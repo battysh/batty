@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod policy;
 mod task;
 
 use anyhow::Result;

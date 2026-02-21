@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 const CONFIG_FILENAME: &str = "config.toml";
 const CONFIG_DIR: &str = ".batty";
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Policy {
     Observe,
@@ -31,6 +32,19 @@ pub struct Defaults {
     pub max_retries: u32,
 }
 
+/// Policy section with auto-answer patterns.
+///
+/// ```toml
+/// [policy.auto_answer]
+/// "Continue? [y/n]" = "y"
+/// "Allow tool" = "y"
+/// ```
+#[derive(Debug, Deserialize, Default)]
+pub struct PolicyConfig {
+    #[serde(default)]
+    pub auto_answer: HashMap<String, String>,
+}
+
 fn default_agent() -> String {
     "claude".to_string()
 }
@@ -54,6 +68,8 @@ impl Default for Defaults {
 pub struct ProjectConfig {
     #[serde(default)]
     pub defaults: Defaults,
+    #[serde(default)]
+    pub policy: PolicyConfig,
 }
 
 impl ProjectConfig {
@@ -160,6 +176,23 @@ max_retries = 2
         let (config, path) = ProjectConfig::load(tmp.path()).unwrap();
         assert!(path.is_none());
         assert_eq!(config.defaults.agent, "claude");
+    }
+
+    #[test]
+    fn parse_auto_answer_config() {
+        let toml = r#"
+[defaults]
+agent = "claude"
+policy = "act"
+
+[policy.auto_answer]
+"Continue? [y/n]" = "y"
+"Allow tool" = "y"
+"#;
+        let config: ProjectConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.policy.auto_answer.len(), 2);
+        assert_eq!(config.policy.auto_answer.get("Continue? [y/n]").unwrap(), "y");
+        assert_eq!(config.policy.auto_answer.get("Allow tool").unwrap(), "y");
     }
 
     #[test]
