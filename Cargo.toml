@@ -18,6 +18,7 @@ tokio = { version = "1", features = ["full"] }
 # Serialization
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+serde_yaml = "0.9"
 
 # Error handling
 anyhow = "1"
