@@ -139,7 +139,7 @@ Markdown is rendered with syntax-highlighted code blocks and Mermaid diagrams â€
 
 - Website: [batty.sh](https://batty.sh)
 - GitHub: [github.com/battysh/batty](https://github.com/battysh/batty)
-- Discord: [discord.gg/batty](https://discord.gg/batty)
+- Discord: [discord.gg/battyterm](https://discord.gg/battyterm)
 - Twitter: [@battyterm](https://twitter.com/battyterm)
 - Bluesky: [@battyterm.bsky.social](https://bsky.app/profile/battyterm.bsky.social)
 
