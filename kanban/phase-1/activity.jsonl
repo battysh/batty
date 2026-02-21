@@ -1,0 +1,17 @@
+{"timestamp":"2026-02-21T18:40:22.840484628-05:00","action":"create","task_id":1,"detail":"Rust project scaffolding"}
+{"timestamp":"2026-02-21T18:40:22.863038264-05:00","action":"create","task_id":2,"detail":"CI setup for Linux and macOS"}
+{"timestamp":"2026-02-21T18:40:22.886579751-05:00","action":"create","task_id":3,"detail":"kanban-md task file reader"}
+{"timestamp":"2026-02-21T18:40:22.912834796-05:00","action":"create","task_id":4,"detail":"Research agent prompt detection patterns"}
+{"timestamp":"2026-02-21T18:40:22.93791838-05:00","action":"create","task_id":5,"detail":"Agent adapter trait design"}
+{"timestamp":"2026-02-21T18:40:22.966734647-05:00","action":"create","task_id":6,"detail":"Claude Code adapter"}
+{"timestamp":"2026-02-21T18:40:22.993429577-05:00","action":"create","task_id":7,"detail":"PTY supervision — bidirectional interactive wrapper"}
+{"timestamp":"2026-02-21T18:40:23.019721421-05:00","action":"create","task_id":8,"detail":"Simple policy engine"}
+{"timestamp":"2026-02-21T18:40:23.043111349-05:00","action":"create","task_id":9,"detail":"Test-gated completion (DoD)"}
+{"timestamp":"2026-02-21T18:40:23.066965314-05:00","action":"create","task_id":10,"detail":"Git worktree lifecycle"}
+{"timestamp":"2026-02-21T18:40:23.089732697-05:00","action":"create","task_id":11,"detail":"Structured execution log"}
+{"timestamp":"2026-02-21T18:40:23.111809204-05:00","action":"create","task_id":12,"detail":"batty work \u003cid\u003e — full single-task command"}
+{"timestamp":"2026-02-21T18:50:48.513339733-05:00","action":"claim","task_id":1,"detail":"frost-fort"}
+{"timestamp":"2026-02-21T18:50:48.51351025-05:00","action":"move","task_id":1,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T18:53:13.618668859-05:00","action":"edit","task_id":1,"detail":"Rust project scaffolding"}
+{"timestamp":"2026-02-21T18:53:13.618779239-05:00","action":"release","task_id":1,"detail":"frost-fort"}
+{"timestamp":"2026-02-21T18:53:13.642814385-05:00","action":"move","task_id":1,"detail":"in-progress -\u003e done"}

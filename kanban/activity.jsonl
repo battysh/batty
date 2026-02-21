@@ -1,0 +1,128 @@
+{"timestamp":"2026-02-21T18:09:32.492511056-05:00","action":"create","task_id":1,"detail":"Set up Tauri v2 app shell"}
+{"timestamp":"2026-02-21T18:09:34.456234334-05:00","action":"create","task_id":2,"detail":"Embed xterm.js with WebGL addon"}
+{"timestamp":"2026-02-21T18:09:37.815880169-05:00","action":"create","task_id":3,"detail":"PTY integration via portable-pty"}
+{"timestamp":"2026-02-21T18:09:44.033798841-05:00","action":"create","task_id":4,"detail":"Keypress-to-render latency instrumentation"}
+{"timestamp":"2026-02-21T18:09:45.97551324-05:00","action":"create","task_id":5,"detail":"CI setup for Linux and macOS"}
+{"timestamp":"2026-02-21T18:09:48.677110978-05:00","action":"create","task_id":6,"detail":"Phase 0 exit criteria validation"}
+{"timestamp":"2026-02-21T18:09:53.133692505-05:00","action":"create","task_id":7,"detail":"Pane tree data structure and IPC"}
+{"timestamp":"2026-02-21T18:09:55.345241736-05:00","action":"create","task_id":8,"detail":"batty split and close CLI commands"}
+{"timestamp":"2026-02-21T18:09:57.518169232-05:00","action":"create","task_id":9,"detail":"batty focus and list CLI commands"}
+{"timestamp":"2026-02-21T18:09:59.962450448-05:00","action":"create","task_id":10,"detail":"Keyboard shortcuts for pane navigation"}
+{"timestamp":"2026-02-21T18:10:01.422021812-05:00","action":"create","task_id":11,"detail":"Pane resize via drag handles"}
+{"timestamp":"2026-02-21T18:10:04.071233568-05:00","action":"create","task_id":12,"detail":"Phase 1 exit criteria validation"}
+{"timestamp":"2026-02-21T18:10:09.878289329-05:00","action":"create","task_id":13,"detail":"kanban-md task file reader"}
+{"timestamp":"2026-02-21T18:10:13.3678902-05:00","action":"create","task_id":14,"detail":"Agent adapter trait design"}
+{"timestamp":"2026-02-21T18:10:16.122693051-05:00","action":"create","task_id":15,"detail":"Claude Code adapter implementation"}
+{"timestamp":"2026-02-21T18:10:23.663186549-05:00","action":"create","task_id":16,"detail":"batty work lifecycle command"}
+{"timestamp":"2026-02-21T18:10:27.642205036-05:00","action":"create","task_id":17,"detail":"Policy engine"}
+{"timestamp":"2026-02-21T18:10:31.578983352-05:00","action":"create","task_id":18,"detail":"Test-gated completion (DoD)"}
+{"timestamp":"2026-02-21T18:10:35.222554378-05:00","action":"create","task_id":19,"detail":"Structured execution log"}
+{"timestamp":"2026-02-21T18:10:38.669098298-05:00","action":"create","task_id":20,"detail":"Supervisor pane"}
+{"timestamp":"2026-02-21T18:10:41.872291267-05:00","action":"create","task_id":21,"detail":"Git worktree automation"}
+{"timestamp":"2026-02-21T18:10:47.88676925-05:00","action":"create","task_id":22,"detail":"Phase 2 exit criteria validation"}
+{"timestamp":"2026-02-21T18:10:53.138021152-05:00","action":"create","task_id":23,"detail":"Markdown rendering in pane"}
+{"timestamp":"2026-02-21T18:10:55.397326505-05:00","action":"create","task_id":24,"detail":"Mermaid diagram rendering"}
+{"timestamp":"2026-02-21T18:10:57.795864473-05:00","action":"create","task_id":25,"detail":"Pipe support for batty view"}
+{"timestamp":"2026-02-21T18:10:59.984519278-05:00","action":"create","task_id":26,"detail":"Phase 3 exit criteria validation"}
+{"timestamp":"2026-02-21T18:11:04.256252205-05:00","action":"create","task_id":27,"detail":"Config file system"}
+{"timestamp":"2026-02-21T18:11:06.953297063-05:00","action":"create","task_id":28,"detail":"Windows support via ConPTY"}
+{"timestamp":"2026-02-21T18:11:09.085645938-05:00","action":"create","task_id":29,"detail":"Crash recovery and session restore"}
+{"timestamp":"2026-02-21T18:11:11.235098018-05:00","action":"create","task_id":30,"detail":"CLI completions and JSON output"}
+{"timestamp":"2026-02-21T18:11:13.194182747-05:00","action":"create","task_id":31,"detail":"Packaging and distribution"}
+{"timestamp":"2026-02-21T18:11:15.234927246-05:00","action":"create","task_id":32,"detail":"README, demo GIF, and docs"}
+{"timestamp":"2026-02-21T18:11:23.814176421-05:00","action":"create","task_id":33,"detail":"Research agent prompt detection patterns"}
+{"timestamp":"2026-02-21T18:11:27.264423244-05:00","action":"create","task_id":34,"detail":"Define Batty-specific YAML frontmatter conventions"}
+{"timestamp":"2026-02-21T18:11:30.091332949-05:00","action":"create","task_id":35,"detail":"Multi-agent orchestration"}
+{"timestamp":"2026-02-21T18:11:34.237144817-05:00","action":"create","task_id":36,"detail":"Pane-native app framework"}
+{"timestamp":"2026-02-21T18:11:37.356891345-05:00","action":"create","task_id":37,"detail":"Board/card UI linked to kanban-md"}
+{"timestamp":"2026-02-21T18:11:40.567329703-05:00","action":"create","task_id":38,"detail":"WASM/WASI plugin runtime"}
+{"timestamp":"2026-02-21T18:11:43.984229261-05:00","action":"create","task_id":39,"detail":"Chat-first mode for non-technical users"}
+{"timestamp":"2026-02-21T18:13:00.121782647-05:00","action":"move","task_id":22,"detail":"backlog -\u003e todo"}
+{"timestamp":"2026-02-21T18:13:01.49719646-05:00","action":"move","task_id":22,"detail":"todo -\u003e in-progress"}
+{"timestamp":"2026-02-21T18:13:02.424752161-05:00","action":"move","task_id":22,"detail":"in-progress -\u003e review"}
+{"timestamp":"2026-02-21T18:13:02.952263542-05:00","action":"move","task_id":22,"detail":"review -\u003e done"}
+{"timestamp":"2026-02-21T18:13:05.282320598-05:00","action":"move","task_id":22,"detail":"done -\u003e review"}
+{"timestamp":"2026-02-21T18:13:06.4187061-05:00","action":"move","task_id":22,"detail":"review -\u003e in-progress"}
+{"timestamp":"2026-02-21T18:13:07.179709429-05:00","action":"move","task_id":22,"detail":"in-progress -\u003e todo"}
+{"timestamp":"2026-02-21T18:13:08.020709082-05:00","action":"move","task_id":22,"detail":"todo -\u003e backlog"}
+{"timestamp":"2026-02-21T18:14:00.709010555-05:00","action":"edit","task_id":1,"detail":"Set up Tauri v2 app shell"}
+{"timestamp":"2026-02-21T18:14:03.389072304-05:00","action":"edit","task_id":1,"detail":"Set up Tauri v2 app shell"}
+{"timestamp":"2026-02-21T18:20:52.375917383-05:00","action":"edit","task_id":16,"detail":"batty work lifecycle command"}
+{"timestamp":"2026-02-21T18:20:55.675233365-05:00","action":"edit","task_id":16,"detail":"batty work lifecycle command"}
+{"timestamp":"2026-02-21T18:26:45.453699833-05:00","action":"create","task_id":40,"detail":"Define Batty execution config conventions"}
+{"timestamp":"2026-02-21T18:26:50.32669801-05:00","action":"delete","task_id":34,"detail":"Define Batty-specific YAML frontmatter conventions"}
+{"timestamp":"2026-02-21T18:29:10.799182248-05:00","action":"create","task_id":41,"detail":"batty work all — autonomous project runner"}
+{"timestamp":"2026-02-21T18:29:19.000886185-05:00","action":"create","task_id":42,"detail":"Merge queue and rebase orchestration"}
+{"timestamp":"2026-02-21T18:30:50.638716761-05:00","action":"create","task_id":43,"detail":"v0.1 batty work — minimal viable agent runner"}
+{"timestamp":"2026-02-21T18:35:57.807290904-05:00","action":"move","task_id":40,"detail":"backlog -\u003e done"}
+{"timestamp":"2026-02-21T18:35:57.831404583-05:00","action":"edit","task_id":13,"detail":"kanban-md task file reader"}
+{"timestamp":"2026-02-21T18:35:57.855800574-05:00","action":"edit","task_id":14,"detail":"Agent adapter trait design"}
+{"timestamp":"2026-02-21T18:35:57.879868682-05:00","action":"edit","task_id":15,"detail":"Claude Code adapter implementation"}
+{"timestamp":"2026-02-21T18:35:57.9035033-05:00","action":"edit","task_id":17,"detail":"Policy engine"}
+{"timestamp":"2026-02-21T18:35:57.927846367-05:00","action":"edit","task_id":18,"detail":"Test-gated completion (DoD)"}
+{"timestamp":"2026-02-21T18:35:57.949845965-05:00","action":"edit","task_id":19,"detail":"Structured execution log"}
+{"timestamp":"2026-02-21T18:35:57.972606191-05:00","action":"edit","task_id":21,"detail":"Git worktree automation"}
+{"timestamp":"2026-02-21T18:35:57.994190816-05:00","action":"edit","task_id":33,"detail":"Research agent prompt detection patterns"}
+{"timestamp":"2026-02-21T18:35:58.016082973-05:00","action":"edit","task_id":43,"detail":"v0.1 batty work — minimal viable agent runner"}
+{"timestamp":"2026-02-21T18:36:07.765091063-05:00","action":"edit","task_id":5,"detail":"CI setup for Linux and macOS"}
+{"timestamp":"2026-02-21T18:36:07.787112519-05:00","action":"edit","task_id":41,"detail":"batty work all — autonomous project runner"}
+{"timestamp":"2026-02-21T18:36:07.811681009-05:00","action":"edit","task_id":42,"detail":"Merge queue and rebase orchestration"}
+{"timestamp":"2026-02-21T18:36:07.835972136-05:00","action":"create","task_id":44,"detail":"Phase 3 — policy hardening and second adapter"}
+{"timestamp":"2026-02-21T18:36:07.861004308-05:00","action":"edit","task_id":1,"detail":"Set up Tauri v2 app shell"}
+{"timestamp":"2026-02-21T18:36:07.886298024-05:00","action":"edit","task_id":2,"detail":"Embed xterm.js with WebGL addon"}
+{"timestamp":"2026-02-21T18:36:07.912205371-05:00","action":"edit","task_id":3,"detail":"PTY integration via portable-pty"}
+{"timestamp":"2026-02-21T18:36:07.93631946-05:00","action":"edit","task_id":4,"detail":"Keypress-to-render latency instrumentation"}
+{"timestamp":"2026-02-21T18:36:07.958979445-05:00","action":"edit","task_id":6,"detail":"Phase 0 exit criteria validation"}
+{"timestamp":"2026-02-21T18:36:15.693153576-05:00","action":"edit","task_id":7,"detail":"Pane tree data structure and IPC"}
+{"timestamp":"2026-02-21T18:36:15.715471241-05:00","action":"edit","task_id":8,"detail":"batty split and close CLI commands"}
+{"timestamp":"2026-02-21T18:36:15.740626445-05:00","action":"edit","task_id":9,"detail":"batty focus and list CLI commands"}
+{"timestamp":"2026-02-21T18:36:15.765823446-05:00","action":"edit","task_id":10,"detail":"Keyboard shortcuts for pane navigation"}
+{"timestamp":"2026-02-21T18:36:15.792111699-05:00","action":"edit","task_id":11,"detail":"Pane resize via drag handles"}
+{"timestamp":"2026-02-21T18:36:15.818117033-05:00","action":"edit","task_id":12,"detail":"Phase 1 exit criteria validation"}
+{"timestamp":"2026-02-21T18:36:15.841775811-05:00","action":"edit","task_id":20,"detail":"Supervisor pane"}
+{"timestamp":"2026-02-21T18:36:15.864138092-05:00","action":"edit","task_id":35,"detail":"Multi-agent orchestration"}
+{"timestamp":"2026-02-21T18:36:15.889964753-05:00","action":"edit","task_id":42,"detail":"Merge queue and rebase orchestration"}
+{"timestamp":"2026-02-21T18:36:15.914591259-05:00","action":"edit","task_id":23,"detail":"Markdown rendering in pane"}
+{"timestamp":"2026-02-21T18:36:15.93629653-05:00","action":"edit","task_id":24,"detail":"Mermaid diagram rendering"}
+{"timestamp":"2026-02-21T18:36:15.960053998-05:00","action":"edit","task_id":25,"detail":"Pipe support for batty view"}
+{"timestamp":"2026-02-21T18:36:15.98563842-05:00","action":"edit","task_id":26,"detail":"Phase 3 exit criteria validation"}
+{"timestamp":"2026-02-21T18:36:16.009401233-05:00","action":"edit","task_id":27,"detail":"Config file system"}
+{"timestamp":"2026-02-21T18:36:16.034170765-05:00","action":"edit","task_id":28,"detail":"Windows support via ConPTY"}
+{"timestamp":"2026-02-21T18:36:16.060719941-05:00","action":"edit","task_id":29,"detail":"Crash recovery and session restore"}
+{"timestamp":"2026-02-21T18:36:16.086406772-05:00","action":"edit","task_id":30,"detail":"CLI completions and JSON output"}
+{"timestamp":"2026-02-21T18:36:16.110017952-05:00","action":"edit","task_id":31,"detail":"Packaging and distribution"}
+{"timestamp":"2026-02-21T18:36:16.134439448-05:00","action":"edit","task_id":32,"detail":"README, demo GIF, and docs"}
+{"timestamp":"2026-02-21T18:36:29.580655325-05:00","action":"edit","task_id":13,"detail":"kanban-md task file reader"}
+{"timestamp":"2026-02-21T18:36:29.603353419-05:00","action":"edit","task_id":14,"detail":"Agent adapter trait design"}
+{"timestamp":"2026-02-21T18:36:29.629184728-05:00","action":"edit","task_id":16,"detail":"batty work lifecycle command"}
+{"timestamp":"2026-02-21T18:36:29.655065897-05:00","action":"edit","task_id":16,"detail":"batty work lifecycle command"}
+{"timestamp":"2026-02-21T18:36:29.680989567-05:00","action":"edit","task_id":17,"detail":"Policy engine"}
+{"timestamp":"2026-02-21T18:36:29.705709042-05:00","action":"edit","task_id":18,"detail":"Test-gated completion (DoD)"}
+{"timestamp":"2026-02-21T18:36:29.731704896-05:00","action":"edit","task_id":22,"detail":"Phase 1 exit criteria — batty work single task"}
+{"timestamp":"2026-02-21T18:36:29.754528941-05:00","action":"edit","task_id":22,"detail":"Phase 1 exit criteria — batty work single task"}
+{"timestamp":"2026-02-21T18:36:29.775970016-05:00","action":"edit","task_id":43,"detail":"v0.1 batty work — minimal viable agent runner"}
+{"timestamp":"2026-02-21T18:36:29.799283254-05:00","action":"edit","task_id":43,"detail":"v0.1 batty work — minimal viable agent runner"}
+{"timestamp":"2026-02-21T18:36:41.061146007-05:00","action":"delete","task_id":16,"detail":"batty work lifecycle command"}
+{"timestamp":"2026-02-21T18:36:41.086779926-05:00","action":"delete","task_id":6,"detail":"Phase 0 exit criteria validation"}
+{"timestamp":"2026-02-21T18:36:41.108981895-05:00","action":"edit","task_id":12,"detail":"Phase 5 exit criteria — pane orchestration"}
+{"timestamp":"2026-02-21T18:36:41.134292743-05:00","action":"delete","task_id":26,"detail":"Phase 3 exit criteria validation"}
+{"timestamp":"2026-02-21T18:36:41.158822794-05:00","action":"edit","task_id":22,"detail":"Phase 1 exit criteria — batty work single task"}
+{"timestamp":"2026-02-21T18:36:41.183119397-05:00","action":"edit","task_id":22,"detail":"Phase 1 exit criteria — batty work single task"}
+{"timestamp":"2026-02-21T18:36:41.207592872-05:00","action":"edit","task_id":41,"detail":"batty work all — autonomous project runner"}
+{"timestamp":"2026-02-21T18:36:41.230211451-05:00","action":"edit","task_id":1,"detail":"Set up Tauri v2 app shell"}
+{"timestamp":"2026-02-21T18:36:41.251754833-05:00","action":"edit","task_id":2,"detail":"Embed xterm.js with WebGL addon"}
+{"timestamp":"2026-02-21T18:36:41.276297865-05:00","action":"edit","task_id":3,"detail":"PTY integration via portable-pty"}
+{"timestamp":"2026-02-21T18:36:41.298801357-05:00","action":"edit","task_id":7,"detail":"Pane tree data structure and IPC"}
+{"timestamp":"2026-02-21T18:36:41.322700657-05:00","action":"edit","task_id":8,"detail":"batty split and close CLI commands"}
+{"timestamp":"2026-02-21T18:36:41.346359824-05:00","action":"edit","task_id":8,"detail":"batty split and close CLI commands"}
+{"timestamp":"2026-02-21T18:36:41.369357808-05:00","action":"edit","task_id":20,"detail":"Supervisor pane"}
+{"timestamp":"2026-02-21T18:36:48.392647239-05:00","action":"edit","task_id":18,"detail":"Test-gated completion (DoD)"}
+{"timestamp":"2026-02-21T18:36:48.416753961-05:00","action":"edit","task_id":19,"detail":"Structured execution log"}
+{"timestamp":"2026-02-21T18:36:48.44177746-05:00","action":"edit","task_id":21,"detail":"Git worktree automation"}
+{"timestamp":"2026-02-21T18:36:48.466229915-05:00","action":"edit","task_id":42,"detail":"Merge queue and rebase orchestration"}
+{"timestamp":"2026-02-21T18:36:48.49146146-05:00","action":"edit","task_id":35,"detail":"Multi-agent orchestration"}
+{"timestamp":"2026-02-21T18:36:48.515540538-05:00","action":"edit","task_id":36,"detail":"Pane-native app framework"}
+{"timestamp":"2026-02-21T18:36:48.537973168-05:00","action":"edit","task_id":37,"detail":"Board/card UI linked to kanban-md"}
+{"timestamp":"2026-02-21T18:36:48.561460516-05:00","action":"edit","task_id":38,"detail":"WASM/WASI plugin runtime"}
+{"timestamp":"2026-02-21T18:37:00.33059065-05:00","action":"create","task_id":45,"detail":"Rust project scaffolding with clap"}
+{"timestamp":"2026-02-21T18:37:00.353199964-05:00","action":"edit","task_id":41,"detail":"batty work all — autonomous project runner"}

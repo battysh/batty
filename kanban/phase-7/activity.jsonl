@@ -1,0 +1,7 @@
+{"timestamp":"2026-02-21T18:41:29.066063146-05:00","action":"create","task_id":1,"detail":"Config file system"}
+{"timestamp":"2026-02-21T18:41:29.090354081-05:00","action":"create","task_id":2,"detail":"Windows support via ConPTY"}
+{"timestamp":"2026-02-21T18:41:29.11462579-05:00","action":"create","task_id":3,"detail":"Crash recovery and session restore"}
+{"timestamp":"2026-02-21T18:41:29.138664316-05:00","action":"create","task_id":4,"detail":"Markdown viewer"}
+{"timestamp":"2026-02-21T18:41:29.160577031-05:00","action":"create","task_id":5,"detail":"CLI completions"}
+{"timestamp":"2026-02-21T18:41:29.186156886-05:00","action":"create","task_id":6,"detail":"Packaging and distribution"}
+{"timestamp":"2026-02-21T18:41:29.212974009-05:00","action":"create","task_id":7,"detail":"README, demo GIF, and docs"}

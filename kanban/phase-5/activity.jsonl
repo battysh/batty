@@ -1,0 +1,7 @@
+{"timestamp":"2026-02-21T18:41:12.218540912-05:00","action":"create","task_id":1,"detail":"Pane tree data structure and IPC"}
+{"timestamp":"2026-02-21T18:41:12.240137054-05:00","action":"create","task_id":2,"detail":"batty split and close commands"}
+{"timestamp":"2026-02-21T18:41:12.263445098-05:00","action":"create","task_id":3,"detail":"batty focus and list commands"}
+{"timestamp":"2026-02-21T18:41:12.286524606-05:00","action":"create","task_id":4,"detail":"Keyboard shortcuts"}
+{"timestamp":"2026-02-21T18:41:12.309275149-05:00","action":"create","task_id":5,"detail":"Pane resize via drag handles"}
+{"timestamp":"2026-02-21T18:41:12.331899714-05:00","action":"create","task_id":6,"detail":"Supervisor pane for batty work"}
+{"timestamp":"2026-02-21T18:41:12.35414433-05:00","action":"create","task_id":7,"detail":"Phase 5 exit criteria"}

@@ -1,0 +1,6 @@
+{"timestamp":"2026-02-21T18:40:59.424485803-05:00","action":"create","task_id":1,"detail":"Tauri v2 app shell"}
+{"timestamp":"2026-02-21T18:40:59.448135051-05:00","action":"create","task_id":2,"detail":"Solid.js frontend setup"}
+{"timestamp":"2026-02-21T18:40:59.470841473-05:00","action":"create","task_id":3,"detail":"xterm.js with WebGL addon"}
+{"timestamp":"2026-02-21T18:40:59.496385201-05:00","action":"create","task_id":4,"detail":"PTY-to-xterm.js bridge via Tauri IPC"}
+{"timestamp":"2026-02-21T18:40:59.519156165-05:00","action":"create","task_id":5,"detail":"Keypress-to-render latency instrumentation"}
+{"timestamp":"2026-02-21T18:40:59.54247739-05:00","action":"create","task_id":6,"detail":"batty work inside Batty terminal"}
