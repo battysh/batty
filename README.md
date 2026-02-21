@@ -2,138 +2,159 @@
 
 **Use the best agents. Batty controls execution.**
 
-Batty is a terminal-native agent orchestration platform. It works as a normal terminal — just faster — and adds policy-based supervision, test-gated completion, and rich rendering on top.
+Batty is a hierarchical agent command system for software development. It reads your project board, dispatches tasks to coding agents, supervises their work, gates on tests, and merges results — while you watch, intervene, or let it run.
 
-## What is Batty?
+## How It Works
 
-- **Terminal superset** — works as a normal terminal by default, zero UI clutter. Panes, sidebars, and rich surfaces appear only when you need them.
-- **Agent orchestration** — run any CLI agent (Claude Code, Codex CLI, Aider, others) with policy-based supervision and lifecycle control.
-- **Test-gated completion** — tasks aren't "done" until tests pass. Completion is measured, not guessed.
-- **Rich rendering** — Markdown documents and Mermaid diagrams rendered in panes, not pseudo-formatted with escape codes.
-- **Extensible** — pane-native apps and WASM plugins via stable APIs.
+```
+You (human) ──→ see everything, intervene anytime
+    │
+    ▼
+Director (batty work all) ──→ reads board, picks tasks, dispatches
+    │
+    ├── Supervisor #1 ──→ spawns agent, watches PTY, auto-answers, runs tests
+    │       └── Claude Code ──→ writes code in worktree /task-3
+    │
+    ├── Supervisor #2 ──→ spawns agent, watches PTY, auto-answers, runs tests
+    │       └── Codex CLI ──→ writes code in worktree /task-7
+    │
+    └── Supervisor #3 ──→ ...
+            └── ...
+    │
+    ▼
+kanban-md (Markdown files) ──→ single source of truth
+```
+
+Three layers: **Director** picks work. **Supervisors** control execution. **Executors** (BYO agents) write code. You sit above all three.
 
 ## Quick Start
 
-```sh
-curl -fsSL https://batty.sh/install | sh
-```
-
-Launch a terminal:
+Work on a single task:
 
 ```sh
-batty
+batty work 3
 ```
 
-Split panes and run commands:
+This reads task #3 from your kanban board, creates a worktree, launches Claude Code with the task description, supervises the session (auto-answers routine prompts, runs tests on completion), and merges the result to main.
+
+You see the full interactive agent session. Type into it anytime. Batty handles the boring parts.
+
+Work through the entire board:
 
 ```sh
-batty split --horizontal
-batty split --vertical
-batty focus <pane-id>
-batty list
+batty work all
 ```
 
-Run an agent with supervision:
+Batty picks tasks by priority, respects dependencies, and works through them sequentially. Point it at your project and walk away — or watch and steer.
+
+Run tasks in parallel:
 
 ```sh
-batty run --agent "claude -p 'fix the bug in auth.py'"
+batty work all --parallel 3
 ```
 
-View rendered markdown:
+Three agents, three worktrees, three panes. Batty manages the merge queue so they land cleanly on main.
+
+## Core Features
+
+### Task-Driven Execution
+
+Tasks live as Markdown files managed by [kanban-md](https://github.com/antopolskiy/kanban-md). Batty reads them, executes them, and updates their status. The kanban board is your command and control center.
 
 ```sh
-batty view README.md
-cat doc.md | batty view
+kanban-md create "Fix auth token refresh" --priority high
+batty work 1    # read task, create worktree, launch agent, supervise, test, merge
 ```
 
-## Agent Runner
+### Interactive Supervision
 
-This is the core differentiator. No existing tool combines a fast terminal with deterministic agent governance.
+Agents run in interactive PTY sessions — not hidden behind a progress bar. You see exactly what Claude or Codex is doing. Batty supervises on top:
 
-### Policy tiers
+- Auto-answers routine prompts ("Continue? [y/n]" → yes)
+- Auto-approves safe tool calls per policy
+- Passes real questions through to you
+- Detects stuck states and retries
 
-Every autonomous action flows through an explicit policy:
+### Policy Tiers
+
+Every automated action flows through explicit policy:
 
 | Tier | Behavior |
 |---|---|
 | `observe` | Log only — Batty watches, you drive |
-| `suggest` | Show suggestion in supervisor pane, you confirm |
-| `act-with-approval` | Auto-respond to routine prompts, escalate unknowns |
-| `fully-auto` | Autonomous execution under defined constraints |
+| `suggest` | Show suggestion, you confirm |
+| `act` | Auto-respond to routine prompts, escalate unknowns |
 
-Policies are defined per-project in TOML:
+Policies are defined per-project in `.batty/config.toml`:
 
 ```toml
-[policy]
-tier = "act-with-approval"
+[defaults]
+agent = "claude"
+policy = "act"
+dod = "cargo test --workspace"
+max_retries = 3
 
 [policy.auto_answer]
 "Continue? [y/n]" = "y"
-
-[definition_of_done]
-command = "pytest tests/"
-pass_pattern = "passed"
 ```
 
-### Test-gated completion
+### Test-Gated Completion
 
-When an agent signals completion, Batty runs your definition-of-done command. If tests pass, the task is done. If tests fail, failure output is fed back to the agent for retry.
+Tasks aren't "done" until tests pass. When an agent signals completion, Batty runs your definition-of-done command. Tests pass → commit → rebase on main → merge. Tests fail → feed failure output back to the agent for retry.
 
-### Audit trail
+Completion is measured, not guessed.
 
-Every automated action — prompt answers, test runs, commits — is logged to a structured event timeline. Inspect any autonomous decision after the run.
+### Audit Trail
 
-### Agent-agnostic
+Every automated decision — prompt answers, test runs, commits, merges — is logged to a structured JSON timeline. Inspect any autonomous decision after the run.
 
-Batty doesn't ship its own AI. Swap Claude Code for Codex CLI without changing your workflow. Agents are first-class, never locked in.
+### Agent-Agnostic
 
-## Pane Orchestration
+Batty doesn't ship its own AI. Swap Claude Code for Codex CLI for Aider without changing your workflow. Agents are first-class, never locked in.
 
-Programmable multi-pane layouts via CLI commands or keyboard shortcuts. Non-modal by default — no tmux-style prefix key required.
+### Git Worktree Isolation
 
-```sh
-batty split --horizontal    # Split current pane horizontally
-batty split --vertical      # Split current pane vertically
-batty close                 # Close current pane
-batty focus <pane-id>       # Focus a specific pane
-batty list                  # List all active panes
-```
-
-When `batty run --agent` launches, a companion supervisor pane opens automatically showing agent status, detected prompts, test results, and the audit log.
-
-## Rich Rendering
-
-```sh
-batty view design.md        # Rendered markdown in a pane
-batty view arch.md           # Mermaid diagrams rendered inline
-cat notes.md | batty view    # Pipe support for agent-generated content
-```
-
-Markdown is rendered with syntax-highlighted code blocks and Mermaid diagrams — not approximated with terminal colors.
+Every task runs in its own worktree. No branch conflicts. No dirty working directories. Batty creates the worktree, the agent works in it, and Batty merges it back cleanly.
 
 ## Architecture
 
+Batty is built progressively — the CLI agent runner works today in any terminal. The GUI terminal shell comes later.
+
 ```
 ┌─────────────────────────────────────────┐
-│  Frontend (WebView)                     │
-│  TypeScript + Solid.js                  │
-│  xterm.js · markdown-it · mermaid.js   │
+│  Batty Terminal (Phase 4+)              │
+│  Tauri v2 + Solid.js + xterm.js        │
 ├─────────────────────────────────────────┤
-│  Tauri v2 IPC bridge                    │
+│  Rust Core (Phase 1)                    │
+│  portable-pty · tokio · clap            │
+│  Agent adapter layer                    │
+│  PTY supervision + prompt detection     │
+│  Policy engine                          │
+│  Test gate runner                       │
+│  Worktree lifecycle manager             │
+│  Execution logger                       │
 ├─────────────────────────────────────────┤
-│  Rust Core                              │
-│  portable-pty · tokio (async runtime)   │
-│  wasmtime (WASM plugin host)            │
-│  Agent supervisor state machine         │
-│  Policy engine + test gate runner       │
-│  Pane-native app SDK (JSON-RPC)         │
+│  kanban-md (external)                   │
+│  Markdown task files with YAML          │
+│  frontmatter — the command center       │
 └─────────────────────────────────────────┘
 ```
 
-- **Rust core** for PTY orchestration, agent supervision, policy engine, and plugin hosting. Performance-critical path stays native.
-- **Tauri v2** for cross-platform app shell (macOS, Linux, Windows) without Electron's overhead.
-- **xterm.js** for battle-tested terminal emulation.
-- **WASM/WASI plugins** for sandboxed, language-agnostic extensions.
+## Philosophy
+
+- **Compose, don't monolith.** Integrate best-in-class CLI tools. Build only the orchestration layer.
+- **Markdown as backend.** All state is human-readable, agent-readable, git-versioned Markdown files.
+- **Agents are processes, not features.** Real interactive PTY sessions. Transparency is non-negotiable.
+- **Earn autonomy progressively.** Start supervised. Prove reliability. Increase automation.
+- **CLI-first, GUI-optional.** Works in any terminal today. Rich panes come later.
+
+See `.planning/dev-philosophy.md` for the full development philosophy.
+
+## Project Status
+
+Building in public. Currently in Phase 1 — the core agent runner (`batty work`).
+
+See `.planning/roadmap.md` for the full roadmap and `.planning/architecture.md` for the hierarchical agent command architecture.
 
 ## Links
 
