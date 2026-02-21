@@ -1,10 +1,12 @@
 ---
 id: 8
 title: Simple policy engine
-status: backlog
+status: done
 priority: critical
 created: 2026-02-21T18:40:23.019142959-05:00
-updated: 2026-02-21T18:40:23.019142959-05:00
+updated: 2026-02-21T18:56:25.954899299-05:00
+started: 2026-02-21T18:55:03.310013432-05:00
+completed: 2026-02-21T18:56:25.954898978-05:00
 tags:
     - core
 depends_on:

@@ -20,3 +20,8 @@
 {"timestamp":"2026-02-21T18:54:52.697678731-05:00","action":"edit","task_id":3,"detail":"kanban-md task file reader"}
 {"timestamp":"2026-02-21T18:54:52.697831873-05:00","action":"release","task_id":3,"detail":"frost-fort"}
 {"timestamp":"2026-02-21T18:54:52.722327853-05:00","action":"move","task_id":3,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T18:55:03.310259459-05:00","action":"claim","task_id":8,"detail":"frost-fort"}
+{"timestamp":"2026-02-21T18:55:03.310331647-05:00","action":"move","task_id":8,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T18:56:25.932868391-05:00","action":"edit","task_id":8,"detail":"Simple policy engine"}
+{"timestamp":"2026-02-21T18:56:25.933009516-05:00","action":"release","task_id":8,"detail":"frost-fort"}
+{"timestamp":"2026-02-21T18:56:25.955112205-05:00","action":"move","task_id":8,"detail":"in-progress -\u003e done"}
