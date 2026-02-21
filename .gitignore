@@ -1,0 +1,24 @@
+# Local IDE / Claude Code settings
+.claude/
+
+# Internal planning docs (not public-facing)
+.planning/
+
+# Rust
+target/
+**/*.rs.bk
+
+# Node / Frontend
+node_modules/
+dist/
+
+# Tauri
+src-tauri/target/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
