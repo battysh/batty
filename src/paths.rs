@@ -11,11 +11,7 @@ pub fn resolve_kanban_root(base: &Path) -> PathBuf {
         preferred
     } else {
         let legacy = base.join("kanban");
-        if legacy.is_dir() {
-            legacy
-        } else {
-            preferred
-        }
+        if legacy.is_dir() { legacy } else { preferred }
     }
 }
 
