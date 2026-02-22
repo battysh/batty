@@ -38,8 +38,12 @@ pub enum Command {
         #[arg(long, default_value_t = false)]
         attach: bool,
 
-        /// Force creation of a new phase worktree run
+        /// Run in an isolated phase worktree
         #[arg(long, default_value_t = false)]
+        worktree: bool,
+
+        /// Force creation of a new phase worktree run (requires --worktree)
+        #[arg(long, default_value_t = false, requires = "worktree")]
         new: bool,
 
         /// Show composed launch context and exit without running the executor
@@ -142,6 +146,24 @@ mod tests {
         match cli.command {
             Command::Config { json } => assert!(json),
             other => panic!("expected config command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn work_subcommand_requires_worktree_for_new() {
+        let err = Cli::try_parse_from(["batty", "work", "phase-2.5", "--new"]).unwrap_err();
+        assert!(err.to_string().contains("--worktree"));
+    }
+
+    #[test]
+    fn work_subcommand_parses_worktree_and_new() {
+        let cli = Cli::parse_from(["batty", "work", "phase-2.5", "--worktree", "--new"]);
+        match cli.command {
+            Command::Work { worktree, new, .. } => {
+                assert!(worktree);
+                assert!(new);
+            }
+            other => panic!("expected work command, got {other:?}"),
         }
     }
 }

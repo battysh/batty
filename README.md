@@ -27,8 +27,9 @@ batty config --json   # machine-readable JSON for scripts
 
 By default, `work` starts tmux detached and backgrounds Batty supervision.
 Use `--attach` to immediately enter the tmux session in the same terminal.
-By default, Batty resumes the latest existing worktree for that phase (if any).
-Use `--new` to force a fresh isolated run branch like `phase-2-4-run-005`.
+By default, Batty runs directly in your current branch/worktree.
+Use `--worktree` to opt into isolated phase worktrees.
+Use `--worktree --new` to force a fresh isolated run branch like `phase-2-4-run-005`.
 
 Optional global install:
 
@@ -63,7 +64,7 @@ batty work phase-2.4 --attach
 If you want to force a new run worktree instead of resuming:
 
 ```sh
-batty work phase-2.4 --new
+batty work phase-2.4 --worktree --new
 ```
 
 If you want to inspect the exact composed launch context without starting the executor:
@@ -163,7 +164,7 @@ batty work phase-2.4
 ```
 
 A tmux session opens. The executor (Claude Code, Codex, Aider) works through the phase board — picking tasks, implementing, testing, committing. Batty auto-answers routine prompts and shows everything in the orchestrator pane.
-By default, Batty resumes the latest phase worktree; pass `--new` to force a fresh run.
+By default, Batty uses your current branch/worktree. Pass `--worktree` to resume the latest phase worktree, or `--worktree --new` to force a fresh run.
 If the phase branch is merged back to the base branch, Batty cleans up the run worktree automatically; otherwise it keeps the worktree for inspection/rework.
 
 ```sh

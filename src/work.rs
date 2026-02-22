@@ -245,17 +245,8 @@ fn resolve_resume_context(target: &str, project_root: &Path) -> Result<ResumeCon
         );
     }
 
-    let branch = execution_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            anyhow!(
-                "unable to infer run branch from {}",
-                execution_root.display()
-            )
-        })?
-        .to_string();
-    let log_dir = project_root.join(".batty").join("logs").join(branch);
+    let log_key = log_key_for_execution_root(&execution_root)?;
+    let log_dir = project_root.join(".batty").join("logs").join(log_key);
     let execution_log_path = log_dir.join("execution.jsonl");
 
     Ok(ResumeContext {
@@ -309,6 +300,46 @@ fn infer_agent_from_execution_log(path: &Path) -> Option<String> {
     None
 }
 
+fn current_git_branch(repo_root: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .arg("branch")
+        .arg("--show-current")
+        .current_dir(repo_root)
+        .output()
+        .with_context(|| format!("failed to run git in {}", repo_root.display()))?;
+
+    if !output.status.success() {
+        bail!(
+            "failed to determine current branch: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        bail!("detached HEAD is not supported for in-place phase runs; checkout a branch first");
+    }
+
+    Ok(branch)
+}
+
+fn log_key_for_execution_root(execution_root: &Path) -> Result<String> {
+    if let Ok(branch) = current_git_branch(execution_root) {
+        return Ok(branch);
+    }
+
+    execution_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .ok_or_else(|| {
+            anyhow!(
+                "unable to infer log key for execution root {}",
+                execution_root.display()
+            )
+        })
+}
+
 /// Run the full work pipeline for a phase.
 #[allow(clippy::too_many_arguments)] // Phase launch combines config and runtime toggles; keeping explicit args avoids opaque builders.
 pub fn run_phase(
@@ -317,12 +348,13 @@ pub fn run_phase(
     agent_name: &str,
     policy_override: Option<&str>,
     auto_attach: bool,
+    use_worktree: bool,
     force_new_worktree: bool,
     dry_run: bool,
     project_root: &Path,
     config_path: Option<&Path>,
 ) -> Result<()> {
-    // 1. Validate the phase board exists before creating an isolated worktree.
+    // 1. Validate the phase board exists before launching.
     let source_phase_dir = project_root.join("kanban").join(phase);
     let source_tasks_dir = source_phase_dir.join("tasks");
 
@@ -334,22 +366,46 @@ pub fn run_phase(
         );
     }
 
-    // 2. Create worktree for this run (earliest isolation boundary).
-    let (phase_worktree, resumed_worktree) =
-        phase_worktree::resolve_phase_worktree(project_root, phase, force_new_worktree)
-            .with_context(|| format!("failed to resolve isolated worktree for phase '{phase}'"))?;
-    let execution_root = phase_worktree.path.clone();
+    // 2. Resolve execution workspace (isolated worktree or current branch).
+    let (execution_root, log_key, phase_worktree, resumed_worktree) = if use_worktree {
+        let (phase_worktree, resumed_worktree) =
+            phase_worktree::resolve_phase_worktree(project_root, phase, force_new_worktree)
+                .with_context(|| {
+                    format!("failed to resolve isolated worktree for phase '{phase}'")
+                })?;
+        let execution_root = phase_worktree.path.clone();
 
-    info!(
-        phase = phase,
-        branch = %phase_worktree.branch,
-        base_branch = %phase_worktree.base_branch,
-        worktree = %execution_root.display(),
-        resumed = resumed_worktree,
-        "phase worktree prepared"
-    );
+        info!(
+            phase = phase,
+            branch = %phase_worktree.branch,
+            base_branch = %phase_worktree.base_branch,
+            worktree = %execution_root.display(),
+            resumed = resumed_worktree,
+            "phase worktree prepared"
+        );
 
-    // 3. Load tasks for context from the isolated worktree.
+        (
+            execution_root,
+            phase_worktree.branch.clone(),
+            Some(phase_worktree),
+            resumed_worktree,
+        )
+    } else {
+        let branch = current_git_branch(project_root)
+            .context("failed to resolve current branch for in-place run")?;
+        let execution_root = project_root.to_path_buf();
+
+        info!(
+            phase = phase,
+            branch = %branch,
+            workspace = %execution_root.display(),
+            "phase run using current branch workspace"
+        );
+
+        (execution_root, branch, None, false)
+    };
+
+    // 3. Load tasks for context from the resolved workspace.
     let phase_dir = execution_root.join("kanban").join(phase);
     let tasks_dir = phase_dir.join("tasks");
     let tasks = task::load_tasks_from_dir(&tasks_dir)
@@ -361,11 +417,8 @@ pub fn run_phase(
         "loaded phase board"
     );
 
-    // 4. Set up per-run logs under .batty/logs/<phase-run-###>/
-    let log_dir = project_root
-        .join(".batty")
-        .join("logs")
-        .join(&phase_worktree.branch);
+    // 4. Set up per-run logs under .batty/logs/<run-key>/
+    let log_dir = project_root.join(".batty").join("logs").join(&log_key);
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create run log dir {}", log_dir.display()))?;
     let log_path = log_dir.join("execution.jsonl");
@@ -377,12 +430,14 @@ pub fn run_phase(
     execution_log.log(LogEvent::SessionStarted {
         phase: phase.to_string(),
     })?;
-    execution_log.log(LogEvent::PhaseWorktreeCreated {
-        phase: phase.to_string(),
-        path: execution_root.display().to_string(),
-        branch: phase_worktree.branch.clone(),
-        base_branch: phase_worktree.base_branch.clone(),
-    })?;
+    if let Some(phase_worktree) = phase_worktree.as_ref() {
+        execution_log.log(LogEvent::PhaseWorktreeCreated {
+            phase: phase.to_string(),
+            path: execution_root.display().to_string(),
+            branch: phase_worktree.branch.clone(),
+            base_branch: phase_worktree.base_branch.clone(),
+        })?;
+    }
 
     // Log all tasks
     for t in &tasks {
@@ -406,7 +461,7 @@ pub fn run_phase(
         None => project_config.defaults.policy,
     };
 
-    // 6b. Resolve the persistent claim identity for this phase worktree.
+    // 6b. Resolve the persistent claim identity for this phase workspace.
     let claim_identity = resolve_claim_identity(phase, &execution_root)?;
     info!(
         phase = phase,
@@ -457,7 +512,12 @@ pub fn run_phase(
         execution_log.log(LogEvent::RunCompleted {
             summary: "dry-run launch context composed".to_string(),
         })?;
-        handle_worktree_finalize(phase, &execution_log, &phase_worktree, RunOutcome::DryRun);
+        finalize_phase_worktree_if_present(
+            phase,
+            &execution_log,
+            phase_worktree.as_ref(),
+            RunOutcome::DryRun,
+        );
         execution_log.log(LogEvent::SessionEnded {
             result: "DryRun".to_string(),
         })?;
@@ -535,16 +595,24 @@ pub fn run_phase(
         "\x1b[36m[batty]\x1b[0m starting {} in tmux session '{}'",
         phase, session
     );
-    println!(
-        "\x1b[36m[batty]\x1b[0m worktree {}: {} ({})",
-        if resumed_worktree {
-            "resumed"
-        } else {
-            "created"
-        },
-        execution_root.display(),
-        phase_worktree.branch
-    );
+    if let Some(phase_worktree) = phase_worktree.as_ref() {
+        println!(
+            "\x1b[36m[batty]\x1b[0m worktree {}: {} ({})",
+            if resumed_worktree {
+                "resumed"
+            } else {
+                "created"
+            },
+            execution_root.display(),
+            phase_worktree.branch
+        );
+    } else {
+        println!(
+            "\x1b[36m[batty]\x1b[0m workspace: current branch {} ({})",
+            log_key,
+            execution_root.display()
+        );
+    }
     println!(
         "\x1b[36m[batty]\x1b[0m claim identity: {} ({})",
         claim_identity.agent,
@@ -557,7 +625,12 @@ pub fn run_phase(
     let result = match orchestrator::run(config, Box::new(observer), stop) {
         Ok(result) => result,
         Err(e) => {
-            handle_worktree_finalize(phase, &execution_log, &phase_worktree, RunOutcome::Failed);
+            finalize_phase_worktree_if_present(
+                phase,
+                &execution_log,
+                phase_worktree.as_ref(),
+                RunOutcome::Failed,
+            );
             return Err(e);
         }
     };
@@ -571,7 +644,12 @@ pub fn run_phase(
     ) {
         Ok(c) => c,
         Err(e) => {
-            handle_worktree_finalize(phase, &execution_log, &phase_worktree, RunOutcome::Failed);
+            finalize_phase_worktree_if_present(
+                phase,
+                &execution_log,
+                phase_worktree.as_ref(),
+                RunOutcome::Failed,
+            );
             return Err(e);
         }
     };
@@ -626,7 +704,7 @@ pub fn run_phase(
     } else {
         RunOutcome::Failed
     };
-    handle_worktree_finalize(phase, &execution_log, &phase_worktree, run_outcome);
+    finalize_phase_worktree_if_present(phase, &execution_log, phase_worktree.as_ref(), run_outcome);
 
     execution_log.log(LogEvent::SessionEnded {
         result: format!("{result:?}; completion={}", completion.is_complete),
@@ -706,6 +784,17 @@ fn handle_worktree_finalize(
                 "failed to finalize phase worktree"
             );
         }
+    }
+}
+
+fn finalize_phase_worktree_if_present(
+    phase: &str,
+    execution_log: &ExecutionLog,
+    phase_worktree: Option<&phase_worktree::PhaseWorktree>,
+    outcome: RunOutcome,
+) {
+    if let Some(phase_worktree) = phase_worktree {
+        handle_worktree_finalize(phase, execution_log, phase_worktree, outcome);
     }
 }
 
@@ -870,7 +959,7 @@ fn build_phase_prompt(
     prompt.push_str(&format!("claim.agent_name: {}\n", claim_agent_name));
     prompt.push_str(&format!("claim.source: {}\n", claim_agent_source));
     prompt.push_str(
-        "Use this exact claim agent name for all `kanban-md ... --claim` commands in this phase worktree, including after restarts.\n",
+        "Use this exact claim agent name for all `kanban-md ... --claim` commands in this phase workspace, including after restarts.\n",
     );
     prompt.push_str(
         "If workflow docs mention `kanban-md agent-name`, skip it and reuse `claim.agent_name`.\n\n",
@@ -1376,6 +1465,7 @@ mod tests {
             &config,
             "claude",
             None,
+            false,
             false,
             false,
             false,

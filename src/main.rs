@@ -277,6 +277,7 @@ async fn main() -> Result<()> {
             agent,
             policy,
             attach,
+            worktree,
             new,
             dry_run,
             foreground,
@@ -305,6 +306,9 @@ async fn main() -> Result<()> {
                 }
                 if let Some(ref p) = policy {
                     cmd.arg("--policy").arg(p);
+                }
+                if worktree {
+                    cmd.arg("--worktree");
                 }
                 if new {
                     cmd.arg("--new");
@@ -347,6 +351,7 @@ async fn main() -> Result<()> {
                 agent_name,
                 policy_str,
                 attach,
+                worktree,
                 new,
                 dry_run,
                 &cwd,
