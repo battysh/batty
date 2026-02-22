@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
@@ -133,6 +133,119 @@ impl OrchestratorObserver for LogFileObserver {
     }
 }
 
+/// Status bar state indicator.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StatusIndicator {
+    /// `●` State change (session start, phase/task transition).
+    StateChange,
+    /// `→` Action taken (answer injected, task claimed).
+    Action,
+    /// `✓` Normal operation (supervising, completed).
+    Ok,
+    /// `?` Supervisor thinking (Tier 2 call in progress).
+    Thinking,
+    /// `⚠` Needs human input.
+    NeedsInput,
+    /// `✗` Failure (test fail, error, stuck).
+    Failure,
+}
+
+impl StatusIndicator {
+    fn symbol(&self) -> &'static str {
+        match self {
+            Self::StateChange => "●",
+            Self::Action => "→",
+            Self::Ok => "✓",
+            Self::Thinking => "?",
+            Self::NeedsInput => "⚠",
+            Self::Failure => "✗",
+        }
+    }
+}
+
+/// Manages the tmux status bar for an orchestrator session.
+///
+/// Format: `[batty] <phase> | <detail> | <indicator> <message>`
+///
+/// Debounces updates to max ~5/sec to avoid tmux overhead.
+pub struct StatusBar {
+    session: String,
+    phase: String,
+    last_update: Option<Instant>,
+    min_interval: Duration,
+}
+
+impl StatusBar {
+    pub fn new(session: &str, phase: &str) -> Self {
+        Self {
+            session: session.to_string(),
+            phase: phase.to_string(),
+            last_update: None,
+            min_interval: Duration::from_millis(200), // max ~5 updates/sec
+        }
+    }
+
+    /// Initialize the status bar styling and initial content.
+    pub fn init(&mut self) -> Result<()> {
+        // Style: dark background, amber text
+        tmux::set_status_style(&self.session, "bg=colour235,fg=colour136")?;
+        // Widen left status to fit our content
+        tmux::tmux_set(&self.session, "status-left-length", "80")?;
+        tmux::tmux_set(&self.session, "status-right-length", "40")?;
+        self.update(StatusIndicator::StateChange, "starting")?;
+        Ok(())
+    }
+
+    /// Update the status bar with a new indicator and message.
+    ///
+    /// Debounced: skips the update if called too frequently, unless forced.
+    pub fn update(&mut self, indicator: StatusIndicator, message: &str) -> Result<()> {
+        self.update_inner(indicator, message, false)
+    }
+
+    /// Force-update the status bar (bypasses debounce).
+    pub fn force_update(&mut self, indicator: StatusIndicator, message: &str) -> Result<()> {
+        self.update_inner(indicator, message, true)
+    }
+
+    fn update_inner(
+        &mut self,
+        indicator: StatusIndicator,
+        message: &str,
+        force: bool,
+    ) -> Result<()> {
+        // Debounce check
+        if !force {
+            if let Some(last) = self.last_update {
+                if last.elapsed() < self.min_interval {
+                    return Ok(());
+                }
+            }
+        }
+
+        let left = format!(
+            " [batty] {} | {} {}",
+            self.phase,
+            indicator.symbol(),
+            message
+        );
+
+        // Best-effort — don't fail the orchestrator if status bar can't update
+        if let Err(e) = tmux::set_status_left(&self.session, &left) {
+            debug!(error = %e, "status bar update failed");
+        }
+
+        // Also set terminal title (shows in tab/title bar)
+        let title = format!("[batty] {} | {}", self.phase, message);
+        if let Err(e) = tmux::set_title(&self.session, &title) {
+            debug!(error = %e, "title update failed");
+        }
+
+        self.last_update = Some(Instant::now());
+        Ok(())
+    }
+}
+
 /// Run the full orchestrator loop.
 ///
 /// Creates a tmux session, sets up pipe-pane, and supervises the executor.
@@ -165,32 +278,40 @@ pub fn run(
     tmux::setup_pipe_pane(&session, &pipe_log)?;
     observer.on_event(&format!("● pipe-pane → {}", pipe_log.display()));
 
-    // 4. Set up orchestrator log pane
+    // 4. Set up status bar
+    let mut status_bar = StatusBar::new(&session, &config.phase);
+    status_bar.init()?;
+    observer.on_event("● status bar initialized");
+
+    // 5. Set up orchestrator log pane
     let orch_log = log_dir.join("orchestrator.log");
     if config.log_pane {
         setup_log_pane(&session, &orch_log, config.log_pane_height_pct)?;
         observer.on_event("● log pane created");
     }
 
-    // 5. Initialize components
+    // 6. Initialize components
     let buffer = EventBuffer::new(config.buffer_size);
     let mut watcher = PipeWatcher::new(&pipe_log, buffer.clone());
     let mut detector = PromptDetector::new(config.patterns, config.detector);
 
     info!(session = %session, "orchestrator loop starting");
     observer.on_event("● supervising");
+    status_bar.update(StatusIndicator::Ok, "supervising")?;
 
     // 6. Supervision loop
     let mut last_line = String::new();
     let result = loop {
         if stop.load(Ordering::Relaxed) {
             observer.on_event("● stopped by signal");
+            status_bar.force_update(StatusIndicator::StateChange, "stopped")?;
             break OrchestratorResult::Detached;
         }
 
         // Check if session still exists
         if !tmux::session_exists(&session) {
             observer.on_event("✓ executor exited");
+            status_bar.force_update(StatusIndicator::Ok, "completed")?;
             break OrchestratorResult::Completed;
         }
 
@@ -232,6 +353,7 @@ pub fn run(
                         &mut *observer,
                         config.tier2.as_ref(),
                         &buffer,
+                        &mut status_bar,
                     )?;
                 }
             }
@@ -248,6 +370,7 @@ pub fn run(
                     &mut *observer,
                     config.tier2.as_ref(),
                     &buffer,
+                    &mut status_bar,
                 )?;
             }
             DetectorEvent::Silence { last_line, .. } => {
@@ -327,6 +450,7 @@ fn handle_prompt(
     observer: &mut dyn OrchestratorObserver,
     tier2_config: Option<&Tier2Config>,
     event_buffer: &EventBuffer,
+    status_bar: &mut StatusBar,
 ) -> Result<()> {
     // Skip completion/error signals — those aren't questions
     match &prompt.kind {
@@ -346,23 +470,27 @@ fn handle_prompt(
         } => {
             info!(prompt = %prompt, response = %response, "Tier 1 auto-answer");
             observer.on_auto_answer(prompt, response);
+            status_bar.update(StatusIndicator::Action, &format!("answered: {response}"))?;
 
             // Inject via tmux send-keys
             tmux::send_keys(session, response, true)
                 .with_context(|| format!("failed to send-keys auto-answer to '{session}'"))?;
 
             detector.answer_injected();
+            status_bar.update(StatusIndicator::Ok, "supervising")?;
         }
         Decision::Suggest {
             ref prompt,
             ref response,
         } => {
             observer.on_suggest(prompt, response);
+            status_bar.update(StatusIndicator::Thinking, &format!("suggest: {response}"))?;
         }
         Decision::Escalate { ref prompt } => {
             // Tier 2: try supervisor agent before escalating to human
             if let Some(t2_config) = tier2_config {
                 observer.on_event("? supervisor thinking...");
+                status_bar.force_update(StatusIndicator::Thinking, "supervisor thinking...")?;
 
                 let event_summary = event_buffer.format_summary();
                 let context = tier2::compose_context(
@@ -375,29 +503,35 @@ fn handle_prompt(
                     Ok(Tier2Result::Answer { response }) => {
                         info!(prompt = %prompt, response = %response, "Tier 2 answer");
                         observer.on_auto_answer(prompt, &response);
+                        status_bar.update(StatusIndicator::Action, &format!("T2: {response}"))?;
 
                         tmux::send_keys(session, &response, true).with_context(|| {
                             format!("failed to send-keys Tier 2 answer to '{session}'")
                         })?;
 
                         detector.answer_injected();
+                        status_bar.update(StatusIndicator::Ok, "supervising")?;
                     }
                     Ok(Tier2Result::Escalate { reason }) => {
                         info!(reason = %reason, "Tier 2 escalated to human");
                         observer.on_escalate(&format!("{prompt} (supervisor: {reason})"));
+                        status_bar.force_update(StatusIndicator::NeedsInput, "NEEDS INPUT")?;
                     }
                     Ok(Tier2Result::Failed { error }) => {
                         warn!(error = %error, "Tier 2 call failed");
                         observer.on_escalate(&format!("{prompt} (supervisor failed: {error})"));
+                        status_bar.force_update(StatusIndicator::NeedsInput, "NEEDS INPUT")?;
                     }
                     Err(e) => {
                         warn!(error = %e, "Tier 2 error");
                         observer.on_escalate(&format!("{prompt} (supervisor error)"));
+                        status_bar.force_update(StatusIndicator::NeedsInput, "NEEDS INPUT")?;
                     }
                 }
             } else {
                 // No Tier 2 configured — escalate directly
                 observer.on_escalate(prompt);
+                status_bar.force_update(StatusIndicator::NeedsInput, "NEEDS INPUT")?;
             }
         }
         Decision::Observe { .. } => {
@@ -485,7 +619,8 @@ mod tests {
         };
 
         let buffer = EventBuffer::new(10);
-        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, None, &buffer).unwrap();
+        let mut status_bar = StatusBar::new(session, "test");
+        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, None, &buffer, &mut status_bar).unwrap();
 
         // Check observer received the auto-answer event
         let collected = events.lock().unwrap();
@@ -519,7 +654,8 @@ mod tests {
         };
 
         let buffer = EventBuffer::new(10);
-        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, None, &buffer).unwrap();
+        let mut status_bar = StatusBar::new(session, "test");
+        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, None, &buffer, &mut status_bar).unwrap();
 
         let collected = events.lock().unwrap();
         assert!(
@@ -560,7 +696,8 @@ mod tests {
         };
 
         let buffer = EventBuffer::new(10);
-        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, Some(&tier2), &buffer).unwrap();
+        let mut status_bar = StatusBar::new(session, "test");
+        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, Some(&tier2), &buffer, &mut status_bar).unwrap();
 
         let collected = events.lock().unwrap();
         // Should have supervisor thinking event + auto-answer from Tier 2
@@ -591,7 +728,8 @@ mod tests {
         };
 
         let buffer = EventBuffer::new(10);
-        handle_prompt(&prompt, "fake-session", &policy, &mut detector, &mut observer, None, &buffer).unwrap();
+        let mut status_bar = StatusBar::new("fake-session", "test");
+        handle_prompt(&prompt, "fake-session", &policy, &mut detector, &mut observer, None, &buffer, &mut status_bar).unwrap();
 
         let collected = events.lock().unwrap();
         assert!(collected.is_empty(), "completion should produce no events");
@@ -782,5 +920,65 @@ mod tests {
         );
 
         let _ = tmux::kill_session("batty-test-logpane-orch");
+    }
+
+    #[test]
+    fn status_indicator_symbols() {
+        assert_eq!(StatusIndicator::StateChange.symbol(), "●");
+        assert_eq!(StatusIndicator::Action.symbol(), "→");
+        assert_eq!(StatusIndicator::Ok.symbol(), "✓");
+        assert_eq!(StatusIndicator::Thinking.symbol(), "?");
+        assert_eq!(StatusIndicator::NeedsInput.symbol(), "⚠");
+        assert_eq!(StatusIndicator::Failure.symbol(), "✗");
+    }
+
+    #[test]
+    fn status_bar_init_and_update() {
+        let session = "batty-test-statusbar";
+        let _ = tmux::kill_session(session);
+
+        tmux::create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        let mut bar = StatusBar::new(session, "phase-2");
+        bar.init().unwrap();
+
+        // Update with various indicators
+        bar.force_update(StatusIndicator::Ok, "supervising").unwrap();
+        bar.force_update(StatusIndicator::Action, "answered: y").unwrap();
+        bar.force_update(StatusIndicator::NeedsInput, "NEEDS INPUT").unwrap();
+
+        tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn status_bar_debounce() {
+        let session = "batty-test-statusbar-deb";
+        let _ = tmux::kill_session(session);
+
+        tmux::create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        let mut bar = StatusBar::new(session, "test");
+        bar.init().unwrap();
+
+        // First update should go through
+        bar.update(StatusIndicator::Ok, "first").unwrap();
+
+        // Second update immediately after should be debounced (no error, just skipped)
+        bar.update(StatusIndicator::Action, "second").unwrap();
+
+        // Force update should always go through
+        bar.force_update(StatusIndicator::Failure, "forced").unwrap();
+
+        tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn status_bar_on_missing_session() {
+        // StatusBar updates are best-effort — shouldn't fail on missing session
+        let mut bar = StatusBar::new("batty-nonexistent-session", "test");
+        // init can fail (it calls tmux_set which is not best-effort), but update is best-effort
+        let _ = bar.init();
+        // update should not panic even if session doesn't exist
+        bar.update(StatusIndicator::Ok, "test").unwrap();
     }
 }

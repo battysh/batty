@@ -285,8 +285,7 @@ pub fn list_panes(session: &str) -> Result<Vec<String>> {
 }
 
 /// Helper: run `tmux set -t <session> <option> <value>`.
-#[allow(dead_code)]
-fn tmux_set(session: &str, option: &str, value: &str) -> Result<()> {
+pub fn tmux_set(session: &str, option: &str, value: &str) -> Result<()> {
     let output = Command::new("tmux")
         .args(["set", "-t", session, option, value])
         .output()
