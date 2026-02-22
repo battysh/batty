@@ -14,14 +14,15 @@ Hierarchical agent command system for software development
 Usage: batty [OPTIONS] <COMMAND>
 
 Commands:
-  work     Execute a task or work through the board
-  attach   Attach to a running batty tmux session
-  resume   Resume supervision for an existing phase/session run
-  config   Show project configuration
-  install  Initialize Batty assets and required external tools
-  remove   Remove installed Batty assets from a project
-  board    Open kanban-md TUI for a phase (prefers active run worktree)
-  help     Print this message or the help of the given subcommand(s)
+  work        Execute a task or work through the board
+  attach      Attach to a running batty tmux session
+  resume      Resume supervision for an existing phase/session run
+  config      Show project configuration
+  install     Initialize Batty assets and required external tools
+  remove      Remove installed Batty assets from a project
+  board       Open kanban-md TUI for a phase (prefers active run worktree)
+  board-list  List all phase boards with status and task counts
+  help        Print this message or the help of the given subcommand(s)
 
 Options:
   -v, --verbose...
@@ -72,6 +73,23 @@ Options:
       --print-dir
           Print resolved board directory and exit
 
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty board-list`
+
+List all phase boards with status and task counts
+
+```text
+List all phase boards with status and task counts
+
+Usage: batty board-list [OPTIONS]
+
+Options:
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 
