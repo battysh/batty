@@ -19,6 +19,7 @@ Commands:
   resume   Resume supervision for an existing phase/session run
   config   Show project configuration
   install  Initialize Batty assets and required external tools
+  remove   Remove installed Batty assets from a project
   board    Open kanban-md TUI for a phase (prefers active run worktree)
   help     Print this message or the help of the given subcommand(s)
 
@@ -116,6 +117,34 @@ Options:
 
       --dir <DIR>
           Destination directory (default: current directory)
+          
+          [default: .]
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty remove`
+
+Remove installed Batty assets from a project
+
+```text
+Remove installed Batty assets from a project
+
+Usage: batty remove [OPTIONS]
+
+Options:
+      --target <TARGET>
+          Steering/skill removal target (default: both)
+          
+          [default: both]
+          [possible values: both, claude, codex]
+
+      --dir <DIR>
+          Target directory (default: current directory)
           
           [default: .]
 
