@@ -2,6 +2,12 @@
 
 ## `batty work` exits quickly
 
+- Run project initialization first:
+
+```sh
+batty install
+```
+
 - Run `batty config` and confirm expected defaults
 - Ensure the requested phase board exists under `kanban/<phase>/`
 - Confirm `tmux` is installed and available

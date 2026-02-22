@@ -74,9 +74,9 @@ pub enum Command {
         json: bool,
     },
 
-    /// Install Batty skill packs and steering docs for agents
+    /// Initialize Batty assets and required external tools
     Install {
-        /// Install target (default: both)
+        /// Steering/skill install target (default: both)
         #[arg(long, value_enum, default_value_t = InstallTarget::Both)]
         target: InstallTarget,
 
