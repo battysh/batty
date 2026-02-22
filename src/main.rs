@@ -4,6 +4,8 @@ mod config;
 #[allow(dead_code)]
 mod policy;
 #[allow(dead_code)]
+mod prompt;
+#[allow(dead_code)]
 mod task;
 
 use anyhow::Result;
