@@ -19,6 +19,7 @@ use tracing::debug;
 use crate::prompt::strip_ansi;
 
 /// Default rolling buffer size.
+#[cfg(test)]
 const DEFAULT_BUFFER_SIZE: usize = 50;
 
 /// Structured events extracted from executor output.
@@ -45,6 +46,7 @@ pub enum PipeEvent {
     /// Executor made a git commit.
     CommitMade { hash: String, message: String },
     /// Raw output line (for lines that don't match any pattern).
+    #[allow(dead_code)] // Retained for optional verbose event buffering and dedicated tests.
     OutputLine { line: String },
 }
 
@@ -178,6 +180,7 @@ impl EventBuffer {
     }
 
     /// Create a buffer with the default size (50 events).
+    #[cfg(test)]
     pub fn default_size() -> Self {
         Self::new(DEFAULT_BUFFER_SIZE)
     }

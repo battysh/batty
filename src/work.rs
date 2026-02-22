@@ -15,6 +15,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+#[cfg(test)]
 use portable_pty::PtySize;
 use serde::Deserialize;
 use serde_json::Value;
@@ -1140,6 +1141,7 @@ fn policy_name(policy: Policy) -> &'static str {
 }
 
 /// Get the current terminal size, falling back to 80x24.
+#[cfg(test)]
 fn terminal_size() -> PtySize {
     // Try to get the actual terminal size
     let (cols, rows) = term_size::dimensions().unwrap_or((80, 24));

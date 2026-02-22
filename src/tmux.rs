@@ -652,6 +652,7 @@ pub fn split_window_vertical_percent(
 /// List panes in a session.
 ///
 /// Returns a list of pane IDs (e.g., ["%0", "%1"]).
+#[cfg(test)]
 pub fn list_panes(session: &str) -> Result<Vec<String>> {
     let output = Command::new("tmux")
         .args(["list-panes", "-t", session, "-F", "#{pane_id}"])

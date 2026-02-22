@@ -118,6 +118,7 @@ impl PromptDetector {
     }
 
     /// Get the current state.
+    #[cfg(test)]
     pub fn state(&self) -> &SupervisorState {
         &self.state
     }
