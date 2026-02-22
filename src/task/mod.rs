@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::config::Policy;
 
 /// A parsed kanban-md task file.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Task {
     pub id: u32,
@@ -19,6 +20,7 @@ pub struct Task {
 }
 
 /// Per-task overrides from `## Batty Config` section.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Default)]
 pub struct TaskBattyConfig {
     pub agent: Option<String>,

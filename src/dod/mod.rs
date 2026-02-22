@@ -13,6 +13,7 @@ use crate::config::Defaults;
 use crate::task::TaskBattyConfig;
 
 /// Outcome of a single DoD run.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct DodResult {
     /// Whether the DoD command succeeded (exit code 0).
@@ -24,6 +25,7 @@ pub struct DodResult {
 }
 
 /// Outcome of the full DoD cycle (potentially multiple retries).
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum DodOutcome {
     /// No DoD command configured — skip verification.
@@ -44,6 +46,7 @@ pub enum DodOutcome {
 }
 
 /// Resolved configuration for a DoD run.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct DodConfig {
     /// The shell command to run (e.g., "cargo test").
@@ -58,6 +61,7 @@ impl DodConfig {
     /// Resolve the DoD configuration from task-level overrides and project defaults.
     ///
     /// Priority: task override > project default > None.
+    #[allow(dead_code)]
     pub fn resolve(
         task_config: Option<&TaskBattyConfig>,
         project_defaults: &Defaults,
@@ -84,6 +88,7 @@ impl DodConfig {
 }
 
 /// Run a single DoD command and capture the result.
+#[allow(dead_code)]
 pub fn run_dod_command(config: &DodConfig) -> Result<DodResult> {
     info!(command = %config.command, work_dir = %config.work_dir, "running DoD command");
 
@@ -124,6 +129,7 @@ pub fn run_dod_command(config: &DodConfig) -> Result<DodResult> {
 /// `on_failure` is called after each failed attempt with the attempt number
 /// and result, allowing the caller to feed the failure back to the agent
 /// before the next retry.
+#[allow(dead_code)]
 pub fn run_dod_cycle<F>(config: &DodConfig, mut on_failure: F) -> Result<DodOutcome>
 where
     F: FnMut(u32, &DodResult),
@@ -161,6 +167,7 @@ where
 /// Format a DoD failure for feeding back to an agent.
 ///
 /// Produces a concise summary suitable for injecting into an agent's stdin.
+#[allow(dead_code)]
 pub fn format_failure_feedback(result: &DodResult, attempt: u32, max_attempts: u32) -> String {
     let mut feedback = String::new();
     feedback.push_str(&format!(

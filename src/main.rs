@@ -1,20 +1,13 @@
-// Wired in task #12 (batty work <id>)
-#[allow(dead_code)]
 mod agent;
 mod cli;
 mod config;
-#[allow(dead_code)]
 mod dod;
-#[allow(dead_code)]
 mod log;
-#[allow(dead_code)]
 mod policy;
-#[allow(dead_code)]
 mod prompt;
-#[allow(dead_code)]
 mod supervisor;
-#[allow(dead_code)]
 mod task;
+mod work;
 
 use anyhow::Result;
 use clap::Parser;
@@ -48,30 +41,14 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Work {
             target,
-            parallel,
+            parallel: _,
             agent,
             policy,
         } => {
-            let agent = agent.as_deref().unwrap_or(&config.defaults.agent);
-            let policy_str = policy.as_deref().unwrap_or(match config.defaults.policy {
-                config::Policy::Observe => "observe",
-                config::Policy::Suggest => "suggest",
-                config::Policy::Act => "act",
-            });
+            let agent_name = agent.as_deref().unwrap_or(&config.defaults.agent);
+            let policy_str = policy.as_deref();
 
-            info!(
-                target = %target,
-                parallel = parallel,
-                agent = agent,
-                policy = policy_str,
-                "starting work"
-            );
-
-            // TODO: Phase 1 tasks will implement the actual work pipeline
-            println!(
-                "batty work {target} (agent={agent}, policy={policy_str}, parallel={parallel})"
-            );
-            println!("Not yet implemented — coming in Phase 1 tasks.");
+            work::run_phase(&target, &config, agent_name, policy_str, &cwd)?;
         }
         Command::Config => {
             println!("Project config:");

@@ -64,6 +64,7 @@ impl PolicyEngine {
         }
     }
 
+    #[allow(dead_code)]
     pub fn policy(&self) -> Policy {
         self.policy
     }

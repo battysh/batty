@@ -49,6 +49,7 @@ pub trait AgentAdapter: Send + Sync {
     /// Format a response to send to the agent's stdin.
     ///
     /// Some agents need a trailing newline, some don't. The adapter handles it.
+    #[allow(dead_code)]
     fn format_input(&self, response: &str) -> String;
 }
 

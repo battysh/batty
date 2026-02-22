@@ -25,12 +25,14 @@ pub enum PromptKind {
     /// Agent is asking a yes/no confirmation question.
     Confirmation { detail: String },
     /// Agent is asking the user a free-form question.
+    #[allow(dead_code)]
     Question { detail: String },
     /// Agent has finished its current turn / task.
     Completion,
     /// Agent encountered an error.
     Error { detail: String },
     /// Agent is waiting for user input (idle at prompt).
+    #[allow(dead_code)]
     WaitingForInput,
 }
 
@@ -107,6 +109,7 @@ impl PromptPatterns {
     ///
     /// Codex CLI uses a full-screen ratatui TUI with alternate screen buffer.
     /// These patterns target text after ANSI stripping.
+    #[allow(dead_code)]
     pub fn codex_cli() -> Self {
         Self {
             patterns: vec![
@@ -158,6 +161,7 @@ impl PromptPatterns {
     ///
     /// Aider uses a line-oriented interface, making it the most reliable
     /// target for PTY pattern matching.
+    #[allow(dead_code)]
     pub fn aider() -> Self {
         Self {
             patterns: vec![

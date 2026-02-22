@@ -11,6 +11,7 @@ clap = { version = "4", features = ["derive"] }
 
 # PTY
 portable-pty = "0.8"
+term_size = "0.3"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
