@@ -1,6 +1,6 @@
 ---
 id: 12
-title: batty work <id> — full single-task command
+title: batty work <phase> — full phase runner command
 status: backlog
 priority: critical
 created: 2026-02-21T18:40:23.111209121-05:00
@@ -13,11 +13,12 @@ depends_on:
     - 7
     - 8
     - 9
-    - 10
     - 11
 class: standard
 ---
 
-Wire it all together: read task → worktree → spawn agent in PTY → supervise → test gate → merge → update kanban-md status. This is the product.
+Wire it all together: read phase board → spawn agent in PTY with phase context → supervise session as agent works through tasks → test gates at checkpoints → ensure commits → log decisions → update kanban-md statuses. This is the product.
 
-Exit criteria: batty work 3 in your current terminal. Claude appears interactively. Batty auto-answers routine prompts. Tests run on completion. On pass, worktree merges to main. Execution log inspectable after.
+The agent manages task flow (picking, implementing, marking done). Batty manages the session (supervision, policy, tests, logging).
+
+Exit criteria: `batty work phase-1` in your current terminal. Claude appears interactively and works through the phase board. Batty auto-answers routine prompts. Tests run at checkpoints. All tasks get statements of work. Execution log inspectable after.
