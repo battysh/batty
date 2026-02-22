@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -66,6 +66,17 @@ pub enum Command {
     /// Show project configuration
     Config,
 
+    /// Install Batty skill packs and steering docs for agents
+    Install {
+        /// Install target (default: both)
+        #[arg(long, value_enum, default_value_t = InstallTarget::Both)]
+        target: InstallTarget,
+
+        /// Destination directory (default: current directory)
+        #[arg(long, default_value = ".")]
+        dir: String,
+    },
+
     /// Open kanban-md TUI for a phase (prefers active run worktree)
     Board {
         /// Phase name (e.g., "phase-2.5")
@@ -75,6 +86,13 @@ pub enum Command {
         #[arg(long, default_value_t = false)]
         print_dir: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum InstallTarget {
+    Both,
+    Claude,
+    Codex,
 }
 
 #[cfg(test)]
@@ -87,6 +105,30 @@ mod tests {
         match cli.command {
             Command::Resume { target } => assert_eq!(target, "phase-2.5"),
             other => panic!("expected resume command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_subcommand_parses_defaults() {
+        let cli = Cli::parse_from(["batty", "install"]);
+        match cli.command {
+            Command::Install { target, dir } => {
+                assert_eq!(target, InstallTarget::Both);
+                assert_eq!(dir, ".");
+            }
+            other => panic!("expected install command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_subcommand_parses_target_and_dir() {
+        let cli = Cli::parse_from(["batty", "install", "--target", "codex", "--dir", "/tmp/x"]);
+        match cli.command {
+            Command::Install { target, dir } => {
+                assert_eq!(target, InstallTarget::Codex);
+                assert_eq!(dir, "/tmp/x");
+            }
+            other => panic!("expected install command, got {other:?}"),
         }
     }
 }

@@ -5,6 +5,7 @@ mod config;
 mod detector;
 mod dod;
 mod events;
+mod install;
 mod log;
 mod orchestrator;
 mod policy;
@@ -22,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tracing::{info, warn};
 
-use cli::{Cli, Command};
+use cli::{Cli, Command, InstallTarget};
 use config::ProjectConfig;
 
 fn sanitize_phase_for_worktree_prefix(phase: &str) -> String {
@@ -270,6 +271,23 @@ async fn main() -> Result<()> {
                 println!("  source:      {}", p.display());
             } else {
                 println!("  source:      (defaults — no .batty/config.toml found)");
+            }
+        }
+        Command::Install { target, dir } => {
+            let destination = PathBuf::from(dir);
+            let install_target = match target {
+                InstallTarget::Both => install::InstallTarget::Both,
+                InstallTarget::Claude => install::InstallTarget::Claude,
+                InstallTarget::Codex => install::InstallTarget::Codex,
+            };
+            let summary = install::install_assets(&destination, install_target)?;
+
+            println!("Installed Batty assets in {}", destination.display());
+            for path in &summary.created_or_updated {
+                println!("  updated:   {}", path.display());
+            }
+            for path in &summary.unchanged {
+                println!("  unchanged: {}", path.display());
             }
         }
         Command::Board { target, print_dir } => {

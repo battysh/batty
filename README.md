@@ -115,6 +115,22 @@ Print the resolved board directory (for scripts):
 batty board phase-2.4 --print-dir
 ```
 
+Install agent steering docs + skill packs in the current project:
+
+```sh
+batty install                       # both agents (default)
+batty install --target claude      # Claude only
+batty install --target codex       # Codex only
+batty install --dir /tmp/demo      # explicit destination
+```
+
+`batty install` writes:
+
+- `CLAUDE.md` (Claude steering doc)
+- `AGENTS.md` (Codex steering doc)
+- `.batty/skills/claude/SKILL.md`
+- `.batty/skills/codex/SKILL.md`
+
 ### Minimal Command
 
 ```sh
