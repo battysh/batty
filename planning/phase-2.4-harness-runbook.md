@@ -1,6 +1,7 @@
 # Phase 2.4 Supervision Harness Runbook
 
 This runbook defines the repeatable validation process for the phase 2.4 supervision harness.
+Phase status: implemented in Phase 2.4 and used as a regression reference.
 
 Reference contract: `planning/supervision-harness-contract.toml`
 
@@ -65,8 +66,8 @@ Expected lifecycle signals:
 
 When running normal `batty work` sessions, inspect:
 
-1. `.batty/logs/orchestrator.log`
-2. `.batty/logs/<phase>-pty-output.log`
+1. `.batty/logs/<run>/orchestrator.log`
+2. `.batty/logs/<run>/pty-output.log`
 
 Pass indicators:
 1. `● supervision target pane %<id>`
