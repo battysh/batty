@@ -16,8 +16,9 @@ mod tier2;
 mod tmux;
 mod work;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
+use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -122,11 +123,134 @@ fn resolve_board_dir(project_root: &Path, phase: &str) -> Result<PathBuf> {
     );
 }
 
+fn policy_label(policy: config::Policy) -> &'static str {
+    match policy {
+        config::Policy::Observe => "observe",
+        config::Policy::Suggest => "suggest",
+        config::Policy::Act => "act",
+    }
+}
+
+fn config_source_label(config_path: Option<&Path>) -> String {
+    config_path
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "(defaults — no .batty/config.toml found)".to_string())
+}
+
+fn push_kv(output: &mut String, key: &str, value: impl std::fmt::Display) {
+    output.push_str(&format!("  {key:<20} {value}\n"));
+}
+
+fn render_config_human(config: &ProjectConfig, config_path: Option<&Path>) -> String {
+    let mut output = String::new();
+    output.push_str("Defaults\n");
+    push_kv(&mut output, "agent", &config.defaults.agent);
+    push_kv(&mut output, "policy", policy_label(config.defaults.policy));
+    push_kv(
+        &mut output,
+        "dod",
+        config.defaults.dod.as_deref().unwrap_or("(none)"),
+    );
+    push_kv(&mut output, "max_retries", config.defaults.max_retries);
+    output.push('\n');
+
+    output.push_str("Supervisor\n");
+    push_kv(&mut output, "enabled", config.supervisor.enabled);
+    push_kv(&mut output, "program", &config.supervisor.program);
+    if config.supervisor.args.is_empty() {
+        push_kv(&mut output, "args", "(none)");
+    } else {
+        push_kv(&mut output, "args", config.supervisor.args.join(", "));
+    }
+    push_kv(&mut output, "timeout_secs", config.supervisor.timeout_secs);
+    push_kv(&mut output, "trace_io", config.supervisor.trace_io);
+    output.push('\n');
+
+    output.push_str("Detector\n");
+    push_kv(
+        &mut output,
+        "silence_timeout",
+        format!("{}s", config.detector.silence_timeout_secs),
+    );
+    push_kv(
+        &mut output,
+        "answer_cooldown",
+        format!("{}ms", config.detector.answer_cooldown_millis),
+    );
+    push_kv(
+        &mut output,
+        "unknown_fallback",
+        config.detector.unknown_request_fallback,
+    );
+    push_kv(
+        &mut output,
+        "idle_input_fallback",
+        config.detector.idle_input_fallback,
+    );
+    output.push('\n');
+
+    output.push_str("Policy Auto Answers\n");
+    let mut auto_answers: Vec<_> = config.policy.auto_answer.iter().collect();
+    auto_answers.sort_by(|a, b| a.0.cmp(b.0));
+    if auto_answers.is_empty() {
+        push_kv(&mut output, "entries", "(none)");
+    } else {
+        for (prompt, answer) in auto_answers {
+            output.push_str(&format!("  - {prompt} => {answer}\n"));
+        }
+    }
+    output.push('\n');
+
+    output.push_str("Source Path\n");
+    push_kv(&mut output, "path", config_source_label(config_path));
+
+    output
+}
+
+fn render_config_json(config: &ProjectConfig, config_path: Option<&Path>) -> Result<String> {
+    let auto_answer: BTreeMap<String, String> = config
+        .policy
+        .auto_answer
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    let payload = serde_json::json!({
+        "defaults": {
+            "agent": &config.defaults.agent,
+            "policy": policy_label(config.defaults.policy),
+            "dod": config.defaults.dod.clone(),
+            "max_retries": config.defaults.max_retries
+        },
+        "supervisor": {
+            "enabled": config.supervisor.enabled,
+            "program": &config.supervisor.program,
+            "args": &config.supervisor.args,
+            "timeout_secs": config.supervisor.timeout_secs,
+            "trace_io": config.supervisor.trace_io
+        },
+        "detector": {
+            "silence_timeout_secs": config.detector.silence_timeout_secs,
+            "answer_cooldown_millis": config.detector.answer_cooldown_millis,
+            "unknown_request_fallback": config.detector.unknown_request_fallback,
+            "idle_input_fallback": config.detector.idle_input_fallback
+        },
+        "policy": {
+            "auto_answer": auto_answer
+        },
+        "source_path": config_source_label(config_path)
+    });
+
+    serde_json::to_string_pretty(&payload).context("failed to serialize config to JSON")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let is_config_command = matches!(&cli.command, Command::Config { .. });
 
     let filter = match cli.verbose {
+        0 if is_config_command => "batty=warn",
         0 => "batty=info",
         1 => "batty=debug",
         _ => "batty=trace",
@@ -139,9 +263,11 @@ async fn main() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let (config, config_path) = ProjectConfig::load(&cwd)?;
 
-    match config_path {
-        Some(ref p) => info!("loaded config from {}", p.display()),
-        None => info!("no .batty/config.toml found, using defaults"),
+    if !is_config_command || cli.verbose > 0 {
+        match config_path {
+            Some(ref p) => info!("loaded config from {}", p.display()),
+            None => info!("no .batty/config.toml found, using defaults"),
+        }
     }
 
     match cli.command {
@@ -234,43 +360,11 @@ async fn main() -> Result<()> {
         Command::Resume { target } => {
             work::resume_phase(&target, &config, config.defaults.agent.as_str(), &cwd)?;
         }
-        Command::Config => {
-            println!("Project config:");
-            println!("  agent:       {}", config.defaults.agent);
-            println!(
-                "  policy:      {}",
-                match config.defaults.policy {
-                    config::Policy::Observe => "observe",
-                    config::Policy::Suggest => "suggest",
-                    config::Policy::Act => "act",
-                }
-            );
-            println!(
-                "  dod:         {}",
-                config.defaults.dod.as_deref().unwrap_or("(none)")
-            );
-            println!("  max_retries: {}", config.defaults.max_retries);
-            println!("Supervisor config:");
-            println!("  enabled:     {}", config.supervisor.enabled);
-            println!("  program:     {}", config.supervisor.program);
-            println!("  args:        {:?}", config.supervisor.args);
-            println!("  timeout_sec: {}", config.supervisor.timeout_secs);
-            println!("  trace_io:    {}", config.supervisor.trace_io);
-            println!("Detector config:");
-            println!("  silence_sec: {}", config.detector.silence_timeout_secs);
-            println!("  cooldown_ms: {}", config.detector.answer_cooldown_millis);
-            println!(
-                "  unknown_fallback: {}",
-                config.detector.unknown_request_fallback
-            );
-            println!(
-                "  idle_input_fallback: {}",
-                config.detector.idle_input_fallback
-            );
-            if let Some(ref p) = config_path {
-                println!("  source:      {}", p.display());
+        Command::Config { json } => {
+            if json {
+                println!("{}", render_config_json(&config, config_path.as_deref())?);
             } else {
-                println!("  source:      (defaults — no .batty/config.toml found)");
+                print!("{}", render_config_human(&config, config_path.as_deref()));
             }
         }
         Command::Install { target, dir } => {
@@ -363,5 +457,51 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let resolved = resolve_latest_worktree_board_dir(tmp.path(), "phase-2.5").unwrap();
         assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn render_config_human_groups_sections_and_formats_arrays() {
+        let config = ProjectConfig::default();
+        let rendered = render_config_human(&config, None);
+
+        assert!(rendered.contains("Defaults"));
+        assert!(rendered.contains("Supervisor"));
+        assert!(rendered.contains("Source Path"));
+        assert!(rendered.contains("args"));
+        assert!(rendered.contains("-p, --output-format, text"));
+        assert!(rendered.contains("(defaults — no .batty/config.toml found)"));
+    }
+
+    #[test]
+    fn render_config_json_is_valid_and_contains_expected_fields() {
+        let config = ProjectConfig::default();
+        let json = render_config_json(&config, None).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["defaults"]["agent"], "claude");
+        assert_eq!(value["defaults"]["policy"], "observe");
+        assert!(value["supervisor"]["args"].is_array());
+        assert_eq!(
+            value["source_path"],
+            "(defaults — no .batty/config.toml found)"
+        );
+    }
+
+    #[test]
+    fn render_config_json_sorts_auto_answer_keys() {
+        let mut config = ProjectConfig::default();
+        config
+            .policy
+            .auto_answer
+            .insert("z-prompt".into(), "z".into());
+        config
+            .policy
+            .auto_answer
+            .insert("a-prompt".into(), "a".into());
+
+        let json = render_config_json(&config, None).unwrap();
+        let first = json.find("\"a-prompt\"").unwrap();
+        let second = json.find("\"z-prompt\"").unwrap();
+        assert!(first < second, "expected sorted JSON map keys");
     }
 }

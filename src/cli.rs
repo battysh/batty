@@ -64,7 +64,11 @@ pub enum Command {
     },
 
     /// Show project configuration
-    Config,
+    Config {
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 
     /// Install Batty skill packs and steering docs for agents
     Install {
@@ -129,6 +133,15 @@ mod tests {
                 assert_eq!(dir, "/tmp/x");
             }
             other => panic!("expected install command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_subcommand_parses_json_flag() {
+        let cli = Cli::parse_from(["batty", "config", "--json"]);
+        match cli.command {
+            Command::Config { json } => assert!(json),
+            other => panic!("expected config command, got {other:?}"),
         }
     }
 }
