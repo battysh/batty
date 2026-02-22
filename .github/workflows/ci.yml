@@ -11,8 +11,45 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
+  changes:
+    name: Change Scope
+    runs-on: ubuntu-latest
+    outputs:
+      docs: ${{ steps.filter.outputs.docs }}
+      non_docs: ${{ steps.filter.outputs.non_docs }}
+      docs_only: ${{ steps.docs_only.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            docs:
+              - 'docs/**'
+              - 'mkdocs.yml'
+              - 'scripts/generate-docs.sh'
+              - '.github/workflows/docs-publish.yml'
+            non_docs:
+              - '**'
+              - '!docs/**'
+              - '!mkdocs.yml'
+              - '!scripts/generate-docs.sh'
+              - '!.github/workflows/docs-publish.yml'
+
+      - id: docs_only
+        shell: bash
+        run: |
+          if [ "${{ steps.filter.outputs.docs }}" = "true" ] && [ "${{ steps.filter.outputs.non_docs }}" != "true" ]; then
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=false" >> "$GITHUB_OUTPUT"
+          fi
+
   check:
-    name: ${{ matrix.os }}
+    name: Rust Checks (${{ matrix.os }})
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.non_docs == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -36,3 +73,42 @@ jobs:
 
       - name: Test
         run: cargo test
+
+  docs:
+    name: Docs Quality
+    needs: changes
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install docs dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install mkdocs-material mdformat mdformat-gfm
+
+      - name: Refresh generated references
+        run: ./scripts/generate-docs.sh
+
+      - name: Markdown format check
+        shell: bash
+        run: |
+          mapfile -t doc_files < <(find docs -name '*.md' | sort)
+          mdformat --check "${doc_files[@]}"
+
+      - name: Markdown lint check
+        run: npx --yes markdownlint-cli2 "docs/**/*.md"
+
+      - name: Internal link audit
+        run: mkdocs build --strict
+
+      - name: Verify generated docs are committed
+        run: git diff --exit-code -- docs/reference/cli.md docs/reference/config.md

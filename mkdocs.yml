@@ -1,0 +1,26 @@
+site_name: Batty Docs
+site_description: Documentation for Batty, the tmux-native hierarchical agent command system.
+site_url: https://zedmor.github.io/batty/
+repo_url: https://github.com/zedmor/batty
+repo_name: zedmor/batty
+strict: true
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Reference:
+      - CLI Reference: reference/cli.md
+      - Configuration: reference/config.md
+  - Architecture: architecture.md
+  - Troubleshooting: troubleshooting.md
+  - Contributor Docs: README.md
+site_dir: site
