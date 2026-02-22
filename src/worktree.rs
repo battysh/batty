@@ -26,6 +26,7 @@ pub struct PhaseWorktree {
 pub enum RunOutcome {
     Completed,
     Failed,
+    DryRun,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,11 @@ impl PhaseWorktree {
     pub fn finalize(&self, outcome: RunOutcome) -> Result<CleanupDecision> {
         match outcome {
             RunOutcome::Failed => Ok(CleanupDecision::KeptForFailure),
+            RunOutcome::DryRun => {
+                remove_worktree(&self.repo_root, &self.path)?;
+                delete_branch(&self.repo_root, &self.branch)?;
+                Ok(CleanupDecision::Cleaned)
+            }
             RunOutcome::Completed => {
                 let branch_tip = current_commit(&self.repo_root, &self.branch)?;
                 if branch_tip == self.start_commit {

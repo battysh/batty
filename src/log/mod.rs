@@ -83,6 +83,16 @@ pub enum LogEvent {
         program: String,
         work_dir: String,
     },
+    /// Launch context was composed and snapshotted before execution.
+    LaunchContextSnapshot {
+        phase: String,
+        agent: String,
+        instructions_path: String,
+        phase_doc_path: String,
+        config_source: String,
+        snapshot_path: String,
+        snapshot: String,
+    },
     /// A prompt was detected in agent output.
     PromptDetected { kind: String, matched_text: String },
     /// An auto-response was sent to the agent.
@@ -113,6 +123,22 @@ pub enum LogEvent {
     RunCompleted { summary: String },
     /// The run failed.
     RunFailed { reason: String },
+    /// Completion contract decision (accept/reject + check results).
+    CompletionDecision {
+        phase: String,
+        passed: bool,
+        board_all_done: bool,
+        milestone_done: bool,
+        summary_exists: bool,
+        dod_passed: bool,
+        executor_stable: bool,
+        reasons: Vec<String>,
+        summary_path: Option<String>,
+        dod_command: String,
+        dod_executed: bool,
+        dod_exit_code: Option<i32>,
+        dod_output_lines: usize,
+    },
     /// Session started.
     SessionStarted { phase: String },
     /// Session ended.
@@ -274,6 +300,15 @@ mod tests {
                 program: "claude".to_string(),
                 work_dir: "/work".to_string(),
             },
+            LogEvent::LaunchContextSnapshot {
+                phase: "phase-2.5".to_string(),
+                agent: "claude-code".to_string(),
+                instructions_path: "CLAUDE.md".to_string(),
+                phase_doc_path: "kanban/phase-2.5/PHASE.md".to_string(),
+                config_source: ".batty/config.toml".to_string(),
+                snapshot_path: ".batty/logs/phase-2.5-ctx.log".to_string(),
+                snapshot: "context body".to_string(),
+            },
             LogEvent::PromptDetected {
                 kind: "Permission".to_string(),
                 matched_text: "Allow tool Read?".to_string(),
@@ -313,6 +348,21 @@ mod tests {
             },
             LogEvent::RunFailed {
                 reason: "tests failed".to_string(),
+            },
+            LogEvent::CompletionDecision {
+                phase: "phase-2.5".to_string(),
+                passed: true,
+                board_all_done: true,
+                milestone_done: true,
+                summary_exists: true,
+                dod_passed: true,
+                executor_stable: true,
+                reasons: vec![],
+                summary_path: Some("/work/phase-summary.md".to_string()),
+                dod_command: "cargo test".to_string(),
+                dod_executed: true,
+                dod_exit_code: Some(0),
+                dod_output_lines: 120,
             },
             LogEvent::SessionStarted {
                 phase: "phase-1".to_string(),

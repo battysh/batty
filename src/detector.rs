@@ -260,6 +260,22 @@ impl PromptDetector {
         };
     }
 
+    /// Seed detector state when supervision resumes mid-session.
+    ///
+    /// This restores the most recent visible output line as baseline without
+    /// emitting prompt events during bootstrap.
+    pub fn seed_from_recent_output(&mut self, line: &str) {
+        let stripped = strip_ansi(line);
+        let trimmed = stripped.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        self.last_line = trimmed.to_string();
+        self.last_output_time = Some(Instant::now());
+        self.state = SupervisorState::Working;
+    }
+
     /// Signal that the human took over (typed directly).
     ///
     /// Cancels any pending question and returns to Working.
@@ -488,5 +504,22 @@ mod tests {
         assert!(matches!(first, DetectorEvent::Silence { .. }));
         let second = d.tick();
         assert!(matches!(second, DetectorEvent::Silence { .. }));
+    }
+
+    #[test]
+    fn seed_from_recent_output_restores_detector_baseline() {
+        let mut d = make_detector();
+        d.seed_from_recent_output("Continue? [y/n]");
+        assert!(matches!(d.state(), SupervisorState::Working));
+
+        thread::sleep(Duration::from_millis(120));
+        let event = d.tick();
+        assert!(
+            matches!(
+                event,
+                DetectorEvent::PromptDetected(_) | DetectorEvent::UnknownRequest { .. }
+            ),
+            "seeded baseline should be considered by silence detection, got {event:?}"
+        );
     }
 }

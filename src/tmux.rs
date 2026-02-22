@@ -5,10 +5,52 @@
 //! portable-pty direct approach from Phase 1 with tmux-based supervision.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use tracing::{debug, info, warn};
+
+static PROBE_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Known split strategies for creating the orchestrator log pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitMode {
+    Lines,
+    Percent,
+    Disabled,
+}
+
+/// tmux capability probe result used by orchestrator startup.
+#[derive(Debug, Clone)]
+pub struct TmuxCapabilities {
+    pub version_raw: String,
+    pub version: Option<(u32, u32)>,
+    pub pipe_pane: bool,
+    pub pipe_pane_only_if_missing: bool,
+    pub status_style: bool,
+    pub split_mode: SplitMode,
+}
+
+impl TmuxCapabilities {
+    /// Known-good range documented for Batty runtime behavior.
+    ///
+    /// Current matrix:
+    /// - 3.2+ known-good
+    /// - 3.1 supported with fallbacks
+    /// - older versions unsupported
+    pub fn known_good(&self) -> bool {
+        matches!(self.version, Some((major, minor)) if major > 3 || (major == 3 && minor >= 2))
+    }
+
+    pub fn remediation_message(&self) -> String {
+        format!(
+            "tmux capability check failed (detected '{}'). Batty requires working `pipe-pane` support. \
+Install or upgrade tmux (recommended >= 3.2) and re-run `batty work` or `batty resume`.",
+            self.version_raw
+        )
+    }
+}
 
 /// Metadata for a tmux pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +77,148 @@ pub fn check_tmux() -> Result<String> {
     let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
     debug!(version = %version, "tmux found");
     Ok(version)
+}
+
+fn parse_tmux_version(version_raw: &str) -> Option<(u32, u32)> {
+    let raw = version_raw.trim();
+    let ver = raw.strip_prefix("tmux ")?;
+    let mut chars = ver.chars().peekable();
+
+    let mut major = String::new();
+    while let Some(c) = chars.peek() {
+        if c.is_ascii_digit() {
+            major.push(*c);
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    if major.is_empty() {
+        return None;
+    }
+
+    if chars.next()? != '.' {
+        return None;
+    }
+
+    let mut minor = String::new();
+    while let Some(c) = chars.peek() {
+        if c.is_ascii_digit() {
+            minor.push(*c);
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    if minor.is_empty() {
+        return None;
+    }
+
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+fn run_tmux<I, S>(args: I) -> Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    Command::new("tmux")
+        .args(args)
+        .output()
+        .context("failed to run tmux command")
+}
+
+/// Probe tmux capabilities used by Batty and choose compatible behavior.
+pub fn probe_capabilities() -> Result<TmuxCapabilities> {
+    let version_raw = check_tmux()?;
+    let version = parse_tmux_version(&version_raw);
+
+    let probe_id = PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let session = format!("batty-cap-probe-{}-{probe_id}", std::process::id());
+    let _ = kill_session(&session);
+    create_session(&session, "sleep", &["20".to_string()], "/tmp")
+        .with_context(|| format!("failed to create tmux probe session '{session}'"))?;
+    let pane = pane_id(&session)?;
+
+    let cleanup = || {
+        let _ = kill_session(&session);
+    };
+
+    let pipe_cmd = "cat >/dev/null";
+    let pipe_pane = match run_tmux(["pipe-pane", "-t", pane.as_str(), pipe_cmd]) {
+        Ok(out) => out.status.success(),
+        Err(_) => false,
+    };
+
+    let pipe_pane_only_if_missing =
+        match run_tmux(["pipe-pane", "-o", "-t", pane.as_str(), pipe_cmd]) {
+            Ok(out) => out.status.success(),
+            Err(_) => false,
+        };
+
+    // Stop piping in probe session (best-effort).
+    let _ = run_tmux(["pipe-pane", "-t", pane.as_str()]);
+
+    let status_style = match run_tmux([
+        "set",
+        "-t",
+        session.as_str(),
+        "status-style",
+        "bg=colour235,fg=colour136",
+    ]) {
+        Ok(out) => out.status.success(),
+        Err(_) => false,
+    };
+
+    let split_lines = match run_tmux([
+        "split-window",
+        "-v",
+        "-l",
+        "3",
+        "-t",
+        session.as_str(),
+        "sleep",
+        "1",
+    ]) {
+        Ok(out) => out.status.success(),
+        Err(_) => false,
+    };
+    let split_percent = if split_lines {
+        false
+    } else {
+        match run_tmux([
+            "split-window",
+            "-v",
+            "-p",
+            "20",
+            "-t",
+            session.as_str(),
+            "sleep",
+            "1",
+        ]) {
+            Ok(out) => out.status.success(),
+            Err(_) => false,
+        }
+    };
+
+    cleanup();
+
+    let split_mode = if split_lines {
+        SplitMode::Lines
+    } else if split_percent {
+        SplitMode::Percent
+    } else {
+        SplitMode::Disabled
+    };
+
+    Ok(TmuxCapabilities {
+        version_raw,
+        version,
+        pipe_pane,
+        pipe_pane_only_if_missing,
+        status_style,
+        split_mode,
+    })
 }
 
 /// Convention for session names: `batty-<phase>`.
@@ -82,6 +266,22 @@ pub fn pane_dead(target: &str) -> Result<bool> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("tmux display-message pane_dead failed: {stderr}");
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(value == "1")
+}
+
+/// Check whether a pane currently has an active `pipe-pane` command.
+pub fn pane_pipe_enabled(target: &str) -> Result<bool> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "-t", target, "#{pane_pipe}"])
+        .output()
+        .with_context(|| format!("failed to query pane_pipe for target '{target}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux display-message pane_pipe failed: {stderr}");
     }
 
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -196,6 +396,32 @@ pub fn setup_pipe_pane(target: &str, log_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Set up pipe-pane only if none is configured yet (`tmux pipe-pane -o`).
+pub fn setup_pipe_pane_if_missing(target: &str, log_path: &Path) -> Result<()> {
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create log directory: {}", parent.display()))?;
+    }
+
+    let pipe_cmd = format!("cat >> {}", log_path.display());
+    let output = Command::new("tmux")
+        .args(["pipe-pane", "-o", "-t", target, &pipe_cmd])
+        .output()
+        .with_context(|| format!("failed to set up pipe-pane (-o) for target '{target}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux pipe-pane -o failed: {stderr}");
+    }
+
+    info!(
+        target = target,
+        log = %log_path.display(),
+        "pipe-pane ensured (only-if-missing)"
+    );
+    Ok(())
+}
+
 /// Attach to an existing tmux session (blocks until detach/exit).
 pub fn attach(session: &str) -> Result<()> {
     if !session_exists(session) {
@@ -222,19 +448,32 @@ pub fn attach(session: &str) -> Result<()> {
 /// This is how batty injects responses into the executor's PTY.
 /// The `keys` string is sent literally, followed by Enter if `press_enter` is true.
 pub fn send_keys(target: &str, keys: &str, press_enter: bool) -> Result<()> {
-    let mut cmd = Command::new("tmux");
-    cmd.args(["send-keys", "-t", target, keys]);
-    if press_enter {
-        cmd.arg("Enter");
+    if !keys.is_empty() {
+        // `-l` sends text literally so punctuation/symbols are not interpreted as
+        // tmux key names.
+        let output = Command::new("tmux")
+            .args(["send-keys", "-t", target, "-l", "--", keys])
+            .output()
+            .with_context(|| format!("failed to send keys to target '{target}'"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("tmux send-keys failed: {stderr}");
+        }
     }
 
-    let output = cmd
-        .output()
-        .with_context(|| format!("failed to send keys to target '{target}'"))?;
+    if press_enter {
+        // Send Enter as an explicit second action so supervisor injections are
+        // always submitted.
+        let output = Command::new("tmux")
+            .args(["send-keys", "-t", target, "C-m"])
+            .output()
+            .with_context(|| format!("failed to send Enter to target '{target}'"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("tmux send-keys failed: {stderr}");
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("tmux send-keys Enter failed: {stderr}");
+        }
     }
 
     debug!(target = target, keys = keys, "sent keys");
@@ -352,6 +591,64 @@ pub fn split_window_vertical(session: &str, percent: u32) -> Result<()> {
     Ok(())
 }
 
+/// Split the window vertically by fixed line count.
+pub fn split_window_vertical_lines(session: &str, lines: u32, command: &[String]) -> Result<()> {
+    let mut cmd = Command::new("tmux");
+    cmd.args([
+        "split-window",
+        "-v",
+        "-l",
+        &lines.to_string(),
+        "-t",
+        session,
+    ]);
+    for arg in command {
+        cmd.arg(arg);
+    }
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to split window in session '{session}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux split-window -l failed: {stderr}");
+    }
+
+    Ok(())
+}
+
+/// Split the window vertically by percentage and run command in the new pane.
+pub fn split_window_vertical_percent(
+    session: &str,
+    percent: u32,
+    command: &[String],
+) -> Result<()> {
+    let mut cmd = Command::new("tmux");
+    cmd.args([
+        "split-window",
+        "-v",
+        "-p",
+        &percent.to_string(),
+        "-t",
+        session,
+    ]);
+    for arg in command {
+        cmd.arg(arg);
+    }
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to split window in session '{session}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux split-window -p failed: {stderr}");
+    }
+
+    Ok(())
+}
+
 /// List panes in a session.
 ///
 /// Returns a list of pane IDs (e.g., ["%0", "%1"]).
@@ -449,6 +746,46 @@ mod tests {
     }
 
     #[test]
+    fn parse_tmux_version_supports_minor_suffixes() {
+        assert_eq!(parse_tmux_version("tmux 3.4"), Some((3, 4)));
+        assert_eq!(parse_tmux_version("tmux 3.3a"), Some((3, 3)));
+        assert_eq!(parse_tmux_version("tmux 2.9"), Some((2, 9)));
+        assert_eq!(parse_tmux_version("tmux unknown"), None);
+    }
+
+    #[test]
+    fn capabilities_known_good_matrix() {
+        let good = TmuxCapabilities {
+            version_raw: "tmux 3.2".to_string(),
+            version: Some((3, 2)),
+            pipe_pane: true,
+            pipe_pane_only_if_missing: true,
+            status_style: true,
+            split_mode: SplitMode::Lines,
+        };
+        assert!(good.known_good());
+
+        let fallback = TmuxCapabilities {
+            version_raw: "tmux 3.1".to_string(),
+            version: Some((3, 1)),
+            pipe_pane: true,
+            pipe_pane_only_if_missing: false,
+            status_style: true,
+            split_mode: SplitMode::Percent,
+        };
+        assert!(!fallback.known_good());
+    }
+
+    #[test]
+    fn capability_probe_reports_pipe_pane() {
+        let caps = probe_capabilities().unwrap();
+        assert!(
+            caps.pipe_pane,
+            "pipe-pane should be available for batty runtime"
+        );
+    }
+
+    #[test]
     fn nonexistent_session_does_not_exist() {
         assert!(!session_exists("batty-test-nonexistent-12345"));
     }
@@ -527,6 +864,34 @@ mod tests {
         send_keys(session, "hello", true).unwrap();
 
         // Clean up
+        kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn send_keys_with_enter_submits_line() {
+        let session = "batty-test-sendkeys-enter";
+        let _ = kill_session(session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("sendkeys.log");
+
+        create_session(session, "cat", &[], "/tmp").unwrap();
+        setup_pipe_pane(session, &log_path).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        send_keys(session, "supervisor ping", true).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let content = std::fs::read_to_string(&log_path).unwrap_or_default();
+        assert!(
+            content.contains("supervisor ping"),
+            "expected injected text in pane log, got: {content:?}"
+        );
+        assert!(
+            content.contains("supervisor ping\r\n") || content.contains("supervisor ping\n"),
+            "expected submitted line ending in pane log, got: {content:?}"
+        );
+
         kill_session(session).unwrap();
     }
 
