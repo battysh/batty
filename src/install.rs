@@ -299,10 +299,14 @@ fn remove_kanban_skills(destination: &Path, target: InstallTarget) -> Result<boo
 }
 
 fn try_remove_empty_parents(path: &Path, stop_at: &Path) {
-    let stop_at_canonical = stop_at.canonicalize().unwrap_or_else(|_| stop_at.to_path_buf());
+    let stop_at_canonical = stop_at
+        .canonicalize()
+        .unwrap_or_else(|_| stop_at.to_path_buf());
     let mut current = path.parent();
     while let Some(parent) = current {
-        let parent_canonical = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+        let parent_canonical = parent
+            .canonicalize()
+            .unwrap_or_else(|_| parent.to_path_buf());
         if parent_canonical == stop_at_canonical {
             break;
         }
@@ -567,8 +571,16 @@ mod tests {
     fn install_does_not_touch_claude_md_or_agents_md() {
         let tmp = tempfile::tempdir().unwrap();
         // Pre-create existing steering docs
-        fs::write(tmp.path().join("CLAUDE.md"), "# My Project\nCustom instructions").unwrap();
-        fs::write(tmp.path().join("AGENTS.md"), "# My Project\nCustom instructions").unwrap();
+        fs::write(
+            tmp.path().join("CLAUDE.md"),
+            "# My Project\nCustom instructions",
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("AGENTS.md"),
+            "# My Project\nCustom instructions",
+        )
+        .unwrap();
 
         install_assets(tmp.path(), InstallTarget::Both).unwrap();
 
@@ -704,8 +716,16 @@ mod tests {
         let summary = install_assets(tmp.path(), InstallTarget::Both).unwrap();
 
         assert_eq!(summary.gitignore_entries_added.len(), 2);
-        assert!(summary.gitignore_entries_added.contains(&".batty/logs/".to_string()));
-        assert!(summary.gitignore_entries_added.contains(&".batty/worktrees/".to_string()));
+        assert!(
+            summary
+                .gitignore_entries_added
+                .contains(&".batty/logs/".to_string())
+        );
+        assert!(
+            summary
+                .gitignore_entries_added
+                .contains(&".batty/worktrees/".to_string())
+        );
 
         let content = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
         assert!(content.contains(".batty/logs/"));

@@ -94,6 +94,35 @@ pub enum LogEvent {
         snapshot_path: String,
         snapshot: String,
     },
+    /// A phase sequencing decision was recorded.
+    PhaseSelectionDecision {
+        phase: String,
+        order_key: String,
+        selected: bool,
+        reason: String,
+    },
+    /// A standardized review packet was generated for human review.
+    ReviewPacketGenerated {
+        phase: String,
+        packet_path: String,
+        diff_command: String,
+        summary_path: Option<String>,
+        statements_count: usize,
+        execution_log_path: String,
+    },
+    /// A human review decision was recorded.
+    ReviewDecision {
+        phase: String,
+        decision: String,
+        feedback: Option<String>,
+    },
+    /// A rework cycle was launched after human review feedback.
+    ReworkCycleStarted {
+        phase: String,
+        attempt: u32,
+        max_retries: u32,
+        feedback: String,
+    },
     /// A prompt was detected in agent output.
     PromptDetected { kind: String, matched_text: String },
     /// An auto-response was sent to the agent.
@@ -310,6 +339,32 @@ mod tests {
                 config_source: ".batty/config.toml".to_string(),
                 snapshot_path: ".batty/logs/phase-2.5-ctx.log".to_string(),
                 snapshot: "context body".to_string(),
+            },
+            LogEvent::PhaseSelectionDecision {
+                phase: "phase-2.5".to_string(),
+                order_key: "2.5".to_string(),
+                selected: true,
+                reason: "phase selected for execution".to_string(),
+            },
+            LogEvent::ReviewPacketGenerated {
+                phase: "phase-2.5".to_string(),
+                packet_path: "/work/review-packet.md".to_string(),
+                diff_command: "git diff main...phase-2-5-run-001".to_string(),
+                summary_path: Some("/work/phase-summary.md".to_string()),
+                statements_count: 4,
+                execution_log_path: "/work/.batty/logs/phase-2-5-run-001/execution.jsonl"
+                    .to_string(),
+            },
+            LogEvent::ReviewDecision {
+                phase: "phase-2.5".to_string(),
+                decision: "merge".to_string(),
+                feedback: None,
+            },
+            LogEvent::ReworkCycleStarted {
+                phase: "phase-2.5".to_string(),
+                attempt: 1,
+                max_retries: 3,
+                feedback: "address flaky test".to_string(),
             },
             LogEvent::PromptDetected {
                 kind: "Permission".to_string(),
