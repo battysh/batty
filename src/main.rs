@@ -266,7 +266,10 @@ fn phase_sort_key(name: &str) -> Option<f64> {
         return Some(n);
     }
     // Try parsing just the leading digits (e.g. "3b" → 3.0)
-    let digits: String = after_phase.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = after_phase
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     if !digits.is_empty() {
         return digits.parse::<f64>().ok();
     }
@@ -287,10 +290,7 @@ fn derive_phase_status(tasks: &[task::Task]) -> &'static str {
 
     let total = tasks.len();
     let done = tasks.iter().filter(|t| t.status == "done").count();
-    let in_progress = tasks
-        .iter()
-        .filter(|t| t.status == "in-progress")
-        .count();
+    let in_progress = tasks.iter().filter(|t| t.status == "in-progress").count();
 
     if done == total {
         "Done"
@@ -307,14 +307,23 @@ fn derive_phase_status(tasks: &[task::Task]) -> &'static str {
 /// Read the git branch name for a worktree directory, if available.
 fn worktree_branch(worktree_dir: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
-        .args(["-C", &worktree_dir.to_string_lossy(), "branch", "--show-current"])
+        .args([
+            "-C",
+            &worktree_dir.to_string_lossy(),
+            "branch",
+            "--show-current",
+        ])
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if branch.is_empty() { None } else { Some(branch) }
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
 }
 
 /// Read the last commit summary (short hash + subject) for a worktree directory.
@@ -361,7 +370,10 @@ impl TaskCounts {
             match task::load_tasks_from_dir(tasks_dir) {
                 Ok(tasks) => {
                     let done = tasks.iter().filter(|t| t.status == "done").count();
-                    Self { done, total: tasks.len() }
+                    Self {
+                        done,
+                        total: tasks.len(),
+                    }
                 }
                 Err(_) => Self { done: 0, total: 0 },
             }
@@ -1101,8 +1113,14 @@ mod tests {
 
         // phase-3 worktree line: indented, shows Done 2/2
         let wt_line = lines[3];
-        assert!(wt_line.contains("Done"), "expected worktree Done, got: {wt_line}");
-        assert!(wt_line.contains("2/2"), "expected worktree 2/2, got: {wt_line}");
+        assert!(
+            wt_line.contains("Done"),
+            "expected worktree Done, got: {wt_line}"
+        );
+        assert!(
+            wt_line.contains("2/2"),
+            "expected worktree 2/2, got: {wt_line}"
+        );
 
         // Summary uses effective (worktree) status: both boards "Done"
         assert!(output.contains("2 done"));
