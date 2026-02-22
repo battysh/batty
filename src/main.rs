@@ -1,6 +1,8 @@
+// Wired in task #12 (batty work <id>)
+#[allow(dead_code)]
+mod agent;
 mod cli;
 mod config;
-// Wired in task #12 (batty work <id>)
 #[allow(dead_code)]
 mod policy;
 #[allow(dead_code)]
