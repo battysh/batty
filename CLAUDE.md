@@ -105,6 +105,7 @@ This is not optional. Every completed task must have a statement of work before 
 - **Minimal code.** Don't over-engineer. Build the smallest thing that works.
 - **No premature abstraction.** Three similar lines > one clever abstraction.
 - **Test what matters.** Focus on the PTY supervision and prompt detection — that's the hard part.
+- **Extensive unit tests.** Every module must have unit tests. Test happy paths, edge cases, and error conditions. Use `#[cfg(test)]` modules in each source file. Run `cargo test` before committing — all tests must pass. If a task adds code, it adds tests. No exceptions.
 
 ## Key Dependencies
 
