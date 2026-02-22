@@ -42,6 +42,10 @@ pub enum Command {
         #[arg(long, default_value_t = false)]
         new: bool,
 
+        /// Show composed launch context and exit without running the executor
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+
         /// Internal: keep work process in foreground (skip auto-backgrounding).
         #[arg(long, hide = true, default_value_t = false)]
         foreground: bool,
@@ -50,6 +54,12 @@ pub enum Command {
     /// Attach to a running batty tmux session
     Attach {
         /// Phase name to attach to (e.g., "phase-1")
+        target: String,
+    },
+
+    /// Resume supervision for an existing phase/session run
+    Resume {
+        /// Phase name (e.g., "phase-2.5") or tmux session name (e.g., "batty-phase-2-5")
         target: String,
     },
 
@@ -65,4 +75,18 @@ pub enum Command {
         #[arg(long, default_value_t = false)]
         print_dir: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_subcommand_parses_target() {
+        let cli = Cli::parse_from(["batty", "resume", "phase-2.5"]);
+        match cli.command {
+            Command::Resume { target } => assert_eq!(target, "phase-2.5"),
+            other => panic!("expected resume command, got {other:?}"),
+        }
+    }
 }

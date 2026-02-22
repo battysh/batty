@@ -1,5 +1,6 @@
 mod agent;
 mod cli;
+mod completion;
 mod config;
 mod detector;
 mod dod;
@@ -150,11 +151,12 @@ async fn main() -> Result<()> {
             policy,
             attach,
             new,
+            dry_run,
             foreground,
         } => {
             // Detached mode: spawn a background batty worker and return immediately.
             // The worker runs with --foreground to avoid recursive spawning.
-            if !attach && !foreground {
+            if !attach && !foreground && !dry_run {
                 let tasks_dir = cwd.join("kanban").join(&target).join("tasks");
                 if !tasks_dir.is_dir() {
                     anyhow::bail!(
@@ -212,11 +214,24 @@ async fn main() -> Result<()> {
             let agent_name = agent.as_deref().unwrap_or(&config.defaults.agent);
             let policy_str = policy.as_deref();
 
-            work::run_phase(&target, &config, agent_name, policy_str, attach, new, &cwd)?;
+            work::run_phase(
+                &target,
+                &config,
+                agent_name,
+                policy_str,
+                attach,
+                new,
+                dry_run,
+                &cwd,
+                config_path.as_deref(),
+            )?;
         }
         Command::Attach { target } => {
             let session = tmux::session_name(&target);
             tmux::attach(&session)?;
+        }
+        Command::Resume { target } => {
+            work::resume_phase(&target, &config, config.defaults.agent.as_str(), &cwd)?;
         }
         Command::Config => {
             println!("Project config:");

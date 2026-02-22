@@ -12,12 +12,14 @@
 //! Batty supervises transparently in the background.
 
 use std::io::IsTerminal;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::agent::SpawnConfig;
@@ -318,6 +320,24 @@ fn extract_idle_input_prompt(pane_content: &str) -> Option<String> {
     None
 }
 
+fn extract_pending_input_from_supervisor_prompt(prompt_text: &str) -> Option<String> {
+    let marker = "Executor is idle at the input prompt with pending input:\n";
+    let rest = prompt_text.strip_prefix(marker)?;
+    let pending = rest.split("\n\n").next()?.trim();
+    if pending.is_empty() {
+        None
+    } else {
+        Some(pending.to_string())
+    }
+}
+
+fn normalize_input_line_prefix(line: &str) -> &str {
+    line.trim()
+        .trim_start_matches('›')
+        .trim_start_matches('>')
+        .trim()
+}
+
 /// Manages the tmux status bar for an orchestrator session.
 ///
 /// Format: `[batty] <phase> | <detail> | <indicator> <message>`
@@ -342,11 +362,23 @@ impl StatusBar {
 
     /// Initialize the status bar styling and initial content.
     pub fn init(&mut self) -> Result<()> {
-        // Style: dark background, amber text
-        tmux::set_status_style(&self.session, "bg=colour235,fg=colour136")?;
-        // Widen left status to fit our content
-        tmux::tmux_set(&self.session, "status-left-length", "80")?;
-        tmux::tmux_set(&self.session, "status-right-length", "40")?;
+        // Best-effort capability usage; old tmux versions may not support all
+        // style options, but supervision can continue without them.
+        if let Err(e) = tmux::set_status_style(&self.session, "bg=colour235,fg=colour136") {
+            debug!(error = %e, "status-style unsupported; continuing with defaults");
+        }
+        if let Err(e) = tmux::tmux_set(&self.session, "status-left-length", "80") {
+            debug!(
+                error = %e,
+                "status-left-length unsupported; continuing with defaults"
+            );
+        }
+        if let Err(e) = tmux::tmux_set(&self.session, "status-right-length", "40") {
+            debug!(
+                error = %e,
+                "status-right-length unsupported; continuing with defaults"
+            );
+        }
         self.update(StatusIndicator::StateChange, "starting")?;
         Ok(())
     }
@@ -608,45 +640,334 @@ impl StuckDetector {
     }
 }
 
+const SUPERVISION_STATE_FILE: &str = "supervision-state.json";
+const SUPERVISION_LOCK_FILE: &str = "supervision.lock";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SupervisionState {
+    version: u32,
+    phase: String,
+    session: String,
+    executor_pane: String,
+    log_pane: Option<String>,
+    pipe_log: String,
+    pipe_checkpoint: u64,
+    updated_epoch: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SupervisionLock {
+    pid: u32,
+    session: String,
+    acquired_epoch: u64,
+}
+
+struct SupervisionLease {
+    path: PathBuf,
+}
+
+impl Drop for SupervisionLease {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StartMode {
+    Fresh,
+    Resume,
+}
+
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn process_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        PathBuf::from(format!("/proc/{pid}")).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+fn acquire_supervision_lease(log_dir: &Path, session: &str) -> Result<SupervisionLease> {
+    let lock_path = log_dir.join(SUPERVISION_LOCK_FILE);
+
+    loop {
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(mut file) => {
+                let payload = SupervisionLock {
+                    pid: std::process::id(),
+                    session: session.to_string(),
+                    acquired_epoch: now_epoch(),
+                };
+                let body = serde_json::to_string(&payload)
+                    .context("failed to serialize supervision lock payload")?;
+                writeln!(file, "{body}").context("failed to write supervision lock file")?;
+                return Ok(SupervisionLease { path: lock_path });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let stale = match std::fs::read_to_string(&lock_path) {
+                    Ok(body) => match serde_json::from_str::<SupervisionLock>(body.trim()) {
+                        Ok(lock) => !process_alive(lock.pid),
+                        Err(_) => true,
+                    },
+                    Err(_) => true,
+                };
+
+                if stale {
+                    let _ = std::fs::remove_file(&lock_path);
+                    continue;
+                }
+
+                anyhow::bail!(
+                    "unsafe duplicate supervisor attach refused: another batty supervisor appears active for session '{session}'. \
+If this is stale, stop that process and run `batty resume` again."
+                );
+            }
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "failed to acquire supervision lease at {}",
+                        lock_path.display()
+                    )
+                });
+            }
+        }
+    }
+}
+
+fn supervision_state_path(log_dir: &Path) -> PathBuf {
+    log_dir.join(SUPERVISION_STATE_FILE)
+}
+
+fn load_supervision_state(log_dir: &Path) -> Option<SupervisionState> {
+    let path = supervision_state_path(log_dir);
+    let body = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<SupervisionState>(&body).ok()
+}
+
+fn save_supervision_state(log_dir: &Path, state: &SupervisionState) -> Result<()> {
+    let path = supervision_state_path(log_dir);
+    let body =
+        serde_json::to_string_pretty(state).context("failed to serialize supervision state")?;
+    std::fs::write(&path, body).with_context(|| {
+        format!(
+            "failed to write supervision state snapshot to {}",
+            path.display()
+        )
+    })
+}
+
+fn detect_log_pane(session: &str) -> Option<String> {
+    tmux::list_pane_details(session)
+        .ok()?
+        .into_iter()
+        .find(|p| !p.dead && p.command == "tail")
+        .map(|p| p.id)
+}
+
+fn resolve_executor_pane(session: &str, state: Option<&SupervisionState>) -> Result<String> {
+    if let Some(saved) = state {
+        if tmux::pane_exists(&saved.executor_pane) && !tmux::pane_dead(&saved.executor_pane)? {
+            return Ok(saved.executor_pane.clone());
+        }
+    }
+
+    let panes = tmux::list_pane_details(session)?;
+    if let Some(pane) = panes.iter().find(|p| !p.dead && p.command != "tail") {
+        return Ok(pane.id.clone());
+    }
+    if let Some(pane) = panes.iter().find(|p| !p.dead && p.active) {
+        return Ok(pane.id.clone());
+    }
+    if let Some(pane) = panes.iter().find(|p| !p.dead) {
+        return Ok(pane.id.clone());
+    }
+
+    anyhow::bail!("no live executor pane found in session '{session}'")
+}
+
+fn parse_last_auto_prompt(orch_log: &Path) -> Option<String> {
+    let body = std::fs::read_to_string(orch_log).ok()?;
+    for line in body.lines().rev() {
+        let marker = "auto-answered: \"";
+        let Some(start) = line.find(marker) else {
+            continue;
+        };
+        let rest = &line[start + marker.len()..];
+        let Some(end) = rest.find("\" →") else {
+            continue;
+        };
+        let prompt = rest[..end].trim();
+        if !prompt.is_empty() {
+            return Some(prompt.to_string());
+        }
+    }
+    None
+}
+
+fn seed_event_buffer_from_pane(buffer: &EventBuffer, pane_content: &str) {
+    let patterns = crate::events::EventPatterns::default_patterns();
+    let recent_lines = pane_content
+        .lines()
+        .rev()
+        .take(150)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+    for raw in recent_lines {
+        let line = strip_ansi(raw);
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(event) = patterns.classify(trimmed) {
+            buffer.push(event);
+        }
+    }
+}
+
 /// Run the full orchestrator loop.
 ///
 /// Creates a tmux session, sets up pipe-pane, and supervises the executor.
 /// Returns when the executor exits or the session is killed.
 pub fn run(
     config: OrchestratorConfig,
-    mut observer: Box<dyn OrchestratorObserver>,
+    observer: Box<dyn OrchestratorObserver>,
     stop: Arc<AtomicBool>,
 ) -> Result<OrchestratorResult> {
-    // 1. Check tmux
-    let version = tmux::check_tmux()?;
-    info!(tmux_version = %version, "tmux available");
+    run_with_mode(config, observer, stop, StartMode::Fresh)
+}
 
-    // 2. Create session
+/// Resume supervision for an already-running tmux session.
+pub fn resume(
+    config: OrchestratorConfig,
+    observer: Box<dyn OrchestratorObserver>,
+    stop: Arc<AtomicBool>,
+) -> Result<OrchestratorResult> {
+    run_with_mode(config, observer, stop, StartMode::Resume)
+}
+
+fn run_with_mode(
+    config: OrchestratorConfig,
+    mut observer: Box<dyn OrchestratorObserver>,
+    stop: Arc<AtomicBool>,
+    mode: StartMode,
+) -> Result<OrchestratorResult> {
+    // 1. Probe tmux capabilities before any supervision actions.
+    let tmux_caps = tmux::probe_capabilities()?;
+    info!(
+        tmux_version = %tmux_caps.version_raw,
+        pipe_pane = tmux_caps.pipe_pane,
+        pipe_pane_only_if_missing = tmux_caps.pipe_pane_only_if_missing,
+        status_style = tmux_caps.status_style,
+        split_mode = ?tmux_caps.split_mode,
+        known_good = tmux_caps.known_good(),
+        "tmux capability probe complete"
+    );
+    if !tmux_caps.known_good() {
+        warn!(
+            tmux_version = %tmux_caps.version_raw,
+            "tmux version outside documented known-good range (>= 3.2)"
+        );
+        observer.on_event(&format!(
+            "⚠ tmux {} is outside known-good range (>= 3.2); using compatibility fallbacks",
+            tmux_caps.version_raw
+        ));
+    }
+    if !tmux_caps.pipe_pane {
+        anyhow::bail!("{}", tmux_caps.remediation_message());
+    }
+
+    // 2. Resolve session + run paths.
     let session = tmux::session_name(&config.phase);
     let log_dir = config.logs_dir.clone();
+    std::fs::create_dir_all(&log_dir)
+        .with_context(|| format!("failed to create log directory {}", log_dir.display()))?;
+
+    // Guard against duplicate supervisors attaching to the same live run.
+    let _lease = acquire_supervision_lease(&log_dir, &session)?;
+
     let pipe_log = log_dir.join("pty-output.log");
+    let orch_log = log_dir.join("orchestrator.log");
+    let prior_state = load_supervision_state(&log_dir);
 
-    tmux::create_session(
-        &session,
-        &config.spawn.program,
-        &config.spawn.args,
-        &config.spawn.work_dir,
-    )
-    .with_context(|| format!("failed to create tmux session for phase {}", config.phase))?;
+    let executor_pane = match mode {
+        StartMode::Fresh => {
+            tmux::create_session(
+                &session,
+                &config.spawn.program,
+                &config.spawn.args,
+                &config.spawn.work_dir,
+            )
+            .with_context(|| format!("failed to create tmux session for phase {}", config.phase))?;
 
-    observer.on_event(&format!("● session '{}' created", session));
+            observer.on_event(&format!("● session '{}' created", session));
+            let pane = tmux::pane_id(&session)?;
+            observer.on_event(&format!("● supervision target pane {pane}"));
+            pane
+        }
+        StartMode::Resume => {
+            if !tmux::session_exists(&session) {
+                anyhow::bail!(
+                    "tmux session '{}' not found; start a run first with `batty work {}`",
+                    session,
+                    config.phase
+                );
+            }
+            observer.on_event(&format!("● resuming existing session '{}'", session));
+            let pane = resolve_executor_pane(&session, prior_state.as_ref())?;
+            observer.on_event(&format!("● supervision target pane {pane}"));
+            pane
+        }
+    };
 
-    // Resolve the executor pane target immediately. We must keep supervision
-    // pinned to this pane even if focus changes to log panes.
-    let executor_pane = tmux::pane_id(&session)?;
-    observer.on_event(&format!("● supervision target pane {executor_pane}"));
     if let Err(e) = tmux::tmux_set(&session, "remain-on-exit", "on") {
         warn!(error = %e, "failed to enable remain-on-exit");
     }
 
     // 3. Set up pipe-pane
-    tmux::setup_pipe_pane(&executor_pane, &pipe_log)?;
-    observer.on_event(&format!("● pipe-pane → {}", pipe_log.display()));
+    match mode {
+        StartMode::Fresh => {
+            tmux::setup_pipe_pane(&executor_pane, &pipe_log)?;
+            observer.on_event(&format!("● pipe-pane → {}", pipe_log.display()));
+        }
+        StartMode::Resume => {
+            if tmux_caps.pipe_pane_only_if_missing {
+                tmux::setup_pipe_pane_if_missing(&executor_pane, &pipe_log)?;
+                observer.on_event(&format!(
+                    "● pipe-pane ensured (resume) → {}",
+                    pipe_log.display()
+                ));
+            } else {
+                // Fallback for older tmux lacking `pipe-pane -o`: avoid
+                // replacing a live pipe if one is already active.
+                let has_pipe = tmux::pane_pipe_enabled(&executor_pane).unwrap_or(false);
+                if has_pipe {
+                    observer.on_event("● resume fallback: existing pipe-pane reused");
+                } else {
+                    tmux::setup_pipe_pane(&executor_pane, &pipe_log)?;
+                    observer.on_event(&format!(
+                        "● resume fallback: pipe-pane attached → {}",
+                        pipe_log.display()
+                    ));
+                }
+            }
+        }
+    }
 
     // 4. Set up status bar
     let mut status_bar = StatusBar::new(&session, &config.phase);
@@ -654,15 +975,21 @@ pub fn run(
     observer.on_event("● status bar initialized");
 
     // 5. Set up orchestrator log pane
-    let orch_log = log_dir.join("orchestrator.log");
+    let mut log_pane_id = detect_log_pane(&session);
     if config.log_pane {
-        setup_log_pane(
-            &session,
-            &executor_pane,
-            &orch_log,
-            config.log_pane_height_pct,
-        )?;
-        observer.on_event("● log pane created");
+        if log_pane_id.is_none() {
+            setup_log_pane(
+                &session,
+                &executor_pane,
+                &orch_log,
+                config.log_pane_height_pct,
+                tmux_caps.split_mode,
+            )?;
+            log_pane_id = detect_log_pane(&session);
+            observer.on_event("● log pane created");
+        } else {
+            observer.on_event("● log pane reused");
+        }
     }
 
     // 5.5 Optional auto-attach
@@ -696,17 +1023,69 @@ pub fn run(
 
     // 6. Initialize components
     let buffer = EventBuffer::new(config.buffer_size);
-    let mut watcher = PipeWatcher::new(&pipe_log, buffer.clone());
+    let mut watcher = match mode {
+        StartMode::Fresh => PipeWatcher::new(&pipe_log, buffer.clone()),
+        StartMode::Resume => {
+            let checkpoint = prior_state.as_ref().map(|s| s.pipe_checkpoint).unwrap_or(0);
+            PipeWatcher::new_with_position(&pipe_log, buffer.clone(), checkpoint)
+        }
+    };
     let mut detector = PromptDetector::new(config.patterns, config.detector);
     let mut stuck_detector = config.stuck.map(StuckDetector::new);
+    let mut last_handled_pane_signature = String::new();
 
     info!(session = %session, "orchestrator loop starting");
     observer.on_event("● supervising");
     status_bar.update(StatusIndicator::Ok, "supervising")?;
 
-    // 7. Supervision loop
+    // 6.5 Resume state rebuild from persisted logs + current pane output.
     let mut last_event_line = String::new();
     let mut last_pane_signature = String::new();
+    if matches!(mode, StartMode::Resume) {
+        observer.on_event(&format!(
+            "● resumed pipe offset from checkpoint {}",
+            watcher.checkpoint_offset()
+        ));
+
+        if let Ok(pane_content) = tmux::capture_pane(&executor_pane) {
+            seed_event_buffer_from_pane(&buffer, &pane_content);
+            if let Some((signature, detector_line)) = pane_detector_snapshot(&pane_content) {
+                detector.seed_from_recent_output(&detector_line);
+                last_pane_signature = signature.clone();
+
+                if let Some(last_auto_prompt) = parse_last_auto_prompt(&orch_log) {
+                    if detector_line.contains(&last_auto_prompt)
+                        || last_auto_prompt.contains(&detector_line)
+                    {
+                        detector.answer_injected();
+                        last_handled_pane_signature = signature;
+                        observer
+                            .on_event("● detector rebuilt from orchestrator log + pane snapshot");
+                    } else {
+                        observer.on_event("● detector seeded from pane snapshot");
+                    }
+                } else {
+                    observer.on_event("● detector seeded from pane snapshot");
+                }
+            }
+        }
+    }
+
+    let mut supervision_state = SupervisionState {
+        version: 1,
+        phase: config.phase.clone(),
+        session: session.clone(),
+        executor_pane: executor_pane.clone(),
+        log_pane: log_pane_id.take(),
+        pipe_log: pipe_log.display().to_string(),
+        pipe_checkpoint: watcher.checkpoint_offset(),
+        updated_epoch: now_epoch(),
+    };
+    if let Err(e) = save_supervision_state(&log_dir, &supervision_state) {
+        warn!(error = %e, "failed to persist supervision state");
+    }
+
+    // 7. Supervision loop
     let result = loop {
         if stop.load(Ordering::Relaxed) {
             observer.on_event("● stopped by signal");
@@ -729,6 +1108,15 @@ pub fn run(
         // Poll for new output
         match watcher.poll() {
             Ok(event_count) => {
+                let checkpoint = watcher.checkpoint_offset();
+                if checkpoint != supervision_state.pipe_checkpoint {
+                    supervision_state.pipe_checkpoint = checkpoint;
+                    supervision_state.updated_epoch = now_epoch();
+                    if let Err(e) = save_supervision_state(&log_dir, &supervision_state) {
+                        warn!(error = %e, "failed to update supervision checkpoint");
+                    }
+                }
+
                 if event_count > 0 {
                     debug!(events = event_count, "new events extracted");
                     // Feed output to stuck detector for loop detection and progress tracking
@@ -787,6 +1175,9 @@ pub fn run(
                             &mut status_bar,
                             config.answer_delay,
                         )?;
+                        if matches!(mode, StartMode::Resume) {
+                            last_handled_pane_signature = last_pane_signature.clone();
+                        }
                     }
                 }
             }
@@ -795,17 +1186,27 @@ pub fn run(
         // Run the tick for silence-based detection
         match detector.tick() {
             DetectorEvent::PromptDetected(ref prompt) => {
-                handle_prompt(
-                    prompt,
-                    &executor_pane,
-                    &config.policy,
-                    &mut detector,
-                    &mut *observer,
-                    config.tier2.as_ref(),
-                    &buffer,
-                    &mut status_bar,
-                    config.answer_delay,
-                )?;
+                if matches!(mode, StartMode::Resume)
+                    && !last_pane_signature.is_empty()
+                    && last_pane_signature == last_handled_pane_signature
+                {
+                    debug!("resume dedupe: skipping repeated prompt handling");
+                } else {
+                    handle_prompt(
+                        prompt,
+                        &executor_pane,
+                        &config.policy,
+                        &mut detector,
+                        &mut *observer,
+                        config.tier2.as_ref(),
+                        &buffer,
+                        &mut status_bar,
+                        config.answer_delay,
+                    )?;
+                    if matches!(mode, StartMode::Resume) && !last_pane_signature.is_empty() {
+                        last_handled_pane_signature = last_pane_signature.clone();
+                    }
+                }
             }
             DetectorEvent::UnknownRequest { last_line, .. } => {
                 debug!(last_line = %last_line, "unknown request fallback triggered");
@@ -815,10 +1216,15 @@ pub fn run(
                 } else {
                     None
                 };
-                let should_fallback =
-                    should_invoke_unknown_fallback(&last_line) || maybe_idle_input.is_some();
-
-                if !should_fallback {
+                if let Some(idle_hint) = maybe_idle_input {
+                    // Codex-style pending input (`› ...`) is an agent hint.
+                    // Do not send it to Tier 2 as an unknown prompt.
+                    observer.on_event(&format!(
+                        "→ idle input hint pending (skipping supervisor): {}",
+                        preview_for_log(&idle_hint, 160)
+                    ));
+                    status_bar.update(StatusIndicator::Action, "idle input pending")?;
+                } else if !should_invoke_unknown_fallback(&last_line) {
                     debug!(
                         last_line = %last_line,
                         "unknown request fallback skipped for non-actionable line"
@@ -836,18 +1242,9 @@ pub fn run(
                         .collect::<Vec<_>>()
                         .join("\n");
 
-                    let prompt_text = if let Some(ref idle) = maybe_idle_input {
-                        format!(
-                            "Executor is idle at the input prompt with pending input:\n{idle}\n\n\
-If this input should be sent now, return the exact short response to send. \
-If it should be revised, return the revised short input. \
-If human judgment is required, respond with ESCALATE: <reason>."
-                        )
-                    } else {
-                        format!(
-                            "Executor appears to be waiting for input, but no known prompt pattern matched.\nLast visible line: {last_line}\n\nVisible pane excerpt:\n{pane_excerpt}\n\nIf user input is required, provide the exact short response to send. If unclear, respond with ESCALATE: <reason>."
-                        )
-                    };
+                    let prompt_text = format!(
+                        "Executor appears to be waiting for input, but no known prompt pattern matched.\nLast visible line: {last_line}\n\nVisible pane excerpt:\n{pane_excerpt}\n\nIf user input is required, provide the exact short response to send. If unclear, respond with ESCALATE: <reason>."
+                    );
 
                     let synthetic_prompt = DetectedPrompt {
                         kind: PromptKind::Question {
@@ -916,6 +1313,11 @@ If human judgment is required, respond with ESCALATE: <reason>."
 
     // 8. Cleanup
     info!(result = ?result, "orchestrator loop ended");
+    supervision_state.pipe_checkpoint = watcher.checkpoint_offset();
+    supervision_state.updated_epoch = now_epoch();
+    if let Err(e) = save_supervision_state(&log_dir, &supervision_state) {
+        warn!(error = %e, "failed to persist final supervision checkpoint");
+    }
 
     Ok(result)
 }
@@ -929,6 +1331,7 @@ fn setup_log_pane(
     executor_pane: &str,
     log_path: &Path,
     height_pct: u32,
+    split_mode: tmux::SplitMode,
 ) -> Result<()> {
     // Ensure log file exists (tail -f needs it)
     if let Some(parent) = log_path.parent() {
@@ -940,30 +1343,30 @@ fn setup_log_pane(
         .append(true)
         .open(log_path)?;
 
-    // Calculate lines from percentage (use session height or fallback to 50)
-    let lines = std::cmp::max(3, (50 * height_pct / 100) as u32);
+    let tail_cmd = vec![
+        "tail".to_string(),
+        "-f".to_string(),
+        log_path.display().to_string(),
+    ];
 
-    // Split the window to create the log pane at the bottom
-    // Use -l (lines) instead of -p (percentage) for tmux compatibility
-    let output = std::process::Command::new("tmux")
-        .args([
-            "split-window",
-            "-v",
-            "-l",
-            &lines.to_string(),
-            "-t",
-            session,
-            "tail",
-            "-f",
-            &log_path.display().to_string(),
-        ])
-        .output()
-        .context("failed to create log pane")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        warn!(stderr = %stderr, "log pane creation failed — continuing without it");
-        return Ok(()); // Non-fatal — status bar still works
+    match split_mode {
+        tmux::SplitMode::Lines => {
+            let lines = std::cmp::max(3, (50 * height_pct / 100) as u32);
+            if let Err(e) = tmux::split_window_vertical_lines(session, lines, &tail_cmd) {
+                warn!(error = %e, "log pane creation with -l failed — continuing without it");
+                return Ok(());
+            }
+        }
+        tmux::SplitMode::Percent => {
+            if let Err(e) = tmux::split_window_vertical_percent(session, height_pct, &tail_cmd) {
+                warn!(error = %e, "log pane creation with -p failed — continuing without it");
+                return Ok(());
+            }
+        }
+        tmux::SplitMode::Disabled => {
+            warn!("tmux split-window unsupported; continuing without log pane");
+            return Ok(());
+        }
     }
 
     // Re-select the executor pane so capture/send-keys stay on the executor.
@@ -985,9 +1388,19 @@ fn check_human_answered(executor_pane: &str, prompt_text: &str) -> bool {
         if let Some(last) = pane_content.lines().rev().find(|l| !l.trim().is_empty()) {
             let last_clean = crate::prompt::strip_ansi(last);
             let last_trimmed = last_clean.trim();
+            let last_normalized = normalize_input_line_prefix(last_trimmed);
+
+            // For synthetic idle-input prompts, ignore the unchanged input line.
+            if let Some(pending) = extract_pending_input_from_supervisor_prompt(prompt_text) {
+                if last_normalized == pending {
+                    return false;
+                }
+            }
+
             // If the last line changed from the prompt, someone typed
             return !last_trimmed.is_empty()
                 && !prompt_text.contains(last_trimmed)
+                && !prompt_text.contains(last_normalized)
                 && !last_trimmed.contains(prompt_text);
         }
     }
@@ -2340,7 +2753,14 @@ esac
         let log_path = tmp.path().join("orchestrator.log");
 
         let executor_pane = tmux::pane_id(session).unwrap();
-        setup_log_pane(session, &executor_pane, &log_path, 20).unwrap();
+        setup_log_pane(
+            session,
+            &executor_pane,
+            &log_path,
+            20,
+            tmux::SplitMode::Lines,
+        )
+        .unwrap();
 
         // Should now have 2 panes
         let panes = tmux::list_panes(session).unwrap();
@@ -2751,6 +3171,88 @@ Preparing main module edits (1m 13s • esc to interrupt)
 ────────────────────────────────────
 ";
         assert!(extract_idle_input_prompt(pane).is_none());
+    }
+
+    #[test]
+    fn extract_pending_input_from_supervisor_prompt_reads_first_block() {
+        let prompt = "\
+Executor is idle at the input prompt with pending input:
+Summarize recent commits
+
+If this input should be sent now, return the exact short response to send.";
+        let pending =
+            extract_pending_input_from_supervisor_prompt(prompt).expect("expected pending input");
+        assert_eq!(pending, "Summarize recent commits");
+    }
+
+    #[test]
+    fn human_check_ignores_prefixed_idle_input_line_for_same_prompt() {
+        let session = "batty-test-human-idle-prefix";
+        let _ = tmux::kill_session(session);
+
+        tmux::create_session(
+            session,
+            "bash",
+            &[
+                "-c".to_string(),
+                "printf '> Summarize recent commits\\n'; sleep 5".to_string(),
+            ],
+            "/tmp",
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+
+        let prompt = "\
+Executor is idle at the input prompt with pending input:
+Summarize recent commits
+
+If this input should be sent now, return the exact short response to send.";
+        assert!(
+            !check_human_answered(session, prompt),
+            "prefixed pending input should not be treated as human override"
+        );
+
+        tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn parse_last_auto_prompt_reads_latest_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("orchestrator.log");
+        std::fs::write(
+            &log,
+            concat!(
+                "[batty] ✓ auto-answered: \"Continue?\" → y\n",
+                "[batty] some other line\n",
+                "[batty] ✓ auto-answered: \"Allow tool Read?\" → y\n"
+            ),
+        )
+        .unwrap();
+
+        let prompt = parse_last_auto_prompt(&log);
+        assert_eq!(prompt.as_deref(), Some("Allow tool Read?"));
+    }
+
+    #[test]
+    fn supervision_state_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = SupervisionState {
+            version: 1,
+            phase: "phase-2.5".to_string(),
+            session: "batty-phase-2-5".to_string(),
+            executor_pane: "%1".to_string(),
+            log_pane: Some("%2".to_string()),
+            pipe_log: "/tmp/pty-output.log".to_string(),
+            pipe_checkpoint: 1234,
+            updated_epoch: 42,
+        };
+
+        save_supervision_state(tmp.path(), &state).unwrap();
+        let loaded = load_supervision_state(tmp.path()).unwrap();
+        assert_eq!(loaded.phase, state.phase);
+        assert_eq!(loaded.session, state.session);
+        assert_eq!(loaded.executor_pane, state.executor_pane);
+        assert_eq!(loaded.pipe_checkpoint, state.pipe_checkpoint);
     }
 
     #[test]

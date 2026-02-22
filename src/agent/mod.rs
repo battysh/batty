@@ -47,6 +47,22 @@ pub trait AgentAdapter: Send + Sync {
     /// Get the compiled prompt detection patterns for this agent.
     fn prompt_patterns(&self) -> PromptPatterns;
 
+    /// Preferred project-root instruction file candidates for this agent.
+    ///
+    /// The first existing file is used as launch context. Adapters can
+    /// override this to prefer agent-specific steering docs.
+    fn instruction_candidates(&self) -> &'static [&'static str] {
+        &["CLAUDE.md", "AGENTS.md"]
+    }
+
+    /// Allow adapters to wrap or transform the composed launch context.
+    ///
+    /// Default behavior is passthrough. Adapters can prepend guardrails or
+    /// framing tailored to their CLI behavior.
+    fn wrap_launch_prompt(&self, prompt: &str) -> String {
+        prompt.to_string()
+    }
+
     /// Format a response to send to the agent's stdin.
     ///
     /// Some agents need a trailing newline, some don't. The adapter handles it.
@@ -118,5 +134,21 @@ mod tests {
         assert_eq!(adapter.name(), "codex-cli");
 
         assert!(adapter_from_name("unknown-agent").is_none());
+    }
+
+    #[test]
+    fn default_instruction_candidates_include_claude_and_agents() {
+        let adapter = claude::ClaudeCodeAdapter::new(None);
+        assert_eq!(
+            adapter.instruction_candidates(),
+            &["CLAUDE.md", "AGENTS.md"]
+        );
+    }
+
+    #[test]
+    fn default_wrap_launch_prompt_is_passthrough() {
+        let adapter = claude::ClaudeCodeAdapter::new(None);
+        let prompt = "test launch prompt";
+        assert_eq!(adapter.wrap_launch_prompt(prompt), prompt);
     }
 }

@@ -59,6 +59,12 @@ If you want to force a new run worktree instead of resuming:
 batty work phase-2.4 --new
 ```
 
+If you want to inspect the exact composed launch context without starting the executor:
+
+```sh
+batty work phase-2.4 --dry-run
+```
+
 Example `.batty/config.toml`:
 
 ```toml
@@ -89,6 +95,14 @@ Reconnect to an existing session:
 batty attach phase-2.4
 ```
 
+Resume Batty supervision after a crash/restart (reuses the active tmux run):
+
+```sh
+batty resume phase-2.4
+# or
+batty resume batty-phase-2-4
+```
+
 Open `kanban-md` TUI for the active run board:
 
 ```sh
@@ -115,6 +129,7 @@ If the phase branch is merged back to the base branch, Batty cleans up the run w
 batty work all                  # chain phases sequentially
 batty work all --parallel 3     # three phases in parallel
 batty attach phase-2.4          # reconnect to a running session
+batty resume phase-2.4          # resume supervision for an existing run
 ```
 
 ## What You See
@@ -151,6 +166,25 @@ Two-tier prompt handling:
 - **Unknown fallback** — if output goes silent and no regex matches, Batty asks the supervisor anyway
 
 Everything runs in tmux. Output captured via `pipe-pane`. Answers injected via `send-keys`. Status in tmux status bar. Events in orchestrator pane.
+
+## tmux Compatibility
+
+Batty probes tmux capabilities on each `work`/`resume` startup and logs:
+- tmux version
+- `pipe-pane` support (required)
+- `pipe-pane -o` support (resume safety optimization)
+- status style option support
+- log-pane split mode (`-l` lines or `-p` percent fallback)
+
+Compatibility matrix:
+
+| tmux version | Status | Behavior |
+| --- | --- | --- |
+| `>= 3.2` | Known-good | Full feature path (`pipe-pane -o`, styled status bar, `split-window -l`) |
+| `3.1.x` | Supported with fallbacks | Uses compatible split/status behavior where needed |
+| `< 3.1` | Not supported | Batty fails fast when required `pipe-pane` capability is missing |
+
+If required capabilities are missing, Batty exits with remediation guidance to install/upgrade tmux (recommended `>= 3.2`).
 
 ## Architecture
 
