@@ -76,6 +76,8 @@ fn normalize_supervisor_response(raw: &str) -> Result<String> {
         || lower.contains("empty enter")
         || lower.contains("empty input")
         || lower.contains("empty string")
+        || lower == "<enter>"
+        || lower == "enter"
     {
         return Ok(String::new());
     }
@@ -97,6 +99,7 @@ fn normalize_supervisor_response(raw: &str) -> Result<String> {
                 }
                 if candidate.eq_ignore_ascii_case("enter")
                     || candidate.eq_ignore_ascii_case("press enter")
+                    || candidate.eq_ignore_ascii_case("<enter>")
                 {
                     return Ok(String::new());
                 }
@@ -116,6 +119,12 @@ fn normalize_supervisor_response(raw: &str) -> Result<String> {
         .to_string();
 
     if first.is_empty() {
+        return Ok(String::new());
+    }
+    if first.eq_ignore_ascii_case("enter")
+        || first.eq_ignore_ascii_case("press enter")
+        || first.eq_ignore_ascii_case("<enter>")
+    {
         return Ok(String::new());
     }
 

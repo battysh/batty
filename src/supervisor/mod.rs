@@ -315,9 +315,12 @@ pub fn run_session(
     // stdin thread will exit when the PTY master is dropped
     drop(stdin_thread);
 
-    match session_result {
+    match &session_result {
         SessionResult::Completed => Ok(session_result),
-        SessionResult::Error { .. } => Ok(session_result),
+        SessionResult::Error { detail } => {
+            debug!(detail = %detail, "agent session ended with error signal");
+            Ok(session_result)
+        }
         _ => {
             let code = if exit_status.success() {
                 Some(0)
