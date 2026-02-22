@@ -67,19 +67,19 @@ cargo run -- work my-phase
 ## What You See
 
 ```
-┌── tmux: batty-my-phase ─────────────────────────────┐
-│                                                       │
-│  Claude Code working on task #3...                    │
-│  Creating src/auth/middleware.rs                       │
-│  Running cargo test... 47 passed                      │
-│                                                       │
-├───────────────────────────────────────────────────────┤
-│  [batty] auto-answered: "Continue?" -> y              │
-│  [batty] supervisor thinking: "which auth strategy?"  │
-│  [batty] supervisor answered -> JWT with refresh      │
-├───────────────────────────────────────────────────────┤
-│ [batty] my-phase | task #3 | 2/8 done | supervising  │
-└───────────────────────────────────────────────────────┘
+┌─── tmux: batty-my-phase ──────────────────────────────┐
+│                                                        │
+│  Claude Code working on task #3...                     │
+│  Creating src/auth/middleware.rs                        │
+│  Running cargo test... 47 passed                       │
+│                                                        │
+├────────────────────────────────────────────────────────┤
+│  [batty] auto-answered: "Continue?" -> y               │
+│  [batty] supervisor thinking: "which auth strategy?"   │
+│  [batty] supervisor answered -> JWT with refresh       │
+├────────────────────────────────────────────────────────┤
+│  [batty] my-phase | task #3 | 2/8 done | supervising  │
+└────────────────────────────────────────────────────────┘
 ```
 
 - **Top pane** -- the executor agent doing its thing
