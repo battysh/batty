@@ -14,6 +14,15 @@ batty install
 
 This command checks `tmux` and `kanban-md`, attempts automatic installation when possible, and installs Batty steering/skill assets in the project.
 
+To remove installed Batty assets from a project:
+
+```sh
+batty remove
+# optional targeting:
+batty remove --target claude
+batty remove --target codex --dir /path/to/project
+```
+
 ## Basic Commands
 
 Run directly from source:
@@ -50,6 +59,8 @@ batty attach phase-2.7
 
 ```sh
 batty board phase-2.7
+# print resolved board path (for scripts/tooling):
+batty board phase-2.7 --print-dir
 ```
 
 ## Common Runtime Modes
@@ -58,3 +69,35 @@ batty board phase-2.7
 - `--worktree`: use isolated phase worktree runs
 - `--worktree --new`: force a fresh run worktree
 - `--dry-run`: show composed launch context and exit
+- `--parallel N`: set parallel agent count (currently useful for future `work all` flow)
+- `--agent AGENT`: override default executor agent
+- `--policy POLICY`: override default policy tier
+
+## Command and Flag Reference (Quick)
+
+- `batty work <phase> [--parallel N] [--agent A] [--policy P] [--attach] [--worktree] [--new] [--dry-run]`
+- `batty attach <phase>`
+- `batty resume <phase|session>`
+- `batty board <phase> [--print-dir]`
+- `batty config [--json]`
+- `batty install [--target both|claude|codex] [--dir PATH]`
+- `batty remove [--target both|claude|codex] [--dir PATH]`
+
+## Dangerous Mode (Opt-In)
+
+Batty supports an opt-in dangerous wrapper mode for supported agents:
+
+```toml
+[dangerous_mode]
+enabled = true
+```
+
+When enabled, Batty adds the matching dangerous flag for `claude` or `codex` wrappers.
+Keep this disabled unless you explicitly want reduced safety boundaries.
+
+## Supervisor Hotkeys
+
+During an active tmux-supervised run:
+
+- Pause supervision: `Prefix + Shift+P` (`C-b P` with default tmux prefix)
+- Resume supervision: `Prefix + Shift+R` (`C-b R` with default tmux prefix)
