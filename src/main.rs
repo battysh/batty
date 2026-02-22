@@ -8,6 +8,8 @@ mod policy;
 #[allow(dead_code)]
 mod prompt;
 #[allow(dead_code)]
+mod supervisor;
+#[allow(dead_code)]
 mod task;
 
 use anyhow::Result;
