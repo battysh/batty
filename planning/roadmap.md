@@ -17,7 +17,7 @@ Developers need a workflow model for building with agents: structured phases, su
 
 `batty work <phase>` — Rust CLI that reads a kanban board, spawns an agent in a PTY, supervises the session. Policy engine, prompt detection, test gates, execution logging.
 
-98 tests passing. All 11 tasks done.
+All 11 tasks done. Current project test inventory is 323 tests.
 
 ---
 
@@ -39,7 +39,7 @@ Developers need a workflow model for building with agents: structured phases, su
 
 ---
 
-## Phase 2.4: Supervision Harness Validation (Next)
+## Phase 2.4: Supervision Harness Validation (Done)
 
 Make supervisor behavior provable before runtime hardening.
 
@@ -54,7 +54,7 @@ Make supervisor behavior provable before runtime hardening.
 
 ---
 
-## Phase 2.5: Runtime Hardening + Dogfood
+## Phase 2.5: Runtime Hardening + Dogfood (Done)
 
 Run Batty on its own hardening phase and close the reliability gaps that block day-to-day use.
 
@@ -69,6 +69,34 @@ Run Batty on its own hardening phase and close the reliability gaps that block d
 
 ---
 
+## Phase 2.6: Backlog Rollover from 2.5 (Done)
+
+Close out the rolled-over reliability and developer-experience work from 2.5.
+
+- **Dogfood completion** — Batty executes phase-2.6 against its own board
+- **Install workflow** — `batty install` for Claude/Codex steering + skills
+- **Config output polish** — improved `batty config` output (including JSON mode)
+- **Build hygiene** — compiler warning cleanup
+- **Lint workflow** — `make lint` / `make lint-fix` and CI checks
+
+**Exit:** Remaining 2.5 backlog items are merged and stable.
+
+---
+
+## Phase 2.7: Minor Improvements (In Progress)
+
+Ship low-risk quality and workflow improvements after hardening.
+
+- **Supervisor hotkeys** — pause/resume control in tmux sessions
+- **Dangerous-mode wrappers** — safer command execution boundaries
+- **Tier 2 context snapshots** — persisted supervisor context for debugging/audit
+- **Secret redaction guardrail** — redact likely secret-bearing lines before persistence
+- **Docs pipeline improvements** — generated docs and consistency cleanups
+
+**Exit:** Minor improvements are merged without regressions in core workflows.
+
+---
+
 ## Phase 3A: Sequencer + Human Review Gate
 
 Separate phase chaining from AI evaluation so we can ship useful automation earlier.
@@ -78,7 +106,7 @@ Separate phase chaining from AI evaluation so we can ship useful automation earl
 - **Human review gate** — merge / rework / escalate decisions without director agent
 - **Rework loop** — rerun phase with reviewer feedback
 - **Merge + cleanup** — merge, test, clean worktree
-- **Codex CLI adapter** — validates agent-agnostic architecture
+- **Phase ordering and dependency handling** — deterministic sequencing from board metadata
 
 **Exit:** `batty work all` runs multiple phases safely with human review and rework loop.
 
