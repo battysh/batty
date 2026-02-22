@@ -18,6 +18,7 @@ use crate::prompt::{DetectedPrompt, PromptKind, PromptPatterns, strip_ansi};
 
 /// Result of a supervised agent session.
 #[derive(Debug)]
+#[allow(dead_code)] // Legacy PTY supervision module retained for tests and fallback integration.
 pub enum SessionResult {
     /// Agent signaled completion normally.
     Completed,
@@ -29,6 +30,7 @@ pub enum SessionResult {
 
 /// Events emitted during supervision for logging/audit.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Emitted by run_session path; currently consumed in tests and logging conversions.
 pub enum SupervisorEvent {
     /// Output line from the agent.
     Output(String),
@@ -43,6 +45,7 @@ pub enum SupervisorEvent {
 }
 
 /// Configuration for a supervision session.
+#[allow(dead_code)] // Constructed by run_session tests and reserved for non-tmux fallback execution.
 pub struct SessionConfig {
     pub spawn: SpawnConfig,
     pub patterns: PromptPatterns,
@@ -84,6 +87,7 @@ impl Default for SessionConfig {
 /// 5. Returns when the agent exits or signals completion
 ///
 /// `event_tx` receives supervision events for logging/audit.
+#[allow(dead_code)] // Not wired into main orchestration path yet; kept as tested fallback implementation.
 pub fn run_session(
     config: SessionConfig,
     _adapter: &dyn AgentAdapter,

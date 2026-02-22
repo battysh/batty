@@ -25,6 +25,8 @@ pub struct Tier2Config {
     /// Default: ["-p", "--output-format", "text"]
     pub args: Vec<String>,
     /// Maximum time to wait for the supervisor response.
+    #[allow(dead_code)]
+    // Timeout enforcement is planned; field remains part of stable config surface.
     pub timeout: Duration,
     /// System prompt (project docs) to prepend for context.
     pub system_prompt: Option<String>,
