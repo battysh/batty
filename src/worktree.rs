@@ -131,10 +131,8 @@ pub fn resolve_phase_worktree(
     phase: &str,
     force_new: bool,
 ) -> Result<(PhaseWorktree, bool)> {
-    if !force_new {
-        if let Some(existing) = latest_phase_worktree(project_root, phase)? {
-            return Ok((existing, true));
-        }
+    if !force_new && let Some(existing) = latest_phase_worktree(project_root, phase)? {
+        return Ok((existing, true));
     }
 
     Ok((prepare_phase_worktree(project_root, phase)?, false))

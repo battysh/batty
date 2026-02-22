@@ -310,6 +310,7 @@ fn infer_agent_from_execution_log(path: &Path) -> Option<String> {
 }
 
 /// Run the full work pipeline for a phase.
+#[allow(clippy::too_many_arguments)] // Phase launch combines config and runtime toggles; keeping explicit args avoids opaque builders.
 pub fn run_phase(
     phase: &str,
     project_config: &ProjectConfig,
@@ -749,6 +750,7 @@ struct ActivityEntry {
 ///
 /// Includes required steering docs, phase docs, board state, and effective
 /// policy/default config. The resulting prompt is adapter-wrapped.
+#[allow(clippy::too_many_arguments)] // Context composition intentionally receives all inputs explicitly for deterministic snapshots.
 fn compose_launch_context(
     phase: &str,
     tasks: &[task::Task],
