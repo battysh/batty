@@ -1,21 +1,31 @@
-# Batty Docs
+# Batty
 
-Batty is a tmux-native supervision layer for running agent-driven project phases.
+**Supervised agent execution for software teams.**
 
-This site focuses on day-to-day operator workflows:
+Batty reads your kanban board, launches a coding agent in tmux, supervises its work, auto-answers routine prompts, escalates real questions, gates on tests, and merges the result. You design the phases. Batty executes them.
 
-- Launching and resuming work sessions
-- Understanding CLI behavior and flags
-- Configuring project policy and supervisor settings
-- Troubleshooting common operational issues
+## How It Works
 
-## Start Here
+Three roles in one supervised tmux session:
 
-1. Read [Getting Started](getting-started.md)
-2. Review [CLI Reference](reference/cli.md)
-3. Review [Configuration](reference/config.md)
+- **Executor** -- Your coding agent (Claude Code, Codex, Aider) works through the board
+- **Supervisor** -- Watches the executor, answers questions it can't handle alone
+- **Director** -- Reviews completed phases and decides: merge, rework, or escalate
 
-## Additional Guides
+Two-tier prompt handling keeps things moving:
 
-- [Architecture](architecture.md)
-- [Troubleshooting](troubleshooting.md)
+1. **Tier 1** -- Regex match on known prompts -> instant auto-answer (~80% of prompts)
+2. **Tier 2** -- Supervisor agent with full project context -> intelligent answer for the rest
+
+Everything is files. Config is TOML. Tasks are Markdown. Logs are JSONL. All git-versioned.
+
+## Get Started
+
+1. [Getting Started](getting-started.md) -- Install, configure, run your first phase
+2. [CLI Reference](reference/cli.md) -- Every command and flag
+3. [Configuration](reference/config.md) -- All config.toml options
+
+## Go Deeper
+
+- [Architecture](architecture.md) -- Module map, data flow, design decisions
+- [Troubleshooting](troubleshooting.md) -- Common issues and fixes

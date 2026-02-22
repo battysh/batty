@@ -1,110 +1,137 @@
 # Getting Started
 
+Get Batty running in your project in under 5 minutes.
+
 ## Prerequisites
 
-- Rust toolchain (`stable`)
-- `tmux` 3.1+
-- `kanban-md` CLI available on `PATH`
+- **Rust** toolchain (stable)
+- **tmux** >= 3.1 (recommended >= 3.2)
+- A coding agent: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [Aider](https://aider.chat), or similar
 
-For new environments, run:
+`kanban-md` is also required but `batty install` handles it automatically.
+
+## Install
+
+```sh
+# From the Batty repository
+cargo install --path .
+
+# Or run directly without installing
+cargo run -- <command>
+```
+
+If `batty` is not found after install, add Cargo bin to your PATH:
+
+```sh
+echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+## Set Up Your Project
 
 ```sh
 batty install
 ```
 
-This command checks `tmux` and `kanban-md`, attempts automatic installation when possible, and installs Batty steering/skill assets in the project.
+This does three things:
 
-To remove installed Batty assets from a project:
+1. **Checks tools** -- Verifies `tmux` and `kanban-md` are available, attempts to install them if not
+2. **Installs steering files** -- Adds workflow rules that your agent loads automatically (`.claude/rules/` for Claude Code, `.agents/rules/` for Codex)
+3. **Installs skills** -- Adds kanban-md skills so your agent knows how to work with task boards
+
+Batty never touches your existing `CLAUDE.md` or `AGENTS.md`.
+
+To remove everything Batty installed:
 
 ```sh
 batty remove
-# optional targeting:
-batty remove --target claude
-batty remove --target codex --dir /path/to/project
 ```
 
-## Basic Commands
-
-Run directly from source:
+## Run Your First Phase
 
 ```sh
-cargo run -- config
-cargo run -- work phase-2.7
+batty work my-phase
 ```
 
-Install globally (optional):
+A tmux session opens with three areas:
+
+- **Executor pane** -- Your coding agent working through the board
+- **Orchestrator pane** -- Batty's log showing every auto-answer, escalation, and status change
+- **Status bar** -- Live progress: phase name, current task, tasks done, supervision state
+
+The agent picks tasks from the board, implements them, runs tests, and commits. Batty handles the prompts.
+
+## Essential Commands
 
 ```sh
-cargo install --path .
-batty config
+batty work my-phase        # start supervised execution
+batty attach my-phase      # reattach to a running session
+batty resume my-phase      # resume supervision after crash
+batty board my-phase       # open the kanban board TUI
+batty board-list           # list all boards with status
+batty config               # show resolved configuration
 ```
 
-## Core Workflow
+## Runtime Modes
 
-1. Start or resume execution for a phase:
+| Flag | Effect |
+|------|--------|
+| `--attach` | Open the tmux session immediately instead of backgrounding |
+| `--agent codex` | Override the default executor agent |
+| `--policy suggest` | Override the default policy tier |
+| `--worktree` | Run in an isolated git worktree |
+| `--worktree --new` | Force a fresh worktree (don't resume existing) |
+| `--dry-run` | Show the composed launch context and exit |
 
-```sh
-batty work phase-2.7
-# or
-batty resume phase-2.7
+## Configuration
+
+Batty reads `.batty/config.toml`:
+
+```toml
+[defaults]
+agent = "claude"       # or "codex", "aider"
+policy = "act"         # observe | suggest | act | fully-auto
+
+[supervisor]
+enabled = true
+program = "claude"
+args = ["-p", "--output-format", "text"]
+timeout_secs = 60
+
+[detector]
+silence_timeout_secs = 3
+answer_cooldown_millis = 1000
+
+[policy.auto_answer]
+"Continue? [y/n]" = "y"
 ```
 
-2. Reattach to the tmux session when needed:
+Full reference: [Configuration Reference](reference/config.md)
 
-```sh
-batty attach phase-2.7
-```
+## Supervisor Hotkeys
 
-3. Open the phase board in `kanban-md`:
+During an active tmux session:
 
-```sh
-batty board phase-2.7
-# print resolved board path (for scripts/tooling):
-batty board phase-2.7 --print-dir
-```
+| Hotkey | Action |
+|--------|--------|
+| `C-b P` | Pause supervision (Tier 1 and Tier 2 stop, you type manually) |
+| `C-b R` | Resume supervision |
 
-4. List all boards at a glance:
-
-```sh
-batty board-list
-```
-
-## Common Runtime Modes
-
-- `--attach`: opens the tmux session immediately
-- `--worktree`: use isolated phase worktree runs
-- `--worktree --new`: force a fresh run worktree
-- `--dry-run`: show composed launch context and exit
-- `--parallel N`: set parallel agent count (currently useful for future `work all` flow)
-- `--agent AGENT`: override default executor agent
-- `--policy POLICY`: override default policy tier
-
-## Command and Flag Reference (Quick)
-
-- `batty work <phase> [--parallel N] [--agent A] [--policy P] [--attach] [--worktree] [--new] [--dry-run]`
-- `batty attach <phase>`
-- `batty resume <phase|session>`
-- `batty board <phase> [--print-dir]`
-- `batty board-list`
-- `batty config [--json]`
-- `batty install [--target both|claude|codex] [--dir PATH]`
-- `batty remove [--target both|claude|codex] [--dir PATH]`
+While paused, human input still works -- you just take over from Batty.
 
 ## Dangerous Mode (Opt-In)
 
-Batty supports an opt-in dangerous wrapper mode for supported agents:
+For environments where you want reduced agent safety prompts:
 
 ```toml
 [dangerous_mode]
 enabled = true
 ```
 
-When enabled, Batty adds the matching dangerous flag for `claude` or `codex` wrappers.
-Keep this disabled unless you explicitly want reduced safety boundaries.
+When enabled, Batty adds the appropriate dangerous-mode flag for each agent (`--dangerously-skip-permissions` for Claude, `--dangerously-bypass-approvals-and-sandbox` for Codex). Keep this disabled unless you explicitly accept the risk.
 
-## Supervisor Hotkeys
+## Next Steps
 
-During an active tmux-supervised run:
-
-- Pause supervision: `Prefix + Shift+P` (`C-b P` with default tmux prefix)
-- Resume supervision: `Prefix + Shift+R` (`C-b R` with default tmux prefix)
+- [CLI Reference](reference/cli.md) -- Full command and flag documentation
+- [Architecture](architecture.md) -- How the three-layer supervision works
+- [Troubleshooting](troubleshooting.md) -- Common issues and fixes
