@@ -1,6 +1,9 @@
 mod cli;
 mod config;
+// Wired in task #12 (batty work <id>)
+#[allow(dead_code)]
 mod policy;
+#[allow(dead_code)]
 mod task;
 
 use anyhow::Result;
@@ -55,7 +58,9 @@ async fn main() -> Result<()> {
             );
 
             // TODO: Phase 1 tasks will implement the actual work pipeline
-            println!("batty work {target} (agent={agent}, policy={policy_str}, parallel={parallel})");
+            println!(
+                "batty work {target} (agent={agent}, policy={policy_str}, parallel={parallel})"
+            );
             println!("Not yet implemented — coming in Phase 1 tasks.");
         }
         Command::Config => {

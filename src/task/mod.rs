@@ -61,8 +61,8 @@ impl Task {
     pub fn parse(content: &str) -> Result<Self> {
         let (frontmatter_str, body) = split_frontmatter(content)?;
 
-        let fm: Frontmatter = serde_yaml::from_str(frontmatter_str)
-            .context("failed to parse YAML frontmatter")?;
+        let fm: Frontmatter =
+            serde_yaml::from_str(frontmatter_str).context("failed to parse YAML frontmatter")?;
 
         let (description, batty_config) = parse_body(body);
 

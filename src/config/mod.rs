@@ -6,18 +6,13 @@ use std::path::{Path, PathBuf};
 const CONFIG_FILENAME: &str = "config.toml";
 const CONFIG_DIR: &str = ".batty";
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Policy {
+    #[default]
     Observe,
     Suggest,
     Act,
-}
-
-impl Default for Policy {
-    fn default() -> Self {
-        Self::Observe
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,6 +35,7 @@ pub struct Defaults {
 /// "Allow tool" = "y"
 /// ```
 #[derive(Debug, Deserialize, Default)]
+#[allow(dead_code)] // Used by policy engine (task #8), wired in task #12
 pub struct PolicyConfig {
     #[serde(default)]
     pub auto_answer: HashMap<String, String>,
@@ -69,6 +65,7 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub defaults: Defaults,
     #[serde(default)]
+    #[allow(dead_code)] // Used by policy engine, wired in task #12
     pub policy: PolicyConfig,
 }
 
@@ -191,7 +188,10 @@ policy = "act"
 "#;
         let config: ProjectConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.policy.auto_answer.len(), 2);
-        assert_eq!(config.policy.auto_answer.get("Continue? [y/n]").unwrap(), "y");
+        assert_eq!(
+            config.policy.auto_answer.get("Continue? [y/n]").unwrap(),
+            "y"
+        );
         assert_eq!(config.policy.auto_answer.get("Allow tool").unwrap(), "y");
     }
 
