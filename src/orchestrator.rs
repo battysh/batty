@@ -516,6 +516,7 @@ pub fn run(
     // Resolve the executor pane target immediately. We must keep supervision
     // pinned to this pane even if focus changes to log panes.
     let executor_pane = tmux::pane_id(&session)?;
+    observer.on_event(&format!("● supervision target pane {executor_pane}"));
     if let Err(e) = tmux::tmux_set(&session, "remain-on-exit", "on") {
         warn!(error = %e, "failed to enable remain-on-exit");
     }
@@ -1050,6 +1051,7 @@ mod tests {
     use super::*;
     use crate::config::Policy;
     use crate::prompt::PromptPatterns;
+    use serde::Deserialize;
     use std::collections::HashMap;
     use std::fs;
     #[cfg(unix)]
@@ -1142,7 +1144,87 @@ esac
     }
 
     #[cfg(unix)]
-    fn run_harness_case(mode: &str) -> (String, Vec<String>) {
+    const HARNESS_CONTRACT_PATH: &str = "planning/supervision-harness-contract.toml";
+
+    #[cfg(unix)]
+    #[derive(Debug, Deserialize, Clone)]
+    struct HarnessContract {
+        scenarios: Vec<HarnessScenario>,
+        failure_taxonomy: Vec<FailureTaxonomyEntry>,
+    }
+
+    #[cfg(unix)]
+    #[derive(Debug, Deserialize, Clone)]
+    struct HarnessScenario {
+        id: String,
+        kind: String,
+        detector_event: Option<String>,
+        supervisor_interface: Option<String>,
+        injected_terminal_input: Option<String>,
+        pane_invariant: Option<String>,
+        agent_prompt_line: Option<String>,
+        read_timeout_secs: Option<u64>,
+        mock_mode: Option<String>,
+        expected_input: Option<String>,
+        expected_contains: Option<String>,
+        expect_auto: Option<bool>,
+        expect_escalate: Option<bool>,
+        expected_lifecycle_events: Option<Vec<String>>,
+    }
+
+    #[cfg(unix)]
+    #[derive(Debug, Deserialize, Clone)]
+    struct FailureTaxonomyEntry {
+        class: String,
+        triage_owner: String,
+    }
+
+    #[cfg(unix)]
+    #[derive(Debug)]
+    struct HarnessCaseResult {
+        received: String,
+        events: Vec<String>,
+        target_pane: String,
+        panes: Vec<tmux::PaneDetails>,
+    }
+
+    #[cfg(unix)]
+    fn load_harness_contract() -> HarnessContract {
+        let body = fs::read_to_string(HARNESS_CONTRACT_PATH)
+            .unwrap_or_else(|e| panic!("failed to read {HARNESS_CONTRACT_PATH}: {e}"));
+        toml::from_str(&body).unwrap_or_else(|e| panic!("invalid harness contract TOML: {e}"))
+    }
+
+    #[cfg(unix)]
+    fn harness_scenario(id: &str) -> HarnessScenario {
+        let contract = load_harness_contract();
+        contract
+            .scenarios
+            .into_iter()
+            .find(|s| s.id == id)
+            .unwrap_or_else(|| panic!("missing harness scenario '{id}' in contract"))
+    }
+
+    #[cfg(unix)]
+    fn run_harness_mock_case(scenario_id: &str) -> HarnessCaseResult {
+        let scenario = harness_scenario(scenario_id);
+        assert_eq!(
+            scenario.kind, "mock",
+            "scenario {scenario_id} must be kind=mock"
+        );
+
+        let mode = scenario
+            .mock_mode
+            .as_deref()
+            .unwrap_or_else(|| panic!("scenario {scenario_id} missing mock_mode"));
+        let prompt_line = scenario
+            .agent_prompt_line
+            .as_deref()
+            .unwrap_or_else(|| panic!("scenario {scenario_id} missing agent_prompt_line"));
+        let timeout = scenario
+            .read_timeout_secs
+            .unwrap_or_else(|| panic!("scenario {scenario_id} missing read_timeout_secs"));
+
         run_harness_case_with_tier2(
             Tier2Config {
                 program: "<mock-supervisor>".to_string(),
@@ -1151,8 +1233,8 @@ esac
                 system_prompt: None,
                 trace_io: true,
             },
-            "Press enter to continue",
-            2,
+            prompt_line,
+            timeout,
             Some(mode),
         )
     }
@@ -1163,7 +1245,7 @@ esac
         agent_prompt_line: &str,
         read_timeout_secs: u64,
         mock_mode: Option<&str>,
-    ) -> (String, Vec<String>) {
+    ) -> HarnessCaseResult {
         let tmp = tempfile::tempdir().unwrap();
         let agent_script = tmp.path().join("mock-agent.sh");
         let supervisor_script = tmp.path().join("mock-supervisor.sh");
@@ -1248,8 +1330,52 @@ esac
         );
 
         let events = events_arc.lock().unwrap().clone();
+        let target_pane = events
+            .iter()
+            .find_map(|e| {
+                e.strip_prefix("event:● supervision target pane ")
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| panic!("missing supervision target pane event: {events:?}"));
+        let pane_details = tmux::list_pane_details(&session).unwrap();
+        assert_eq!(
+            pane_details.len(),
+            2,
+            "expected exactly two panes (executor+log): {pane_details:?}"
+        );
+        assert!(
+            pane_details.iter().any(|p| p.command == "tail"),
+            "expected a tail log pane, got: {pane_details:?}"
+        );
+        assert!(
+            pane_details
+                .iter()
+                .any(|p| p.id == target_pane && p.command != "tail"),
+            "supervision target pane must be executor, got target={target_pane} panes={pane_details:?}"
+        );
+        let executor_details = pane_details
+            .iter()
+            .find(|p| p.id == target_pane)
+            .unwrap_or_else(|| panic!("missing target pane details: {pane_details:?}"));
+        assert!(
+            executor_details.dead,
+            "executor pane should be marked dead after process exit: {pane_details:?}"
+        );
+        assert!(
+            pane_details
+                .iter()
+                .filter(|p| p.command == "tail")
+                .all(|p| !p.dead),
+            "log pane should remain alive and not become supervision target: {pane_details:?}"
+        );
+
         let _ = tmux::kill_session(&session);
-        (received_value, events)
+        HarnessCaseResult {
+            received: received_value,
+            events,
+            target_pane,
+            panes: pane_details,
+        }
     }
 
     #[cfg(unix)]
@@ -1258,7 +1384,7 @@ esac
         real_args: &[&str],
         agent_prompt_line: &str,
         read_timeout_secs: u64,
-    ) -> (String, Vec<String>) {
+    ) -> HarnessCaseResult {
         let mut args: Vec<String> = real_args.iter().map(|s| s.to_string()).collect();
         // The custom context file path is appended in run_harness_case_with_tier2.
         run_harness_case_with_tier2(
@@ -1273,6 +1399,16 @@ esac
             read_timeout_secs,
             None,
         )
+    }
+
+    #[cfg(unix)]
+    fn assert_lifecycle_events(events: &[String], expected_needles: &[String]) {
+        for needle in expected_needles {
+            assert!(
+                events.iter().any(|e| e.contains(needle)),
+                "expected lifecycle event '{needle}', got: {events:?}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -1297,75 +1433,209 @@ esac
 
     #[cfg(unix)]
     #[test]
+    fn harness_contract_is_machine_readable_and_complete() {
+        let contract = load_harness_contract();
+        assert!(
+            !contract.scenarios.is_empty(),
+            "contract must define at least one scenario"
+        );
+        assert!(
+            !contract.failure_taxonomy.is_empty(),
+            "contract must define failure taxonomy"
+        );
+
+        let mut ids = std::collections::HashSet::new();
+        for scenario in &contract.scenarios {
+            assert!(
+                ids.insert(scenario.id.clone()),
+                "duplicate scenario id in contract: {}",
+                scenario.id
+            );
+            assert!(
+                !scenario.kind.trim().is_empty(),
+                "scenario kind must be present: {:?}",
+                scenario
+            );
+            if scenario.kind == "mock" {
+                assert!(
+                    scenario.detector_event.is_some()
+                        && scenario.supervisor_interface.is_some()
+                        && scenario.injected_terminal_input.is_some()
+                        && scenario.pane_invariant.is_some(),
+                    "mock scenario missing layer assertions: {:?}",
+                    scenario
+                );
+            }
+        }
+
+        for row in &contract.failure_taxonomy {
+            assert!(
+                !row.class.trim().is_empty() && !row.triage_owner.trim().is_empty(),
+                "invalid failure taxonomy row: {:?}",
+                row
+            );
+        }
+
+        for required in [
+            "mock-direct",
+            "mock-enter",
+            "mock-escalate",
+            "mock-fail",
+            "mock-verbose",
+            "real-supervisor-claude-token",
+            "real-supervisor-claude-enter",
+            "real-supervisor-codex-token",
+            "real-supervisor-codex-enter",
+            "real-smoke-claude",
+            "real-smoke-codex",
+        ] {
+            assert!(
+                contract.scenarios.iter().any(|s| s.id == required),
+                "missing required contract scenario: {required}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn harness_direct_reply_injected_into_agent() {
-        let (received, events) = run_harness_case("direct");
-        assert_eq!(received, "y");
-        assert!(
-            events.iter().any(|e| e.contains("auto:")),
-            "expected auto-answer event, got: {events:?}"
+        let scenario = harness_scenario("mock-direct");
+        let result = run_harness_mock_case(&scenario.id);
+        assert_eq!(
+            result.received,
+            scenario
+                .expected_input
+                .as_deref()
+                .expect("mock-direct expected_input missing")
         );
         assert!(
-            events.iter().any(|e| e.contains("event:? supervisor call")),
-            "expected supervisor call trace event, got: {events:?}"
+            result.events.iter().any(|e| e.contains("auto:")),
+            "expected auto-answer event, got: {:?}",
+            result.events
+        );
+        assert_eq!(scenario.expect_auto, Some(true));
+        assert_eq!(scenario.expect_escalate, Some(false));
+        assert!(
+            result
+                .events
+                .iter()
+                .any(|e| e.contains("event:? supervisor call")),
+            "expected supervisor call trace event, got: {:?}",
+            result.events
         );
         assert!(
-            events
+            result
+                .events
                 .iter()
                 .any(|e| e.contains("event:? supervisor reply ← y")),
-            "expected supervisor reply trace event, got: {events:?}"
+            "expected supervisor reply trace event, got: {:?}",
+            result.events
+        );
+        assert!(
+            result.target_pane.starts_with('%'),
+            "expected tmux pane id target, got {}",
+            result.target_pane
+        );
+        assert!(
+            result.panes.iter().any(|p| p.id == result.target_pane),
+            "expected target pane to exist in pane details: {:?}",
+            result.panes
         );
     }
 
     #[cfg(unix)]
     #[test]
     fn harness_press_enter_reply_injected_as_empty_input() {
-        let (received, events) = run_harness_case("enter");
-        assert_eq!(received, "");
-        assert!(
-            events.iter().any(|e| e.contains("auto:")),
-            "expected auto-answer event, got: {events:?}"
+        let scenario = harness_scenario("mock-enter");
+        let result = run_harness_mock_case(&scenario.id);
+        assert_eq!(
+            result.received,
+            scenario
+                .expected_input
+                .as_deref()
+                .expect("mock-enter expected_input missing")
         );
+        assert!(
+            result.events.iter().any(|e| e.contains("auto:")),
+            "expected auto-answer event, got: {:?}",
+            result.events
+        );
+        assert_eq!(scenario.expect_auto, Some(true));
+        assert_eq!(scenario.expect_escalate, Some(false));
     }
 
     #[cfg(unix)]
     #[test]
     fn harness_supervisor_escalate_does_not_inject() {
-        let (received, events) = run_harness_case("escalate");
-        assert_eq!(received, "__NO_INPUT__");
-        assert!(
-            events.iter().any(|e| e.contains("escalate:")),
-            "expected escalate event, got: {events:?}"
+        let scenario = harness_scenario("mock-escalate");
+        let result = run_harness_mock_case(&scenario.id);
+        assert_eq!(
+            result.received,
+            scenario
+                .expected_input
+                .as_deref()
+                .expect("mock-escalate expected_input missing")
         );
         assert!(
-            !events.iter().any(|e| e.contains("auto:")),
-            "did not expect auto-answer, got: {events:?}"
+            result.events.iter().any(|e| e.contains("escalate:")),
+            "expected escalate event, got: {:?}",
+            result.events
         );
+        assert!(
+            !result.events.iter().any(|e| e.contains("auto:")),
+            "did not expect auto-answer, got: {:?}",
+            result.events
+        );
+        assert_eq!(scenario.expect_auto, Some(false));
+        assert_eq!(scenario.expect_escalate, Some(true));
     }
 
     #[cfg(unix)]
     #[test]
     fn harness_supervisor_failure_does_not_inject() {
-        let (received, events) = run_harness_case("fail");
-        assert_eq!(received, "__NO_INPUT__");
+        let scenario = harness_scenario("mock-fail");
+        let result = run_harness_mock_case(&scenario.id);
+        assert_eq!(
+            result.received,
+            scenario
+                .expected_input
+                .as_deref()
+                .expect("mock-fail expected_input missing")
+        );
         assert!(
-            events
+            result
+                .events
                 .iter()
                 .any(|e| e.contains("supervisor failed") || e.contains("escalate:")),
-            "expected supervisor failure escalation event, got: {events:?}"
+            "expected supervisor failure escalation event, got: {:?}",
+            result.events
         );
+        assert_eq!(scenario.expect_auto, Some(false));
+        assert_eq!(scenario.expect_escalate, Some(true));
     }
 
     #[cfg(unix)]
     #[test]
     fn harness_supervisor_verbose_reply_rejected_for_safety() {
-        let (received, events) = run_harness_case("verbose");
-        assert_eq!(received, "__NO_INPUT__");
+        let scenario = harness_scenario("mock-verbose");
+        let result = run_harness_mock_case(&scenario.id);
+        assert_eq!(
+            result.received,
+            scenario
+                .expected_input
+                .as_deref()
+                .expect("mock-verbose expected_input missing")
+        );
         assert!(
-            events
+            result
+                .events
                 .iter()
                 .any(|e| e.contains("supervisor failed") || e.contains("escalate:")),
-            "expected non-injectable response escalation, got: {events:?}"
+            "expected non-injectable response escalation, got: {:?}",
+            result.events
         );
+        assert_eq!(scenario.expect_auto, Some(false));
+        assert_eq!(scenario.expect_escalate, Some(true));
     }
 
     #[cfg(unix)]
@@ -1375,16 +1645,39 @@ esac
         require_env_flag("BATTY_TEST_REAL_CLAUDE");
         assert!(command_exists("claude"), "claude binary not found");
 
-        let (received, events) = run_harness_case_with_real_supervisor(
-            "claude",
-            &["-p", "--output-format", "text"],
-            "Type exactly TOKEN_CLAUDE_123 and press Enter",
-            8,
-        );
-        assert!(
-            received.contains("TOKEN_CLAUDE_123"),
-            "expected token injected, got '{received}' events={events:?}"
-        );
+        for scenario_id in [
+            "real-supervisor-claude-token",
+            "real-supervisor-claude-enter",
+        ] {
+            let scenario = harness_scenario(scenario_id);
+            let result = run_harness_case_with_real_supervisor(
+                "claude",
+                &["-p", "--output-format", "text"],
+                scenario
+                    .agent_prompt_line
+                    .as_deref()
+                    .expect("real Claude scenario missing prompt"),
+                scenario
+                    .read_timeout_secs
+                    .expect("real Claude scenario missing read_timeout_secs"),
+            );
+
+            if let Some(expected_contains) = scenario.expected_contains.as_deref() {
+                assert!(
+                    result.received.contains(expected_contains),
+                    "scenario {scenario_id}: expected '{expected_contains}' in '{}', events={:?}",
+                    result.received,
+                    result.events
+                );
+            }
+            if let Some(expected_input) = scenario.expected_input.as_deref() {
+                assert_eq!(
+                    result.received, expected_input,
+                    "scenario {scenario_id}: expected exact input mismatch, events={:?}",
+                    result.events
+                );
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -1394,22 +1687,36 @@ esac
         require_env_flag("BATTY_TEST_REAL_CODEX");
         assert!(command_exists("codex"), "codex binary not found");
 
-        let (received, events) = run_harness_case_with_real_supervisor(
-            "codex",
-            &[
-                "exec",
-                "-a",
-                "never",
-                "--sandbox",
-                "workspace-write",
-            ],
-            "Type exactly TOKEN_CODEX_123 and press Enter",
-            10,
-        );
-        assert!(
-            received.contains("TOKEN_CODEX_123"),
-            "expected token injected, got '{received}' events={events:?}"
-        );
+        for scenario_id in ["real-supervisor-codex-token", "real-supervisor-codex-enter"] {
+            let scenario = harness_scenario(scenario_id);
+            let result = run_harness_case_with_real_supervisor(
+                "codex",
+                &["exec", "-a", "never", "--sandbox", "workspace-write"],
+                scenario
+                    .agent_prompt_line
+                    .as_deref()
+                    .expect("real Codex scenario missing prompt"),
+                scenario
+                    .read_timeout_secs
+                    .expect("real Codex scenario missing read_timeout_secs"),
+            );
+
+            if let Some(expected_contains) = scenario.expected_contains.as_deref() {
+                assert!(
+                    result.received.contains(expected_contains),
+                    "scenario {scenario_id}: expected '{expected_contains}' in '{}', events={:?}",
+                    result.received,
+                    result.events
+                );
+            }
+            if let Some(expected_input) = scenario.expected_input.as_deref() {
+                assert_eq!(
+                    result.received, expected_input,
+                    "scenario {scenario_id}: expected exact input mismatch, events={:?}",
+                    result.events
+                );
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -1418,6 +1725,7 @@ esac
     fn harness_real_executor_and_supervisor_claude_smoke() {
         require_env_flag("BATTY_TEST_REAL_E2E_CLAUDE");
         assert!(command_exists("claude"), "claude binary not found");
+        let scenario = harness_scenario("real-smoke-claude");
 
         let tmp = tempfile::tempdir().unwrap();
         let phase = "it-real-e2e-claude".to_string();
@@ -1451,7 +1759,11 @@ esac
             buffer_size: 50,
             tier2: Some(Tier2Config {
                 program: "claude".to_string(),
-                args: vec!["-p".to_string(), "--output-format".to_string(), "text".to_string()],
+                args: vec![
+                    "-p".to_string(),
+                    "--output-format".to_string(),
+                    "text".to_string(),
+                ],
                 timeout: Duration::from_secs(30),
                 system_prompt: None,
                 trace_io: true,
@@ -1469,10 +1781,17 @@ esac
             "expected Completed, got {result:?}"
         );
         let events = events_arc.lock().unwrap().clone();
-        assert!(
-            events.iter().any(|e| e.contains("created")),
-            "expected session events, got: {events:?}"
-        );
+        let expected = scenario
+            .expected_lifecycle_events
+            .clone()
+            .unwrap_or_else(|| {
+                vec![
+                    "created".to_string(),
+                    "supervising".to_string(),
+                    "executor exited".to_string(),
+                ]
+            });
+        assert_lifecycle_events(&events, &expected);
         let _ = tmux::kill_session(&session);
     }
 
@@ -1482,6 +1801,7 @@ esac
     fn harness_real_executor_and_supervisor_codex_smoke() {
         require_env_flag("BATTY_TEST_REAL_E2E_CODEX");
         assert!(command_exists("codex"), "codex binary not found");
+        let scenario = harness_scenario("real-smoke-codex");
 
         let tmp = tempfile::tempdir().unwrap();
         let phase = "it-real-e2e-codex".to_string();
@@ -1541,10 +1861,17 @@ esac
             "expected Completed, got {result:?}"
         );
         let events = events_arc.lock().unwrap().clone();
-        assert!(
-            events.iter().any(|e| e.contains("created")),
-            "expected session events, got: {events:?}"
-        );
+        let expected = scenario
+            .expected_lifecycle_events
+            .clone()
+            .unwrap_or_else(|| {
+                vec![
+                    "created".to_string(),
+                    "supervising".to_string(),
+                    "executor exited".to_string(),
+                ]
+            });
+        assert_lifecycle_events(&events, &expected);
         let _ = tmux::kill_session(&session);
     }
 

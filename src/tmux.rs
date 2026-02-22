@@ -8,7 +8,16 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+
+/// Metadata for a tmux pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneDetails {
+    pub id: String,
+    pub command: String,
+    pub active: bool,
+    pub dead: bool,
+}
 
 /// Check that tmux is installed and reachable.
 pub fn check_tmux() -> Result<String> {
@@ -128,6 +137,14 @@ pub fn create_session(session: &str, program: &str, args: &[String], work_dir: &
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("tmux new-session failed: {stderr}");
+    }
+
+    if let Err(e) = set_mouse(session, true) {
+        warn!(
+            session = session,
+            error = %e,
+            "failed to enable tmux mouse mode"
+        );
     }
 
     info!(session = session, "tmux session created");
@@ -283,6 +300,13 @@ pub fn set_title(session: &str, title: &str) -> Result<()> {
     tmux_set(session, "set-titles-string", title)
 }
 
+/// Enable/disable tmux mouse mode for a session.
+#[allow(dead_code)]
+pub fn set_mouse(session: &str, enabled: bool) -> Result<()> {
+    let value = if enabled { "on" } else { "off" };
+    tmux_set(session, "mouse", value)
+}
+
 /// Split the window to create a new pane.
 ///
 /// Returns Ok(()) on success. The new pane is at the bottom (vertical split)
@@ -327,6 +351,44 @@ pub fn list_panes(session: &str) -> Result<Vec<String>> {
         .lines()
         .map(|s| s.to_string())
         .collect();
+
+    Ok(panes)
+}
+
+/// List panes in a session with command/active/dead metadata.
+pub fn list_pane_details(session: &str) -> Result<Vec<PaneDetails>> {
+    let output = Command::new("tmux")
+        .args([
+            "list-panes",
+            "-t",
+            session,
+            "-F",
+            "#{pane_id}\t#{pane_current_command}\t#{pane_active}\t#{pane_dead}",
+        ])
+        .output()
+        .with_context(|| format!("failed to list pane details for session '{session}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux list-panes details failed: {stderr}");
+    }
+
+    let mut panes = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut parts = line.split('\t');
+        let Some(id) = parts.next() else { continue };
+        let Some(command) = parts.next() else {
+            continue;
+        };
+        let Some(active) = parts.next() else { continue };
+        let Some(dead) = parts.next() else { continue };
+        panes.push(PaneDetails {
+            id: id.to_string(),
+            command: command.to_string(),
+            active: active == "1",
+            dead: dead == "1",
+        });
+    }
 
     Ok(panes)
 }
@@ -397,6 +459,24 @@ mod tests {
         let result = create_session(session, "sleep", &["10".to_string()], "/tmp");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
+
+        kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn create_session_enables_mouse_mode() {
+        let session = "batty-test-mouse";
+        let _ = kill_session(session);
+
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        let output = Command::new("tmux")
+            .args(["show-options", "-t", session, "-v", "mouse"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        assert_eq!(value, "on", "expected tmux mouse mode to be enabled");
 
         kill_session(session).unwrap();
     }
@@ -489,6 +569,26 @@ mod tests {
 
         let panes = list_panes(session).unwrap();
         assert!(!panes.is_empty(), "session should have at least one pane");
+
+        kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn list_pane_details_includes_active_flag() {
+        let session = "batty-test-pane-details";
+        let _ = kill_session(session);
+
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        let panes = list_pane_details(session).unwrap();
+        assert!(
+            !panes.is_empty(),
+            "expected at least one pane detail record"
+        );
+        assert!(
+            panes.iter().any(|p| p.active),
+            "expected one active pane, got: {panes:?}"
+        );
 
         kill_session(session).unwrap();
     }

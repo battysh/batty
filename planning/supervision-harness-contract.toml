@@ -1,0 +1,137 @@
+[metadata]
+name = "phase-2.4-supervision-harness-contract"
+version = 1
+description = "Scenario matrix and assertion contract for tmux supervision harness validation."
+
+[[scenarios]]
+id = "mock-direct"
+kind = "mock"
+detector_event = "UnknownRequest"
+supervisor_interface = "mock supervisor mode=direct must return concise answer"
+injected_terminal_input = "literal 'y' plus Enter"
+pane_invariant = "supervision target pane id remains executor pane; target pane command is not tail"
+agent_prompt_line = "Press enter to continue"
+read_timeout_secs = 2
+mock_mode = "direct"
+expected_input = "y"
+expect_auto = true
+expect_escalate = false
+
+[[scenarios]]
+id = "mock-enter"
+kind = "mock"
+detector_event = "UnknownRequest"
+supervisor_interface = "mock supervisor mode=enter normalized to empty input"
+injected_terminal_input = "empty input represented as <ENTER>"
+pane_invariant = "supervision target pane id remains executor pane; log pane is never target"
+agent_prompt_line = "Press enter to continue"
+read_timeout_secs = 2
+mock_mode = "enter"
+expected_input = ""
+expect_auto = true
+expect_escalate = false
+
+[[scenarios]]
+id = "mock-escalate"
+kind = "mock"
+detector_event = "UnknownRequest"
+supervisor_interface = "mock supervisor mode=escalate returns ESCALATE:<reason>"
+injected_terminal_input = "no injection"
+pane_invariant = "supervision target pane id remains executor pane while no send-keys is performed"
+agent_prompt_line = "Choose between A/B without context"
+read_timeout_secs = 2
+mock_mode = "escalate"
+expected_input = "__NO_INPUT__"
+expect_auto = false
+expect_escalate = true
+
+[[scenarios]]
+id = "mock-fail"
+kind = "mock"
+detector_event = "UnknownRequest"
+supervisor_interface = "mock supervisor mode=fail exits non-zero"
+injected_terminal_input = "no injection"
+pane_invariant = "executor pane remains supervision target despite supervisor subprocess failure"
+agent_prompt_line = "Press enter to continue"
+read_timeout_secs = 2
+mock_mode = "fail"
+expected_input = "__NO_INPUT__"
+expect_auto = false
+expect_escalate = true
+
+[[scenarios]]
+id = "mock-verbose"
+kind = "mock"
+detector_event = "UnknownRequest"
+supervisor_interface = "mock supervisor mode=verbose returns long non-injectable prose"
+injected_terminal_input = "no injection (safety rejection)"
+pane_invariant = "log pane remains non-target; executor pane target is unchanged"
+agent_prompt_line = "Press enter to continue"
+read_timeout_secs = 2
+mock_mode = "verbose"
+expected_input = "__NO_INPUT__"
+expect_auto = false
+expect_escalate = true
+
+[[scenarios]]
+id = "real-supervisor-claude-token"
+kind = "real-supervisor"
+agent_prompt_line = "Type exactly TOKEN_CLAUDE_123 and press Enter"
+read_timeout_secs = 8
+expected_contains = "TOKEN_CLAUDE_123"
+
+[[scenarios]]
+id = "real-supervisor-claude-enter"
+kind = "real-supervisor"
+agent_prompt_line = "Press enter to continue"
+read_timeout_secs = 8
+expected_input = ""
+
+[[scenarios]]
+id = "real-supervisor-codex-token"
+kind = "real-supervisor"
+agent_prompt_line = "Type exactly TOKEN_CODEX_123 and press Enter"
+read_timeout_secs = 10
+expected_contains = "TOKEN_CODEX_123"
+
+[[scenarios]]
+id = "real-supervisor-codex-enter"
+kind = "real-supervisor"
+agent_prompt_line = "Press enter to continue"
+read_timeout_secs = 10
+expected_input = ""
+
+[[scenarios]]
+id = "real-smoke-claude"
+kind = "real-smoke"
+expected_lifecycle_events = ["created", "supervising", "executor exited"]
+
+[[scenarios]]
+id = "real-smoke-codex"
+kind = "real-smoke"
+expected_lifecycle_events = ["created", "supervising", "executor exited"]
+
+[[failure_taxonomy]]
+class = "detector-regression"
+triage_owner = "supervision-runtime"
+description = "Prompt detection misses/duplicates leading to incorrect prompt handling."
+
+[[failure_taxonomy]]
+class = "tier2-interface-regression"
+triage_owner = "supervision-runtime"
+description = "Supervisor subprocess contract drift (CLI args, normalization, escalation parsing)."
+
+[[failure_taxonomy]]
+class = "unsafe-injection-regression"
+triage_owner = "prompt-safety"
+description = "Non-injectable or overly verbose supervisor replies are injected into executor."
+
+[[failure_taxonomy]]
+class = "tmux-pane-targeting-regression"
+triage_owner = "tmux-runtime"
+description = "Supervision target drifts from executor pane or log pane becomes send-keys target."
+
+[[failure_taxonomy]]
+class = "real-agent-integration-regression"
+triage_owner = "release-validation"
+description = "Authenticated real supervisor/executor pathways diverge from deterministic harness behavior."
