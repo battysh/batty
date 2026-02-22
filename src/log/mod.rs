@@ -81,6 +81,7 @@ pub enum LogEvent {
     AgentLaunched {
         agent: String,
         program: String,
+        args: Vec<String>,
         work_dir: String,
     },
     /// Launch context was composed and snapshotted before execution.
@@ -298,6 +299,7 @@ mod tests {
             LogEvent::AgentLaunched {
                 agent: "claude".to_string(),
                 program: "claude".to_string(),
+                args: vec!["--prompt".to_string(), "task".to_string()],
                 work_dir: "/work".to_string(),
             },
             LogEvent::LaunchContextSnapshot {

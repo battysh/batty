@@ -44,6 +44,42 @@ struct ResumeContext {
     execution_log_path: PathBuf,
 }
 
+const CLAUDE_DANGEROUS_FLAG: &str = "--dangerously-skip-permissions";
+const CODEX_DANGEROUS_FLAG: &str = "--dangerously-bypass-approvals-and-sandbox";
+
+fn dangerous_flag_for_program(program: &str) -> Option<&'static str> {
+    let binary = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program);
+
+    match binary {
+        "claude" => Some(CLAUDE_DANGEROUS_FLAG),
+        "codex" => Some(CODEX_DANGEROUS_FLAG),
+        _ => None,
+    }
+}
+
+fn apply_dangerous_mode_wrapper(
+    program: String,
+    mut args: Vec<String>,
+    enabled: bool,
+) -> (String, Vec<String>) {
+    if !enabled {
+        return (program, args);
+    }
+
+    let Some(flag) = dangerous_flag_for_program(&program) else {
+        return (program, args);
+    };
+    if args.iter().any(|arg| arg == flag) {
+        return (program, args);
+    }
+
+    args.insert(0, flag.to_string());
+    (program, args)
+}
+
 /// Resume supervision for a running phase/session without relaunching executor.
 pub fn resume_phase(
     target: &str,
@@ -92,9 +128,14 @@ pub fn resume_phase(
 
     let tier2_config = if project_config.supervisor.enabled {
         let system_prompt = crate::tier2::load_project_docs(&resume.execution_root);
+        let (supervisor_program, supervisor_args) = apply_dangerous_mode_wrapper(
+            project_config.supervisor.program.clone(),
+            project_config.supervisor.args.clone(),
+            project_config.dangerous_mode.enabled,
+        );
         Some(Tier2Config {
-            program: project_config.supervisor.program.clone(),
-            args: project_config.supervisor.args.clone(),
+            program: supervisor_program,
+            args: supervisor_args,
             timeout: Duration::from_secs(project_config.supervisor.timeout_secs),
             system_prompt: Some(system_prompt),
             trace_io: project_config.supervisor.trace_io,
@@ -527,11 +568,19 @@ pub fn run_phase(
     let policy_engine = PolicyEngine::new(policy_tier, project_config.policy.auto_answer.clone());
 
     // 8. Get spawn config from adapter
-    let spawn_config = adapter.spawn_config(&launch_context.prompt, &execution_root);
+    let mut spawn_config = adapter.spawn_config(&launch_context.prompt, &execution_root);
+    let (program, args) = apply_dangerous_mode_wrapper(
+        spawn_config.program,
+        spawn_config.args,
+        project_config.dangerous_mode.enabled,
+    );
+    spawn_config.program = program;
+    spawn_config.args = args;
 
     execution_log.log(LogEvent::AgentLaunched {
         agent: adapter.name().to_string(),
         program: spawn_config.program.clone(),
+        args: spawn_config.args.clone(),
         work_dir: spawn_config.work_dir.clone(),
     })?;
 
@@ -542,9 +591,14 @@ pub fn run_phase(
     // Load project docs for Tier 2 supervisor context
     let tier2_config = if project_config.supervisor.enabled {
         let system_prompt = crate::tier2::load_project_docs(&execution_root);
+        let (supervisor_program, supervisor_args) = apply_dangerous_mode_wrapper(
+            project_config.supervisor.program.clone(),
+            project_config.supervisor.args.clone(),
+            project_config.dangerous_mode.enabled,
+        );
         Some(Tier2Config {
-            program: project_config.supervisor.program.clone(),
-            args: project_config.supervisor.args.clone(),
+            program: supervisor_program,
+            args: supervisor_args,
             timeout: Duration::from_secs(project_config.supervisor.timeout_secs),
             system_prompt: Some(system_prompt),
             trace_io: project_config.supervisor.trace_io,
@@ -1035,6 +1089,10 @@ fn build_phase_prompt(
         project_config.supervisor.args.join(", ")
     ));
     prompt.push_str(&format!(
+        "dangerous_mode.enabled: {}\n",
+        project_config.dangerous_mode.enabled
+    ));
+    prompt.push_str(&format!(
         "supervisor.timeout_secs: {}\n",
         project_config.supervisor.timeout_secs
     ));
@@ -1303,6 +1361,7 @@ mod tests {
         assert!(snapshot.prompt.contains("claim.agent_name: zinc-ivory"));
         assert!(snapshot.prompt.contains("defaults.agent: claude"));
         assert!(snapshot.prompt.contains("effective.policy: observe"));
+        assert!(snapshot.prompt.contains("dangerous_mode.enabled: false"));
     }
 
     #[test]
@@ -1419,6 +1478,75 @@ mod tests {
             Some("zinc-ivory")
         );
         assert!(normalize_claim_agent_name("   ").is_none());
+    }
+
+    #[test]
+    fn apply_dangerous_mode_wrapper_disabled_is_passthrough() {
+        let (program, args) = apply_dangerous_mode_wrapper(
+            "claude".to_string(),
+            vec!["--prompt".to_string(), "task".to_string()],
+            false,
+        );
+        assert_eq!(program, "claude");
+        assert_eq!(args, vec!["--prompt", "task"]);
+    }
+
+    #[test]
+    fn apply_dangerous_mode_wrapper_adds_claude_flag() {
+        let (program, args) = apply_dangerous_mode_wrapper(
+            "/usr/local/bin/claude".to_string(),
+            vec!["--prompt".to_string(), "task".to_string()],
+            true,
+        );
+        assert_eq!(program, "/usr/local/bin/claude");
+        assert_eq!(
+            args,
+            vec![
+                CLAUDE_DANGEROUS_FLAG.to_string(),
+                "--prompt".to_string(),
+                "task".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_dangerous_mode_wrapper_adds_codex_flag() {
+        let (program, args) = apply_dangerous_mode_wrapper(
+            "codex".to_string(),
+            vec!["Launch context".to_string()],
+            true,
+        );
+        assert_eq!(program, "codex");
+        assert_eq!(
+            args,
+            vec![
+                CODEX_DANGEROUS_FLAG.to_string(),
+                "Launch context".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_dangerous_mode_wrapper_does_not_duplicate_flag() {
+        let (program, args) = apply_dangerous_mode_wrapper(
+            "codex".to_string(),
+            vec![
+                CODEX_DANGEROUS_FLAG.to_string(),
+                "Launch context".to_string(),
+            ],
+            true,
+        );
+        assert_eq!(program, "codex");
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], CODEX_DANGEROUS_FLAG);
+    }
+
+    #[test]
+    fn apply_dangerous_mode_wrapper_ignores_unknown_program() {
+        let (program, args) =
+            apply_dangerous_mode_wrapper("aider".to_string(), vec!["task".to_string()], true);
+        assert_eq!(program, "aider");
+        assert_eq!(args, vec!["task"]);
     }
 
     #[test]

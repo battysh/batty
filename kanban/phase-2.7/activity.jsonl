@@ -11,3 +11,7 @@
 {"timestamp":"2026-02-22T00:28:50.478038641-05:00","action":"move","task_id":3,"detail":"backlog -\u003e in-progress"}
 {"timestamp":"2026-02-22T00:33:17.080056963-05:00","action":"edit","task_id":3,"detail":"Implement supervisor pause/resume hotkeys"}
 {"timestamp":"2026-02-22T00:33:29.609777819-05:00","action":"move","task_id":3,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T00:33:54.994600328-05:00","action":"claim","task_id":5,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T00:33:54.994818335-05:00","action":"move","task_id":5,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T00:37:41.656289573-05:00","action":"edit","task_id":5,"detail":"Support dangerous-mode wrappers for claude and codex"}
+{"timestamp":"2026-02-22T00:37:53.415026263-05:00","action":"move","task_id":5,"detail":"in-progress -\u003e done"}

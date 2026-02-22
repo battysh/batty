@@ -89,6 +89,10 @@ fn default_detector_idle_input_fallback() -> bool {
     true
 }
 
+fn default_dangerous_mode_enabled() -> bool {
+    false
+}
+
 impl Default for Defaults {
     fn default() -> Self {
         Self {
@@ -149,6 +153,20 @@ impl Default for DetectorSettings {
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DangerousModeConfig {
+    #[serde(default = "default_dangerous_mode_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for DangerousModeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_dangerous_mode_enabled(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct ProjectConfig {
     #[serde(default)]
@@ -160,6 +178,8 @@ pub struct ProjectConfig {
     pub supervisor: SupervisorConfig,
     #[serde(default)]
     pub detector: DetectorSettings,
+    #[serde(default)]
+    pub dangerous_mode: DangerousModeConfig,
 }
 
 impl ProjectConfig {
@@ -215,6 +235,7 @@ mod tests {
         assert_eq!(config.detector.answer_cooldown_millis, 1000);
         assert!(config.detector.unknown_request_fallback);
         assert!(config.detector.idle_input_fallback);
+        assert!(!config.dangerous_mode.enabled);
     }
 
     #[test]
@@ -238,6 +259,9 @@ silence_timeout_secs = 5
 answer_cooldown_millis = 1500
 unknown_request_fallback = true
 idle_input_fallback = true
+
+[dangerous_mode]
+enabled = true
 "#;
         let config: ProjectConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.defaults.agent, "codex");
@@ -255,6 +279,7 @@ idle_input_fallback = true
         assert_eq!(config.detector.answer_cooldown_millis, 1500);
         assert!(config.detector.unknown_request_fallback);
         assert!(config.detector.idle_input_fallback);
+        assert!(config.dangerous_mode.enabled);
     }
 
     #[test]
@@ -269,6 +294,7 @@ agent = "aider"
         assert_eq!(config.defaults.max_retries, 3);
         assert!(config.detector.unknown_request_fallback);
         assert!(config.detector.idle_input_fallback);
+        assert!(!config.dangerous_mode.enabled);
     }
 
     #[test]
