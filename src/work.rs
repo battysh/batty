@@ -478,7 +478,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let config = ProjectConfig::default();
 
-        let result = run_phase("nonexistent", &config, "claude", None, false, false, tmp.path());
+        let result = run_phase(
+            "nonexistent",
+            &config,
+            "claude",
+            None,
+            false,
+            false,
+            tmp.path(),
+        );
         assert!(result.is_err());
         assert!(
             result

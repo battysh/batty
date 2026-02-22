@@ -24,6 +24,71 @@ use tracing::{info, warn};
 use cli::{Cli, Command};
 use config::ProjectConfig;
 
+fn sanitize_phase_for_worktree_prefix(phase: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+
+    for c in phase.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+
+    let slug = out.trim_matches('-').to_string();
+    if slug.is_empty() {
+        "phase".to_string()
+    } else {
+        slug
+    }
+}
+
+fn parse_run_number(name: &str, prefix: &str) -> Option<u32> {
+    let suffix = name.strip_prefix(prefix)?;
+    if suffix.len() < 3 || !suffix.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    suffix.parse().ok()
+}
+
+fn resolve_latest_worktree_board_dir(project_root: &Path, phase: &str) -> Result<Option<PathBuf>> {
+    let worktrees_root = project_root.join(".batty").join("worktrees");
+    if !worktrees_root.is_dir() {
+        return Ok(None);
+    }
+
+    let phase_slug = sanitize_phase_for_worktree_prefix(phase);
+    let prefix = format!("{phase_slug}-run-");
+    let mut best: Option<(u32, PathBuf)> = None;
+
+    for entry in std::fs::read_dir(&worktrees_root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(run) = parse_run_number(&name, &prefix) else {
+            continue;
+        };
+        let board_dir = path.join("kanban").join(phase);
+        if !board_dir.is_dir() {
+            continue;
+        }
+
+        match &best {
+            Some((best_run, _)) if run <= *best_run => {}
+            _ => best = Some((run, board_dir)),
+        }
+    }
+
+    Ok(best.map(|(_, dir)| dir))
+}
+
 fn resolve_board_dir(project_root: &Path, phase: &str) -> Result<PathBuf> {
     let session = tmux::session_name(phase);
     if tmux::session_exists(&session) {
@@ -39,13 +104,17 @@ fn resolve_board_dir(project_root: &Path, phase: &str) -> Result<PathBuf> {
         );
     }
 
+    if let Some(worktree_board) = resolve_latest_worktree_board_dir(project_root, phase)? {
+        return Ok(worktree_board);
+    }
+
     let fallback = project_root.join("kanban").join(phase);
     if fallback.is_dir() {
         return Ok(fallback);
     }
 
     anyhow::bail!(
-        "phase board not found for '{}': checked active run and fallback path {}",
+        "phase board not found for '{}': checked active tmux run, latest worktree run, and fallback path {}",
         phase,
         fallback.display()
     );
@@ -209,4 +278,57 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_phase_for_worktree_prefix_matches_convention() {
+        assert_eq!(sanitize_phase_for_worktree_prefix("phase-2.5"), "phase-2-5");
+        assert_eq!(sanitize_phase_for_worktree_prefix("Phase 7"), "phase-7");
+        assert_eq!(sanitize_phase_for_worktree_prefix("///"), "phase");
+    }
+
+    #[test]
+    fn resolve_latest_worktree_board_dir_prefers_highest_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        std::fs::create_dir_all(
+            root.join(".batty")
+                .join("worktrees")
+                .join("phase-2-5-run-001")
+                .join("kanban")
+                .join("phase-2.5"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(
+            root.join(".batty")
+                .join("worktrees")
+                .join("phase-2-5-run-003")
+                .join("kanban")
+                .join("phase-2.5"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(
+            root.join(".batty")
+                .join("worktrees")
+                .join("phase-2-5-run-002"),
+        )
+        .unwrap();
+
+        let resolved = resolve_latest_worktree_board_dir(root, "phase-2.5")
+            .unwrap()
+            .unwrap();
+        assert!(resolved.ends_with("phase-2-5-run-003/kanban/phase-2.5"));
+    }
+
+    #[test]
+    fn resolve_latest_worktree_board_dir_returns_none_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resolved = resolve_latest_worktree_board_dir(tmp.path(), "phase-2.5").unwrap();
+        assert!(resolved.is_none());
+    }
 }
