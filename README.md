@@ -59,6 +59,12 @@ If you want to force a new run worktree instead of resuming:
 batty work phase-2.4 --new
 ```
 
+If you want to inspect the exact composed launch context without starting the executor:
+
+```sh
+batty work phase-2.4 --dry-run
+```
+
 Example `.batty/config.toml`:
 
 ```toml

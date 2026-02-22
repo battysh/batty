@@ -42,6 +42,10 @@ pub enum Command {
         #[arg(long, default_value_t = false)]
         new: bool,
 
+        /// Show composed launch context and exit without running the executor
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+
         /// Internal: keep work process in foreground (skip auto-backgrounding).
         #[arg(long, hide = true, default_value_t = false)]
         foreground: bool,

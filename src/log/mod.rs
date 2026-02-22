@@ -83,6 +83,16 @@ pub enum LogEvent {
         program: String,
         work_dir: String,
     },
+    /// Launch context was composed and snapshotted before execution.
+    LaunchContextSnapshot {
+        phase: String,
+        agent: String,
+        instructions_path: String,
+        phase_doc_path: String,
+        config_source: String,
+        snapshot_path: String,
+        snapshot: String,
+    },
     /// A prompt was detected in agent output.
     PromptDetected { kind: String, matched_text: String },
     /// An auto-response was sent to the agent.
@@ -273,6 +283,15 @@ mod tests {
                 agent: "claude".to_string(),
                 program: "claude".to_string(),
                 work_dir: "/work".to_string(),
+            },
+            LogEvent::LaunchContextSnapshot {
+                phase: "phase-2.5".to_string(),
+                agent: "claude-code".to_string(),
+                instructions_path: "CLAUDE.md".to_string(),
+                phase_doc_path: "kanban/phase-2.5/PHASE.md".to_string(),
+                config_source: ".batty/config.toml".to_string(),
+                snapshot_path: ".batty/logs/phase-2.5-ctx.log".to_string(),
+                snapshot: "context body".to_string(),
             },
             LogEvent::PromptDetected {
                 kind: "Permission".to_string(),
