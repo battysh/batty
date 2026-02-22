@@ -1,10 +1,12 @@
 ---
 id: 6
 title: Claude Code adapter
-status: backlog
+status: done
 priority: critical
 created: 2026-02-21T18:40:22.966151562-05:00
-updated: 2026-02-21T18:40:22.966151562-05:00
+updated: 2026-02-21T19:23:26.343082466-05:00
+started: 2026-02-21T19:22:02.286053773-05:00
+completed: 2026-02-21T19:23:26.343082175-05:00
 tags:
     - core
 depends_on:
