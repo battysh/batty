@@ -1,6 +1,6 @@
 version: 10
 board:
-    name: phase-3-policy-hardening
+    name: phase-3a-sequencer-and-human-review
 tasks_dir: tasks
 statuses:
     - name: backlog
@@ -44,4 +44,4 @@ tui:
           color: "208"
         - after: 168h
           color: "196"
-next_id: 6
+next_id: 9

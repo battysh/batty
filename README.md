@@ -1,160 +1,163 @@
 # Batty
 
-**Use the best agents. Batty controls execution.**
+**A workflow model for building with agents.**
 
-Batty is a hierarchical agent command system for software development. It reads your project board, dispatches tasks to coding agents, supervises their work, gates on tests, and merges results — while you watch, intervene, or let it run.
+Batty reads your project board, launches coding agents in tmux, supervises their work, auto-answers routine prompts, escalates real questions, gates on tests, and merges results.
 
-## How It Works
-
-```
-You (human) ──→ see everything, intervene anytime
-    │
-    ▼
-Director (batty work all) ──→ reads board, picks tasks, dispatches
-    │
-    ├── Supervisor #1 ──→ spawns agent, watches PTY, auto-answers, runs tests
-    │       └── Claude Code ──→ writes code in worktree /task-3
-    │
-    ├── Supervisor #2 ──→ spawns agent, watches PTY, auto-answers, runs tests
-    │       └── Codex CLI ──→ writes code in worktree /task-7
-    │
-    └── Supervisor #3 ──→ ...
-            └── ...
-    │
-    ▼
-kanban-md (Markdown files) ──→ single source of truth
-```
-
-Three layers: **Director** picks work. **Supervisors** control execution. **Executors** (BYO agents) write code. You sit above all three.
+You design phases. Batty executes them.
 
 ## Quick Start
 
-Work on a single task:
+### Install + Run (Local Dev)
+
+From this repository root:
 
 ```sh
-batty work 3
+# 1) Run without installing globally
+cargo run -- config
+cargo run -- work phase-2.4
 ```
 
-This reads task #3 from your kanban board, creates a worktree, launches Claude Code with the task description, supervises the session (auto-answers routine prompts, runs tests on completion), and merges the result to main.
+By default, `work` starts tmux detached and backgrounds Batty supervision.
+Use `--attach` to immediately enter the tmux session in the same terminal.
+Each run also gets an isolated git worktree branch like `phase-2-4-run-001`.
 
-You see the full interactive agent session. Type into it anytime. Batty handles the boring parts.
-
-Work through the entire board:
+Optional global install:
 
 ```sh
-batty work all
+# 2) Install the batty binary to ~/.cargo/bin
+cargo install --path .
+
+# 3) Verify and run
+batty config
+batty work phase-2.4
 ```
 
-Batty picks tasks by priority, respects dependencies, and works through them sequentially. Point it at your project and walk away — or watch and steer.
-
-Run tasks in parallel:
+If `batty` is not found after install, add Cargo bin to your PATH:
 
 ```sh
-batty work all --parallel 3
+echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
 ```
 
-Three agents, three worktrees, three panes. Batty manages the merge queue so they land cleanly on main.
-
-## Core Features
-
-### Task-Driven Execution
-
-Tasks live as Markdown files managed by [kanban-md](https://github.com/antopolskiy/kanban-md). Batty reads them, executes them, and updates their status. The kanban board is your command and control center.
+If you want to force Codex for executor on a run:
 
 ```sh
-kanban-md create "Fix auth token refresh" --priority high
-batty work 1    # read task, create worktree, launch agent, supervise, test, merge
+batty work phase-2.4 --agent codex
 ```
 
-### Interactive Supervision
+If you want immediate interactive mode:
 
-Agents run in interactive PTY sessions — not hidden behind a progress bar. You see exactly what Claude or Codex is doing. Batty supervises on top:
+```sh
+batty work phase-2.4 --attach
+```
 
-- Auto-answers routine prompts ("Continue? [y/n]" → yes)
-- Auto-approves safe tool calls per policy
-- Passes real questions through to you
-- Detects stuck states and retries
-
-### Policy Tiers
-
-Every automated action flows through explicit policy:
-
-| Tier | Behavior |
-|---|---|
-| `observe` | Log only — Batty watches, you drive |
-| `suggest` | Show suggestion, you confirm |
-| `act` | Auto-respond to routine prompts, escalate unknowns |
-
-Policies are defined per-project in `.batty/config.toml`:
+Example `.batty/config.toml`:
 
 ```toml
 [defaults]
-agent = "claude"
+agent = "codex"
 policy = "act"
-dod = "cargo test --workspace"
-max_retries = 3
+
+[supervisor]
+enabled = true
+program = "claude"
+args = ["-p", "--output-format", "text"]
+timeout_secs = 60
+trace_io = true
+
+[detector]
+silence_timeout_secs = 3
+answer_cooldown_millis = 1000
+unknown_request_fallback = true
 
 [policy.auto_answer]
 "Continue? [y/n]" = "y"
 ```
 
-### Test-Gated Completion
+Reconnect to an existing session:
 
-Tasks aren't "done" until tests pass. When an agent signals completion, Batty runs your definition-of-done command. Tests pass → commit → rebase on main → merge. Tests fail → feed failure output back to the agent for retry.
+```sh
+batty attach phase-2.4
+```
 
-Completion is measured, not guessed.
+### Minimal Command
 
-### Audit Trail
+```sh
+batty work phase-2.4
+```
 
-Every automated decision — prompt answers, test runs, commits, merges — is logged to a structured JSON timeline. Inspect any autonomous decision after the run.
+A tmux session opens. The executor (Claude Code, Codex, Aider) works through the phase board — picking tasks, implementing, testing, committing. Batty auto-answers routine prompts and shows everything in the orchestrator pane.
+If the phase branch is merged back to the base branch, Batty cleans up the run worktree automatically; otherwise it keeps the worktree for inspection/rework.
 
-### Agent-Agnostic
+```sh
+batty work all                  # chain phases sequentially
+batty work all --parallel 3     # three phases in parallel
+batty attach phase-2.4          # reconnect to a running session
+```
 
-Batty doesn't ship its own AI. Swap Claude Code for Codex CLI for Aider without changing your workflow. Agents are first-class, never locked in.
+## What You See
 
-### Git Worktree Isolation
+```
+┌── tmux: batty-phase-1 ──────────────────────────┐
+│                                                   │
+│  Claude Code working on task #7...                │
+│  Creating src/supervisor/mod.rs                   │
+│  Running cargo test... 14 passed                  │
+│                                                   │
+├───────────────────────────────────────────────────┤
+│  [batty] ✓ auto-answered: "Continue?" → y          │
+│  [batty] ? supervisor thinking: "async or sync?"   │
+│  [batty] ✓ supervisor answered → async             │
+├───────────────────────────────────────────────────┤
+│ [batty] phase-1 | task #8 | 7/11 done | ✓ active │
+└───────────────────────────────────────────────────┘
+```
 
-Every task runs in its own worktree. No branch conflicts. No dirty working directories. Batty creates the worktree, the agent works in it, and Batty merges it back cleanly.
+Type into the executor pane anytime — human input always takes priority. Detach and re-attach. Session survives disconnect.
+
+## How It Works
+
+Three layers:
+
+- **Director** — reviews completed phases → merge / rework / escalate
+- **Supervisor** — watches executor, answers questions using project context
+- **Executor** — BYO agent (Claude Code, Codex, Aider) working through the board
+
+Two-tier prompt handling:
+- **Tier 1** — regex match → instant auto-answer (~70-80% of prompts)
+- **Tier 2** — supervisor agent with project context → intelligent answer
+- **Unknown fallback** — if output goes silent and no regex matches, Batty asks the supervisor anyway
+
+Everything runs in tmux. Output captured via `pipe-pane`. Answers injected via `send-keys`. Status in tmux status bar. Events in orchestrator pane.
 
 ## Architecture
 
-Batty is built progressively — the CLI agent runner works today in any terminal. The GUI terminal shell comes later.
-
 ```
 ┌─────────────────────────────────────────┐
-│  Batty Terminal (Phase 4+)              │
-│  Tauri v2 + Solid.js + xterm.js        │
+│  tmux                                   │
+│  Panes · pipe-pane · send-keys          │
+│  Status bar · Session persistence       │
 ├─────────────────────────────────────────┤
-│  Rust Core (Phase 1)                    │
-│  portable-pty · tokio · clap            │
-│  Agent adapter layer                    │
-│  PTY supervision + prompt detection     │
-│  Policy engine                          │
-│  Test gate runner                       │
-│  Worktree lifecycle manager             │
-│  Execution logger                       │
+│  Batty (Rust)                           │
+│  Event extraction · Prompt handling     │
+│  Policy engine · Test gates · Logging   │
 ├─────────────────────────────────────────┤
-│  kanban-md (external)                   │
-│  Markdown task files with YAML          │
-│  frontmatter — the command center       │
+│  kanban-md                              │
+│  Markdown task boards — command center  │
 └─────────────────────────────────────────┘
 ```
 
 ## Philosophy
 
-- **Compose, don't monolith.** Integrate best-in-class CLI tools. Build only the orchestration layer.
-- **Markdown as backend.** All state is human-readable, agent-readable, git-versioned Markdown files.
-- **Agents are processes, not features.** Real interactive PTY sessions. Transparency is non-negotiable.
-- **Earn autonomy progressively.** Start supervised. Prove reliability. Increase automation.
-- **CLI-first, GUI-optional.** Works in any terminal today. Rich panes come later.
-
-See `.planning/dev-philosophy.md` for the full development philosophy.
+- **Compose, don't monolith.** tmux + kanban-md + BYO agents. Build only the orchestration layer.
+- **Markdown as backend.** All state is human-readable, git-versioned files.
+- **Earn autonomy progressively.** observe → suggest → act. Trust is earned, not assumed.
+- **Ship fast.** Use existing tools. Validate with real users.
 
 ## Project Status
 
-Building in public. Currently in Phase 1 — the core agent runner (`batty work`).
-
-See `.planning/roadmap.md` for the full roadmap and `.planning/architecture.md` for the hierarchical agent command architecture.
+Phase 1 complete. Phase 2 complete. Phase 2.4 (supervision harness validation) is next. Phase 2.5 (runtime hardening + dogfood) follows.
 
 ## Links
 

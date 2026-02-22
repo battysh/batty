@@ -11,9 +11,10 @@
 //! The user sees the executor's live session in tmux and can type directly.
 //! Batty supervises transparently in the background.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -23,7 +24,7 @@ use crate::agent::SpawnConfig;
 use crate::detector::{DetectorConfig, DetectorEvent, PromptDetector};
 use crate::events::{EventBuffer, PipeWatcher};
 use crate::policy::{Decision, PolicyEngine};
-use crate::prompt::{PromptKind, PromptPatterns};
+use crate::prompt::{DetectedPrompt, PromptKind, PromptPatterns};
 use crate::tier2::{self, Tier2Config, Tier2Result};
 use crate::tmux;
 
@@ -56,6 +57,8 @@ pub struct OrchestratorConfig {
     /// Delay before Tier 1 auto-answer injection (allows human to type first).
     /// Set to Duration::ZERO to disable the delay. Default: 1 second.
     pub answer_delay: Duration,
+    /// Auto-attach to the tmux session in the current terminal.
+    pub auto_attach: bool,
 }
 
 impl OrchestratorConfig {
@@ -114,13 +117,20 @@ impl LogFileObserver {
             let _ = writeln!(f, "{line}");
         }
     }
+
+    fn display_response(response: &str) -> String {
+        if response.trim().is_empty() {
+            "<ENTER>".to_string()
+        } else {
+            response.to_string()
+        }
+    }
 }
 
 impl OrchestratorObserver for LogFileObserver {
     fn on_auto_answer(&mut self, prompt: &str, response: &str) {
-        self.append(&format!(
-            "[batty] ✓ auto-answered: \"{prompt}\" → {response}"
-        ));
+        let shown = Self::display_response(response);
+        self.append(&format!("[batty] ✓ auto-answered: \"{prompt}\" → {shown}"));
     }
 
     fn on_escalate(&mut self, prompt: &str) {
@@ -128,8 +138,9 @@ impl OrchestratorObserver for LogFileObserver {
     }
 
     fn on_suggest(&mut self, prompt: &str, response: &str) {
+        let shown = Self::display_response(response);
         self.append(&format!(
-            "[batty] ? suggestion: respond to \"{prompt}\" with \"{response}\""
+            "[batty] ? suggestion: respond to \"{prompt}\" with \"{shown}\""
         ));
     }
 
@@ -165,6 +176,38 @@ impl StatusIndicator {
             Self::NeedsInput => "⚠",
             Self::Failure => "✗",
         }
+    }
+}
+
+fn display_response(response: &str) -> String {
+    if response.trim().is_empty() {
+        "<ENTER>".to_string()
+    } else {
+        response.to_string()
+    }
+}
+
+fn preview_for_log(text: &str, max_chars: usize) -> String {
+    let one_line = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let compact = one_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max_chars {
+        compact
+    } else {
+        let truncated: String = compact.chars().take(max_chars).collect();
+        format!("{truncated}...")
+    }
+}
+
+fn supervisor_cmd_for_log(config: &Tier2Config) -> String {
+    if config.args.is_empty() {
+        config.program.clone()
+    } else {
+        format!("{} {}", config.program, config.args.join(" "))
     }
 }
 
@@ -376,10 +419,7 @@ impl StuckDetector {
                 return (
                     StuckState::Looping,
                     StuckAction::Escalate {
-                        reason: format!(
-                            "executor stuck in loop after {} nudges",
-                            self.nudge_count
-                        ),
+                        reason: format!("executor stuck in loop after {} nudges", self.nudge_count),
                     },
                 );
             }
@@ -473,8 +513,15 @@ pub fn run(
 
     observer.on_event(&format!("● session '{}' created", session));
 
+    // Resolve the executor pane target immediately. We must keep supervision
+    // pinned to this pane even if focus changes to log panes.
+    let executor_pane = tmux::pane_id(&session)?;
+    if let Err(e) = tmux::tmux_set(&session, "remain-on-exit", "on") {
+        warn!(error = %e, "failed to enable remain-on-exit");
+    }
+
     // 3. Set up pipe-pane
-    tmux::setup_pipe_pane(&session, &pipe_log)?;
+    tmux::setup_pipe_pane(&executor_pane, &pipe_log)?;
     observer.on_event(&format!("● pipe-pane → {}", pipe_log.display()));
 
     // 4. Set up status bar
@@ -485,8 +532,42 @@ pub fn run(
     // 5. Set up orchestrator log pane
     let orch_log = log_dir.join("orchestrator.log");
     if config.log_pane {
-        setup_log_pane(&session, &orch_log, config.log_pane_height_pct)?;
+        setup_log_pane(
+            &session,
+            &executor_pane,
+            &orch_log,
+            config.log_pane_height_pct,
+        )?;
         observer.on_event("● log pane created");
+    }
+
+    // 5.5 Optional auto-attach
+    if config.auto_attach {
+        if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
+            observer.on_event("● auto-attach requested");
+            let session_for_attach = session.clone();
+            std::thread::spawn(move || {
+                match std::process::Command::new("tmux")
+                    .args(["attach-session", "-t", &session_for_attach])
+                    .status()
+                {
+                    Ok(status) if status.success() => {}
+                    Ok(status) => {
+                        warn!(
+                            session = %session_for_attach,
+                            status = ?status,
+                            "auto-attach exited non-zero"
+                        );
+                    }
+                    Err(error) => {
+                        warn!(session = %session_for_attach, error = %error, "auto-attach failed");
+                    }
+                }
+            });
+        } else {
+            warn!("auto-attach requested but stdin/stdout is not a TTY; skipping");
+            observer.on_event("⚠ auto-attach skipped (no TTY)");
+        }
     }
 
     // 6. Initialize components
@@ -500,7 +581,8 @@ pub fn run(
     status_bar.update(StatusIndicator::Ok, "supervising")?;
 
     // 7. Supervision loop
-    let mut last_line = String::new();
+    let mut last_event_line = String::new();
+    let mut last_pane_line = String::new();
     let result = loop {
         if stop.load(Ordering::Relaxed) {
             observer.on_event("● stopped by signal");
@@ -509,7 +591,12 @@ pub fn run(
         }
 
         // Check if session still exists
-        if !tmux::session_exists(&session) {
+        let executor_alive = if tmux::pane_exists(&executor_pane) {
+            !tmux::pane_dead(&executor_pane).unwrap_or(false)
+        } else {
+            false
+        };
+        if !executor_alive {
             observer.on_event("✓ executor exited");
             status_bar.force_update(StatusIndicator::Ok, "completed")?;
             break OrchestratorResult::Completed;
@@ -523,7 +610,10 @@ pub fn run(
                     // Feed output to stuck detector for loop detection and progress tracking
                     if let Some(ref mut stuck) = stuck_detector {
                         let snapshot = buffer.snapshot();
-                        for evt in snapshot.iter().skip(snapshot.len().saturating_sub(event_count)) {
+                        for evt in snapshot
+                            .iter()
+                            .skip(snapshot.len().saturating_sub(event_count))
+                        {
                             let line = format!("{evt:?}");
                             stuck.on_output(&line);
                             // Progress events: task completed, command ran, file changes
@@ -548,20 +638,83 @@ pub fn run(
         let events = buffer.snapshot();
         if let Some(last_event) = events.last() {
             let line = format!("{last_event:?}");
-            if line != last_line {
-                last_line = line;
+            if line != last_event_line {
+                last_event_line = line;
             }
         }
 
         // Also check capture-pane for the most current visible content
         // This catches prompts that pipe-pane hasn't flushed yet
-        if let Ok(pane_content) = tmux::capture_pane(&session) {
+        if let Ok(pane_content) = tmux::capture_pane(&executor_pane) {
             if let Some(last) = pane_content.lines().rev().find(|l| !l.trim().is_empty()) {
-                let event = detector.on_output(last);
-                if let Some(DetectorEvent::PromptDetected(ref prompt)) = event {
+                // Only treat as new output if visible line changed; otherwise we
+                // keep silence timing intact for unknown-request fallback.
+                if last != last_pane_line {
+                    last_pane_line = last.to_string();
+                    let event = detector.on_output(last);
+                    if let Some(DetectorEvent::PromptDetected(ref prompt)) = event {
+                        handle_prompt(
+                            prompt,
+                            &executor_pane,
+                            &config.policy,
+                            &mut detector,
+                            &mut *observer,
+                            config.tier2.as_ref(),
+                            &buffer,
+                            &mut status_bar,
+                            config.answer_delay,
+                        )?;
+                    }
+                }
+            }
+        }
+
+        // Run the tick for silence-based detection
+        match detector.tick() {
+            DetectorEvent::PromptDetected(ref prompt) => {
+                handle_prompt(
+                    prompt,
+                    &executor_pane,
+                    &config.policy,
+                    &mut detector,
+                    &mut *observer,
+                    config.tier2.as_ref(),
+                    &buffer,
+                    &mut status_bar,
+                    config.answer_delay,
+                )?;
+            }
+            DetectorEvent::UnknownRequest { last_line, .. } => {
+                debug!(last_line = %last_line, "unknown request fallback triggered");
+                if config.tier2.is_some() {
+                    // Generic fallback: no known pattern, but executor appears idle
+                    // and potentially waiting for user input. Ask supervisor agent.
+                    let pane_excerpt = tmux::capture_pane(&executor_pane)
+                        .map(|s| {
+                            s.lines()
+                                .rev()
+                                .take(20)
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                        .unwrap_or_default();
+
+                    let synthetic_prompt = DetectedPrompt {
+                        kind: PromptKind::Question {
+                            detail: last_line.clone(),
+                        },
+                        matched_text: format!(
+                            "Executor appears to be waiting for input, but no known prompt pattern matched.\nLast visible line: {last_line}\n\nVisible pane excerpt:\n{pane_excerpt}\n\nIf user input is required, provide the exact short response to send. If unclear, respond with ESCALATE: <reason>."
+                        ),
+                    };
+
+                    observer.on_event("? supervisor fallback: unknown request");
                     handle_prompt(
-                        prompt,
-                        &session,
+                        &synthetic_prompt,
+                        &executor_pane,
                         &config.policy,
                         &mut detector,
                         &mut *observer,
@@ -572,23 +725,6 @@ pub fn run(
                     )?;
                 }
             }
-        }
-
-        // Run the tick for silence-based detection
-        match detector.tick() {
-            DetectorEvent::PromptDetected(ref prompt) => {
-                handle_prompt(
-                    prompt,
-                    &session,
-                    &config.policy,
-                    &mut detector,
-                    &mut *observer,
-                    config.tier2.as_ref(),
-                    &buffer,
-                    &mut status_bar,
-                    config.answer_delay,
-                )?;
-            }
             DetectorEvent::Silence { last_line, .. } => {
                 debug!(last_line = %last_line, "silence detected");
             }
@@ -597,7 +733,11 @@ pub fn run(
 
         // Stuck detection
         if let Some(ref mut stuck) = stuck_detector {
-            let session_alive = tmux::session_exists(&session);
+            let session_alive = if tmux::pane_exists(&executor_pane) {
+                !tmux::pane_dead(&executor_pane).unwrap_or(false)
+            } else {
+                false
+            };
             let (state, action) = stuck.check(session_alive);
 
             match action {
@@ -607,7 +747,7 @@ pub fn run(
                     observer.on_event(&format!("⚠ stuck: nudging executor"));
                     status_bar.force_update(StatusIndicator::Failure, "stuck — nudging")?;
 
-                    if let Err(e) = tmux::send_keys(&session, message, true) {
+                    if let Err(e) = tmux::send_keys(&executor_pane, message, true) {
                         warn!(error = %e, "failed to send nudge");
                     }
                     stuck.nudge_sent();
@@ -639,7 +779,12 @@ pub fn run(
 ///
 /// Creates a vertical split at the bottom of the session showing `tail -f`
 /// on the orchestrator log file. The executor pane stays focused (selected).
-fn setup_log_pane(session: &str, log_path: &Path, height_pct: u32) -> Result<()> {
+fn setup_log_pane(
+    session: &str,
+    executor_pane: &str,
+    log_path: &Path,
+    height_pct: u32,
+) -> Result<()> {
     // Ensure log file exists (tail -f needs it)
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -676,9 +821,9 @@ fn setup_log_pane(session: &str, log_path: &Path, height_pct: u32) -> Result<()>
         return Ok(()); // Non-fatal — status bar still works
     }
 
-    // Select the executor pane (pane 0) so the user types there, not in the log pane
+    // Re-select the executor pane so capture/send-keys stay on the executor.
     let _ = std::process::Command::new("tmux")
-        .args(["select-pane", "-t", &format!("{session}:.0")])
+        .args(["select-pane", "-t", executor_pane])
         .output();
 
     info!(session = session, "orchestrator log pane created");
@@ -689,14 +834,16 @@ fn setup_log_pane(session: &str, log_path: &Path, height_pct: u32) -> Result<()>
 ///
 /// Compares the current last visible line against the original prompt text.
 /// If the pane content has changed (new lines after the prompt), the human typed.
-fn check_human_answered(session: &str, prompt_text: &str) -> bool {
-    if let Ok(pane_content) = tmux::capture_pane(session) {
+fn check_human_answered(executor_pane: &str, prompt_text: &str) -> bool {
+    if let Ok(pane_content) = tmux::capture_pane(executor_pane) {
         // If the last non-empty line no longer matches the prompt, human answered
         if let Some(last) = pane_content.lines().rev().find(|l| !l.trim().is_empty()) {
             let last_clean = crate::prompt::strip_ansi(last);
             let last_trimmed = last_clean.trim();
             // If the last line changed from the prompt, someone typed
-            return !last_trimmed.is_empty() && !prompt_text.contains(last_trimmed) && !last_trimmed.contains(prompt_text);
+            return !last_trimmed.is_empty()
+                && !prompt_text.contains(last_trimmed)
+                && !last_trimmed.contains(prompt_text);
         }
     }
     false
@@ -707,7 +854,7 @@ fn check_human_answered(session: &str, prompt_text: &str) -> bool {
 /// Returns true if the human answered during the delay, false if the delay
 /// expired without human input (safe to inject).
 fn wait_with_human_check(
-    session: &str,
+    executor_pane: &str,
     prompt_text: &str,
     delay: Duration,
     poll_interval: Duration,
@@ -718,7 +865,7 @@ fn wait_with_human_check(
 
     let start = Instant::now();
     while start.elapsed() < delay {
-        if check_human_answered(session, prompt_text) {
+        if check_human_answered(executor_pane, prompt_text) {
             return true; // Human answered
         }
         std::thread::sleep(poll_interval);
@@ -735,7 +882,7 @@ fn wait_with_human_check(
 /// thinking, the auto-answer is cancelled.
 fn handle_prompt(
     prompt: &crate::prompt::DetectedPrompt,
-    session: &str,
+    executor_pane: &str,
     policy: &PolicyEngine,
     detector: &mut PromptDetector,
     observer: &mut dyn OrchestratorObserver,
@@ -763,7 +910,12 @@ fn handle_prompt(
             info!(prompt = %prompt, response = %response, "Tier 1 auto-answer");
 
             // Wait for answer_delay, checking if human types first
-            if wait_with_human_check(session, prompt, answer_delay, Duration::from_millis(100)) {
+            if wait_with_human_check(
+                executor_pane,
+                prompt,
+                answer_delay,
+                Duration::from_millis(100),
+            ) {
                 info!("human override — cancelling auto-answer");
                 observer.on_event("→ human override — auto-answer cancelled");
                 status_bar.update(StatusIndicator::Action, "human override")?;
@@ -772,11 +924,14 @@ fn handle_prompt(
             }
 
             observer.on_auto_answer(prompt, response);
-            status_bar.update(StatusIndicator::Action, &format!("answered: {response}"))?;
+            status_bar.update(
+                StatusIndicator::Action,
+                &format!("answered: {}", display_response(response)),
+            )?;
 
             // Inject via tmux send-keys
-            tmux::send_keys(session, response, true)
-                .with_context(|| format!("failed to send-keys auto-answer to '{session}'"))?;
+            tmux::send_keys(executor_pane, response, true)
+                .with_context(|| format!("failed to send-keys auto-answer to '{executor_pane}'"))?;
 
             detector.answer_injected();
             status_bar.update(StatusIndicator::Ok, "supervising")?;
@@ -793,6 +948,16 @@ fn handle_prompt(
             if let Some(t2_config) = tier2_config {
                 observer.on_event("? supervisor thinking...");
                 status_bar.force_update(StatusIndicator::Thinking, "supervisor thinking...")?;
+                if t2_config.trace_io {
+                    observer.on_event(&format!(
+                        "? supervisor call → {}",
+                        supervisor_cmd_for_log(t2_config)
+                    ));
+                    observer.on_event(&format!(
+                        "? supervisor prompt → {}",
+                        preview_for_log(prompt, 220)
+                    ));
+                }
 
                 let event_summary = event_buffer.format_summary();
                 let context = tier2::compose_context(
@@ -800,11 +965,20 @@ fn handle_prompt(
                     prompt,
                     t2_config.system_prompt.as_deref(),
                 );
+                if t2_config.trace_io {
+                    observer.on_event(&format!("? supervisor context chars={}", context.len()));
+                }
 
                 match tier2::call_supervisor(t2_config, &context) {
                     Ok(Tier2Result::Answer { response }) => {
+                        if t2_config.trace_io {
+                            observer.on_event(&format!(
+                                "? supervisor reply ← {}",
+                                display_response(&response)
+                            ));
+                        }
                         // Check if human answered while Tier 2 was thinking
-                        if check_human_answered(session, prompt) {
+                        if check_human_answered(executor_pane, prompt) {
                             info!("human override — cancelling Tier 2 answer");
                             observer.on_event("→ human override — Tier 2 answer cancelled");
                             status_bar.update(StatusIndicator::Action, "human override")?;
@@ -814,26 +988,44 @@ fn handle_prompt(
 
                         info!(prompt = %prompt, response = %response, "Tier 2 answer");
                         observer.on_auto_answer(prompt, &response);
-                        status_bar.update(StatusIndicator::Action, &format!("T2: {response}"))?;
+                        status_bar.update(
+                            StatusIndicator::Action,
+                            &format!("T2: {}", display_response(&response)),
+                        )?;
 
-                        tmux::send_keys(session, &response, true).with_context(|| {
-                            format!("failed to send-keys Tier 2 answer to '{session}'")
+                        tmux::send_keys(executor_pane, &response, true).with_context(|| {
+                            format!("failed to send-keys Tier 2 answer to '{executor_pane}'")
                         })?;
 
                         detector.answer_injected();
                         status_bar.update(StatusIndicator::Ok, "supervising")?;
                     }
                     Ok(Tier2Result::Escalate { reason }) => {
+                        if t2_config.trace_io {
+                            observer.on_event(&format!(
+                                "? supervisor reply ← ESCALATE: {}",
+                                preview_for_log(&reason, 220)
+                            ));
+                        }
                         info!(reason = %reason, "Tier 2 escalated to human");
                         observer.on_escalate(&format!("{prompt} (supervisor: {reason})"));
                         status_bar.force_update(StatusIndicator::NeedsInput, "NEEDS INPUT")?;
                     }
                     Ok(Tier2Result::Failed { error }) => {
+                        if t2_config.trace_io {
+                            observer.on_event(&format!(
+                                "? supervisor error ← {}",
+                                preview_for_log(&error, 220)
+                            ));
+                        }
                         warn!(error = %error, "Tier 2 call failed");
                         observer.on_escalate(&format!("{prompt} (supervisor failed: {error})"));
                         status_bar.force_update(StatusIndicator::NeedsInput, "NEEDS INPUT")?;
                     }
                     Err(e) => {
+                        if t2_config.trace_io {
+                            observer.on_event(&format!("? supervisor error ← {}", e));
+                        }
                         warn!(error = %e, "Tier 2 error");
                         observer.on_escalate(&format!("{prompt} (supervisor error)"));
                         status_bar.force_update(StatusIndicator::NeedsInput, "NEEDS INPUT")?;
@@ -859,6 +1051,9 @@ mod tests {
     use crate::config::Policy;
     use crate::prompt::PromptPatterns;
     use std::collections::HashMap;
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
     /// Test observer that collects events.
@@ -902,6 +1097,457 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn write_script(path: &std::path::Path, content: &str) {
+        fs::write(path, content).unwrap();
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn harness_agent_script() -> &'static str {
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+out="${1:?missing output path}"
+timeout="${2:-2}"
+prompt_line="${3:-agent waiting for supervisor response}"
+echo "$prompt_line"
+if IFS= read -r -t "$timeout" line; then
+  printf "%s" "$line" > "$out"
+else
+  printf "__NO_INPUT__" > "$out"
+fi
+echo "agent done"
+"#
+    }
+
+    #[cfg(unix)]
+    fn harness_supervisor_script() -> &'static str {
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+mode="${1:?missing mode}"
+ctx_out="${2:?missing context output path}"
+context="${3:-}"
+printf "%s" "$context" > "$ctx_out"
+case "$mode" in
+  direct) printf "y" ;;
+  enter) printf "Press Enter to continue" ;;
+  escalate) printf "ESCALATE: need human decision" ;;
+  fail) echo "forced failure" >&2; exit 9 ;;
+  verbose) printf "This is a very long paragraph that explains what to do instead of returning a direct terminal input and it should not be injected as-is into the executor prompt because that is unsafe." ;;
+  *) printf "y" ;;
+esac
+"#
+    }
+
+    #[cfg(unix)]
+    fn run_harness_case(mode: &str) -> (String, Vec<String>) {
+        run_harness_case_with_tier2(
+            Tier2Config {
+                program: "<mock-supervisor>".to_string(),
+                args: vec![],
+                timeout: Duration::from_secs(5),
+                system_prompt: None,
+                trace_io: true,
+            },
+            "Press enter to continue",
+            2,
+            Some(mode),
+        )
+    }
+
+    #[cfg(unix)]
+    fn run_harness_case_with_tier2(
+        mut tier2: Tier2Config,
+        agent_prompt_line: &str,
+        read_timeout_secs: u64,
+        mock_mode: Option<&str>,
+    ) -> (String, Vec<String>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent_script = tmp.path().join("mock-agent.sh");
+        let supervisor_script = tmp.path().join("mock-supervisor.sh");
+        let received = tmp.path().join("received.txt");
+        let context = tmp.path().join("context.txt");
+
+        write_script(&agent_script, harness_agent_script());
+        if mock_mode.is_some() {
+            write_script(&supervisor_script, harness_supervisor_script());
+        }
+
+        let phase_suffix = mock_mode.unwrap_or("custom");
+        let phase = format!("it-harness-{phase_suffix}");
+        let session = tmux::session_name(&phase);
+        let _ = tmux::kill_session(&session);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let (observer, events_arc) = TestObserver::new();
+
+        let config = OrchestratorConfig {
+            spawn: SpawnConfig {
+                program: agent_script.to_string_lossy().to_string(),
+                args: vec![
+                    received.to_string_lossy().to_string(),
+                    read_timeout_secs.to_string(),
+                    agent_prompt_line.to_string(),
+                ],
+                work_dir: "/tmp".to_string(),
+                env: vec![],
+            },
+            patterns: PromptPatterns::codex_cli(),
+            policy: PolicyEngine::new(Policy::Act, HashMap::new()),
+            detector: DetectorConfig {
+                silence_timeout: Duration::from_millis(120),
+                answer_cooldown: Duration::from_millis(50),
+                unknown_request_fallback: true,
+            },
+            phase,
+            project_root: tmp.path().to_path_buf(),
+            poll_interval: Duration::from_millis(80),
+            buffer_size: 50,
+            tier2: Some({
+                if let Some(mode) = mock_mode {
+                    tier2.program = supervisor_script.to_string_lossy().to_string();
+                    tier2.args = vec![mode.to_string(), context.to_string_lossy().to_string()];
+                } else {
+                    // Real supervisor path: append context output file path and
+                    // keep existing args for the real program.
+                    let mut args = tier2.args.clone();
+                    args.push(context.to_string_lossy().to_string());
+                    tier2.args = args;
+                }
+                tier2
+            }),
+            log_pane: true,
+            log_pane_height_pct: 20,
+            stuck: None,
+            answer_delay: Duration::ZERO,
+            auto_attach: false,
+        };
+
+        let result = run(config, Box::new(observer), stop).unwrap();
+        assert!(
+            matches!(result, OrchestratorResult::Completed),
+            "expected Completed, got: {result:?}"
+        );
+
+        // Interface stability check: executor + log panes should both exist.
+        let panes = tmux::list_panes(&session).unwrap();
+        assert_eq!(
+            panes.len(),
+            2,
+            "expected 2 panes (executor + log), got {}",
+            panes.len()
+        );
+
+        let received_value = fs::read_to_string(&received).unwrap_or_default();
+        let ctx = fs::read_to_string(&context).unwrap_or_default();
+        assert!(
+            ctx.contains("Question from executor"),
+            "expected supervisor context payload, got: {ctx}"
+        );
+
+        let events = events_arc.lock().unwrap().clone();
+        let _ = tmux::kill_session(&session);
+        (received_value, events)
+    }
+
+    #[cfg(unix)]
+    fn run_harness_case_with_real_supervisor(
+        real_program: &str,
+        real_args: &[&str],
+        agent_prompt_line: &str,
+        read_timeout_secs: u64,
+    ) -> (String, Vec<String>) {
+        let mut args: Vec<String> = real_args.iter().map(|s| s.to_string()).collect();
+        // The custom context file path is appended in run_harness_case_with_tier2.
+        run_harness_case_with_tier2(
+            Tier2Config {
+                program: real_program.to_string(),
+                args: std::mem::take(&mut args),
+                timeout: Duration::from_secs(30),
+                system_prompt: None,
+                trace_io: true,
+            },
+            agent_prompt_line,
+            read_timeout_secs,
+            None,
+        )
+    }
+
+    #[cfg(unix)]
+    fn command_exists(cmd: &str) -> bool {
+        std::process::Command::new("sh")
+            .args(["-c", &format!("command -v {cmd} >/dev/null 2>&1")])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    fn require_env_flag(name: &str) {
+        let enabled = std::env::var(name)
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        assert!(
+            enabled,
+            "{name} must be set (1/true) to run this real-agent integration test"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_direct_reply_injected_into_agent() {
+        let (received, events) = run_harness_case("direct");
+        assert_eq!(received, "y");
+        assert!(
+            events.iter().any(|e| e.contains("auto:")),
+            "expected auto-answer event, got: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| e.contains("event:? supervisor call")),
+            "expected supervisor call trace event, got: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.contains("event:? supervisor reply ← y")),
+            "expected supervisor reply trace event, got: {events:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_press_enter_reply_injected_as_empty_input() {
+        let (received, events) = run_harness_case("enter");
+        assert_eq!(received, "");
+        assert!(
+            events.iter().any(|e| e.contains("auto:")),
+            "expected auto-answer event, got: {events:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_supervisor_escalate_does_not_inject() {
+        let (received, events) = run_harness_case("escalate");
+        assert_eq!(received, "__NO_INPUT__");
+        assert!(
+            events.iter().any(|e| e.contains("escalate:")),
+            "expected escalate event, got: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| e.contains("auto:")),
+            "did not expect auto-answer, got: {events:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_supervisor_failure_does_not_inject() {
+        let (received, events) = run_harness_case("fail");
+        assert_eq!(received, "__NO_INPUT__");
+        assert!(
+            events
+                .iter()
+                .any(|e| e.contains("supervisor failed") || e.contains("escalate:")),
+            "expected supervisor failure escalation event, got: {events:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_supervisor_verbose_reply_rejected_for_safety() {
+        let (received, events) = run_harness_case("verbose");
+        assert_eq!(received, "__NO_INPUT__");
+        assert!(
+            events
+                .iter()
+                .any(|e| e.contains("supervisor failed") || e.contains("escalate:")),
+            "expected non-injectable response escalation, got: {events:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "manual: requires Claude auth + network; run with BATTY_TEST_REAL_CLAUDE=1"]
+    fn harness_real_supervisor_claude_with_mock_executor() {
+        require_env_flag("BATTY_TEST_REAL_CLAUDE");
+        assert!(command_exists("claude"), "claude binary not found");
+
+        let (received, events) = run_harness_case_with_real_supervisor(
+            "claude",
+            &["-p", "--output-format", "text"],
+            "Type exactly TOKEN_CLAUDE_123 and press Enter",
+            8,
+        );
+        assert!(
+            received.contains("TOKEN_CLAUDE_123"),
+            "expected token injected, got '{received}' events={events:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "manual: requires Codex auth + network; run with BATTY_TEST_REAL_CODEX=1"]
+    fn harness_real_supervisor_codex_with_mock_executor() {
+        require_env_flag("BATTY_TEST_REAL_CODEX");
+        assert!(command_exists("codex"), "codex binary not found");
+
+        let (received, events) = run_harness_case_with_real_supervisor(
+            "codex",
+            &[
+                "exec",
+                "-a",
+                "never",
+                "--sandbox",
+                "workspace-write",
+            ],
+            "Type exactly TOKEN_CODEX_123 and press Enter",
+            10,
+        );
+        assert!(
+            received.contains("TOKEN_CODEX_123"),
+            "expected token injected, got '{received}' events={events:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "manual smoke: real executor+supervisor in tmux; BATTY_TEST_REAL_E2E_CLAUDE=1"]
+    fn harness_real_executor_and_supervisor_claude_smoke() {
+        require_env_flag("BATTY_TEST_REAL_E2E_CLAUDE");
+        assert!(command_exists("claude"), "claude binary not found");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let phase = "it-real-e2e-claude".to_string();
+        let session = tmux::session_name(&phase);
+        let _ = tmux::kill_session(&session);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (observer, events_arc) = TestObserver::new();
+
+        let config = OrchestratorConfig {
+            spawn: SpawnConfig {
+                program: "claude".to_string(),
+                args: vec![
+                    "-p".to_string(),
+                    "--output-format".to_string(),
+                    "text".to_string(),
+                    "Reply with exactly: READY".to_string(),
+                ],
+                work_dir: "/tmp".to_string(),
+                env: vec![],
+            },
+            patterns: PromptPatterns::claude_code(),
+            policy: PolicyEngine::new(Policy::Act, HashMap::new()),
+            detector: DetectorConfig {
+                silence_timeout: Duration::from_millis(150),
+                answer_cooldown: Duration::from_millis(50),
+                unknown_request_fallback: true,
+            },
+            phase,
+            project_root: tmp.path().to_path_buf(),
+            poll_interval: Duration::from_millis(80),
+            buffer_size: 50,
+            tier2: Some(Tier2Config {
+                program: "claude".to_string(),
+                args: vec!["-p".to_string(), "--output-format".to_string(), "text".to_string()],
+                timeout: Duration::from_secs(30),
+                system_prompt: None,
+                trace_io: true,
+            }),
+            log_pane: true,
+            log_pane_height_pct: 20,
+            stuck: None,
+            answer_delay: Duration::ZERO,
+            auto_attach: false,
+        };
+
+        let result = run(config, Box::new(observer), stop).unwrap();
+        assert!(
+            matches!(result, OrchestratorResult::Completed),
+            "expected Completed, got {result:?}"
+        );
+        let events = events_arc.lock().unwrap().clone();
+        assert!(
+            events.iter().any(|e| e.contains("created")),
+            "expected session events, got: {events:?}"
+        );
+        let _ = tmux::kill_session(&session);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "manual smoke: real executor+supervisor in tmux; BATTY_TEST_REAL_E2E_CODEX=1"]
+    fn harness_real_executor_and_supervisor_codex_smoke() {
+        require_env_flag("BATTY_TEST_REAL_E2E_CODEX");
+        assert!(command_exists("codex"), "codex binary not found");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let phase = "it-real-e2e-codex".to_string();
+        let session = tmux::session_name(&phase);
+        let _ = tmux::kill_session(&session);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (observer, events_arc) = TestObserver::new();
+
+        let config = OrchestratorConfig {
+            spawn: SpawnConfig {
+                program: "codex".to_string(),
+                args: vec![
+                    "exec".to_string(),
+                    "-a".to_string(),
+                    "never".to_string(),
+                    "--sandbox".to_string(),
+                    "workspace-write".to_string(),
+                    "Reply with exactly: READY".to_string(),
+                ],
+                work_dir: "/tmp".to_string(),
+                env: vec![],
+            },
+            patterns: PromptPatterns::codex_cli(),
+            policy: PolicyEngine::new(Policy::Act, HashMap::new()),
+            detector: DetectorConfig {
+                silence_timeout: Duration::from_millis(150),
+                answer_cooldown: Duration::from_millis(50),
+                unknown_request_fallback: true,
+            },
+            phase,
+            project_root: tmp.path().to_path_buf(),
+            poll_interval: Duration::from_millis(80),
+            buffer_size: 50,
+            tier2: Some(Tier2Config {
+                program: "codex".to_string(),
+                args: vec![
+                    "exec".to_string(),
+                    "-a".to_string(),
+                    "never".to_string(),
+                    "--sandbox".to_string(),
+                    "workspace-write".to_string(),
+                ],
+                timeout: Duration::from_secs(30),
+                system_prompt: None,
+                trace_io: true,
+            }),
+            log_pane: true,
+            log_pane_height_pct: 20,
+            stuck: None,
+            answer_delay: Duration::ZERO,
+            auto_attach: false,
+        };
+
+        let result = run(config, Box::new(observer), stop).unwrap();
+        assert!(
+            matches!(result, OrchestratorResult::Completed),
+            "expected Completed, got {result:?}"
+        );
+        let events = events_arc.lock().unwrap().clone();
+        assert!(
+            events.iter().any(|e| e.contains("created")),
+            "expected session events, got: {events:?}"
+        );
+        let _ = tmux::kill_session(&session);
+    }
+
     #[test]
     fn handle_prompt_auto_answers() {
         let session = "batty-test-autoanswer";
@@ -915,10 +1561,8 @@ mod tests {
         auto_answers.insert("Continue?".to_string(), "y".to_string());
         let policy = PolicyEngine::new(Policy::Act, auto_answers);
 
-        let mut detector = PromptDetector::new(
-            PromptPatterns::claude_code(),
-            DetectorConfig::default(),
-        );
+        let mut detector =
+            PromptDetector::new(PromptPatterns::claude_code(), DetectorConfig::default());
 
         let (mut observer, events) = TestObserver::new();
 
@@ -931,7 +1575,18 @@ mod tests {
 
         let buffer = EventBuffer::new(10);
         let mut status_bar = StatusBar::new(session, "test");
-        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, None, &buffer, &mut status_bar, Duration::ZERO).unwrap();
+        handle_prompt(
+            &prompt,
+            session,
+            &policy,
+            &mut detector,
+            &mut observer,
+            None,
+            &buffer,
+            &mut status_bar,
+            Duration::ZERO,
+        )
+        .unwrap();
 
         // Check observer received the auto-answer event
         let collected = events.lock().unwrap();
@@ -951,10 +1606,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
 
         let policy = PolicyEngine::new(Policy::Act, HashMap::new());
-        let mut detector = PromptDetector::new(
-            PromptPatterns::claude_code(),
-            DetectorConfig::default(),
-        );
+        let mut detector =
+            PromptDetector::new(PromptPatterns::claude_code(), DetectorConfig::default());
         let (mut observer, events) = TestObserver::new();
 
         let prompt = crate::prompt::DetectedPrompt {
@@ -966,7 +1619,18 @@ mod tests {
 
         let buffer = EventBuffer::new(10);
         let mut status_bar = StatusBar::new(session, "test");
-        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, None, &buffer, &mut status_bar, Duration::ZERO).unwrap();
+        handle_prompt(
+            &prompt,
+            session,
+            &policy,
+            &mut detector,
+            &mut observer,
+            None,
+            &buffer,
+            &mut status_bar,
+            Duration::ZERO,
+        )
+        .unwrap();
 
         let collected = events.lock().unwrap();
         assert!(
@@ -978,25 +1642,24 @@ mod tests {
     }
 
     #[test]
-    fn handle_prompt_tier2_with_echo() {
-        // Test Tier 2 integration with echo as a mock supervisor
+    fn handle_prompt_tier2_with_direct_answer() {
+        // Test Tier 2 integration with a concise mock supervisor answer.
         let session = "batty-test-tier2";
         let _ = tmux::kill_session(session);
         tmux::create_session(session, "cat", &[], "/tmp").unwrap();
         std::thread::sleep(Duration::from_millis(200));
 
         let policy = PolicyEngine::new(Policy::Act, HashMap::new()); // no auto-answers
-        let mut detector = PromptDetector::new(
-            PromptPatterns::claude_code(),
-            DetectorConfig::default(),
-        );
+        let mut detector =
+            PromptDetector::new(PromptPatterns::claude_code(), DetectorConfig::default());
         let (mut observer, events) = TestObserver::new();
 
         let tier2 = Tier2Config {
-            program: "echo".to_string(),
-            args: vec!["yes".to_string()],
+            program: "printf".to_string(),
+            args: vec!["y".to_string()],
             timeout: Duration::from_secs(5),
             system_prompt: None,
+            trace_io: true,
         };
 
         let prompt = crate::prompt::DetectedPrompt {
@@ -1008,7 +1671,18 @@ mod tests {
 
         let buffer = EventBuffer::new(10);
         let mut status_bar = StatusBar::new(session, "test");
-        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, Some(&tier2), &buffer, &mut status_bar, Duration::ZERO).unwrap();
+        handle_prompt(
+            &prompt,
+            session,
+            &policy,
+            &mut detector,
+            &mut observer,
+            Some(&tier2),
+            &buffer,
+            &mut status_bar,
+            Duration::ZERO,
+        )
+        .unwrap();
 
         let collected = events.lock().unwrap();
         // Should have supervisor thinking event + auto-answer from Tier 2
@@ -1027,10 +1701,8 @@ mod tests {
     #[test]
     fn handle_prompt_skips_completion() {
         let policy = PolicyEngine::new(Policy::Act, HashMap::new());
-        let mut detector = PromptDetector::new(
-            PromptPatterns::claude_code(),
-            DetectorConfig::default(),
-        );
+        let mut detector =
+            PromptDetector::new(PromptPatterns::claude_code(), DetectorConfig::default());
         let (mut observer, events) = TestObserver::new();
 
         let prompt = crate::prompt::DetectedPrompt {
@@ -1040,7 +1712,18 @@ mod tests {
 
         let buffer = EventBuffer::new(10);
         let mut status_bar = StatusBar::new("fake-session", "test");
-        handle_prompt(&prompt, "fake-session", &policy, &mut detector, &mut observer, None, &buffer, &mut status_bar, Duration::ZERO).unwrap();
+        handle_prompt(
+            &prompt,
+            "fake-session",
+            &policy,
+            &mut detector,
+            &mut observer,
+            None,
+            &buffer,
+            &mut status_bar,
+            Duration::ZERO,
+        )
+        .unwrap();
 
         let collected = events.lock().unwrap();
         assert!(collected.is_empty(), "completion should produce no events");
@@ -1073,6 +1756,7 @@ mod tests {
             log_pane_height_pct: 20,
             stuck: None,
             answer_delay: Duration::ZERO,
+            auto_attach: false,
         };
 
         // Clean up any leftover session
@@ -1120,6 +1804,7 @@ mod tests {
             log_pane_height_pct: 20,
             stuck: None,
             answer_delay: Duration::ZERO,
+            auto_attach: false,
         };
 
         let _ = tmux::kill_session("batty-test-stop");
@@ -1178,11 +1863,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let log_path = tmp.path().join("orchestrator.log");
 
-        setup_log_pane(session, &log_path, 20).unwrap();
+        let executor_pane = tmux::pane_id(session).unwrap();
+        setup_log_pane(session, &executor_pane, &log_path, 20).unwrap();
 
         // Should now have 2 panes
         let panes = tmux::list_panes(session).unwrap();
-        assert_eq!(panes.len(), 2, "expected 2 panes (executor + log), got {}", panes.len());
+        assert_eq!(
+            panes.len(),
+            2,
+            "expected 2 panes (executor + log), got {}",
+            panes.len()
+        );
 
         tmux::kill_session(session).unwrap();
     }
@@ -1214,6 +1905,7 @@ mod tests {
             log_pane_height_pct: 20,
             stuck: None,
             answer_delay: Duration::ZERO,
+            auto_attach: false,
         };
 
         let _ = tmux::kill_session("batty-test-logpane-orch");
@@ -1260,9 +1952,12 @@ mod tests {
         bar.init().unwrap();
 
         // Update with various indicators
-        bar.force_update(StatusIndicator::Ok, "supervising").unwrap();
-        bar.force_update(StatusIndicator::Action, "answered: y").unwrap();
-        bar.force_update(StatusIndicator::NeedsInput, "NEEDS INPUT").unwrap();
+        bar.force_update(StatusIndicator::Ok, "supervising")
+            .unwrap();
+        bar.force_update(StatusIndicator::Action, "answered: y")
+            .unwrap();
+        bar.force_update(StatusIndicator::NeedsInput, "NEEDS INPUT")
+            .unwrap();
 
         tmux::kill_session(session).unwrap();
     }
@@ -1284,7 +1979,8 @@ mod tests {
         bar.update(StatusIndicator::Action, "second").unwrap();
 
         // Force update should always go through
-        bar.force_update(StatusIndicator::Failure, "forced").unwrap();
+        bar.force_update(StatusIndicator::Failure, "forced")
+            .unwrap();
 
         tmux::kill_session(session).unwrap();
     }
@@ -1462,7 +2158,16 @@ mod tests {
         let _ = tmux::kill_session(session);
 
         // Create a session that shows a prompt-like line
-        tmux::create_session(session, "bash", &["-c".to_string(), "echo 'Continue? [y/n]'; sleep 5".to_string()], "/tmp").unwrap();
+        tmux::create_session(
+            session,
+            "bash",
+            &[
+                "-c".to_string(),
+                "echo 'Continue? [y/n]'; sleep 5".to_string(),
+            ],
+            "/tmp",
+        )
+        .unwrap();
         std::thread::sleep(Duration::from_millis(300));
 
         // The prompt should still be visible → not human-answered
@@ -1477,7 +2182,12 @@ mod tests {
     #[test]
     fn wait_with_zero_delay_returns_immediately() {
         let start = Instant::now();
-        let result = wait_with_human_check("batty-nonexistent", "prompt", Duration::ZERO, Duration::from_millis(50));
+        let result = wait_with_human_check(
+            "batty-nonexistent",
+            "prompt",
+            Duration::ZERO,
+            Duration::from_millis(50),
+        );
         assert!(!result); // should return false (no human override)
         assert!(start.elapsed() < Duration::from_millis(50)); // should be instant
     }
@@ -1487,11 +2197,22 @@ mod tests {
         let session = "batty-test-wait-delay";
         let _ = tmux::kill_session(session);
 
-        tmux::create_session(session, "bash", &["-c".to_string(), "echo 'waiting...'; sleep 10".to_string()], "/tmp").unwrap();
+        tmux::create_session(
+            session,
+            "bash",
+            &["-c".to_string(), "echo 'waiting...'; sleep 10".to_string()],
+            "/tmp",
+        )
+        .unwrap();
         std::thread::sleep(Duration::from_millis(300));
 
         let start = Instant::now();
-        let result = wait_with_human_check(session, "waiting...", Duration::from_millis(200), Duration::from_millis(50));
+        let result = wait_with_human_check(
+            session,
+            "waiting...",
+            Duration::from_millis(200),
+            Duration::from_millis(50),
+        );
         // No human typing, so should return false after the delay
         assert!(!result);
         assert!(start.elapsed() >= Duration::from_millis(200));
@@ -1512,10 +2233,8 @@ mod tests {
         auto_answers.insert("Continue?".to_string(), "y".to_string());
         let policy = PolicyEngine::new(Policy::Act, auto_answers);
 
-        let mut detector = PromptDetector::new(
-            PromptPatterns::claude_code(),
-            DetectorConfig::default(),
-        );
+        let mut detector =
+            PromptDetector::new(PromptPatterns::claude_code(), DetectorConfig::default());
 
         let (mut observer, events) = TestObserver::new();
 
@@ -1528,7 +2247,18 @@ mod tests {
 
         let buffer = EventBuffer::new(10);
         let mut status_bar = StatusBar::new(session, "test");
-        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, None, &buffer, &mut status_bar, Duration::ZERO).unwrap();
+        handle_prompt(
+            &prompt,
+            session,
+            &policy,
+            &mut detector,
+            &mut observer,
+            None,
+            &buffer,
+            &mut status_bar,
+            Duration::ZERO,
+        )
+        .unwrap();
 
         let collected = events.lock().unwrap();
         assert!(

@@ -28,6 +28,9 @@ pub enum SupervisorState {
         since: Instant,
         /// The last non-empty line seen (for prompt matching).
         last_line: String,
+        /// Whether an unknown-request fallback event was already emitted for
+        /// this paused period.
+        unknown_emitted: bool,
     },
     /// A prompt was detected — waiting for a response decision.
     Question {
@@ -50,6 +53,9 @@ pub struct DetectorConfig {
     pub silence_timeout: Duration,
     /// How long after injecting an answer to wait before returning to Working.
     pub answer_cooldown: Duration,
+    /// If true, emit an `UnknownRequest` event when output is silent and no
+    /// known prompt pattern matches. This lets Tier 2 decide what to do.
+    pub unknown_request_fallback: bool,
 }
 
 impl Default for DetectorConfig {
@@ -57,6 +63,7 @@ impl Default for DetectorConfig {
         Self {
             silence_timeout: Duration::from_secs(3),
             answer_cooldown: Duration::from_secs(1),
+            unknown_request_fallback: true,
         }
     }
 }
@@ -81,7 +88,16 @@ pub enum DetectorEvent {
     /// Executor is working normally — no action needed.
     Working,
     /// Output has paused — may be a prompt.
-    Silence { duration: Duration, last_line: String },
+    Silence {
+        duration: Duration,
+        last_line: String,
+    },
+    /// Output is silent and no known prompt pattern matched. Caller should
+    /// ask Tier 2 for an intelligent action or escalate.
+    UnknownRequest {
+        duration: Duration,
+        last_line: String,
+    },
     /// A prompt was detected (via pattern match or silence + pattern).
     PromptDetected(DetectedPrompt),
     /// Waiting for executor to resume after answer injection.
@@ -155,7 +171,7 @@ impl PromptDetector {
     pub fn tick(&mut self) -> DetectorEvent {
         let now = Instant::now();
 
-        match &self.state {
+        match self.state.clone() {
             SupervisorState::Working => {
                 // Check if output has gone silent
                 if let Some(last) = self.last_output_time {
@@ -165,6 +181,7 @@ impl PromptDetector {
                         self.state = SupervisorState::Paused {
                             since: last,
                             last_line: self.last_line.clone(),
+                            unknown_emitted: false,
                         };
 
                         // Check if last line matches a prompt pattern
@@ -176,6 +193,18 @@ impl PromptDetector {
                             return DetectorEvent::PromptDetected(detected);
                         }
 
+                        if self.config.unknown_request_fallback {
+                            self.state = SupervisorState::Paused {
+                                since: last,
+                                last_line: self.last_line.clone(),
+                                unknown_emitted: true,
+                            };
+                            return DetectorEvent::UnknownRequest {
+                                duration: silence,
+                                last_line: self.last_line.clone(),
+                            };
+                        }
+
                         return DetectorEvent::Silence {
                             duration: silence,
                             last_line: self.last_line.clone(),
@@ -184,18 +213,33 @@ impl PromptDetector {
                 }
                 DetectorEvent::Working
             }
-            SupervisorState::Paused { since, last_line } => {
-                let silence = now.duration_since(*since);
+            SupervisorState::Paused {
+                since,
+                last_line,
+                unknown_emitted,
+            } => {
+                let silence = now.duration_since(since);
+
+                if !unknown_emitted && self.config.unknown_request_fallback {
+                    self.state = SupervisorState::Paused {
+                        since,
+                        last_line: last_line.clone(),
+                        unknown_emitted: true,
+                    };
+                    return DetectorEvent::UnknownRequest {
+                        duration: silence,
+                        last_line,
+                    };
+                }
+
                 DetectorEvent::Silence {
                     duration: silence,
-                    last_line: last_line.clone(),
+                    last_line,
                 }
             }
-            SupervisorState::Question { prompt, .. } => {
-                DetectorEvent::PromptDetected(prompt.clone())
-            }
+            SupervisorState::Question { prompt, .. } => DetectorEvent::PromptDetected(prompt),
             SupervisorState::Answering { injected_at } => {
-                let elapsed = now.duration_since(*injected_at);
+                let elapsed = now.duration_since(injected_at);
                 if elapsed >= self.config.answer_cooldown {
                     // Cooldown expired, back to working
                     self.state = SupervisorState::Working;
@@ -237,6 +281,7 @@ mod tests {
             DetectorConfig {
                 silence_timeout: Duration::from_millis(100),
                 answer_cooldown: Duration::from_millis(50),
+                unknown_request_fallback: true,
             },
         )
     }
@@ -283,8 +328,11 @@ mod tests {
             DetectorEvent::Silence { last_line, .. } => {
                 assert_eq!(last_line, "some output");
             }
+            DetectorEvent::UnknownRequest { last_line, .. } => {
+                assert_eq!(last_line, "some output");
+            }
             DetectorEvent::PromptDetected(_) => {} // also acceptable if pattern matched
-            other => panic!("expected Silence or PromptDetected, got: {other:?}"),
+            other => panic!("expected Silence/UnknownRequest/PromptDetected, got: {other:?}"),
         }
     }
 
@@ -300,6 +348,7 @@ mod tests {
             DetectorConfig {
                 silence_timeout: Duration::from_millis(100),
                 answer_cooldown: Duration::from_millis(50),
+                unknown_request_fallback: true,
             },
         );
         // Manually set last line and time to simulate a prompt that wasn't caught inline
@@ -392,6 +441,7 @@ mod tests {
         let config = DetectorConfig::default();
         assert_eq!(config.silence_timeout, Duration::from_secs(3));
         assert_eq!(config.answer_cooldown, Duration::from_secs(1));
+        assert!(config.unknown_request_fallback);
     }
 
     #[test]
@@ -401,9 +451,10 @@ mod tests {
 
         thread::sleep(Duration::from_millis(150));
 
-        // First tick should transition to Paused
-        let _event = d.tick();
-        // Second tick should still report Silence
+        // First tick should emit unknown request fallback for this pause.
+        let first = d.tick();
+        assert!(matches!(first, DetectorEvent::UnknownRequest { .. }));
+        // Second tick should report Silence (fallback emitted once).
         let event = d.tick();
         assert!(matches!(event, DetectorEvent::Silence { .. }));
     }
@@ -418,5 +469,24 @@ mod tests {
         // Should still be working (not enough silence since line 2)
         let event = d.tick();
         assert!(matches!(event, DetectorEvent::Working));
+    }
+
+    #[test]
+    fn unknown_request_disabled_reports_silence_only() {
+        let mut d = PromptDetector::new(
+            PromptPatterns::claude_code(),
+            DetectorConfig {
+                silence_timeout: Duration::from_millis(100),
+                answer_cooldown: Duration::from_millis(50),
+                unknown_request_fallback: false,
+            },
+        );
+        d.on_output("some non-prompt output");
+        thread::sleep(Duration::from_millis(150));
+
+        let first = d.tick();
+        assert!(matches!(first, DetectorEvent::Silence { .. }));
+        let second = d.tick();
+        assert!(matches!(second, DetectorEvent::Silence { .. }));
     }
 }

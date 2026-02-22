@@ -10,6 +10,7 @@
 //! specific CLI conventions.
 
 pub mod claude;
+pub mod codex;
 
 use std::path::Path;
 
@@ -60,6 +61,7 @@ pub trait AgentAdapter: Send + Sync {
 pub fn adapter_from_name(name: &str) -> Option<Box<dyn AgentAdapter>> {
     match name {
         "claude" | "claude-code" => Some(Box::new(claude::ClaudeCodeAdapter::new(None))),
+        "codex" | "codex-cli" => Some(Box::new(codex::CodexCliAdapter::new(None))),
         _ => None,
     }
 }
@@ -108,6 +110,12 @@ mod tests {
 
         let adapter = adapter_from_name("claude-code").unwrap();
         assert_eq!(adapter.name(), "claude-code");
+
+        let adapter = adapter_from_name("codex").unwrap();
+        assert_eq!(adapter.name(), "codex-cli");
+
+        let adapter = adapter_from_name("codex-cli").unwrap();
+        assert_eq!(adapter.name(), "codex-cli");
 
         assert!(adapter_from_name("unknown-agent").is_none());
     }

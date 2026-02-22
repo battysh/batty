@@ -1,6 +1,6 @@
 version: 10
 board:
-    name: phase-2-board-runner
+    name: phase-2-tmux-intelligent-supervisor
 tasks_dir: tasks
 statuses:
     - name: backlog
@@ -44,4 +44,4 @@ tui:
           color: "208"
         - after: 168h
           color: "196"
-next_id: 5
+next_id: 11

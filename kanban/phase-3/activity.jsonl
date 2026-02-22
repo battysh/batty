@@ -1,5 +1,0 @@
-{"timestamp":"2026-02-21T18:40:44.989424482-05:00","action":"create","task_id":1,"detail":"Improved prompt detection from dogfooding"}
-{"timestamp":"2026-02-21T18:40:45.012275799-05:00","action":"create","task_id":2,"detail":"Codex CLI adapter"}
-{"timestamp":"2026-02-21T18:40:45.034960236-05:00","action":"create","task_id":3,"detail":"Per-command-type policy rules"}
-{"timestamp":"2026-02-21T18:40:45.0606192-05:00","action":"create","task_id":4,"detail":"Failure recovery and stuck detection"}
-{"timestamp":"2026-02-21T18:40:45.086293359-05:00","action":"create","task_id":5,"detail":"Phase 3 exit criteria"}

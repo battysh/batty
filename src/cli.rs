@@ -33,6 +33,14 @@ pub enum Command {
         /// Override the default policy
         #[arg(long)]
         policy: Option<String>,
+
+        /// Auto-attach to the tmux session after startup
+        #[arg(long, default_value_t = false)]
+        attach: bool,
+
+        /// Internal: keep work process in foreground (skip auto-backgrounding).
+        #[arg(long, hide = true, default_value_t = false)]
+        foreground: bool,
     },
 
     /// Attach to a running batty tmux session

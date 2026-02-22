@@ -1,0 +1,4 @@
+{"timestamp":"2026-02-21T21:05:50.864026399-05:00","action":"create","task_id":7,"detail":"CLI install for Claude+Codex skills and steering docs"}
+{"timestamp":"2026-02-21T21:47:10.779348171-05:00","action":"claim","task_id":1,"detail":"bloom-peak"}
+{"timestamp":"2026-02-21T21:47:10.780541046-05:00","action":"move","task_id":1,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T21:55:13.141661924-05:00","action":"move","task_id":1,"detail":"in-progress -\u003e done"}

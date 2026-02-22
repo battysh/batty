@@ -1,0 +1,19 @@
+[defaults]
+agent = "codex"
+policy = "act"
+
+[supervisor]
+enabled = true
+program = "claude"
+args = ["-p", "--output-format", "text"]
+timeout_secs = 60
+trace_io = true
+
+[detector]
+silence_timeout_secs = 3
+answer_cooldown_millis = 1000
+unknown_request_fallback = true
+
+[policy.auto_answer]
+"Continue? [y/n]" = "y"
+"Do you want to proceed?" = "yes"

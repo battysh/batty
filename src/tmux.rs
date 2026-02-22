@@ -12,13 +12,15 @@ use tracing::{debug, info};
 
 /// Check that tmux is installed and reachable.
 pub fn check_tmux() -> Result<String> {
-    let output = Command::new("tmux")
-        .arg("-V")
-        .output()
-        .context("tmux not found — install tmux (e.g., `apt install tmux` or `brew install tmux`)")?;
+    let output = Command::new("tmux").arg("-V").output().context(
+        "tmux not found — install tmux (e.g., `apt install tmux` or `brew install tmux`)",
+    )?;
 
     if !output.status.success() {
-        bail!("tmux -V failed: {}", String::from_utf8_lossy(&output.stderr));
+        bail!(
+            "tmux -V failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -28,7 +30,19 @@ pub fn check_tmux() -> Result<String> {
 
 /// Convention for session names: `batty-<phase>`.
 pub fn session_name(phase: &str) -> String {
-    format!("batty-{phase}")
+    // tmux target parsing treats '.' as pane separators, so session names
+    // should avoid dots and other punctuation that can be interpreted.
+    let sanitized: String = phase
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("batty-{sanitized}")
 }
 
 /// Check if a tmux session exists.
@@ -40,16 +54,55 @@ pub fn session_exists(session: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Check if a specific tmux pane target exists.
+pub fn pane_exists(target: &str) -> bool {
+    Command::new("tmux")
+        .args(["display-message", "-p", "-t", target, "#{pane_id}"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Check whether a pane target is dead (`remain-on-exit` pane).
+pub fn pane_dead(target: &str) -> Result<bool> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "-t", target, "#{pane_dead}"])
+        .output()
+        .with_context(|| format!("failed to query pane_dead for target '{target}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux display-message pane_dead failed: {stderr}");
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(value == "1")
+}
+
+/// Get the active pane id for a session target (for example: `%3`).
+pub fn pane_id(target: &str) -> Result<String> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "-t", target, "#{pane_id}"])
+        .output()
+        .with_context(|| format!("failed to resolve pane id for target '{target}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux display-message failed: {stderr}");
+    }
+
+    let pane = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if pane.is_empty() {
+        bail!("tmux returned empty pane id for target '{target}'");
+    }
+    Ok(pane)
+}
+
 /// Create a detached tmux session running the given command.
 ///
 /// The session is created with `new-session -d` so it starts in the background.
 /// The executor command is the initial command the session runs.
-pub fn create_session(
-    session: &str,
-    program: &str,
-    args: &[String],
-    work_dir: &str,
-) -> Result<()> {
+pub fn create_session(session: &str, program: &str, args: &[String], work_dir: &str) -> Result<()> {
     if session_exists(session) {
         bail!(
             "tmux session '{session}' already exists — use `batty attach` to reconnect, \
@@ -81,11 +134,11 @@ pub fn create_session(
     Ok(())
 }
 
-/// Set up pipe-pane to capture all output from the session to a log file.
+/// Set up pipe-pane to capture all output from the target pane to a log file.
 ///
 /// Uses `tmux pipe-pane -t <session> "cat >> <log_path>"` to stream all PTY
 /// output to a file. This is the foundation for event extraction.
-pub fn setup_pipe_pane(session: &str, log_path: &Path) -> Result<()> {
+pub fn setup_pipe_pane(target: &str, log_path: &Path) -> Result<()> {
     // Ensure log directory exists
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)
@@ -94,16 +147,16 @@ pub fn setup_pipe_pane(session: &str, log_path: &Path) -> Result<()> {
 
     let pipe_cmd = format!("cat >> {}", log_path.display());
     let output = Command::new("tmux")
-        .args(["pipe-pane", "-t", session, &pipe_cmd])
+        .args(["pipe-pane", "-t", target, &pipe_cmd])
         .output()
-        .with_context(|| format!("failed to set up pipe-pane for session '{session}'"))?;
+        .with_context(|| format!("failed to set up pipe-pane for target '{target}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("tmux pipe-pane failed: {stderr}");
     }
 
-    info!(session = session, log = %log_path.display(), "pipe-pane configured");
+    info!(target = target, log = %log_path.display(), "pipe-pane configured");
     Ok(())
 }
 
@@ -128,27 +181,27 @@ pub fn attach(session: &str) -> Result<()> {
     Ok(())
 }
 
-/// Send keys to a tmux session.
+/// Send keys to a tmux target (session or pane).
 ///
 /// This is how batty injects responses into the executor's PTY.
 /// The `keys` string is sent literally, followed by Enter if `press_enter` is true.
-pub fn send_keys(session: &str, keys: &str, press_enter: bool) -> Result<()> {
+pub fn send_keys(target: &str, keys: &str, press_enter: bool) -> Result<()> {
     let mut cmd = Command::new("tmux");
-    cmd.args(["send-keys", "-t", session, keys]);
+    cmd.args(["send-keys", "-t", target, keys]);
     if press_enter {
         cmd.arg("Enter");
     }
 
     let output = cmd
         .output()
-        .with_context(|| format!("failed to send keys to session '{session}'"))?;
+        .with_context(|| format!("failed to send keys to target '{target}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("tmux send-keys failed: {stderr}");
     }
 
-    debug!(session = session, keys = keys, "sent keys");
+    debug!(target = target, keys = keys, "sent keys");
     Ok(())
 }
 
@@ -172,15 +225,15 @@ pub fn kill_session(session: &str) -> Result<()> {
     Ok(())
 }
 
-/// Capture the current visible content of a pane.
+/// Capture the current visible content of a tmux target (session or pane).
 ///
 /// Returns the text currently shown in the pane (useful for prompt detection
 /// when pipe-pane output has a lag).
-pub fn capture_pane(session: &str) -> Result<String> {
+pub fn capture_pane(target: &str) -> Result<String> {
     let output = Command::new("tmux")
-        .args(["capture-pane", "-t", session, "-p"])
+        .args(["capture-pane", "-t", target, "-p"])
         .output()
-        .with_context(|| format!("failed to capture pane for session '{session}'"))?;
+        .with_context(|| format!("failed to capture pane for target '{target}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -261,13 +314,7 @@ pub fn split_window_vertical(session: &str, percent: u32) -> Result<()> {
 /// Returns a list of pane IDs (e.g., ["%0", "%1"]).
 pub fn list_panes(session: &str) -> Result<Vec<String>> {
     let output = Command::new("tmux")
-        .args([
-            "list-panes",
-            "-t",
-            session,
-            "-F",
-            "#{pane_id}",
-        ])
+        .args(["list-panes", "-t", session, "-F", "#{pane_id}"])
         .output()
         .with_context(|| format!("failed to list panes for session '{session}'"))?;
 
@@ -307,12 +354,17 @@ mod tests {
     fn session_name_convention() {
         assert_eq!(session_name("phase-1"), "batty-phase-1");
         assert_eq!(session_name("phase-2"), "batty-phase-2");
+        assert_eq!(session_name("phase-2.5"), "batty-phase-2-5");
+        assert_eq!(session_name("phase 3"), "batty-phase-3");
     }
 
     #[test]
     fn check_tmux_finds_binary() {
         let version = check_tmux().unwrap();
-        assert!(version.starts_with("tmux"), "expected tmux version, got: {version}");
+        assert!(
+            version.starts_with("tmux"),
+            "expected tmux version, got: {version}"
+        );
     }
 
     #[test]
@@ -409,12 +461,21 @@ mod tests {
         let session = "batty-test-capture";
         let _ = kill_session(session);
 
-        create_session(session, "bash", &["-c".to_string(), "echo 'capture-test'; sleep 2".to_string()], "/tmp").unwrap();
+        create_session(
+            session,
+            "bash",
+            &["-c".to_string(), "echo 'capture-test'; sleep 2".to_string()],
+            "/tmp",
+        )
+        .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(500));
 
         let content = capture_pane(session).unwrap();
         // Should have some content (at least the echo output or prompt)
-        assert!(!content.trim().is_empty(), "capture-pane should return content");
+        assert!(
+            !content.trim().is_empty(),
+            "capture-pane should return content"
+        );
 
         kill_session(session).unwrap();
     }

@@ -57,6 +57,26 @@ pub enum LogEvent {
         path: String,
         branch: String,
     },
+    /// A phase run worktree was created.
+    PhaseWorktreeCreated {
+        phase: String,
+        path: String,
+        branch: String,
+        base_branch: String,
+    },
+    /// A run worktree was retained for later inspection.
+    PhaseWorktreeRetained {
+        phase: String,
+        path: String,
+        branch: String,
+        reason: String,
+    },
+    /// A run worktree was cleaned up after merge.
+    PhaseWorktreeCleaned {
+        phase: String,
+        path: String,
+        branch: String,
+    },
     /// An agent process was launched.
     AgentLaunched {
         agent: String,
@@ -231,6 +251,23 @@ mod tests {
                 task_id: 1,
                 path: "/tmp/wt".to_string(),
                 branch: "task/1".to_string(),
+            },
+            LogEvent::PhaseWorktreeCreated {
+                phase: "phase-2.5".to_string(),
+                path: "/tmp/wt-phase".to_string(),
+                branch: "phase-2-5-run-001".to_string(),
+                base_branch: "main".to_string(),
+            },
+            LogEvent::PhaseWorktreeRetained {
+                phase: "phase-2.5".to_string(),
+                path: "/tmp/wt-phase".to_string(),
+                branch: "phase-2-5-run-001".to_string(),
+                reason: "run failed".to_string(),
+            },
+            LogEvent::PhaseWorktreeCleaned {
+                phase: "phase-2.5".to_string(),
+                path: "/tmp/wt-phase".to_string(),
+                branch: "phase-2-5-run-001".to_string(),
             },
             LogEvent::AgentLaunched {
                 agent: "claude".to_string(),

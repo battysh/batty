@@ -28,6 +28,8 @@ pub struct Tier2Config {
     pub timeout: Duration,
     /// System prompt (project docs) to prepend for context.
     pub system_prompt: Option<String>,
+    /// Whether to emit detailed supervisor request/response traces.
+    pub trace_io: bool,
 }
 
 impl Default for Tier2Config {
@@ -41,6 +43,7 @@ impl Default for Tier2Config {
             ],
             timeout: Duration::from_secs(60),
             system_prompt: None,
+            trace_io: true,
         }
     }
 }
@@ -49,17 +52,79 @@ impl Default for Tier2Config {
 #[derive(Debug, Clone)]
 pub enum Tier2Result {
     /// Supervisor provided an answer to inject.
-    Answer {
-        response: String,
-    },
+    Answer { response: String },
     /// Supervisor decided to escalate to human.
-    Escalate {
-        reason: String,
-    },
+    Escalate { reason: String },
     /// Supervisor call failed (timeout, error, etc.).
-    Failed {
-        error: String,
-    },
+    Failed { error: String },
+}
+
+/// Normalize supervisor output into a safe, injectable terminal response.
+///
+/// The supervisor is instructed to return only the exact input, but models
+/// sometimes add explanation. This function extracts a concise response and
+/// handles common "press enter" variants.
+fn normalize_supervisor_response(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("supervisor returned empty response");
+    }
+
+    let lower = trimmed.to_lowercase();
+    if lower.contains("press enter")
+        || lower.contains("just press enter")
+        || lower.contains("empty enter")
+        || lower.contains("empty input")
+        || lower.contains("empty string")
+    {
+        return Ok(String::new());
+    }
+
+    // Try structured markers first.
+    for line in trimmed.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        for prefix in [
+            "**Answer to send:**",
+            "Answer to send:",
+            "The exact input to send:",
+            "Exact input:",
+            "Input:",
+            "Response:",
+        ] {
+            if let Some(rest) = line.strip_prefix(prefix) {
+                let candidate = rest.trim().trim_matches('`').trim_matches('"');
+                if candidate.is_empty() {
+                    return Ok(String::new());
+                }
+                if candidate.eq_ignore_ascii_case("enter")
+                    || candidate.eq_ignore_ascii_case("press enter")
+                {
+                    return Ok(String::new());
+                }
+                return Ok(candidate.to_string());
+            }
+        }
+    }
+
+    // Fall back to first non-empty line.
+    let first = trimmed
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or_default()
+        .trim_matches('`')
+        .trim_matches('"')
+        .to_string();
+
+    if first.is_empty() {
+        return Ok(String::new());
+    }
+
+    // Guardrail: don't inject long prose into interactive prompts.
+    if first.len() > 120 {
+        anyhow::bail!("supervisor response too long to inject safely");
+    }
+
+    Ok(first)
 }
 
 /// Compose the context prompt for the supervisor.
@@ -68,11 +133,7 @@ pub enum Tier2Result {
 /// 1. A system-level description of the supervisor's role
 /// 2. The event buffer summary (what the executor has done recently)
 /// 3. The detected question that needs an answer
-pub fn compose_context(
-    event_summary: &str,
-    question: &str,
-    system_prompt: Option<&str>,
-) -> String {
+pub fn compose_context(event_summary: &str, question: &str, system_prompt: Option<&str>) -> String {
     let mut prompt = String::new();
 
     // System-level role description
@@ -141,12 +202,6 @@ pub fn call_supervisor(config: &Tier2Config, context_prompt: &str) -> Result<Tie
 
     let response = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-    if response.is_empty() {
-        return Ok(Tier2Result::Failed {
-            error: "supervisor returned empty response".to_string(),
-        });
-    }
-
     // Check for escalation signal
     if response.starts_with("ESCALATE:") {
         let reason = response
@@ -157,22 +212,30 @@ pub fn call_supervisor(config: &Tier2Config, context_prompt: &str) -> Result<Tie
         return Ok(Tier2Result::Escalate { reason });
     }
 
-    info!(response = %response, "supervisor answered");
-    Ok(Tier2Result::Answer { response })
+    let normalized = match normalize_supervisor_response(&response) {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(Tier2Result::Failed {
+                error: format!("supervisor response not safely injectable: {e}"),
+            });
+        }
+    };
+
+    info!(response = %normalized, "supervisor answered");
+    Ok(Tier2Result::Answer {
+        response: normalized,
+    })
 }
 
 /// Load project docs for the system prompt.
 ///
 /// Reads key files from the project root to build cached context:
 /// - CLAUDE.md (if exists)
-/// - .planning/architecture.md (if exists)
+/// - planning/architecture.md (if exists)
 pub fn load_project_docs(project_root: &Path) -> String {
     let mut docs = String::new();
 
-    let files = [
-        "CLAUDE.md",
-        ".planning/architecture.md",
-    ];
+    let files = ["CLAUDE.md", "planning/architecture.md"];
 
     for filename in &files {
         let path = project_root.join(filename);
@@ -231,6 +294,7 @@ mod tests {
         assert_eq!(config.program, "claude");
         assert!(config.args.contains(&"-p".to_string()));
         assert_eq!(config.timeout, Duration::from_secs(60));
+        assert!(config.trace_io);
     }
 
     #[test]
@@ -241,6 +305,7 @@ mod tests {
             args: vec![],
             timeout: Duration::from_secs(5),
             system_prompt: None,
+            trace_io: true,
         };
 
         let result = call_supervisor(&config, "test prompt").unwrap();
@@ -260,6 +325,7 @@ mod tests {
             args: vec!["ESCALATE: too ambiguous".to_string()],
             timeout: Duration::from_secs(5),
             system_prompt: None,
+            trace_io: true,
         };
 
         let result = call_supervisor(&config, "ignored").unwrap();
@@ -272,12 +338,37 @@ mod tests {
     }
 
     #[test]
+    fn normalize_press_enter_sentence_to_empty() {
+        let out = normalize_supervisor_response(
+            "Press Enter. The executor is waiting at a generic prompt.",
+        )
+        .unwrap();
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn normalize_marker_line_extracts_value() {
+        let out =
+            normalize_supervisor_response("Some context\n**Answer to send:** y\nMore text ignored")
+                .unwrap();
+        assert_eq!(out, "y");
+    }
+
+    #[test]
+    fn normalize_rejects_long_prose() {
+        let long = "This is a very long paragraph that explains what to do instead of returning a direct terminal input and it should not be injected as-is into the executor prompt because that is unsafe.";
+        let err = normalize_supervisor_response(long).unwrap_err().to_string();
+        assert!(err.contains("too long"));
+    }
+
+    #[test]
     fn call_supervisor_failing_command() {
         let config = Tier2Config {
             program: "false".to_string(),
             args: vec![],
             timeout: Duration::from_secs(5),
             system_prompt: None,
+            trace_io: true,
         };
 
         let result = call_supervisor(&config, "test").unwrap();
