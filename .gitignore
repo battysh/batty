@@ -16,6 +16,7 @@ Thumbs.db
 # Batty runtime artifacts
 .batty/logs/
 .batty/worktrees/
+site/
 
 # Added by cargo
 

@@ -1,4 +1,4 @@
-.PHONY: lint lint-fix
+.PHONY: lint lint-fix docs-generate docs-serve
 
 lint:
 	cargo fmt -- --check
@@ -7,3 +7,9 @@ lint:
 lint-fix:
 	cargo fmt
 	cargo clippy --fix --allow-dirty --allow-staged
+
+docs-generate:
+	./scripts/generate-docs.sh
+
+docs-serve:
+	mkdocs serve
