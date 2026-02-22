@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use anyhow::{Context, Result, bail};
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub struct PhaseWorktree {
@@ -110,6 +111,82 @@ pub fn prepare_phase_worktree(project_root: &Path, phase: &str) -> Result<PhaseW
             path,
         });
     }
+}
+
+/// Resolve the phase worktree for a run.
+///
+/// Behavior:
+/// - If `force_new` is false, resume the latest existing `<phase>-run-###` worktree if found.
+/// - Otherwise (or if none exists), create a new worktree.
+///
+/// Returns `(worktree, resumed_existing)`.
+pub fn resolve_phase_worktree(
+    project_root: &Path,
+    phase: &str,
+    force_new: bool,
+) -> Result<(PhaseWorktree, bool)> {
+    if !force_new {
+        if let Some(existing) = latest_phase_worktree(project_root, phase)? {
+            return Ok((existing, true));
+        }
+    }
+
+    Ok((prepare_phase_worktree(project_root, phase)?, false))
+}
+
+fn latest_phase_worktree(project_root: &Path, phase: &str) -> Result<Option<PhaseWorktree>> {
+    let repo_root = resolve_repo_root(project_root)?;
+    let base_branch = current_branch(&repo_root)?;
+    let worktrees_root = repo_root.join(".batty").join("worktrees");
+    if !worktrees_root.is_dir() {
+        return Ok(None);
+    }
+
+    let phase_slug = sanitize_phase_for_branch(phase);
+    let prefix = format!("{phase_slug}-run-");
+    let mut best: Option<(u32, String, PathBuf)> = None;
+
+    for entry in std::fs::read_dir(&worktrees_root)
+        .with_context(|| format!("failed to read {}", worktrees_root.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let branch = entry.file_name().to_string_lossy().to_string();
+        let Some(run) = parse_run_number(&branch, &prefix) else {
+            continue;
+        };
+
+        if !branch_exists(&repo_root, &branch)? {
+            warn!(
+                branch = %branch,
+                path = %path.display(),
+                "skipping stale phase worktree directory without branch"
+            );
+            continue;
+        }
+
+        match &best {
+            Some((best_run, _, _)) if run <= *best_run => {}
+            _ => best = Some((run, branch, path)),
+        }
+    }
+
+    let Some((_, branch, path)) = best else {
+        return Ok(None);
+    };
+
+    let start_commit = current_commit(&repo_root, &branch)?;
+    Ok(Some(PhaseWorktree {
+        repo_root,
+        base_branch,
+        start_commit,
+        branch,
+        path,
+    }))
 }
 
 fn resolve_repo_root(project_root: &Path) -> Result<PathBuf> {
@@ -462,5 +539,67 @@ mod tests {
         assert_eq!(decision, CleanupDecision::Cleaned);
         assert!(!worktree.path.exists());
         assert!(!branch_exists(tmp.path(), &worktree.branch).unwrap());
+    }
+
+    #[test]
+    fn resolve_phase_worktree_resumes_latest_existing_by_default() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        let first = prepare_phase_worktree(tmp.path(), "phase-2.5").unwrap();
+        let second = prepare_phase_worktree(tmp.path(), "phase-2.5").unwrap();
+
+        let (resolved, resumed) = resolve_phase_worktree(tmp.path(), "phase-2.5", false).unwrap();
+        assert!(
+            resumed,
+            "expected default behavior to resume existing worktree"
+        );
+        assert_eq!(
+            resolved.branch, second.branch,
+            "should resume latest run branch"
+        );
+        assert_eq!(resolved.path, second.path, "should resume latest run path");
+
+        cleanup_worktree(tmp.path(), &first);
+        cleanup_worktree(tmp.path(), &second);
+    }
+
+    #[test]
+    fn resolve_phase_worktree_force_new_creates_next_run() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        let first = prepare_phase_worktree(tmp.path(), "phase-2.5").unwrap();
+        let (resolved, resumed) = resolve_phase_worktree(tmp.path(), "phase-2.5", true).unwrap();
+
+        assert!(!resumed, "force-new should never resume prior worktree");
+        assert_ne!(resolved.branch, first.branch);
+        assert!(
+            resolved.branch.ends_with("002"),
+            "branch: {}",
+            resolved.branch
+        );
+
+        cleanup_worktree(tmp.path(), &first);
+        cleanup_worktree(tmp.path(), &resolved);
+    }
+
+    #[test]
+    fn resolve_phase_worktree_without_existing_creates_new() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        let (resolved, resumed) = resolve_phase_worktree(tmp.path(), "phase-2.5", false).unwrap();
+        assert!(!resumed);
+        assert!(
+            resolved.branch.ends_with("001"),
+            "branch: {}",
+            resolved.branch
+        );
+
+        cleanup_worktree(tmp.path(), &resolved);
     }
 }

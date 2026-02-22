@@ -17,11 +17,39 @@ mod work;
 use anyhow::Result;
 use clap::Parser;
 use std::fs::OpenOptions;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tracing::info;
+use tracing::{info, warn};
 
 use cli::{Cli, Command};
 use config::ProjectConfig;
+
+fn resolve_board_dir(project_root: &Path, phase: &str) -> Result<PathBuf> {
+    let session = tmux::session_name(phase);
+    if tmux::session_exists(&session) {
+        let session_root = tmux::session_path(&session)?;
+        let active_board = PathBuf::from(session_root).join("kanban").join(phase);
+        if active_board.is_dir() {
+            return Ok(active_board);
+        }
+        warn!(
+            session = %session,
+            board = %active_board.display(),
+            "active tmux session found but board directory missing; falling back to repo board"
+        );
+    }
+
+    let fallback = project_root.join("kanban").join(phase);
+    if fallback.is_dir() {
+        return Ok(fallback);
+    }
+
+    anyhow::bail!(
+        "phase board not found for '{}': checked active run and fallback path {}",
+        phase,
+        fallback.display()
+    );
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -52,6 +80,7 @@ async fn main() -> Result<()> {
             agent,
             policy,
             attach,
+            new,
             foreground,
         } => {
             // Detached mode: spawn a background batty worker and return immediately.
@@ -78,6 +107,9 @@ async fn main() -> Result<()> {
                 }
                 if let Some(ref p) = policy {
                     cmd.arg("--policy").arg(p);
+                }
+                if new {
+                    cmd.arg("--new");
                 }
 
                 let log_dir = cwd.join(".batty").join("logs");
@@ -111,7 +143,7 @@ async fn main() -> Result<()> {
             let agent_name = agent.as_deref().unwrap_or(&config.defaults.agent);
             let policy_str = policy.as_deref();
 
-            work::run_phase(&target, &config, agent_name, policy_str, attach, &cwd)?;
+            work::run_phase(&target, &config, agent_name, policy_str, attach, new, &cwd)?;
         }
         Command::Attach { target } => {
             let session = tmux::session_name(&target);
@@ -146,10 +178,32 @@ async fn main() -> Result<()> {
                 "  unknown_fallback: {}",
                 config.detector.unknown_request_fallback
             );
+            println!(
+                "  idle_input_fallback: {}",
+                config.detector.idle_input_fallback
+            );
             if let Some(ref p) = config_path {
                 println!("  source:      {}", p.display());
             } else {
                 println!("  source:      (defaults — no .batty/config.toml found)");
+            }
+        }
+        Command::Board { target, print_dir } => {
+            let board_dir = resolve_board_dir(&cwd, &target)?;
+            if print_dir {
+                println!("{}", board_dir.display());
+                return Ok(());
+            }
+
+            let status = std::process::Command::new("kanban-md")
+                .arg("tui")
+                .arg("--dir")
+                .arg(&board_dir)
+                .status()
+                .map_err(|e| anyhow::anyhow!("failed to launch kanban-md: {e}"))?;
+
+            if !status.success() {
+                anyhow::bail!("kanban-md tui exited with non-zero status");
             }
         }
     }

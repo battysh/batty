@@ -20,7 +20,8 @@ cargo run -- work phase-2.4
 
 By default, `work` starts tmux detached and backgrounds Batty supervision.
 Use `--attach` to immediately enter the tmux session in the same terminal.
-Each run also gets an isolated git worktree branch like `phase-2-4-run-001`.
+By default, Batty resumes the latest existing worktree for that phase (if any).
+Use `--new` to force a fresh isolated run branch like `phase-2-4-run-005`.
 
 Optional global install:
 
@@ -52,6 +53,12 @@ If you want immediate interactive mode:
 batty work phase-2.4 --attach
 ```
 
+If you want to force a new run worktree instead of resuming:
+
+```sh
+batty work phase-2.4 --new
+```
+
 Example `.batty/config.toml`:
 
 ```toml
@@ -70,6 +77,7 @@ trace_io = true
 silence_timeout_secs = 3
 answer_cooldown_millis = 1000
 unknown_request_fallback = true
+idle_input_fallback = true
 
 [policy.auto_answer]
 "Continue? [y/n]" = "y"
@@ -81,6 +89,18 @@ Reconnect to an existing session:
 batty attach phase-2.4
 ```
 
+Open `kanban-md` TUI for the active run board:
+
+```sh
+batty board phase-2.4
+```
+
+Print the resolved board directory (for scripts):
+
+```sh
+batty board phase-2.4 --print-dir
+```
+
 ### Minimal Command
 
 ```sh
@@ -88,6 +108,7 @@ batty work phase-2.4
 ```
 
 A tmux session opens. The executor (Claude Code, Codex, Aider) works through the phase board — picking tasks, implementing, testing, committing. Batty auto-answers routine prompts and shows everything in the orchestrator pane.
+By default, Batty resumes the latest phase worktree; pass `--new` to force a fresh run.
 If the phase branch is merged back to the base branch, Batty cleans up the run worktree automatically; otherwise it keeps the worktree for inspection/rework.
 
 ```sh

@@ -24,7 +24,7 @@ use crate::agent::SpawnConfig;
 use crate::detector::{DetectorConfig, DetectorEvent, PromptDetector};
 use crate::events::{EventBuffer, PipeWatcher};
 use crate::policy::{Decision, PolicyEngine};
-use crate::prompt::{DetectedPrompt, PromptKind, PromptPatterns};
+use crate::prompt::{DetectedPrompt, PromptKind, PromptPatterns, strip_ansi};
 use crate::tier2::{self, Tier2Config, Tier2Result};
 use crate::tmux;
 
@@ -40,8 +40,8 @@ pub struct OrchestratorConfig {
     pub detector: DetectorConfig,
     /// Phase name (for session naming and logging).
     pub phase: String,
-    /// Project root (for log paths).
-    pub project_root: PathBuf,
+    /// Per-run log directory (execution/orchestrator/pty logs).
+    pub logs_dir: PathBuf,
     /// Polling interval for the pipe watcher.
     pub poll_interval: Duration,
     /// Event buffer size.
@@ -59,6 +59,9 @@ pub struct OrchestratorConfig {
     pub answer_delay: Duration,
     /// Auto-attach to the tmux session in the current terminal.
     pub auto_attach: bool,
+    /// If true, unknown-request fallback can trigger on idle input lines
+    /// (for example Codex `› ...`) so execution can continue automatically.
+    pub idle_input_fallback: bool,
 }
 
 impl OrchestratorConfig {
@@ -211,6 +214,110 @@ fn supervisor_cmd_for_log(config: &Tier2Config) -> String {
     }
 }
 
+fn is_ui_noise_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    let lower = trimmed.to_lowercase();
+    if lower.contains("for shortcuts") || lower.contains("context left") {
+        return true;
+    }
+
+    // Ignore pure border/separator rows from full-screen TUIs.
+    trimmed.chars().all(|c| {
+        matches!(
+            c,
+            ' ' | '│' | '┃' | '─' | '━' | '┄' | '┈' | '┊' | '┆' | '╭' | '╮' | '╯' | '╰'
+        )
+    })
+}
+
+/// Build a detector snapshot from pane content:
+/// - strips ANSI
+/// - removes known UI noise lines
+/// - returns `(signature, last_meaningful_line)` from the tail window
+fn pane_detector_snapshot(pane_content: &str) -> Option<(String, String)> {
+    let meaningful = pane_content
+        .lines()
+        .map(strip_ansi)
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .filter(|line| !is_ui_noise_line(line))
+        .collect::<Vec<_>>();
+
+    if meaningful.is_empty() {
+        return None;
+    }
+
+    let tail = meaningful
+        .iter()
+        .rev()
+        .take(12)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+
+    let signature = tail.join("\n");
+    let last = tail.last().cloned().unwrap_or_default();
+    Some((signature, last))
+}
+
+/// Gate unknown-request fallback so we don't escalate on inert UI footer lines.
+fn should_invoke_unknown_fallback(last_line: &str) -> bool {
+    if is_ui_noise_line(last_line) {
+        return false;
+    }
+
+    let lower = last_line.to_lowercase();
+    if lower.contains("[y/n]")
+        || lower.contains("would you like")
+        || lower.contains("do you want")
+        || lower.contains("allow tool")
+        || lower.contains("approve")
+        || lower.contains("press enter")
+        || lower.contains("press")
+        || lower.contains("type ")
+        || lower.contains("input ")
+        || lower.contains("choose ")
+        || lower.contains("select ")
+    {
+        return true;
+    }
+
+    last_line.contains('?')
+}
+
+fn extract_idle_input_prompt(pane_content: &str) -> Option<String> {
+    for raw in pane_content.lines().rev() {
+        let cleaned = strip_ansi(raw);
+        let trimmed = cleaned.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if is_ui_noise_line(trimmed) {
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix('›') {
+            let candidate = rest.trim();
+            if !candidate.is_empty() {
+                return Some(candidate.to_string());
+            }
+        }
+        if let Some(rest) = trimmed.strip_prefix('>') {
+            let candidate = rest.trim();
+            if !candidate.is_empty() {
+                return Some(candidate.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Manages the tmux status bar for an orchestrator session.
 ///
 /// Format: `[batty] <phase> | <detail> | <indicator> <message>`
@@ -352,6 +459,8 @@ pub struct StuckDetector {
     recent_lines: Vec<String>,
     /// Maximum lines to track for loop detection.
     loop_window: usize,
+    /// Whether this stuck episode has already been escalated to human.
+    escalated: bool,
 }
 
 impl StuckDetector {
@@ -362,6 +471,7 @@ impl StuckDetector {
             nudge_count: 0,
             recent_lines: Vec::new(),
             loop_window: 20,
+            escalated: false,
         }
     }
 
@@ -370,6 +480,7 @@ impl StuckDetector {
         self.last_progress = Instant::now();
         self.nudge_count = 0;
         self.recent_lines.clear();
+        self.escalated = false;
     }
 
     /// Feed an output line for loop detection.
@@ -393,12 +504,15 @@ impl StuckDetector {
     ///
     /// Call this periodically from the orchestrator loop.
     /// `session_alive` indicates whether the tmux session/pane still exists.
-    pub fn check(&self, session_alive: bool) -> (StuckState, StuckAction) {
+    pub fn check(&mut self, session_alive: bool) -> (StuckState, StuckAction) {
         // Crash detection
         if !session_alive {
             let action = if self.config.auto_relaunch {
                 StuckAction::Relaunch
+            } else if self.escalated {
+                StuckAction::None
             } else {
+                self.escalated = true;
                 StuckAction::Escalate {
                     reason: "executor process crashed".to_string(),
                 }
@@ -416,6 +530,10 @@ impl StuckDetector {
                     },
                 );
             } else {
+                if self.escalated {
+                    return (StuckState::Looping, StuckAction::None);
+                }
+                self.escalated = true;
                 return (
                     StuckState::Looping,
                     StuckAction::Escalate {
@@ -436,6 +554,10 @@ impl StuckDetector {
                     },
                 );
             } else {
+                if self.escalated {
+                    return (StuckState::Stalled { since: elapsed }, StuckAction::None);
+                }
+                self.escalated = true;
                 return (
                     StuckState::Stalled { since: elapsed },
                     StuckAction::Escalate {
@@ -449,6 +571,7 @@ impl StuckDetector {
             }
         }
 
+        self.escalated = false;
         (StuckState::Normal, StuckAction::None)
     }
 
@@ -500,8 +623,8 @@ pub fn run(
 
     // 2. Create session
     let session = tmux::session_name(&config.phase);
-    let log_dir = config.project_root.join(".batty").join("logs");
-    let pipe_log = log_dir.join(format!("{}-pty-output.log", config.phase));
+    let log_dir = config.logs_dir.clone();
+    let pipe_log = log_dir.join("pty-output.log");
 
     tmux::create_session(
         &session,
@@ -583,7 +706,7 @@ pub fn run(
 
     // 7. Supervision loop
     let mut last_event_line = String::new();
-    let mut last_pane_line = String::new();
+    let mut last_pane_signature = String::new();
     let result = loop {
         if stop.load(Ordering::Relaxed) {
             observer.on_event("● stopped by signal");
@@ -647,12 +770,11 @@ pub fn run(
         // Also check capture-pane for the most current visible content
         // This catches prompts that pipe-pane hasn't flushed yet
         if let Ok(pane_content) = tmux::capture_pane(&executor_pane) {
-            if let Some(last) = pane_content.lines().rev().find(|l| !l.trim().is_empty()) {
-                // Only treat as new output if visible line changed; otherwise we
-                // keep silence timing intact for unknown-request fallback.
-                if last != last_pane_line {
-                    last_pane_line = last.to_string();
-                    let event = detector.on_output(last);
+            if let Some((signature, detector_line)) = pane_detector_snapshot(&pane_content) {
+                // Only treat as new output when meaningful pane content changes.
+                if signature != last_pane_signature {
+                    last_pane_signature = signature;
+                    let event = detector.on_output(&detector_line);
                     if let Some(DetectorEvent::PromptDetected(ref prompt)) = event {
                         handle_prompt(
                             prompt,
@@ -687,29 +809,51 @@ pub fn run(
             }
             DetectorEvent::UnknownRequest { last_line, .. } => {
                 debug!(last_line = %last_line, "unknown request fallback triggered");
-                if config.tier2.is_some() {
+                let pane_content = tmux::capture_pane(&executor_pane).unwrap_or_default();
+                let maybe_idle_input = if config.idle_input_fallback {
+                    extract_idle_input_prompt(&pane_content)
+                } else {
+                    None
+                };
+                let should_fallback =
+                    should_invoke_unknown_fallback(&last_line) || maybe_idle_input.is_some();
+
+                if !should_fallback {
+                    debug!(
+                        last_line = %last_line,
+                        "unknown request fallback skipped for non-actionable line"
+                    );
+                } else if config.tier2.is_some() {
                     // Generic fallback: no known pattern, but executor appears idle
                     // and potentially waiting for user input. Ask supervisor agent.
-                    let pane_excerpt = tmux::capture_pane(&executor_pane)
-                        .map(|s| {
-                            s.lines()
-                                .rev()
-                                .take(20)
-                                .collect::<Vec<_>>()
-                                .into_iter()
-                                .rev()
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        })
-                        .unwrap_or_default();
+                    let pane_excerpt = pane_content
+                        .lines()
+                        .rev()
+                        .take(20)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                    let prompt_text = if let Some(ref idle) = maybe_idle_input {
+                        format!(
+                            "Executor is idle at the input prompt with pending input:\n{idle}\n\n\
+If this input should be sent now, return the exact short response to send. \
+If it should be revised, return the revised short input. \
+If human judgment is required, respond with ESCALATE: <reason>."
+                        )
+                    } else {
+                        format!(
+                            "Executor appears to be waiting for input, but no known prompt pattern matched.\nLast visible line: {last_line}\n\nVisible pane excerpt:\n{pane_excerpt}\n\nIf user input is required, provide the exact short response to send. If unclear, respond with ESCALATE: <reason>."
+                        )
+                    };
 
                     let synthetic_prompt = DetectedPrompt {
                         kind: PromptKind::Question {
                             detail: last_line.clone(),
                         },
-                        matched_text: format!(
-                            "Executor appears to be waiting for input, but no known prompt pattern matched.\nLast visible line: {last_line}\n\nVisible pane excerpt:\n{pane_excerpt}\n\nIf user input is required, provide the exact short response to send. If unclear, respond with ESCALATE: <reason>."
-                        ),
+                        matched_text: prompt_text,
                     };
 
                     observer.on_event("? supervisor fallback: unknown request");
@@ -1284,7 +1428,7 @@ esac
                 unknown_request_fallback: true,
             },
             phase,
-            project_root: tmp.path().to_path_buf(),
+            logs_dir: tmp.path().join(".batty").join("logs"),
             poll_interval: Duration::from_millis(80),
             buffer_size: 50,
             tier2: Some({
@@ -1299,6 +1443,7 @@ esac
             stuck: None,
             answer_delay: Duration::ZERO,
             auto_attach: false,
+            idle_input_fallback: true,
         };
 
         let result = run(config, Box::new(observer), stop).unwrap();
@@ -1758,7 +1903,7 @@ esac
                 unknown_request_fallback: true,
             },
             phase,
-            project_root: tmp.path().to_path_buf(),
+            logs_dir: tmp.path().join(".batty").join("logs"),
             poll_interval: Duration::from_millis(80),
             buffer_size: 50,
             tier2: Some(Tier2Config {
@@ -1777,6 +1922,7 @@ esac
             stuck: None,
             answer_delay: Duration::ZERO,
             auto_attach: false,
+            idle_input_fallback: true,
         };
 
         let result = run(config, Box::new(observer), stop).unwrap();
@@ -1834,7 +1980,7 @@ esac
                 unknown_request_fallback: true,
             },
             phase,
-            project_root: tmp.path().to_path_buf(),
+            logs_dir: tmp.path().join(".batty").join("logs"),
             poll_interval: Duration::from_millis(80),
             buffer_size: 50,
             tier2: Some(Tier2Config {
@@ -1853,6 +1999,7 @@ esac
             stuck: None,
             answer_delay: Duration::ZERO,
             auto_attach: false,
+            idle_input_fallback: true,
         };
 
         let result = run(config, Box::new(observer), stop).unwrap();
@@ -2075,7 +2222,7 @@ esac
             policy: PolicyEngine::new(Policy::Act, HashMap::new()),
             detector: DetectorConfig::default(),
             phase: "test-short".to_string(),
-            project_root: tmp.path().to_path_buf(),
+            logs_dir: tmp.path().join(".batty").join("logs"),
             poll_interval: Duration::from_millis(100),
             buffer_size: 50,
             tier2: None,
@@ -2084,6 +2231,7 @@ esac
             stuck: None,
             answer_delay: Duration::ZERO,
             auto_attach: false,
+            idle_input_fallback: true,
         };
 
         // Clean up any leftover session
@@ -2123,7 +2271,7 @@ esac
             policy: PolicyEngine::new(Policy::Act, HashMap::new()),
             detector: DetectorConfig::default(),
             phase: "test-stop".to_string(),
-            project_root: tmp.path().to_path_buf(),
+            logs_dir: tmp.path().join(".batty").join("logs"),
             poll_interval: Duration::from_millis(100),
             buffer_size: 50,
             tier2: None,
@@ -2132,6 +2280,7 @@ esac
             stuck: None,
             answer_delay: Duration::ZERO,
             auto_attach: false,
+            idle_input_fallback: true,
         };
 
         let _ = tmux::kill_session("batty-test-stop");
@@ -2224,7 +2373,7 @@ esac
             policy: PolicyEngine::new(Policy::Act, HashMap::new()),
             detector: DetectorConfig::default(),
             phase: "test-logpane-orch".to_string(),
-            project_root: tmp.path().to_path_buf(),
+            logs_dir: tmp.path().join(".batty").join("logs"),
             poll_interval: Duration::from_millis(100),
             buffer_size: 50,
             tier2: None,
@@ -2233,6 +2382,7 @@ esac
             stuck: None,
             answer_delay: Duration::ZERO,
             auto_attach: false,
+            idle_input_fallback: true,
         };
 
         let _ = tmux::kill_session("batty-test-logpane-orch");
@@ -2332,7 +2482,7 @@ esac
 
     #[test]
     fn stuck_normal_when_recent_progress() {
-        let sd = StuckDetector::new(StuckConfig {
+        let mut sd = StuckDetector::new(StuckConfig {
             timeout: Duration::from_secs(60),
             max_nudges: 2,
             auto_relaunch: false,
@@ -2374,7 +2524,7 @@ esac
 
     #[test]
     fn stuck_crash_detected() {
-        let sd = StuckDetector::new(StuckConfig {
+        let mut sd = StuckDetector::new(StuckConfig {
             timeout: Duration::from_secs(300),
             max_nudges: 2,
             auto_relaunch: false,
@@ -2386,7 +2536,7 @@ esac
 
     #[test]
     fn stuck_crash_auto_relaunch() {
-        let sd = StuckDetector::new(StuckConfig {
+        let mut sd = StuckDetector::new(StuckConfig {
             timeout: Duration::from_secs(300),
             max_nudges: 2,
             auto_relaunch: true,
@@ -2394,6 +2544,29 @@ esac
         let (state, action) = sd.check(false);
         assert_eq!(state, StuckState::Crashed);
         assert_eq!(action, StuckAction::Relaunch);
+    }
+
+    #[test]
+    fn stuck_escalation_emits_once_until_recovery() {
+        let mut sd = StuckDetector::new(StuckConfig {
+            timeout: Duration::from_millis(50),
+            max_nudges: 2,
+            auto_relaunch: false,
+        });
+        sd.last_progress = Instant::now() - Duration::from_millis(100);
+        sd.nudge_count = 2; // already used all nudges
+
+        let (_, first) = sd.check(true);
+        let (_, second) = sd.check(true);
+        assert!(matches!(first, StuckAction::Escalate { .. }));
+        assert_eq!(second, StuckAction::None);
+
+        // Recovery resets escalation gate.
+        sd.on_progress();
+        sd.last_progress = Instant::now() - Duration::from_millis(100);
+        sd.nudge_count = 2;
+        let (_, third) = sd.check(true);
+        assert!(matches!(third, StuckAction::Escalate { .. }));
     }
 
     #[test]
@@ -2517,6 +2690,67 @@ esac
         );
         assert!(!result); // should return false (no human override)
         assert!(start.elapsed() < Duration::from_millis(50)); // should be instant
+    }
+
+    #[test]
+    fn ui_noise_line_detects_codex_footer_noise() {
+        assert!(is_ui_noise_line("? for shortcuts"));
+        assert!(is_ui_noise_line(
+            "? for shortcuts                             95% context left"
+        ));
+        assert!(is_ui_noise_line("95% context left"));
+        assert!(is_ui_noise_line("────────────────────────────────────"));
+        assert!(!is_ui_noise_line(
+            "Preparing main module edits (1m 13s • esc to interrupt)"
+        ));
+    }
+
+    #[test]
+    fn pane_detector_snapshot_ignores_footer_and_tracks_meaningful_tail() {
+        let pane = "\
+Edited src/main.rs (+1 -0)
+Preparing main module edits (1m 13s • esc to interrupt)
+? for shortcuts                             95% context left
+";
+
+        let (signature, last) = pane_detector_snapshot(pane).expect("expected meaningful snapshot");
+        assert!(signature.contains("Edited src/main.rs (+1 -0)"));
+        assert!(signature.contains("Preparing main module edits"));
+        assert!(!signature.contains("for shortcuts"));
+        assert_eq!(
+            last,
+            "Preparing main module edits (1m 13s • esc to interrupt)"
+        );
+    }
+
+    #[test]
+    fn unknown_fallback_gate_skips_non_actionable_lines() {
+        assert!(!should_invoke_unknown_fallback(
+            "? for shortcuts 95% context left"
+        ));
+        assert!(!should_invoke_unknown_fallback("Write tests for @filename"));
+        assert!(should_invoke_unknown_fallback("Press enter to continue"));
+        assert!(should_invoke_unknown_fallback("Continue? [y/n]"));
+    }
+
+    #[test]
+    fn extract_idle_input_prompt_from_codex_input_line() {
+        let pane = "\
+• Finished task summary
+› Explain this codebase
+? for shortcuts 49% context left
+";
+        let prompt = extract_idle_input_prompt(pane).expect("expected idle input prompt");
+        assert_eq!(prompt, "Explain this codebase");
+    }
+
+    #[test]
+    fn extract_idle_input_prompt_ignores_noise_only_content() {
+        let pane = "\
+? for shortcuts 49% context left
+────────────────────────────────────
+";
+        assert!(extract_idle_input_prompt(pane).is_none());
     }
 
     #[test]

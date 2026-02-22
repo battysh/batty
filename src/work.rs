@@ -37,6 +37,7 @@ pub fn run_phase(
     agent_name: &str,
     policy_override: Option<&str>,
     auto_attach: bool,
+    force_new_worktree: bool,
     project_root: &Path,
 ) -> Result<()> {
     // 1. Validate the phase board exists before creating an isolated worktree.
@@ -52,8 +53,9 @@ pub fn run_phase(
     }
 
     // 2. Create worktree for this run (earliest isolation boundary).
-    let phase_worktree = phase_worktree::prepare_phase_worktree(project_root, phase)
-        .with_context(|| format!("failed to create isolated worktree for phase '{phase}'"))?;
+    let (phase_worktree, resumed_worktree) =
+        phase_worktree::resolve_phase_worktree(project_root, phase, force_new_worktree)
+            .with_context(|| format!("failed to resolve isolated worktree for phase '{phase}'"))?;
     let execution_root = phase_worktree.path.clone();
 
     info!(
@@ -61,6 +63,7 @@ pub fn run_phase(
         branch = %phase_worktree.branch,
         base_branch = %phase_worktree.base_branch,
         worktree = %execution_root.display(),
+        resumed = resumed_worktree,
         "phase worktree prepared"
     );
 
@@ -76,13 +79,14 @@ pub fn run_phase(
         "loaded phase board"
     );
 
-    // 4. Set up execution log
-    let log_dir = project_root.join(".batty").join("logs");
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let log_path = log_dir.join(format!("{phase}-{timestamp}.jsonl"));
+    // 4. Set up per-run logs under .batty/logs/<phase-run-###>/
+    let log_dir = project_root
+        .join(".batty")
+        .join("logs")
+        .join(&phase_worktree.branch);
+    std::fs::create_dir_all(&log_dir)
+        .with_context(|| format!("failed to create run log dir {}", log_dir.display()))?;
+    let log_path = log_dir.join("execution.jsonl");
     let execution_log = ExecutionLog::new(&log_path)
         .with_context(|| format!("failed to create execution log at {}", log_path.display()))?;
 
@@ -161,8 +165,9 @@ pub fn run_phase(
             answer_cooldown: Duration::from_millis(project_config.detector.answer_cooldown_millis),
             unknown_request_fallback: project_config.detector.unknown_request_fallback,
         },
+        idle_input_fallback: project_config.detector.idle_input_fallback,
         phase: phase.to_string(),
-        project_root: project_root.to_path_buf(),
+        logs_dir: log_dir.clone(),
         poll_interval: OrchestratorConfig::default_poll_interval(),
         buffer_size: OrchestratorConfig::default_buffer_size(),
         tier2: tier2_config,
@@ -194,7 +199,12 @@ pub fn run_phase(
         phase, session
     );
     println!(
-        "\x1b[36m[batty]\x1b[0m worktree: {} ({})",
+        "\x1b[36m[batty]\x1b[0m worktree {}: {} ({})",
+        if resumed_worktree {
+            "resumed"
+        } else {
+            "created"
+        },
         execution_root.display(),
         phase_worktree.branch
     );
@@ -468,7 +478,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let config = ProjectConfig::default();
 
-        let result = run_phase("nonexistent", &config, "claude", None, false, tmp.path());
+        let result = run_phase("nonexistent", &config, "claude", None, false, false, tmp.path());
         assert!(result.is_err());
         assert!(
             result
