@@ -320,6 +320,24 @@ fn extract_idle_input_prompt(pane_content: &str) -> Option<String> {
     None
 }
 
+fn extract_pending_input_from_supervisor_prompt(prompt_text: &str) -> Option<String> {
+    let marker = "Executor is idle at the input prompt with pending input:\n";
+    let rest = prompt_text.strip_prefix(marker)?;
+    let pending = rest.split("\n\n").next()?.trim();
+    if pending.is_empty() {
+        None
+    } else {
+        Some(pending.to_string())
+    }
+}
+
+fn normalize_input_line_prefix(line: &str) -> &str {
+    line.trim()
+        .trim_start_matches('›')
+        .trim_start_matches('>')
+        .trim()
+}
+
 /// Manages the tmux status bar for an orchestrator session.
 ///
 /// Format: `[batty] <phase> | <detail> | <indicator> <message>`
@@ -344,11 +362,23 @@ impl StatusBar {
 
     /// Initialize the status bar styling and initial content.
     pub fn init(&mut self) -> Result<()> {
-        // Style: dark background, amber text
-        tmux::set_status_style(&self.session, "bg=colour235,fg=colour136")?;
-        // Widen left status to fit our content
-        tmux::tmux_set(&self.session, "status-left-length", "80")?;
-        tmux::tmux_set(&self.session, "status-right-length", "40")?;
+        // Best-effort capability usage; old tmux versions may not support all
+        // style options, but supervision can continue without them.
+        if let Err(e) = tmux::set_status_style(&self.session, "bg=colour235,fg=colour136") {
+            debug!(error = %e, "status-style unsupported; continuing with defaults");
+        }
+        if let Err(e) = tmux::tmux_set(&self.session, "status-left-length", "80") {
+            debug!(
+                error = %e,
+                "status-left-length unsupported; continuing with defaults"
+            );
+        }
+        if let Err(e) = tmux::tmux_set(&self.session, "status-right-length", "40") {
+            debug!(
+                error = %e,
+                "status-right-length unsupported; continuing with defaults"
+            );
+        }
         self.update(StatusIndicator::StateChange, "starting")?;
         Ok(())
     }
@@ -837,9 +867,30 @@ fn run_with_mode(
     stop: Arc<AtomicBool>,
     mode: StartMode,
 ) -> Result<OrchestratorResult> {
-    // 1. Check tmux
-    let version = tmux::check_tmux()?;
-    info!(tmux_version = %version, "tmux available");
+    // 1. Probe tmux capabilities before any supervision actions.
+    let tmux_caps = tmux::probe_capabilities()?;
+    info!(
+        tmux_version = %tmux_caps.version_raw,
+        pipe_pane = tmux_caps.pipe_pane,
+        pipe_pane_only_if_missing = tmux_caps.pipe_pane_only_if_missing,
+        status_style = tmux_caps.status_style,
+        split_mode = ?tmux_caps.split_mode,
+        known_good = tmux_caps.known_good(),
+        "tmux capability probe complete"
+    );
+    if !tmux_caps.known_good() {
+        warn!(
+            tmux_version = %tmux_caps.version_raw,
+            "tmux version outside documented known-good range (>= 3.2)"
+        );
+        observer.on_event(&format!(
+            "⚠ tmux {} is outside known-good range (>= 3.2); using compatibility fallbacks",
+            tmux_caps.version_raw
+        ));
+    }
+    if !tmux_caps.pipe_pane {
+        anyhow::bail!("{}", tmux_caps.remediation_message());
+    }
 
     // 2. Resolve session + run paths.
     let session = tmux::session_name(&config.phase);
@@ -895,11 +946,26 @@ fn run_with_mode(
             observer.on_event(&format!("● pipe-pane → {}", pipe_log.display()));
         }
         StartMode::Resume => {
-            tmux::setup_pipe_pane_if_missing(&executor_pane, &pipe_log)?;
-            observer.on_event(&format!(
-                "● pipe-pane ensured (resume) → {}",
-                pipe_log.display()
-            ));
+            if tmux_caps.pipe_pane_only_if_missing {
+                tmux::setup_pipe_pane_if_missing(&executor_pane, &pipe_log)?;
+                observer.on_event(&format!(
+                    "● pipe-pane ensured (resume) → {}",
+                    pipe_log.display()
+                ));
+            } else {
+                // Fallback for older tmux lacking `pipe-pane -o`: avoid
+                // replacing a live pipe if one is already active.
+                let has_pipe = tmux::pane_pipe_enabled(&executor_pane).unwrap_or(false);
+                if has_pipe {
+                    observer.on_event("● resume fallback: existing pipe-pane reused");
+                } else {
+                    tmux::setup_pipe_pane(&executor_pane, &pipe_log)?;
+                    observer.on_event(&format!(
+                        "● resume fallback: pipe-pane attached → {}",
+                        pipe_log.display()
+                    ));
+                }
+            }
         }
     }
 
@@ -917,6 +983,7 @@ fn run_with_mode(
                 &executor_pane,
                 &orch_log,
                 config.log_pane_height_pct,
+                tmux_caps.split_mode,
             )?;
             log_pane_id = detect_log_pane(&session);
             observer.on_event("● log pane created");
@@ -1149,10 +1216,15 @@ fn run_with_mode(
                 } else {
                     None
                 };
-                let should_fallback =
-                    should_invoke_unknown_fallback(&last_line) || maybe_idle_input.is_some();
-
-                if !should_fallback {
+                if let Some(idle_hint) = maybe_idle_input {
+                    // Codex-style pending input (`› ...`) is an agent hint.
+                    // Do not send it to Tier 2 as an unknown prompt.
+                    observer.on_event(&format!(
+                        "→ idle input hint pending (skipping supervisor): {}",
+                        preview_for_log(&idle_hint, 160)
+                    ));
+                    status_bar.update(StatusIndicator::Action, "idle input pending")?;
+                } else if !should_invoke_unknown_fallback(&last_line) {
                     debug!(
                         last_line = %last_line,
                         "unknown request fallback skipped for non-actionable line"
@@ -1170,18 +1242,9 @@ fn run_with_mode(
                         .collect::<Vec<_>>()
                         .join("\n");
 
-                    let prompt_text = if let Some(ref idle) = maybe_idle_input {
-                        format!(
-                            "Executor is idle at the input prompt with pending input:\n{idle}\n\n\
-If this input should be sent now, return the exact short response to send. \
-If it should be revised, return the revised short input. \
-If human judgment is required, respond with ESCALATE: <reason>."
-                        )
-                    } else {
-                        format!(
-                            "Executor appears to be waiting for input, but no known prompt pattern matched.\nLast visible line: {last_line}\n\nVisible pane excerpt:\n{pane_excerpt}\n\nIf user input is required, provide the exact short response to send. If unclear, respond with ESCALATE: <reason>."
-                        )
-                    };
+                    let prompt_text = format!(
+                        "Executor appears to be waiting for input, but no known prompt pattern matched.\nLast visible line: {last_line}\n\nVisible pane excerpt:\n{pane_excerpt}\n\nIf user input is required, provide the exact short response to send. If unclear, respond with ESCALATE: <reason>."
+                    );
 
                     let synthetic_prompt = DetectedPrompt {
                         kind: PromptKind::Question {
@@ -1268,6 +1331,7 @@ fn setup_log_pane(
     executor_pane: &str,
     log_path: &Path,
     height_pct: u32,
+    split_mode: tmux::SplitMode,
 ) -> Result<()> {
     // Ensure log file exists (tail -f needs it)
     if let Some(parent) = log_path.parent() {
@@ -1279,30 +1343,30 @@ fn setup_log_pane(
         .append(true)
         .open(log_path)?;
 
-    // Calculate lines from percentage (use session height or fallback to 50)
-    let lines = std::cmp::max(3, (50 * height_pct / 100) as u32);
+    let tail_cmd = vec![
+        "tail".to_string(),
+        "-f".to_string(),
+        log_path.display().to_string(),
+    ];
 
-    // Split the window to create the log pane at the bottom
-    // Use -l (lines) instead of -p (percentage) for tmux compatibility
-    let output = std::process::Command::new("tmux")
-        .args([
-            "split-window",
-            "-v",
-            "-l",
-            &lines.to_string(),
-            "-t",
-            session,
-            "tail",
-            "-f",
-            &log_path.display().to_string(),
-        ])
-        .output()
-        .context("failed to create log pane")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        warn!(stderr = %stderr, "log pane creation failed — continuing without it");
-        return Ok(()); // Non-fatal — status bar still works
+    match split_mode {
+        tmux::SplitMode::Lines => {
+            let lines = std::cmp::max(3, (50 * height_pct / 100) as u32);
+            if let Err(e) = tmux::split_window_vertical_lines(session, lines, &tail_cmd) {
+                warn!(error = %e, "log pane creation with -l failed — continuing without it");
+                return Ok(());
+            }
+        }
+        tmux::SplitMode::Percent => {
+            if let Err(e) = tmux::split_window_vertical_percent(session, height_pct, &tail_cmd) {
+                warn!(error = %e, "log pane creation with -p failed — continuing without it");
+                return Ok(());
+            }
+        }
+        tmux::SplitMode::Disabled => {
+            warn!("tmux split-window unsupported; continuing without log pane");
+            return Ok(());
+        }
     }
 
     // Re-select the executor pane so capture/send-keys stay on the executor.
@@ -1324,9 +1388,19 @@ fn check_human_answered(executor_pane: &str, prompt_text: &str) -> bool {
         if let Some(last) = pane_content.lines().rev().find(|l| !l.trim().is_empty()) {
             let last_clean = crate::prompt::strip_ansi(last);
             let last_trimmed = last_clean.trim();
+            let last_normalized = normalize_input_line_prefix(last_trimmed);
+
+            // For synthetic idle-input prompts, ignore the unchanged input line.
+            if let Some(pending) = extract_pending_input_from_supervisor_prompt(prompt_text) {
+                if last_normalized == pending {
+                    return false;
+                }
+            }
+
             // If the last line changed from the prompt, someone typed
             return !last_trimmed.is_empty()
                 && !prompt_text.contains(last_trimmed)
+                && !prompt_text.contains(last_normalized)
                 && !last_trimmed.contains(prompt_text);
         }
     }
@@ -2679,7 +2753,14 @@ esac
         let log_path = tmp.path().join("orchestrator.log");
 
         let executor_pane = tmux::pane_id(session).unwrap();
-        setup_log_pane(session, &executor_pane, &log_path, 20).unwrap();
+        setup_log_pane(
+            session,
+            &executor_pane,
+            &log_path,
+            20,
+            tmux::SplitMode::Lines,
+        )
+        .unwrap();
 
         // Should now have 2 panes
         let panes = tmux::list_panes(session).unwrap();
@@ -3090,6 +3171,48 @@ Preparing main module edits (1m 13s • esc to interrupt)
 ────────────────────────────────────
 ";
         assert!(extract_idle_input_prompt(pane).is_none());
+    }
+
+    #[test]
+    fn extract_pending_input_from_supervisor_prompt_reads_first_block() {
+        let prompt = "\
+Executor is idle at the input prompt with pending input:
+Summarize recent commits
+
+If this input should be sent now, return the exact short response to send.";
+        let pending =
+            extract_pending_input_from_supervisor_prompt(prompt).expect("expected pending input");
+        assert_eq!(pending, "Summarize recent commits");
+    }
+
+    #[test]
+    fn human_check_ignores_prefixed_idle_input_line_for_same_prompt() {
+        let session = "batty-test-human-idle-prefix";
+        let _ = tmux::kill_session(session);
+
+        tmux::create_session(
+            session,
+            "bash",
+            &[
+                "-c".to_string(),
+                "printf '> Summarize recent commits\\n'; sleep 5".to_string(),
+            ],
+            "/tmp",
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+
+        let prompt = "\
+Executor is idle at the input prompt with pending input:
+Summarize recent commits
+
+If this input should be sent now, return the exact short response to send.";
+        assert!(
+            !check_human_answered(session, prompt),
+            "prefixed pending input should not be treated as human override"
+        );
+
+        tmux::kill_session(session).unwrap();
     }
 
     #[test]
