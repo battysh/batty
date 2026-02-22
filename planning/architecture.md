@@ -35,7 +35,7 @@ Human sits above all three. See everything, type anytime, override anything.
 ## Data Flow
 
 ```
-kanban/phase-1/                    ← phase board
+.batty/kanban/phase-1/             ← phase board
     ↓
 batty work phase-1
     ↓
