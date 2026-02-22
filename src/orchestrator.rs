@@ -24,6 +24,7 @@ use crate::detector::{DetectorConfig, DetectorEvent, PromptDetector};
 use crate::events::{EventBuffer, PipeWatcher};
 use crate::policy::{Decision, PolicyEngine};
 use crate::prompt::{PromptKind, PromptPatterns};
+use crate::tier2::{self, Tier2Config, Tier2Result};
 use crate::tmux;
 
 /// Configuration for the orchestrator.
@@ -44,6 +45,8 @@ pub struct OrchestratorConfig {
     pub poll_interval: Duration,
     /// Event buffer size.
     pub buffer_size: usize,
+    /// Tier 2 supervisor agent configuration (None = disable Tier 2).
+    pub tier2: Option<Tier2Config>,
 }
 
 impl OrchestratorConfig {
@@ -220,6 +223,8 @@ pub fn run(
                         &config.policy,
                         &mut detector,
                         &mut *observer,
+                        config.tier2.as_ref(),
+                        &buffer,
                     )?;
                 }
             }
@@ -234,6 +239,8 @@ pub fn run(
                     &config.policy,
                     &mut detector,
                     &mut *observer,
+                    config.tier2.as_ref(),
+                    &buffer,
                 )?;
             }
             DetectorEvent::Silence { last_line, .. } => {
@@ -252,12 +259,17 @@ pub fn run(
 }
 
 /// Handle a detected prompt: evaluate policy and take action.
+///
+/// Tier 1: pattern match → auto-answer via send-keys.
+/// Tier 2: no match → call supervisor agent → inject answer or escalate to human.
 fn handle_prompt(
     prompt: &crate::prompt::DetectedPrompt,
     session: &str,
     policy: &PolicyEngine,
     detector: &mut PromptDetector,
     observer: &mut dyn OrchestratorObserver,
+    tier2_config: Option<&Tier2Config>,
+    event_buffer: &EventBuffer,
 ) -> Result<()> {
     // Skip completion/error signals — those aren't questions
     match &prompt.kind {
@@ -291,7 +303,45 @@ fn handle_prompt(
             observer.on_suggest(prompt, response);
         }
         Decision::Escalate { ref prompt } => {
-            observer.on_escalate(prompt);
+            // Tier 2: try supervisor agent before escalating to human
+            if let Some(t2_config) = tier2_config {
+                observer.on_event("? supervisor thinking...");
+
+                let event_summary = event_buffer.format_summary();
+                let context = tier2::compose_context(
+                    &event_summary,
+                    prompt,
+                    t2_config.system_prompt.as_deref(),
+                );
+
+                match tier2::call_supervisor(t2_config, &context) {
+                    Ok(Tier2Result::Answer { response }) => {
+                        info!(prompt = %prompt, response = %response, "Tier 2 answer");
+                        observer.on_auto_answer(prompt, &response);
+
+                        tmux::send_keys(session, &response, true).with_context(|| {
+                            format!("failed to send-keys Tier 2 answer to '{session}'")
+                        })?;
+
+                        detector.answer_injected();
+                    }
+                    Ok(Tier2Result::Escalate { reason }) => {
+                        info!(reason = %reason, "Tier 2 escalated to human");
+                        observer.on_escalate(&format!("{prompt} (supervisor: {reason})"));
+                    }
+                    Ok(Tier2Result::Failed { error }) => {
+                        warn!(error = %error, "Tier 2 call failed");
+                        observer.on_escalate(&format!("{prompt} (supervisor failed: {error})"));
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Tier 2 error");
+                        observer.on_escalate(&format!("{prompt} (supervisor error)"));
+                    }
+                }
+            } else {
+                // No Tier 2 configured — escalate directly
+                observer.on_escalate(prompt);
+            }
         }
         Decision::Observe { .. } => {
             // Just log, no action
@@ -377,7 +427,8 @@ mod tests {
             matched_text: "Continue? [y/n]".to_string(),
         };
 
-        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer).unwrap();
+        let buffer = EventBuffer::new(10);
+        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, None, &buffer).unwrap();
 
         // Check observer received the auto-answer event
         let collected = events.lock().unwrap();
@@ -410,12 +461,59 @@ mod tests {
             matched_text: "Some unknown prompt".to_string(),
         };
 
-        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer).unwrap();
+        let buffer = EventBuffer::new(10);
+        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, None, &buffer).unwrap();
 
         let collected = events.lock().unwrap();
         assert!(
             collected.iter().any(|e| e.contains("escalate:")),
             "expected escalate event, got: {collected:?}"
+        );
+
+        tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn handle_prompt_tier2_with_echo() {
+        // Test Tier 2 integration with echo as a mock supervisor
+        let session = "batty-test-tier2";
+        let _ = tmux::kill_session(session);
+        tmux::create_session(session, "cat", &[], "/tmp").unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+
+        let policy = PolicyEngine::new(Policy::Act, HashMap::new()); // no auto-answers
+        let mut detector = PromptDetector::new(
+            PromptPatterns::claude_code(),
+            DetectorConfig::default(),
+        );
+        let (mut observer, events) = TestObserver::new();
+
+        let tier2 = Tier2Config {
+            program: "echo".to_string(),
+            args: vec!["yes".to_string()],
+            timeout: Duration::from_secs(5),
+            system_prompt: None,
+        };
+
+        let prompt = crate::prompt::DetectedPrompt {
+            kind: crate::prompt::PromptKind::Permission {
+                detail: "unknown".to_string(),
+            },
+            matched_text: "Some unknown prompt".to_string(),
+        };
+
+        let buffer = EventBuffer::new(10);
+        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, Some(&tier2), &buffer).unwrap();
+
+        let collected = events.lock().unwrap();
+        // Should have supervisor thinking event + auto-answer from Tier 2
+        assert!(
+            collected.iter().any(|e| e.contains("thinking")),
+            "expected thinking event, got: {collected:?}"
+        );
+        assert!(
+            collected.iter().any(|e| e.contains("auto:")),
+            "expected auto-answer from Tier 2, got: {collected:?}"
         );
 
         tmux::kill_session(session).unwrap();
@@ -435,9 +533,8 @@ mod tests {
             matched_text: "result".to_string(),
         };
 
-        // Should not error and should not produce any events
-        // (no session needed since it returns early)
-        handle_prompt(&prompt, "fake-session", &policy, &mut detector, &mut observer).unwrap();
+        let buffer = EventBuffer::new(10);
+        handle_prompt(&prompt, "fake-session", &policy, &mut detector, &mut observer, None, &buffer).unwrap();
 
         let collected = events.lock().unwrap();
         assert!(collected.is_empty(), "completion should produce no events");
@@ -465,6 +562,7 @@ mod tests {
             project_root: tmp.path().to_path_buf(),
             poll_interval: Duration::from_millis(100),
             buffer_size: 50,
+            tier2: None,
         };
 
         // Clean up any leftover session
@@ -507,6 +605,7 @@ mod tests {
             project_root: tmp.path().to_path_buf(),
             poll_interval: Duration::from_millis(100),
             buffer_size: 50,
+            tier2: None,
         };
 
         let _ = tmux::kill_session("batty-test-stop");

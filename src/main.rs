@@ -10,6 +10,7 @@ mod policy;
 mod prompt;
 mod supervisor;
 mod task;
+mod tier2;
 mod tmux;
 mod work;
 
