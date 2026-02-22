@@ -1,0 +1,13 @@
+{"timestamp":"2026-02-22T00:19:23.958943314-05:00","action":"create","task_id":2,"detail":"Define supervisor hotkey control contract"}
+{"timestamp":"2026-02-22T00:19:28.216847463-05:00","action":"create","task_id":3,"detail":"Implement supervisor pause/resume hotkeys"}
+{"timestamp":"2026-02-22T00:19:32.502716666-05:00","action":"create","task_id":4,"detail":"Add tests and operator docs for supervisor hotkeys"}
+{"timestamp":"2026-02-22T00:20:16.392033136-05:00","action":"delete","task_id":1,"detail":"Minor improvements backlog triage"}
+{"timestamp":"2026-02-22T00:22:19.407091065-05:00","action":"create","task_id":5,"detail":"Support dangerous-mode wrappers for claude and codex"}
+{"timestamp":"2026-02-22T00:26:14.880190242-05:00","action":"claim","task_id":2,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T00:26:14.881485616-05:00","action":"move","task_id":2,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T00:27:50.839353481-05:00","action":"edit","task_id":2,"detail":"Define supervisor hotkey control contract"}
+{"timestamp":"2026-02-22T00:28:05.339670584-05:00","action":"move","task_id":2,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T00:28:50.477942319-05:00","action":"claim","task_id":3,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T00:28:50.478038641-05:00","action":"move","task_id":3,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T00:33:17.080056963-05:00","action":"edit","task_id":3,"detail":"Implement supervisor pause/resume hotkeys"}
+{"timestamp":"2026-02-22T00:33:29.609777819-05:00","action":"move","task_id":3,"detail":"in-progress -\u003e done"}
