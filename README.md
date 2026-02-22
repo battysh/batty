@@ -95,6 +95,14 @@ Reconnect to an existing session:
 batty attach phase-2.4
 ```
 
+Resume Batty supervision after a crash/restart (reuses the active tmux run):
+
+```sh
+batty resume phase-2.4
+# or
+batty resume batty-phase-2-4
+```
+
 Open `kanban-md` TUI for the active run board:
 
 ```sh
@@ -121,6 +129,7 @@ If the phase branch is merged back to the base branch, Batty cleans up the run w
 batty work all                  # chain phases sequentially
 batty work all --parallel 3     # three phases in parallel
 batty attach phase-2.4          # reconnect to a running session
+batty resume phase-2.4          # resume supervision for an existing run
 ```
 
 ## What You See

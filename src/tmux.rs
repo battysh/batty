@@ -196,6 +196,32 @@ pub fn setup_pipe_pane(target: &str, log_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Set up pipe-pane only if none is configured yet (`tmux pipe-pane -o`).
+pub fn setup_pipe_pane_if_missing(target: &str, log_path: &Path) -> Result<()> {
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create log directory: {}", parent.display()))?;
+    }
+
+    let pipe_cmd = format!("cat >> {}", log_path.display());
+    let output = Command::new("tmux")
+        .args(["pipe-pane", "-o", "-t", target, &pipe_cmd])
+        .output()
+        .with_context(|| format!("failed to set up pipe-pane (-o) for target '{target}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux pipe-pane -o failed: {stderr}");
+    }
+
+    info!(
+        target = target,
+        log = %log_path.display(),
+        "pipe-pane ensured (only-if-missing)"
+    );
+    Ok(())
+}
+
 /// Attach to an existing tmux session (blocks until detach/exit).
 pub fn attach(session: &str) -> Result<()> {
     if !session_exists(session) {

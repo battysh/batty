@@ -1,14 +1,17 @@
 ---
 id: 3
 title: Phase completion detection contract
-status: backlog
+status: done
 priority: critical
 created: 0001-01-01T00:00:00Z
-updated: 2026-02-21T22:39:55.559960178-05:00
+updated: 2026-02-21T23:24:45.765827624-05:00
 started: 2026-02-21T22:32:49.146404708-05:00
+completed: 2026-02-21T23:24:45.765827003-05:00
 tags:
     - core
     - reliability
+claimed_by: oaken-south
+claimed_at: 2026-02-21T23:24:45.765827564-05:00
 class: standard
 ---
 
@@ -37,3 +40,12 @@ Completion requires all of the following:
 
 [[2026-02-21]] Sat 22:39
 Picked accidentally; released while completing #2 first in dependency order.
+
+## Statement of Work
+
+- **What was done:** Implemented a deterministic completion contract evaluator and integrated it into the phase execution pipeline so phase runs are accepted/rejected from explicit gate checks.
+- **Files created:** `src/completion.rs` - completion contract evaluation module (board/milestone/summary/DoD/executor-stability checks).
+- **Files modified:** `src/work.rs` - wired completion evaluation + structured completion decision logging and run accept/reject behavior; `src/main.rs` - module wiring.
+- **Key decisions:** Completion is only accepted when all contract checks pass; DoD command execution is gated to run only when structural completion conditions are already satisfied.
+- **How to verify:** `cargo test -q completion::tests` and `cargo test -q` (full suite).
+- **Open issues:** None identified during restore validation.

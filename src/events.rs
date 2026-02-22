@@ -288,11 +288,18 @@ pub struct PipeWatcher {
 impl PipeWatcher {
     /// Create a new pipe watcher for the given log file.
     pub fn new(path: &Path, buffer: EventBuffer) -> Self {
+        Self::new_with_position(path, buffer, 0)
+    }
+
+    /// Create a new pipe watcher starting from a specific byte offset.
+    ///
+    /// Offsets beyond EOF are clamped during polling.
+    pub fn new_with_position(path: &Path, buffer: EventBuffer, position: u64) -> Self {
         Self {
             path: path.to_path_buf(),
             patterns: EventPatterns::default_patterns(),
             buffer,
-            position: 0,
+            position,
             line_buffer: String::new(),
         }
     }
@@ -312,6 +319,12 @@ impl PipeWatcher {
                     .with_context(|| format!("failed to open pipe log: {}", self.path.display()));
             }
         };
+
+        // Clamp stale checkpoints (for example after truncation/rotation)
+        let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        if self.position > file_len {
+            self.position = file_len;
+        }
 
         // Seek to where we left off
         file.seek(SeekFrom::Start(self.position))
@@ -370,6 +383,15 @@ impl PipeWatcher {
         } else {
             None
         }
+    }
+
+    /// Resume-safe checkpoint offset.
+    ///
+    /// This rewinds by the currently buffered partial line bytes so a resumed
+    /// watcher can re-read any incomplete line safely.
+    pub fn checkpoint_offset(&self) -> u64 {
+        self.position
+            .saturating_sub(self.line_buffer.len().try_into().unwrap_or(0))
     }
 }
 
@@ -738,6 +760,57 @@ mod tests {
         // Should not error — just returns 0 events
         let count = watcher.poll().unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn watcher_resume_from_position_reads_only_new_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("resume.log");
+
+        {
+            let mut f = fs::File::create(&log_path).unwrap();
+            writeln!(f, "test result: ok. 1 passed").unwrap();
+        }
+
+        let file_len = fs::metadata(&log_path).unwrap().len();
+        let buffer = EventBuffer::new(50);
+        let mut watcher = PipeWatcher::new_with_position(&log_path, buffer.clone(), file_len);
+
+        {
+            let mut f = fs::OpenOptions::new().append(true).open(&log_path).unwrap();
+            writeln!(f, "[main abc1234] resume").unwrap();
+        }
+
+        let count = watcher.poll().unwrap();
+        assert!(count >= 1);
+        let events = buffer.snapshot();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PipeEvent::CommitMade { .. }))
+        );
+    }
+
+    #[test]
+    fn watcher_checkpoint_offset_rewinds_partial_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("partial.log");
+
+        {
+            let mut f = fs::File::create(&log_path).unwrap();
+            write!(f, "test result: ok").unwrap(); // no trailing newline
+        }
+
+        let buffer = EventBuffer::new(50);
+        let mut watcher = PipeWatcher::new(&log_path, buffer.clone());
+        let _ = watcher.poll().unwrap();
+
+        assert_eq!(
+            watcher.checkpoint_offset(),
+            0,
+            "partial line should be re-read on resume"
+        );
+        assert_eq!(buffer.len(), 0);
     }
 
     #[test]
