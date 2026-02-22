@@ -41,11 +41,19 @@ Compose existing tools. Build only the orchestration layer.
 |---|---|
 | `clap` | CLI argument parsing |
 | `tokio` | Async runtime |
-| `portable-pty` | PTY management (Phase 1 fallback, non-tmux) |
-| `serde` + `serde_yaml` | YAML frontmatter parsing |
+| `portable-pty` | PTY management fallback for non-tmux environments |
+| `term_size` | Terminal dimension detection for layout/status rendering |
+| `serde` | Data model serialization/deserialization |
+| `serde_yaml` | YAML frontmatter parsing for kanban task files |
+| `serde_json` | JSON output for logs and machine-readable config output |
 | `toml` | Config file parsing |
 | `regex` | Event extraction, prompt pattern matching |
-| `notify` | File watching (pipe-pane output log) |
+| `anyhow` | Application-level error propagation with context |
+| `thiserror` | Structured error definitions for internal error types |
+| `ctrlc` | Signal handling for graceful shutdown/interrupt behavior |
+| `tracing` | Structured instrumentation and runtime logs |
+| `tracing-subscriber` | Log filtering/formatting and env-filter support |
+| `tempfile` (dev-dependency) | Temp directories/files for unit and integration tests |
 
 ## What We Don't Build
 
