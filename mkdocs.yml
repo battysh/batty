@@ -20,6 +20,7 @@ nav:
   - Reference:
       - CLI Reference: reference/cli.md
       - Configuration: reference/config.md
+      - Modules: reference/modules.md
   - Architecture: architecture.md
   - Troubleshooting: troubleshooting.md
   - Contributor Docs: README.md
