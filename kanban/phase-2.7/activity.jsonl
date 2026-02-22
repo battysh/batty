@@ -15,3 +15,13 @@
 {"timestamp":"2026-02-22T00:33:54.994818335-05:00","action":"move","task_id":5,"detail":"backlog -\u003e in-progress"}
 {"timestamp":"2026-02-22T00:37:41.656289573-05:00","action":"edit","task_id":5,"detail":"Support dangerous-mode wrappers for claude and codex"}
 {"timestamp":"2026-02-22T00:37:53.415026263-05:00","action":"move","task_id":5,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T00:38:40.749995154-05:00","action":"claim","task_id":4,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T00:38:40.750080024-05:00","action":"move","task_id":4,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T00:39:08.885659227-05:00","action":"create","task_id":6,"detail":"Persist Tier2 intervention context snapshots"}
+{"timestamp":"2026-02-22T00:40:18.572972231-05:00","action":"edit","task_id":4,"detail":"Add tests and operator docs for supervisor hotkeys"}
+{"timestamp":"2026-02-22T00:40:25.785593785-05:00","action":"edit","task_id":4,"detail":"Add tests and operator docs for supervisor hotkeys"}
+{"timestamp":"2026-02-22T00:40:36.098113071-05:00","action":"move","task_id":4,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T00:44:40.416892165-05:00","action":"claim","task_id":6,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T00:44:40.417014765-05:00","action":"move","task_id":6,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T00:49:33.480905028-05:00","action":"edit","task_id":6,"detail":"Persist Tier2 intervention context snapshots"}
+{"timestamp":"2026-02-22T00:49:47.483980407-05:00","action":"move","task_id":6,"detail":"in-progress -\u003e done"}

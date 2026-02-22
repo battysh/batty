@@ -225,6 +225,106 @@ fn supervisor_cmd_for_log(config: &Tier2Config) -> String {
     command_for_log(&config.program, &config.args)
 }
 
+fn next_tier2_snapshot_index(log_dir: &Path) -> u64 {
+    let mut max_seen = 0_u64;
+    if let Ok(entries) = std::fs::read_dir(log_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some(stem) = name.strip_prefix("tier2-context-") else {
+                continue;
+            };
+            let Some(index_str) = stem.strip_suffix(".md") else {
+                continue;
+            };
+            if let Ok(index) = index_str.parse::<u64>() {
+                max_seen = max_seen.max(index);
+            }
+        }
+    }
+    max_seen.saturating_add(1).max(1)
+}
+
+fn redact_sensitive_context(context: &str) -> String {
+    const SENSITIVE_MARKERS: [&str; 8] = [
+        "api_key",
+        "api-key",
+        "authorization:",
+        "bearer ",
+        "secret",
+        "password",
+        "token",
+        "private key",
+    ];
+
+    context
+        .lines()
+        .map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if SENSITIVE_MARKERS
+                .iter()
+                .any(|marker| lower.contains(marker))
+            {
+                "[REDACTED: potential secret-bearing line]".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+struct Tier2SnapshotWriter {
+    log_dir: PathBuf,
+    session: String,
+    next_index: u64,
+}
+
+impl Tier2SnapshotWriter {
+    fn new(log_dir: &Path, session: &str) -> Self {
+        Self {
+            log_dir: log_dir.to_path_buf(),
+            session: session.to_string(),
+            next_index: next_tier2_snapshot_index(log_dir),
+        }
+    }
+
+    fn persist(&mut self, prompt: &DetectedPrompt, context: &str) -> Result<PathBuf> {
+        std::fs::create_dir_all(&self.log_dir)
+            .with_context(|| format!("failed to create snapshot dir {}", self.log_dir.display()))?;
+        let index = self.next_index;
+        self.next_index = self.next_index.saturating_add(1);
+
+        let path = self.log_dir.join(format!("tier2-context-{index:03}.md"));
+        let redacted = redact_sensitive_context(context);
+        let body = format!(
+            "# Tier2 Context Snapshot\n\n\
+- snapshot: {index:03}\n\
+- timestamp_epoch: {timestamp}\n\
+- session: {session}\n\
+- prompt_kind: {prompt_kind}\n\
+- prompt_preview: {prompt_preview}\n\
+- context_chars_original: {original_chars}\n\
+- context_chars_persisted: {persisted_chars}\n\
+- redaction_strategy: keyword-based line redaction (deterministic)\n\n\
+## Context (redacted)\n\n\
+```text\n\
+{redacted}\n\
+```\n",
+            timestamp = now_epoch(),
+            session = self.session,
+            prompt_kind = format!("{:?}", prompt.kind),
+            prompt_preview = preview_for_log(&prompt.matched_text, 160),
+            original_chars = context.chars().count(),
+            persisted_chars = redacted.chars().count(),
+            redacted = redacted,
+        );
+        std::fs::write(&path, body)
+            .with_context(|| format!("failed to write tier2 snapshot {}", path.display()))?;
+        Ok(path)
+    }
+}
+
 fn is_ui_noise_line(line: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -1112,6 +1212,7 @@ fn run_with_mode(
     let mut stuck_detector = config.stuck.map(StuckDetector::new);
     let mut last_handled_pane_signature = String::new();
     let mut supervisor_mode = SupervisorMode::Working;
+    let mut tier2_snapshot_writer = Tier2SnapshotWriter::new(&log_dir, &session);
 
     info!(session = %session, "orchestrator loop starting");
     observer.on_event("● supervising");
@@ -1294,24 +1395,21 @@ fn run_with_mode(
                 last_pane_signature = signature;
                 let event = detector.on_output(&detector_line);
                 if let Some(DetectorEvent::PromptDetected(ref prompt)) = event {
-                    if supervisor_mode == SupervisorMode::Paused {
-                        debug!("supervisor paused: suppressing inline prompt automation");
-                        detector.human_override();
-                    } else {
-                        handle_prompt(
-                            prompt,
-                            &executor_pane,
-                            &config.policy,
-                            &mut detector,
-                            &mut *observer,
-                            config.tier2.as_ref(),
-                            &buffer,
-                            &mut status_bar,
-                            config.answer_delay,
-                        )?;
-                        if matches!(mode, StartMode::Resume) {
-                            last_handled_pane_signature = last_pane_signature.clone();
-                        }
+                    let handled = handle_prompt_by_mode(
+                        supervisor_mode,
+                        prompt,
+                        &executor_pane,
+                        &config.policy,
+                        &mut detector,
+                        &mut *observer,
+                        config.tier2.as_ref(),
+                        Some(&mut tier2_snapshot_writer),
+                        &buffer,
+                        &mut status_bar,
+                        config.answer_delay,
+                    )?;
+                    if handled && matches!(mode, StartMode::Resume) {
+                        last_handled_pane_signature = last_pane_signature.clone();
                     }
                 }
             }
@@ -1325,22 +1423,24 @@ fn run_with_mode(
                     && last_pane_signature == last_handled_pane_signature
                 {
                     debug!("resume dedupe: skipping repeated prompt handling");
-                } else if supervisor_mode == SupervisorMode::Paused {
-                    debug!("supervisor paused: suppressing prompt automation");
-                    detector.human_override();
                 } else {
-                    handle_prompt(
+                    let handled = handle_prompt_by_mode(
+                        supervisor_mode,
                         prompt,
                         &executor_pane,
                         &config.policy,
                         &mut detector,
                         &mut *observer,
                         config.tier2.as_ref(),
+                        Some(&mut tier2_snapshot_writer),
                         &buffer,
                         &mut status_bar,
                         config.answer_delay,
                     )?;
-                    if matches!(mode, StartMode::Resume) && !last_pane_signature.is_empty() {
+                    if handled
+                        && matches!(mode, StartMode::Resume)
+                        && !last_pane_signature.is_empty()
+                    {
                         last_handled_pane_signature = last_pane_signature.clone();
                     }
                 }
@@ -1403,6 +1503,7 @@ fn run_with_mode(
                         &mut detector,
                         &mut *observer,
                         config.tier2.as_ref(),
+                        Some(&mut tier2_snapshot_writer),
                         &buffer,
                         &mut status_bar,
                         config.answer_delay,
@@ -1579,6 +1680,40 @@ fn wait_with_human_check(
     false
 }
 
+#[allow(clippy::too_many_arguments)] // Maintains the same explicit wiring surface as handle_prompt while adding mode gating.
+fn handle_prompt_by_mode(
+    mode: SupervisorMode,
+    prompt: &crate::prompt::DetectedPrompt,
+    executor_pane: &str,
+    policy: &PolicyEngine,
+    detector: &mut PromptDetector,
+    observer: &mut dyn OrchestratorObserver,
+    tier2_config: Option<&Tier2Config>,
+    tier2_snapshot_writer: Option<&mut Tier2SnapshotWriter>,
+    event_buffer: &EventBuffer,
+    status_bar: &mut StatusBar,
+    answer_delay: Duration,
+) -> Result<bool> {
+    if mode == SupervisorMode::Paused {
+        detector.human_override();
+        return Ok(false);
+    }
+
+    handle_prompt(
+        prompt,
+        executor_pane,
+        policy,
+        detector,
+        observer,
+        tier2_config,
+        tier2_snapshot_writer,
+        event_buffer,
+        status_bar,
+        answer_delay,
+    )?;
+    Ok(true)
+}
+
 /// Handle a detected prompt: evaluate policy and take action.
 ///
 /// Tier 1: pattern match → wait answer_delay → inject auto-answer via send-keys.
@@ -1588,25 +1723,26 @@ fn wait_with_human_check(
 /// thinking, the auto-answer is cancelled.
 #[allow(clippy::too_many_arguments)] // Orchestrator wiring passes explicit context parts to keep call-site intent readable.
 fn handle_prompt(
-    prompt: &crate::prompt::DetectedPrompt,
+    detected_prompt: &crate::prompt::DetectedPrompt,
     executor_pane: &str,
     policy: &PolicyEngine,
     detector: &mut PromptDetector,
     observer: &mut dyn OrchestratorObserver,
     tier2_config: Option<&Tier2Config>,
+    mut tier2_snapshot_writer: Option<&mut Tier2SnapshotWriter>,
     event_buffer: &EventBuffer,
     status_bar: &mut StatusBar,
     answer_delay: Duration,
 ) -> Result<()> {
     // Skip completion/error signals — those aren't questions
-    match &prompt.kind {
+    match &detected_prompt.kind {
         PromptKind::Completion | PromptKind::Error { .. } => {
             return Ok(());
         }
         _ => {}
     }
 
-    let decision = policy.evaluate(&prompt.matched_text);
+    let decision = policy.evaluate(&detected_prompt.matched_text);
     debug!(decision = ?decision, "policy decision for prompt");
 
     match decision {
@@ -1650,7 +1786,9 @@ fn handle_prompt(
             observer.on_suggest(prompt, response);
             status_bar.update(StatusIndicator::Thinking, &format!("suggest: {response}"))?;
         }
-        Decision::Escalate { ref prompt } => {
+        Decision::Escalate {
+            prompt: ref prompt_text,
+        } => {
             // Tier 2: try supervisor agent before escalating to human
             if let Some(t2_config) = tier2_config {
                 observer.on_event("? supervisor thinking...");
@@ -1662,16 +1800,30 @@ fn handle_prompt(
                     ));
                     observer.on_event(&format!(
                         "? supervisor prompt → {}",
-                        preview_for_log(prompt, 220)
+                        preview_for_log(prompt_text, 220)
                     ));
                 }
 
                 let event_summary = event_buffer.format_summary();
                 let context = tier2::compose_context(
                     &event_summary,
-                    prompt,
+                    prompt_text,
                     t2_config.system_prompt.as_deref(),
                 );
+                if let Some(writer) = tier2_snapshot_writer.as_deref_mut() {
+                    match writer.persist(detected_prompt, &context) {
+                        Ok(path) => {
+                            observer.on_event(&format!(
+                                "? supervisor context snapshot → {}",
+                                path.display()
+                            ));
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "failed to persist tier2 context snapshot");
+                            observer.on_event("⚠ supervisor context snapshot failed");
+                        }
+                    }
+                }
                 if t2_config.trace_io {
                     observer.on_event(&format!("? supervisor context chars={}", context.len()));
                 }
@@ -1685,7 +1837,7 @@ fn handle_prompt(
                             ));
                         }
                         // Check if human answered while Tier 2 was thinking
-                        if check_human_answered(executor_pane, prompt) {
+                        if check_human_answered(executor_pane, prompt_text) {
                             info!("human override — cancelling Tier 2 answer");
                             observer.on_event("→ human override — Tier 2 answer cancelled");
                             status_bar.update(StatusIndicator::Action, "human override")?;
@@ -1693,8 +1845,8 @@ fn handle_prompt(
                             return Ok(());
                         }
 
-                        info!(prompt = %prompt, response = %response, "Tier 2 answer");
-                        observer.on_auto_answer(prompt, &response);
+                        info!(prompt = %prompt_text, response = %response, "Tier 2 answer");
+                        observer.on_auto_answer(prompt_text, &response);
                         status_bar.update(
                             StatusIndicator::Action,
                             &format!("T2: {}", display_response(&response)),
@@ -1715,7 +1867,7 @@ fn handle_prompt(
                             ));
                         }
                         info!(reason = %reason, "Tier 2 escalated to human");
-                        observer.on_escalate(&format!("{prompt} (supervisor: {reason})"));
+                        observer.on_escalate(&format!("{prompt_text} (supervisor: {reason})"));
                         status_bar.force_update(StatusIndicator::NeedsInput, "NEEDS INPUT")?;
                     }
                     Ok(Tier2Result::Failed { error }) => {
@@ -1726,7 +1878,8 @@ fn handle_prompt(
                             ));
                         }
                         warn!(error = %error, "Tier 2 call failed");
-                        observer.on_escalate(&format!("{prompt} (supervisor failed: {error})"));
+                        observer
+                            .on_escalate(&format!("{prompt_text} (supervisor failed: {error})"));
                         status_bar.force_update(StatusIndicator::NeedsInput, "NEEDS INPUT")?;
                     }
                     Err(e) => {
@@ -1734,13 +1887,13 @@ fn handle_prompt(
                             observer.on_event(&format!("? supervisor error ← {}", e));
                         }
                         warn!(error = %e, "Tier 2 error");
-                        observer.on_escalate(&format!("{prompt} (supervisor error)"));
+                        observer.on_escalate(&format!("{prompt_text} (supervisor error)"));
                         status_bar.force_update(StatusIndicator::NeedsInput, "NEEDS INPUT")?;
                     }
                 }
             } else {
                 // No Tier 2 configured — escalate directly
-                observer.on_escalate(prompt);
+                observer.on_escalate(prompt_text);
                 status_bar.force_update(StatusIndicator::NeedsInput, "NEEDS INPUT")?;
             }
         }
@@ -2618,6 +2771,7 @@ esac
             &mut detector,
             &mut observer,
             None,
+            None,
             &buffer,
             &mut status_bar,
             Duration::ZERO,
@@ -2630,6 +2784,128 @@ esac
             collected.iter().any(|e| e.contains("auto:")),
             "expected auto-answer event, got: {collected:?}"
         );
+
+        tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn paused_mode_blocks_prompt_automation() {
+        let session = "batty-test-paused-prompt";
+        let _ = tmux::kill_session(session);
+
+        tmux::create_session(session, "cat", &[], "/tmp").unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+
+        let mut auto_answers = HashMap::new();
+        auto_answers.insert("Continue?".to_string(), "y".to_string());
+        let policy = PolicyEngine::new(Policy::Act, auto_answers);
+        let mut detector =
+            PromptDetector::new(PromptPatterns::claude_code(), DetectorConfig::default());
+        let (mut observer, events) = TestObserver::new();
+        let prompt = crate::prompt::DetectedPrompt {
+            kind: crate::prompt::PromptKind::Confirmation {
+                detail: "Continue?".to_string(),
+            },
+            matched_text: "Continue? [y/n]".to_string(),
+        };
+        let buffer = EventBuffer::new(10);
+        let mut status_bar = StatusBar::new(session, "test");
+
+        let handled = handle_prompt_by_mode(
+            SupervisorMode::Paused,
+            &prompt,
+            session,
+            &policy,
+            &mut detector,
+            &mut observer,
+            None,
+            None,
+            &buffer,
+            &mut status_bar,
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert!(!handled, "paused mode should suppress automation");
+
+        let collected = events.lock().unwrap();
+        assert!(
+            !collected.iter().any(|e| e.contains("auto:")),
+            "did not expect auto-answer while paused, got: {collected:?}"
+        );
+
+        tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn resume_reenables_prompt_automation() {
+        let session = "batty-test-resume-prompt";
+        let _ = tmux::kill_session(session);
+
+        tmux::create_session(session, "cat", &[], "/tmp").unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+
+        let mut auto_answers = HashMap::new();
+        auto_answers.insert("Continue?".to_string(), "y".to_string());
+        let policy = PolicyEngine::new(Policy::Act, auto_answers);
+        let mut detector =
+            PromptDetector::new(PromptPatterns::claude_code(), DetectorConfig::default());
+        let (mut observer, events) = TestObserver::new();
+        let prompt = crate::prompt::DetectedPrompt {
+            kind: crate::prompt::PromptKind::Confirmation {
+                detail: "Continue?".to_string(),
+            },
+            matched_text: "Continue? [y/n]".to_string(),
+        };
+        let buffer = EventBuffer::new(10);
+        let mut status_bar = StatusBar::new(session, "test");
+
+        let mut mode = SupervisorMode::Working;
+        let paused =
+            apply_supervisor_hotkey_action(&mut mode, SupervisorHotkeyAction::Pause, &mut detector);
+        assert_eq!(paused, SupervisorTransition::Paused);
+
+        let handled_paused = handle_prompt_by_mode(
+            mode,
+            &prompt,
+            session,
+            &policy,
+            &mut detector,
+            &mut observer,
+            None,
+            None,
+            &buffer,
+            &mut status_bar,
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert!(!handled_paused);
+
+        let resumed = apply_supervisor_hotkey_action(
+            &mut mode,
+            SupervisorHotkeyAction::Resume,
+            &mut detector,
+        );
+        assert_eq!(resumed, SupervisorTransition::Resumed);
+
+        let handled_resumed = handle_prompt_by_mode(
+            mode,
+            &prompt,
+            session,
+            &policy,
+            &mut detector,
+            &mut observer,
+            None,
+            None,
+            &buffer,
+            &mut status_bar,
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert!(handled_resumed, "working mode should allow automation");
+
+        let collected = events.lock().unwrap();
+        let auto_count = collected.iter().filter(|e| e.contains("auto:")).count();
+        assert_eq!(auto_count, 1, "expected one auto-answer after resume");
 
         tmux::kill_session(session).unwrap();
     }
@@ -2661,6 +2937,7 @@ esac
             &policy,
             &mut detector,
             &mut observer,
+            None,
             None,
             &buffer,
             &mut status_bar,
@@ -2707,6 +2984,8 @@ esac
 
         let buffer = EventBuffer::new(10);
         let mut status_bar = StatusBar::new(session, "test");
+        let tmp = tempfile::tempdir().unwrap();
+        let mut snapshot_writer = Tier2SnapshotWriter::new(tmp.path(), session);
         handle_prompt(
             &prompt,
             session,
@@ -2714,6 +2993,7 @@ esac
             &mut detector,
             &mut observer,
             Some(&tier2),
+            Some(&mut snapshot_writer),
             &buffer,
             &mut status_bar,
             Duration::ZERO,
@@ -2730,6 +3010,20 @@ esac
             collected.iter().any(|e| e.contains("auto:")),
             "expected auto-answer from Tier 2, got: {collected:?}"
         );
+        assert!(
+            collected.iter().any(|e| e.contains("context snapshot")),
+            "expected context snapshot event, got: {collected:?}"
+        );
+        let snapshot_files = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("tier2-context-")
+            })
+            .count();
+        assert_eq!(snapshot_files, 1, "expected exactly one snapshot file");
 
         tmux::kill_session(session).unwrap();
     }
@@ -2754,6 +3048,7 @@ esac
             &policy,
             &mut detector,
             &mut observer,
+            None,
             None,
             &buffer,
             &mut status_bar,
@@ -3448,6 +3743,58 @@ If this input should be sent now, return the exact short response to send.";
     }
 
     #[test]
+    fn tier2_snapshot_writer_persists_metadata_and_redaction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut writer = Tier2SnapshotWriter::new(tmp.path(), "batty-phase-2-7");
+        let prompt = DetectedPrompt {
+            kind: PromptKind::Permission {
+                detail: "Allow tool Read?".to_string(),
+            },
+            matched_text: "Allow tool Read on /tmp/file? [y/n]".to_string(),
+        };
+        let context = "\
+Recent activity
+Authorization: Bearer super-secret-token
+Question: Continue?";
+
+        let path = writer.persist(&prompt, context).unwrap();
+        assert!(
+            path.ends_with("tier2-context-001.md"),
+            "unexpected snapshot path: {}",
+            path.display()
+        );
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("session: batty-phase-2-7"));
+        assert!(body.contains("prompt_kind: Permission"));
+        assert!(body.contains("context_chars_original:"));
+        assert!(body.contains("redaction_strategy:"));
+        assert!(body.contains("[REDACTED: potential secret-bearing line]"));
+        assert!(!body.contains("super-secret-token"));
+    }
+
+    #[test]
+    fn tier2_snapshot_writer_continues_index_from_existing_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("tier2-context-001.md"), "existing").unwrap();
+        std::fs::write(tmp.path().join("tier2-context-007.md"), "existing").unwrap();
+
+        let mut writer = Tier2SnapshotWriter::new(tmp.path(), "batty-phase-2-7");
+        let prompt = DetectedPrompt {
+            kind: PromptKind::Question {
+                detail: "unknown".to_string(),
+            },
+            matched_text: "Unknown prompt".to_string(),
+        };
+        let path = writer.persist(&prompt, "context").unwrap();
+        assert!(
+            path.ends_with("tier2-context-008.md"),
+            "expected next index to continue from existing files, got {}",
+            path.display()
+        );
+    }
+
+    #[test]
     fn supervision_state_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
         let state = SupervisionState {
@@ -3530,6 +3877,7 @@ If this input should be sent now, return the exact short response to send.";
             &policy,
             &mut detector,
             &mut observer,
+            None,
             None,
             &buffer,
             &mut status_bar,

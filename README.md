@@ -210,6 +210,37 @@ batty resume phase-2.4          # resume supervision for an existing run
 
 Type into the executor pane anytime — human input always takes priority. Detach and re-attach. Session survives disconnect.
 
+## Supervisor Hotkeys
+
+During an active tmux-supervised run:
+- Pause supervision: `Prefix + Shift+P` (`C-b P` with default tmux prefix)
+- Resume supervision: `Prefix + Shift+R` (`C-b R` with default tmux prefix)
+
+Expected status behavior:
+- Pause sets status to `● PAUSED — manual input only`
+- Resume returns status to `✓ supervising`
+
+While paused:
+- Batty does not inject Tier 1 auto-answers
+- Batty does not call Tier 2 supervisor responses
+- You can continue typing directly in the executor pane
+
+Troubleshooting:
+- If pause/resume appears ignored, confirm you are attached to the Batty tmux session (not another tmux server/session).
+- If prompts are not being auto-answered, check whether status is still `PAUSED`; this is expected until resume.
+- Repeated pause/resume presses are no-ops and logged (already paused / already supervising).
+
+## Tier2 Context Snapshots
+
+When Tier 2 supervisor intervention is invoked, Batty writes a per-call context snapshot under:
+
+- `.batty/logs/<run>/tier2-context-<n>.md`
+
+The orchestrator log includes a concise reference to each snapshot path.
+
+Safety guardrail:
+- Snapshot persistence uses deterministic keyword-based line redaction for likely secret-bearing lines (for example authorization/token/password markers) before writing context to disk.
+
 ## How It Works
 
 Three layers:
