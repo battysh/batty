@@ -135,22 +135,20 @@ impl LogFileObserver {
 impl OrchestratorObserver for LogFileObserver {
     fn on_auto_answer(&mut self, prompt: &str, response: &str) {
         let shown = Self::display_response(response);
-        self.append(&format!("[batty] ✓ auto-answered: \"{prompt}\" → {shown}"));
+        self.append(&format!("✓ auto-answered: \"{prompt}\" → {shown}"));
     }
 
     fn on_escalate(&mut self, prompt: &str) {
-        self.append(&format!("[batty] ⚠ NEEDS INPUT: \"{prompt}\""));
+        self.append(&format!("⚠ NEEDS INPUT: \"{prompt}\""));
     }
 
     fn on_suggest(&mut self, prompt: &str, response: &str) {
         let shown = Self::display_response(response);
-        self.append(&format!(
-            "[batty] ? suggestion: respond to \"{prompt}\" with \"{shown}\""
-        ));
+        self.append(&format!("? suggestion: respond to \"{prompt}\" with \"{shown}\""));
     }
 
     fn on_event(&mut self, message: &str) {
-        self.append(&format!("[batty] {message}"));
+        self.append(message);
     }
 }
 
@@ -3731,9 +3729,9 @@ If this input should be sent now, return the exact short response to send.";
         std::fs::write(
             &log,
             concat!(
-                "[batty] ✓ auto-answered: \"Continue?\" → y\n",
-                "[batty] some other line\n",
-                "[batty] ✓ auto-answered: \"Allow tool Read?\" → y\n"
+                "✓ auto-answered: \"Continue?\" → y\n",
+                "some other line\n",
+                "✓ auto-answered: \"Allow tool Read?\" → y\n"
             ),
         )
         .unwrap();
