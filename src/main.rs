@@ -1,6 +1,7 @@
 mod agent;
 mod cli;
 mod config;
+mod detector;
 mod dod;
 mod events;
 mod log;

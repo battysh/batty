@@ -37,7 +37,7 @@ pub enum PromptKind {
 }
 
 /// A detected prompt with its kind and the matched text.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DetectedPrompt {
     pub kind: PromptKind,
     pub matched_text: String,
