@@ -381,6 +381,8 @@ async fn main() -> Result<()> {
         }
         Command::Install { target, dir } => {
             let destination = PathBuf::from(dir);
+            let prereqs = install::ensure_prerequisites()?;
+
             let install_target = match target {
                 InstallTarget::Both => install::InstallTarget::Both,
                 InstallTarget::Claude => install::InstallTarget::Claude,
@@ -388,7 +390,18 @@ async fn main() -> Result<()> {
             };
             let summary = install::install_assets(&destination, install_target)?;
 
-            println!("Installed Batty assets in {}", destination.display());
+            println!("Checked external prerequisites:");
+            for tool in &prereqs.present {
+                println!("  present:   {}", tool);
+            }
+            for tool in &prereqs.installed {
+                println!("  installed: {}", tool);
+            }
+
+            println!(
+                "Installed Batty project assets in {}",
+                destination.display()
+            );
             for path in &summary.created_or_updated {
                 println!("  updated:   {}", path.display());
             }

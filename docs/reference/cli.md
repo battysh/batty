@@ -18,7 +18,7 @@ Commands:
   attach   Attach to a running batty tmux session
   resume   Resume supervision for an existing phase/session run
   config   Show project configuration
-  install  Install Batty skill packs and steering docs for agents
+  install  Initialize Batty assets and required external tools
   board    Open kanban-md TUI for a phase (prefers active run worktree)
   help     Print this message or the help of the given subcommand(s)
 
@@ -100,16 +100,16 @@ Options:
 
 ## `batty install`
 
-Install Batty skill packs and steering docs for agents
+Initialize Batty assets and required external tools
 
 ```text
-Install Batty skill packs and steering docs for agents
+Initialize Batty assets and required external tools
 
 Usage: batty install [OPTIONS]
 
 Options:
       --target <TARGET>
-          Install target (default: both)
+          Steering/skill install target (default: both)
           
           [default: both]
           [possible values: both, claude, codex]

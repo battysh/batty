@@ -6,6 +6,14 @@
 - `tmux` 3.1+
 - `kanban-md` CLI available on `PATH`
 
+For new environments, run:
+
+```sh
+batty install
+```
+
+This command checks `tmux` and `kanban-md`, attempts automatic installation when possible, and installs Batty steering/skill assets in the project.
+
 ## Basic Commands
 
 Run directly from source:

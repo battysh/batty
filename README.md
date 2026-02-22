@@ -139,7 +139,7 @@ Print the resolved board directory (for scripts):
 batty board phase-2.4 --print-dir
 ```
 
-Install agent steering docs + skill packs in the current project:
+Initialize Batty in the current project (checks/installs required tools and writes steering assets):
 
 ```sh
 batty install                       # both agents (default)
@@ -148,7 +148,14 @@ batty install --target codex       # Codex only
 batty install --dir /tmp/demo      # explicit destination
 ```
 
-`batty install` writes:
+`batty install` bootstraps external dependencies:
+
+- checks `tmux` and `kanban-md` on `PATH`
+- attempts automatic install if missing (best effort):
+  - `tmux`: Homebrew or `sudo` package manager install (`apt-get`/`dnf`/`pacman`)
+  - `kanban-md`: `cargo install kanban-md --locked` (or Homebrew when available)
+
+Then it writes:
 
 - `CLAUDE.md` (Claude steering doc)
 - `AGENTS.md` (Codex steering doc)
