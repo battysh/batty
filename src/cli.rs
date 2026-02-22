@@ -105,6 +105,9 @@ pub enum Command {
         #[arg(long, default_value_t = false)]
         print_dir: bool,
     },
+
+    /// List all phase boards with status and task counts
+    BoardList,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -200,5 +203,23 @@ mod tests {
             }
             other => panic!("expected work command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn board_subcommand_parses_target() {
+        let cli = Cli::parse_from(["batty", "board", "phase-2.5"]);
+        match cli.command {
+            Command::Board { target, print_dir } => {
+                assert_eq!(target, "phase-2.5");
+                assert!(!print_dir);
+            }
+            other => panic!("expected board command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn board_list_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "board-list"]);
+        assert!(matches!(cli.command, Command::BoardList));
     }
 }

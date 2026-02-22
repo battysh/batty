@@ -63,6 +63,12 @@ batty board phase-2.7
 batty board phase-2.7 --print-dir
 ```
 
+4. List all boards at a glance:
+
+```sh
+batty board-list
+```
+
 ## Common Runtime Modes
 
 - `--attach`: opens the tmux session immediately
@@ -79,6 +85,7 @@ batty board phase-2.7 --print-dir
 - `batty attach <phase>`
 - `batty resume <phase|session>`
 - `batty board <phase> [--print-dir]`
+- `batty board-list`
 - `batty config [--json]`
 - `batty install [--target both|claude|codex] [--dir PATH]`
 - `batty remove [--target both|claude|codex] [--dir PATH]`

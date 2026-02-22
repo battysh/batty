@@ -139,6 +139,12 @@ Print the resolved board directory (for scripts):
 batty board phase-2.4 --print-dir
 ```
 
+List all phase boards with status and task counts:
+
+```sh
+batty board-list
+```
+
 Initialize Batty in the current project (checks/installs required tools and writes steering assets):
 
 ```sh
