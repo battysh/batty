@@ -276,6 +276,11 @@ fn phase_sort_key(name: &str) -> Option<f64> {
     None
 }
 
+/// Statuses that are excluded from board counts (not active work).
+fn is_excluded_status(status: &str) -> bool {
+    matches!(status, "archived" | "cancelled" | "wontfix")
+}
+
 /// Derive phase status from task statuses.
 ///
 /// - All tasks done → "Done"
@@ -284,13 +289,18 @@ fn phase_sort_key(name: &str) -> Option<f64> {
 /// - Mix of done and backlog (none in-progress) → "In Progress"
 /// - No tasks → "Empty"
 fn derive_phase_status(tasks: &[task::Task]) -> &'static str {
-    if tasks.is_empty() {
-        return "Empty";
+    let active: Vec<_> = tasks
+        .iter()
+        .filter(|t| !is_excluded_status(&t.status))
+        .collect();
+
+    if active.is_empty() {
+        return if tasks.is_empty() { "Empty" } else { "Done" };
     }
 
-    let total = tasks.len();
-    let done = tasks.iter().filter(|t| t.status == "done").count();
-    let in_progress = tasks.iter().filter(|t| t.status == "in-progress").count();
+    let total = active.len();
+    let done = active.iter().filter(|t| t.status == "done").count();
+    let in_progress = active.iter().filter(|t| t.status == "in-progress").count();
 
     if done == total {
         "Done"
@@ -304,88 +314,41 @@ fn derive_phase_status(tasks: &[task::Task]) -> &'static str {
     }
 }
 
-/// Read the git branch name for a worktree directory, if available.
-fn worktree_branch(worktree_dir: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args([
-            "-C",
-            &worktree_dir.to_string_lossy(),
-            "branch",
-            "--show-current",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if branch.is_empty() {
-        None
-    } else {
-        Some(branch)
-    }
-}
-
-/// Read the last commit summary (short hash + subject) for a worktree directory.
-fn worktree_last_commit(worktree_dir: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args([
-            "-C",
-            &worktree_dir.to_string_lossy(),
-            "log",
-            "--oneline",
-            "-1",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if line.is_empty() { None } else { Some(line) }
-}
-
-/// Resolve the worktree root directory for a phase (the parent of .batty/kanban/<phase>).
-///
-/// Given a board dir like `.batty/worktrees/phase-3-run-001/.batty/kanban/phase-3`,
-/// walk up to find the worktree root (the dir containing `.batty/`).
-fn worktree_root_from_board(board_dir: &Path) -> Option<PathBuf> {
-    // board_dir = <worktree>/.batty/kanban/<phase> or <worktree>/kanban/<phase>
-    let mut ancestor = board_dir.parent()?; // kanban dir
-    ancestor = ancestor.parent()?; // .batty or worktree root
-    if ancestor.file_name().is_some_and(|n| n == ".batty") {
-        ancestor = ancestor.parent()?; // worktree root
-    }
-    Some(ancestor.to_path_buf())
-}
-
 struct TaskCounts {
+    todo: usize,
+    in_progress: usize,
     done: usize,
     total: usize,
 }
 
 impl TaskCounts {
-    fn from_dir(tasks_dir: &Path) -> Self {
-        if tasks_dir.is_dir() {
-            match task::load_tasks_from_dir(tasks_dir) {
-                Ok(tasks) => {
-                    let done = tasks.iter().filter(|t| t.status == "done").count();
-                    Self {
-                        done,
-                        total: tasks.len(),
-                    }
-                }
-                Err(_) => Self { done: 0, total: 0 },
-            }
-        } else {
-            Self { done: 0, total: 0 }
+    fn from_tasks(tasks: &[task::Task]) -> Self {
+        let active: Vec<_> = tasks
+            .iter()
+            .filter(|t| !is_excluded_status(&t.status))
+            .collect();
+        let done = active.iter().filter(|t| t.status == "done").count();
+        let in_progress = active
+            .iter()
+            .filter(|t| t.status == "in-progress")
+            .count();
+        let total = active.len();
+        let todo = total - done - in_progress;
+        Self {
+            todo,
+            in_progress,
+            done,
+            total,
         }
     }
+
 }
 
 struct WorktreeInfo {
-    branch: String,
-    last_commit: Option<String>,
+    /// Run name, e.g. "run-001".
+    run_name: String,
+    /// Whether a tmux session is active for this worktree.
+    active: bool,
     counts: TaskCounts,
     status: String,
 }
@@ -395,26 +358,101 @@ struct BoardInfo {
     /// Status derived from the repo (main branch) tasks.
     repo_status: String,
     repo_counts: TaskCounts,
-    /// Present when a worktree with a board for this phase exists.
-    worktree: Option<WorktreeInfo>,
+    /// All worktrees with a board for this phase, sorted by run number.
+    worktrees: Vec<WorktreeInfo>,
 }
 
 impl BoardInfo {
-    /// Effective status: worktree if present, otherwise repo.
+    /// Effective status: prefer active worktree, then latest, then repo.
     fn effective_status(&self) -> &str {
-        self.worktree
-            .as_ref()
+        self.best_worktree()
             .map(|w| w.status.as_str())
             .unwrap_or(&self.repo_status)
     }
 
-    /// Effective task counts: worktree if present, otherwise repo.
+    /// Effective task counts: prefer active worktree, then latest, then repo.
     fn effective_counts(&self) -> &TaskCounts {
-        self.worktree
-            .as_ref()
+        self.best_worktree()
             .map(|w| &w.counts)
             .unwrap_or(&self.repo_counts)
     }
+
+    /// Best worktree: active one if any, otherwise the last (highest run number).
+    fn best_worktree(&self) -> Option<&WorktreeInfo> {
+        self.worktrees
+            .iter()
+            .find(|w| w.active)
+            .or(self.worktrees.last())
+    }
+}
+
+/// Format a task count cell: show "n/total" when n > 0, otherwise "-".
+fn fmt_count(n: usize, total: usize) -> String {
+    if n == 0 {
+        "-".to_string()
+    } else {
+        format!("{n}/{total}")
+    }
+}
+
+/// Collect all worktrees for a phase, sorted by run number ascending.
+fn collect_worktrees(project_root: &Path, phase: &str) -> Vec<WorktreeInfo> {
+    let worktrees_root = project_root.join(".batty").join("worktrees");
+    if !worktrees_root.is_dir() {
+        return Vec::new();
+    }
+
+    let phase_slug = sanitize_phase_for_worktree_prefix(phase);
+    let prefix = format!("{phase_slug}-run-");
+    let mut runs: Vec<(u32, WorktreeInfo)> = Vec::new();
+
+    let entries = match std::fs::read_dir(&worktrees_root) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        let Some(run_num) = parse_run_number(&dir_name, &prefix) else {
+            continue;
+        };
+
+        let board_dir = paths::resolve_kanban_root(&path).join(phase);
+        if !board_dir.is_dir() {
+            continue;
+        }
+
+        let tasks = if board_dir.join("tasks").is_dir() {
+            task::load_tasks_from_dir(&board_dir.join("tasks")).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let counts = TaskCounts::from_tasks(&tasks);
+        let status = derive_phase_status(&tasks).to_string();
+
+        // Check if there's an active tmux session for this worktree
+        let session = format!("batty-{}", dir_name);
+        let active = tmux::session_exists(&session);
+
+        let run_label = format!("run-{run_num:03}");
+        runs.push((
+            run_num,
+            WorktreeInfo {
+                run_name: run_label,
+                active,
+                counts,
+                status,
+            },
+        ));
+    }
+
+    runs.sort_by_key(|(n, _)| *n);
+    runs.into_iter().map(|(_, info)| info).collect()
 }
 
 /// Build a formatted listing of all boards, showing both repo and worktree state.
@@ -440,47 +478,22 @@ fn list_boards(project_root: &Path) -> Result<String> {
         let name = entry.file_name().to_string_lossy().to_string();
 
         // Repo (main) board
-        let repo_counts = TaskCounts::from_dir(&path.join("tasks"));
         let repo_tasks = if path.join("tasks").is_dir() {
             task::load_tasks_from_dir(&path.join("tasks")).unwrap_or_default()
         } else {
             Vec::new()
         };
+        let repo_counts = TaskCounts::from_tasks(&repo_tasks);
         let repo_status = derive_phase_status(&repo_tasks).to_string();
 
-        // Worktree board (if any)
-        let wt_info = match resolve_latest_worktree_board_dir(project_root, &name) {
-            Ok(Some(wt_board)) => {
-                let wt_counts = TaskCounts::from_dir(&wt_board.join("tasks"));
-                let wt_tasks = if wt_board.join("tasks").is_dir() {
-                    task::load_tasks_from_dir(&wt_board.join("tasks")).unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                let wt_status = derive_phase_status(&wt_tasks).to_string();
-
-                let wt_root = worktree_root_from_board(&wt_board);
-                let branch = wt_root
-                    .as_ref()
-                    .and_then(|r| worktree_branch(r))
-                    .unwrap_or_else(|| "???".to_string());
-                let last_commit = wt_root.as_ref().and_then(|r| worktree_last_commit(r));
-
-                Some(WorktreeInfo {
-                    branch,
-                    last_commit,
-                    counts: wt_counts,
-                    status: wt_status,
-                })
-            }
-            _ => None,
-        };
+        // Collect all worktrees for this phase
+        let wt_infos = collect_worktrees(project_root, &name);
 
         boards.push(BoardInfo {
             name,
             repo_status,
             repo_counts,
-            worktree: wt_info,
+            worktrees: wt_infos,
         });
     }
 
@@ -532,36 +545,40 @@ fn list_boards(project_root: &Path) -> Result<String> {
         .unwrap_or(6)
         .max(6);
 
+    // Width for indented worktree run labels (name_width minus 2-space indent)
+    let label_width = name_width.saturating_sub(2);
+
     let mut output = String::new();
 
     // Table header
     output.push_str(&format!(
-        "{:<name_width$}  {:<status_width$}  Tasks\n",
-        "Phase", "Status"
+        "{:<name_width$}  {:<status_width$}  {:>5}  {:>5}  {:>5}\n",
+        "Phase", "Status", "Todo", "WIP", "Done"
     ));
 
     for board in &boards {
-        let tasks_str = format!("{}/{}", board.repo_counts.done, board.repo_counts.total);
+        let c = &board.repo_counts;
         output.push_str(&format!(
-            "{:<name_width$}  {:<status_width$}  {:>5}\n",
-            board.name, board.repo_status, tasks_str
+            "{:<name_width$}  {:<status_width$}  {:>5}  {:>5}  {:>5}\n",
+            board.name,
+            board.repo_status,
+            fmt_count(c.todo, c.total),
+            fmt_count(c.in_progress, c.total),
+            fmt_count(c.done, c.total),
         ));
 
-        // Worktree detail line, indented
-        if let Some(ref wt) = board.worktree {
-            let wt_tasks_str = format!("{}/{}", wt.counts.done, wt.counts.total);
-            let merged = wt.status == board.repo_status
-                && wt.counts.done == board.repo_counts.done
-                && wt.counts.total == board.repo_counts.total;
-            let merged_label = if merged { " (merged)" } else { "" };
-            let commit_label = wt
-                .last_commit
-                .as_ref()
-                .map(|c| format!("  {c}"))
-                .unwrap_or_default();
+        // Worktree detail lines, indented
+        for wt in &board.worktrees {
+            let wc = &wt.counts;
+            let active_label = if wt.active { " *" } else { "" };
             output.push_str(&format!(
-                "  worktree:  {:<status_width$}  {:>5}  {}{}{}\n",
-                wt.status, wt_tasks_str, wt.branch, merged_label, commit_label,
+                "  {:<label_width$}  {:<status_width$}  {:>5}  {:>5}  {:>5}{}\n",
+                wt.run_name,
+                wt.status,
+                fmt_count(wc.todo, wc.total),
+                fmt_count(wc.in_progress, wc.total),
+                fmt_count(wc.done, wc.total),
+                active_label,
             ));
         }
     }
@@ -831,9 +848,20 @@ async fn main() -> Result<()> {
                 anyhow::bail!("kanban-md tui exited with non-zero status");
             }
         }
-        Command::BoardList => {
-            let output = list_boards(&cwd)?;
-            print!("{output}");
+        Command::List { watch, interval } => {
+            if watch {
+                loop {
+                    // Clear screen and move cursor to top-left
+                    print!("\x1b[2J\x1b[H");
+                    let output = list_boards(&cwd)?;
+                    print!("{output}");
+                    std::io::Write::flush(&mut std::io::stdout())?;
+                    std::thread::sleep(std::time::Duration::from_secs(interval));
+                }
+            } else {
+                let output = list_boards(&cwd)?;
+                print!("{output}");
+            }
         }
     }
 
@@ -941,20 +969,6 @@ mod tests {
     }
 
     #[test]
-    fn worktree_root_from_board_extracts_root() {
-        let board = PathBuf::from("/project/.batty/worktrees/run-001/.batty/kanban/phase-3");
-        let root = worktree_root_from_board(&board).unwrap();
-        assert_eq!(root, PathBuf::from("/project/.batty/worktrees/run-001"));
-    }
-
-    #[test]
-    fn worktree_root_from_board_handles_legacy_kanban() {
-        let board = PathBuf::from("/project/.batty/worktrees/run-001/kanban/phase-3");
-        let root = worktree_root_from_board(&board).unwrap();
-        assert_eq!(root, PathBuf::from("/project/.batty/worktrees/run-001"));
-    }
-
-    #[test]
     fn phase_sort_key_parses_numeric_phases() {
         assert_eq!(phase_sort_key("phase-1"), Some(1.0));
         assert_eq!(phase_sort_key("phase-2.5"), Some(2.5));
@@ -1038,22 +1052,25 @@ mod tests {
 
         let output = list_boards(project).unwrap();
 
-        // Table rows
+        // Table header
         let lines: Vec<&str> = output.lines().collect();
         assert!(lines[0].contains("Phase"));
         assert!(lines[0].contains("Status"));
+        assert!(lines[0].contains("Todo"));
+        assert!(lines[0].contains("WIP"));
+        assert!(lines[0].contains("Done"));
 
+        // phase-1: 1 done, 0 todo, 0 in-progress
         assert!(lines[1].starts_with("phase-1"));
         assert!(lines[1].contains("Done"));
-        assert!(lines[1].contains("1/1"));
 
+        // phase-2: 1 done, 1 todo (backlog), 0 in-progress
         assert!(lines[2].starts_with("phase-2"));
         assert!(lines[2].contains("In Progress"));
-        assert!(lines[2].contains("1/2"));
 
+        // docs-update: 0 done, 1 todo, 0 in-progress
         assert!(lines[3].starts_with("docs-update"));
         assert!(lines[3].contains("Not Started"));
-        assert!(lines[3].contains("0/1"));
 
         // Summary line
         assert!(output.contains("3 boards"));
@@ -1104,22 +1121,20 @@ mod tests {
         // phase-1: repo only, no worktree line
         assert!(lines[1].starts_with("phase-1"));
         assert!(lines[1].contains("Done"));
-        assert!(lines[1].contains("1/1"));
 
-        // phase-3 repo line: shows Not Started 0/2
+        // phase-3 repo line: shows Not Started with 2 todo
         assert!(lines[2].starts_with("phase-3"));
         assert!(lines[2].contains("Not Started"));
-        assert!(lines[2].contains("0/2"));
 
-        // phase-3 worktree line: indented, shows Done 2/2
+        // phase-3 worktree line: indented, shows run-001 and Done
         let wt_line = lines[3];
+        assert!(
+            wt_line.contains("run-001"),
+            "expected run-001, got: {wt_line}"
+        );
         assert!(
             wt_line.contains("Done"),
             "expected worktree Done, got: {wt_line}"
-        );
-        assert!(
-            wt_line.contains("2/2"),
-            "expected worktree 2/2, got: {wt_line}"
         );
 
         // Summary uses effective (worktree) status: both boards "Done"
@@ -1128,31 +1143,39 @@ mod tests {
     }
 
     #[test]
-    fn list_boards_shows_merged_when_repo_matches_worktree() {
+    fn list_boards_shows_multiple_worktrees() {
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path();
         let kanban = project.join(".batty").join("kanban");
 
-        // Repo: phase-2 all done (already merged)
-        create_test_phase(&kanban, "phase-2", &["done", "done"]);
+        create_test_phase(&kanban, "phase-2", &["backlog", "backlog"]);
 
-        // Worktree: phase-2 also all done (same state)
-        let wt_kanban = project
+        // Two worktrees for phase-2
+        let wt1 = project
             .join(".batty")
             .join("worktrees")
             .join("phase-2-run-001")
             .join(".batty")
             .join("kanban");
-        create_test_phase(&wt_kanban, "phase-2", &["done", "done"]);
+        create_test_phase(&wt1, "phase-2", &["done", "done"]);
+
+        let wt2 = project
+            .join(".batty")
+            .join("worktrees")
+            .join("phase-2-run-002")
+            .join(".batty")
+            .join("kanban");
+        create_test_phase(&wt2, "phase-2", &["done", "backlog"]);
 
         let output = list_boards(project).unwrap();
 
-        // The worktree line should contain "(merged)"
-        let wt_line = output
-            .lines()
-            .find(|l| l.contains("(merged)"))
-            .expect("expected a (merged) line in output");
-        assert!(wt_line.contains("Done"));
-        assert!(wt_line.contains("2/2"));
+        // Both worktrees should appear
+        assert!(output.contains("run-001"), "missing run-001 in:\n{output}");
+        assert!(output.contains("run-002"), "missing run-002 in:\n{output}");
+
+        // run-001 before run-002
+        let pos1 = output.find("run-001").unwrap();
+        let pos2 = output.find("run-002").unwrap();
+        assert!(pos1 < pos2, "run-001 should appear before run-002");
     }
 }

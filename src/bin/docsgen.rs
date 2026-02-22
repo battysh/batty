@@ -328,7 +328,7 @@ mod tests {
         assert!(markdown.contains("## `batty work`"));
         assert!(markdown.contains("## `batty resume`"));
         assert!(markdown.contains("## `batty board`"));
-        assert!(markdown.contains("## `batty board-list`"));
+        assert!(markdown.contains("## `batty list`"));
     }
 
     #[test]

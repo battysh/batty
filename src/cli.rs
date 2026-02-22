@@ -107,7 +107,16 @@ pub enum Command {
     },
 
     /// List all phase boards with status and task counts
-    BoardList,
+    #[command(alias = "board-list")]
+    List {
+        /// Continuously refresh the board listing
+        #[arg(long, default_value_t = false)]
+        watch: bool,
+
+        /// Refresh interval in seconds (used with --watch)
+        #[arg(long, default_value_t = 2)]
+        interval: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -218,8 +227,26 @@ mod tests {
     }
 
     #[test]
-    fn board_list_subcommand_parses() {
+    fn list_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "list"]);
+        assert!(matches!(cli.command, Command::List { .. }));
+    }
+
+    #[test]
+    fn list_subcommand_parses_board_list_alias() {
         let cli = Cli::parse_from(["batty", "board-list"]);
-        assert!(matches!(cli.command, Command::BoardList));
+        assert!(matches!(cli.command, Command::List { .. }));
+    }
+
+    #[test]
+    fn list_subcommand_parses_watch_and_interval() {
+        let cli = Cli::parse_from(["batty", "list", "--watch", "--interval", "5"]);
+        match cli.command {
+            Command::List { watch, interval } => {
+                assert!(watch);
+                assert_eq!(interval, 5);
+            }
+            other => panic!("expected list command, got {other:?}"),
+        }
     }
 }
