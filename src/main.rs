@@ -1,5 +1,6 @@
 mod agent;
 mod cli;
+mod completion;
 mod config;
 mod detector;
 mod dod;
@@ -228,6 +229,9 @@ async fn main() -> Result<()> {
         Command::Attach { target } => {
             let session = tmux::session_name(&target);
             tmux::attach(&session)?;
+        }
+        Command::Resume { target } => {
+            work::resume_phase(&target, &config, config.defaults.agent.as_str(), &cwd)?;
         }
         Command::Config => {
             println!("Project config:");
