@@ -9,7 +9,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -42,6 +42,12 @@ struct ResumeContext {
     execution_root: PathBuf,
     log_dir: PathBuf,
     execution_log_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct ReworkContext {
+    attempt: u32,
+    feedback: String,
 }
 
 const CLAUDE_DANGEROUS_FLAG: &str = "--dangerously-skip-permissions";
@@ -381,6 +387,138 @@ fn log_key_for_execution_root(execution_root: &Path) -> Result<String> {
         })
 }
 
+fn run_git_in_repo(repo_root: &Path, args: &[&str]) -> Result<Output> {
+    Command::new("git")
+        .current_dir(repo_root)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run git {:?} in {}", args, repo_root.display()))
+}
+
+fn run_shell_command_in_repo(repo_root: &Path, command: &str) -> Result<Output> {
+    Command::new("sh")
+        .arg("-lc")
+        .arg(command)
+        .current_dir(repo_root)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to run shell command '{}' in {}",
+                command,
+                repo_root.display()
+            )
+        })
+}
+
+fn merge_branch_with_rebase_retry(
+    repo_root: &Path,
+    source_branch: &str,
+    base_branch: &str,
+) -> Result<()> {
+    let switch_base = run_git_in_repo(repo_root, &["switch", base_branch])?;
+    if !switch_base.status.success() {
+        bail!(
+            "failed to switch to base branch '{}': {}",
+            base_branch,
+            String::from_utf8_lossy(&switch_base.stderr).trim()
+        );
+    }
+
+    let merge_output =
+        run_git_in_repo(repo_root, &["merge", "--no-ff", "--no-edit", source_branch])?;
+    if merge_output.status.success() {
+        return Ok(());
+    }
+
+    let _ = run_git_in_repo(repo_root, &["merge", "--abort"]);
+
+    let switch_source = run_git_in_repo(repo_root, &["switch", source_branch])?;
+    if !switch_source.status.success() {
+        bail!(
+            "merge failed and unable to switch to branch '{}': {}",
+            source_branch,
+            String::from_utf8_lossy(&switch_source.stderr).trim()
+        );
+    }
+
+    let rebase_output = run_git_in_repo(repo_root, &["rebase", base_branch])?;
+    if !rebase_output.status.success() {
+        let _ = run_git_in_repo(repo_root, &["rebase", "--abort"]);
+        let _ = run_git_in_repo(repo_root, &["switch", base_branch]);
+        bail!(
+            "merge conflict unresolved after rebase retry: {}",
+            String::from_utf8_lossy(&rebase_output.stderr).trim()
+        );
+    }
+
+    let switch_base = run_git_in_repo(repo_root, &["switch", base_branch])?;
+    if !switch_base.status.success() {
+        bail!(
+            "rebase succeeded but failed to switch back to '{}': {}",
+            base_branch,
+            String::from_utf8_lossy(&switch_base.stderr).trim()
+        );
+    }
+
+    let retry_merge =
+        run_git_in_repo(repo_root, &["merge", "--no-ff", "--no-edit", source_branch])?;
+    if !retry_merge.status.success() {
+        let _ = run_git_in_repo(repo_root, &["merge", "--abort"]);
+        bail!(
+            "merge conflict unresolved after rebase retry: {}",
+            String::from_utf8_lossy(&retry_merge.stderr).trim()
+        );
+    }
+
+    Ok(())
+}
+
+fn merge_phase_branch_and_validate(
+    phase_worktree: &phase_worktree::PhaseWorktree,
+    project_config: &ProjectConfig,
+    execution_log: &ExecutionLog,
+) -> Result<()> {
+    merge_branch_with_rebase_retry(
+        &phase_worktree.repo_root,
+        &phase_worktree.branch,
+        &phase_worktree.base_branch,
+    )?;
+    execution_log.log(LogEvent::Merge {
+        source: phase_worktree.branch.clone(),
+        target: phase_worktree.base_branch.clone(),
+    })?;
+
+    let verify_command = project_config
+        .defaults
+        .dod
+        .clone()
+        .unwrap_or_else(|| "cargo test".to_string());
+    let verify = run_shell_command_in_repo(&phase_worktree.repo_root, &verify_command)?;
+    let output_lines = String::from_utf8_lossy(&verify.stdout).lines().count()
+        + String::from_utf8_lossy(&verify.stderr).lines().count();
+
+    execution_log.log(LogEvent::TestExecuted {
+        command: verify_command.clone(),
+        passed: verify.status.success(),
+        exit_code: verify.status.code(),
+    })?;
+    execution_log.log(LogEvent::TestResult {
+        attempt: 1,
+        passed: verify.status.success(),
+        output_lines,
+    })?;
+
+    if !verify.status.success() {
+        bail!(
+            "post-merge verification failed for '{}': {}",
+            verify_command,
+            String::from_utf8_lossy(&verify.stderr).trim()
+        );
+    }
+
+    Ok(())
+}
+
 /// Run the full work pipeline for a phase.
 #[allow(clippy::too_many_arguments)] // Phase launch combines config and runtime toggles; keeping explicit args avoids opaque builders.
 pub fn run_phase(
@@ -394,6 +532,37 @@ pub fn run_phase(
     dry_run: bool,
     project_root: &Path,
     config_path: Option<&Path>,
+) -> Result<()> {
+    run_phase_with_rework(
+        phase,
+        project_config,
+        agent_name,
+        policy_override,
+        auto_attach,
+        use_worktree,
+        force_new_worktree,
+        dry_run,
+        project_root,
+        config_path,
+        None,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Phase launch combines config and runtime toggles; keeping explicit args avoids opaque builders.
+fn run_phase_with_rework(
+    phase: &str,
+    project_config: &ProjectConfig,
+    agent_name: &str,
+    policy_override: Option<&str>,
+    auto_attach: bool,
+    use_worktree: bool,
+    force_new_worktree: bool,
+    dry_run: bool,
+    project_root: &Path,
+    config_path: Option<&Path>,
+    rework_context: Option<ReworkContext>,
+    rework_attempt: u32,
 ) -> Result<()> {
     // 1. Validate the phase board exists before launching.
     let source_phase_dir = crate::paths::resolve_kanban_root(project_root).join(phase);
@@ -516,6 +685,7 @@ pub fn run_phase(
         phase,
         &tasks,
         &execution_root,
+        rework_context.as_ref(),
         &claim_identity.agent,
         claim_identity.source.as_str(),
         project_config,
@@ -740,10 +910,138 @@ pub fn run_phase(
         dod_output_lines: completion.dod_output_lines,
     })?;
 
-    let completion_reason = completion.failure_summary();
-    if completion.is_complete {
+    let mut run_accepted = completion.is_complete;
+    let mut completion_reason = completion.failure_summary();
+
+    if completion.is_complete && phase_worktree.is_some() {
+        let base_branch = phase_worktree
+            .as_ref()
+            .map(|worktree| worktree.base_branch.as_str())
+            .unwrap_or("main");
+
+        let review_packet = match crate::review::generate_review_packet(
+            phase,
+            &execution_root,
+            &log_path,
+            &log_key,
+            base_branch,
+        ) {
+            Ok(packet) => packet,
+            Err(e) => {
+                finalize_phase_worktree_if_present(
+                    phase,
+                    &execution_log,
+                    phase_worktree.as_ref(),
+                    RunOutcome::Failed,
+                );
+                return Err(e);
+            }
+        };
+
+        execution_log.log(LogEvent::ReviewPacketGenerated {
+            phase: phase.to_string(),
+            packet_path: review_packet.path.display().to_string(),
+            diff_command: review_packet.diff_command.clone(),
+            summary_path: review_packet
+                .summary_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            statements_count: review_packet.statements.len(),
+            execution_log_path: review_packet.execution_log_path.display().to_string(),
+        })?;
+
+        println!(
+            "\x1b[36m[batty]\x1b[0m review packet generated: {}",
+            review_packet.path.display()
+        );
+
+        let review_decision = match crate::review::capture_review_decision() {
+            Ok(decision) => decision,
+            Err(e) => {
+                finalize_phase_worktree_if_present(
+                    phase,
+                    &execution_log,
+                    phase_worktree.as_ref(),
+                    RunOutcome::Failed,
+                );
+                return Err(e);
+            }
+        };
+
+        execution_log.log(LogEvent::ReviewDecision {
+            phase: phase.to_string(),
+            decision: review_decision.label().to_string(),
+            feedback: review_decision.feedback().map(|value| value.to_string()),
+        })?;
+
+        match review_decision {
+            crate::review::ReviewDecision::Merge => {
+                if let Some(worktree) = phase_worktree.as_ref()
+                    && let Err(err) =
+                        merge_phase_branch_and_validate(worktree, project_config, &execution_log)
+                {
+                    run_accepted = false;
+                    completion_reason = format!("review decision: escalate ({err})");
+                }
+            }
+            crate::review::ReviewDecision::Rework { feedback } => {
+                let next_attempt = rework_attempt + 1;
+                if next_attempt > project_config.defaults.max_retries {
+                    run_accepted = false;
+                    completion_reason = format!(
+                        "review decision: rework retries exceeded (attempt {next_attempt} > max {})",
+                        project_config.defaults.max_retries
+                    );
+                } else {
+                    execution_log.log(LogEvent::ReworkCycleStarted {
+                        phase: phase.to_string(),
+                        attempt: next_attempt,
+                        max_retries: project_config.defaults.max_retries,
+                        feedback: feedback.clone(),
+                    })?;
+                    execution_log.log(LogEvent::RunFailed {
+                        reason: format!("review decision: rework ({feedback})"),
+                    })?;
+                    execution_log.log(LogEvent::SessionEnded {
+                        result: format!(
+                            "{result:?}; completion=false; rework_cycle={next_attempt}"
+                        ),
+                    })?;
+
+                    println!(
+                        "\x1b[36m[batty]\x1b[0m rework requested (attempt {next_attempt}/{}), relaunching in same worktree",
+                        project_config.defaults.max_retries
+                    );
+
+                    return run_phase_with_rework(
+                        phase,
+                        project_config,
+                        agent_name,
+                        policy_override,
+                        auto_attach,
+                        use_worktree,
+                        false,
+                        dry_run,
+                        project_root,
+                        config_path,
+                        Some(ReworkContext {
+                            attempt: next_attempt,
+                            feedback,
+                        }),
+                        next_attempt,
+                    );
+                }
+            }
+            crate::review::ReviewDecision::Escalate { feedback } => {
+                run_accepted = false;
+                completion_reason = format!("review decision: escalate ({feedback})");
+            }
+        }
+    }
+
+    if run_accepted {
         execution_log.log(LogEvent::RunCompleted {
-            summary: "completion contract passed".to_string(),
+            summary: "completion contract and review gate passed".to_string(),
         })?;
         info!("session completed");
     } else {
@@ -753,7 +1051,7 @@ pub fn run_phase(
         warn!(reason = %completion_reason, "session failed completion contract");
     }
 
-    let run_outcome = if completion.is_complete {
+    let run_outcome = if run_accepted {
         RunOutcome::Completed
     } else {
         RunOutcome::Failed
@@ -761,10 +1059,10 @@ pub fn run_phase(
     finalize_phase_worktree_if_present(phase, &execution_log, phase_worktree.as_ref(), run_outcome);
 
     execution_log.log(LogEvent::SessionEnded {
-        result: format!("{result:?}; completion={}", completion.is_complete),
+        result: format!("{result:?}; completion={run_accepted}"),
     })?;
 
-    if completion.is_complete {
+    if run_accepted {
         println!(
             "\n\x1b[36m[batty]\x1b[0m session complete. Log: {}",
             log_path.display()
@@ -777,6 +1075,149 @@ pub fn run_phase(
         );
         Err(anyhow!(completion_reason))
     }
+}
+
+#[allow(clippy::too_many_arguments)] // Sequencer path shares the same runtime controls as single-phase runs.
+pub fn run_all_phases(
+    project_config: &ProjectConfig,
+    agent_name: &str,
+    policy_override: Option<&str>,
+    auto_attach: bool,
+    use_worktree: bool,
+    force_new_worktree: bool,
+    dry_run: bool,
+    project_root: &Path,
+    config_path: Option<&Path>,
+) -> Result<()> {
+    let failure_policy = match std::env::var("BATTY_CONTINUE_ON_FAILURE")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("1") | Some("true") | Some("yes") => {
+            crate::sequencer::SequencerFailurePolicy::ContinueOnFailure
+        }
+        _ => crate::sequencer::SequencerFailurePolicy::StopOnFailure,
+    };
+
+    let discovery = crate::sequencer::discover_phases_for_sequencing(project_root)?;
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let log_dir = project_root
+        .join(".batty")
+        .join("logs")
+        .join(format!("work-all-{now_secs}"));
+    std::fs::create_dir_all(&log_dir)
+        .with_context(|| format!("failed to create sequencer log dir {}", log_dir.display()))?;
+    let execution_log_path = log_dir.join("execution.jsonl");
+    let execution_log = ExecutionLog::new(&execution_log_path).with_context(|| {
+        format!(
+            "failed to create sequencer execution log at {}",
+            execution_log_path.display()
+        )
+    })?;
+    execution_log.log(LogEvent::SessionStarted {
+        phase: "all".to_string(),
+    })?;
+    crate::sequencer::log_phase_selection_decisions(&execution_log, &discovery.decisions)?;
+
+    if discovery.selected.is_empty() {
+        println!("\x1b[36m[batty]\x1b[0m no incomplete numeric phases found.");
+        execution_log.log(LogEvent::RunCompleted {
+            summary: "no incomplete phases to run".to_string(),
+        })?;
+        execution_log.log(LogEvent::SessionEnded {
+            result: "Completed".to_string(),
+        })?;
+        return Ok(());
+    }
+
+    let effective_use_worktree = if dry_run {
+        use_worktree
+    } else if use_worktree {
+        true
+    } else {
+        println!(
+            "\x1b[36m[batty]\x1b[0m forcing --worktree for `batty work all` to support review/merge loops."
+        );
+        true
+    };
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = stop.clone();
+    ctrlc::set_handler(move || {
+        stop_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+    })
+    .ok();
+
+    for phase in discovery.selected {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            execution_log.log(LogEvent::RunFailed {
+                reason: "stopped by user interrupt".to_string(),
+            })?;
+            execution_log.log(LogEvent::SessionEnded {
+                result: "Interrupted".to_string(),
+            })?;
+            bail!("stopped by user interrupt");
+        }
+
+        println!("\x1b[36m[batty]\x1b[0m running phase {}", phase.name);
+        match run_phase_with_rework(
+            &phase.name,
+            project_config,
+            agent_name,
+            policy_override,
+            auto_attach,
+            effective_use_worktree,
+            force_new_worktree,
+            dry_run,
+            project_root,
+            config_path,
+            None,
+            0,
+        ) {
+            Ok(()) => {
+                execution_log.log(LogEvent::RunCompleted {
+                    summary: format!("phase {} completed", phase.name),
+                })?;
+                let _ = crate::sequencer::should_continue_after_phase(
+                    crate::sequencer::PhaseRunOutcome::Merged,
+                    failure_policy,
+                );
+            }
+            Err(err) => {
+                let reason = format!("phase {} failed: {err}", phase.name);
+                execution_log.log(LogEvent::RunFailed {
+                    reason: reason.clone(),
+                })?;
+
+                let continue_run = crate::sequencer::should_continue_after_phase(
+                    if reason.contains("review decision: escalate") {
+                        crate::sequencer::PhaseRunOutcome::Escalated
+                    } else {
+                        crate::sequencer::PhaseRunOutcome::Failed
+                    },
+                    failure_policy,
+                );
+                if !continue_run {
+                    execution_log.log(LogEvent::SessionEnded {
+                        result: "Failed".to_string(),
+                    })?;
+                    return Err(anyhow!(reason));
+                }
+            }
+        }
+    }
+
+    execution_log.log(LogEvent::SessionEnded {
+        result: "Completed".to_string(),
+    })?;
+    println!("\x1b[36m[batty]\x1b[0m all eligible phases processed.");
+    Ok(())
 }
 
 fn handle_worktree_finalize(
@@ -898,6 +1339,7 @@ fn compose_launch_context(
     phase: &str,
     tasks: &[task::Task],
     execution_root: &Path,
+    rework_context: Option<&ReworkContext>,
     claim_agent_name: &str,
     claim_agent_source: &str,
     project_config: &ProjectConfig,
@@ -934,6 +1376,7 @@ fn compose_launch_context(
         phase,
         tasks,
         execution_root,
+        rework_context,
         claim_agent_name,
         claim_agent_source,
         &instructions_path,
@@ -980,6 +1423,7 @@ fn build_phase_prompt(
     phase: &str,
     tasks: &[task::Task],
     project_root: &Path,
+    rework_context: Option<&ReworkContext>,
     claim_agent_name: &str,
     claim_agent_source: &str,
     instructions_path: &Path,
@@ -1058,6 +1502,14 @@ fn build_phase_prompt(
     }
     prompt.push('\n');
 
+    if let Some(context) = rework_context {
+        prompt.push_str("## Reviewer Feedback (Rework Loop)\n");
+        prompt.push_str(&format!("rework.attempt: {}\n", context.attempt));
+        prompt.push_str("Address this reviewer feedback before requesting review again:\n");
+        prompt.push_str(context.feedback.trim());
+        prompt.push_str("\n\n");
+    }
+
     prompt.push_str("## .batty/config.toml Policy and Execution Defaults\n");
     prompt.push_str(&format!("source: {}\n", config_source_label(config_path)));
     prompt.push_str(&format!(
@@ -1121,6 +1573,20 @@ fn build_phase_prompt(
         }
     }
     prompt.push('\n');
+
+    prompt.push_str("## Required Completion Artifacts\n");
+    prompt.push_str(
+        "When this phase is complete, produce `phase-summary.md` at the repository root.\n",
+    );
+    prompt.push_str("`phase-summary.md` must include:\n");
+    prompt.push_str("- What was done (tasks completed + outputs)\n");
+    prompt.push_str("- Files changed and tests added/modified/run\n");
+    prompt.push_str("- Key decisions made and why\n");
+    prompt.push_str("- What was deferred or left open\n");
+    prompt.push_str("- What to watch for in follow-up work\n\n");
+    prompt.push_str(
+        "Treat this summary plus per-task statements of work as the review packet inputs.\n\n",
+    );
 
     prompt.push_str(
         "Follow the workflow in the active agent instructions to pick tasks, implement, test, and close them.\n",
@@ -1306,7 +1772,7 @@ fn terminal_size() -> PtySize {
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use crate::task::Task;
 
@@ -1345,6 +1811,7 @@ mod tests {
             "phase-1",
             &tasks,
             tmp.path(),
+            None,
             "zinc-ivory",
             "persisted",
             &config,
@@ -1362,6 +1829,55 @@ mod tests {
         assert!(snapshot.prompt.contains("defaults.agent: claude"));
         assert!(snapshot.prompt.contains("effective.policy: observe"));
         assert!(snapshot.prompt.contains("dangerous_mode.enabled: false"));
+        assert!(
+            snapshot
+                .prompt
+                .contains("When this phase is complete, produce `phase-summary.md`")
+        );
+        assert!(snapshot.prompt.contains("What was deferred or left open"));
+    }
+
+    #[test]
+    fn compose_launch_context_includes_rework_feedback_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("CLAUDE.md"), "# Steering\nUse workflow.\n").unwrap();
+        fs::create_dir_all(tmp.path().join("kanban/phase-1")).unwrap();
+        fs::write(
+            tmp.path().join("kanban/phase-1/PHASE.md"),
+            "# Phase 1\nBuild it.\n",
+        )
+        .unwrap();
+
+        let adapter = crate::agent::adapter_from_name("claude").unwrap();
+        let rework = ReworkContext {
+            attempt: 2,
+            feedback: "Fix edge-case regression in parser.".to_string(),
+        };
+        let snapshot = compose_launch_context(
+            "phase-1",
+            &[make_task(2, "fixups", "backlog", vec![])],
+            tmp.path(),
+            Some(&rework),
+            "zinc-ivory",
+            "persisted",
+            &ProjectConfig::default(),
+            Policy::Observe,
+            adapter.as_ref(),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            snapshot
+                .prompt
+                .contains("## Reviewer Feedback (Rework Loop)")
+        );
+        assert!(snapshot.prompt.contains("rework.attempt: 2"));
+        assert!(
+            snapshot
+                .prompt
+                .contains("Fix edge-case regression in parser.")
+        );
     }
 
     #[test]
@@ -1375,6 +1891,7 @@ mod tests {
             "phase-1",
             &[],
             tmp.path(),
+            None,
             "zinc-ivory",
             "persisted",
             &ProjectConfig::default(),
@@ -1399,6 +1916,7 @@ mod tests {
             "phase-1",
             &[],
             tmp.path(),
+            None,
             "zinc-ivory",
             "persisted",
             &ProjectConfig::default(),
@@ -1424,6 +1942,7 @@ mod tests {
             "phase-1",
             &[make_task(9, "wrapping", "backlog", vec![])],
             tmp.path(),
+            None,
             "zinc-ivory",
             "persisted",
             &ProjectConfig::default(),
@@ -1581,6 +2100,231 @@ mod tests {
         let size = terminal_size();
         assert!(size.rows > 0);
         assert!(size.cols > 0);
+    }
+
+    fn git(repo: &Path, args: &[&str]) -> std::process::Output {
+        std::process::Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
+    fn init_git_repo() -> Option<(tempfile::TempDir, String)> {
+        let version = std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .ok()?;
+        if !version.status.success() {
+            return None;
+        }
+
+        let tmp = tempfile::tempdir().ok()?;
+        let init = git(tmp.path(), &["init", "-q"]);
+        if !init.status.success() {
+            return None;
+        }
+
+        let _ = git(
+            tmp.path(),
+            &["config", "user.email", "batty-test@example.com"],
+        );
+        let _ = git(tmp.path(), &["config", "user.name", "Batty Test"]);
+
+        fs::write(tmp.path().join("README.md"), "base\n").ok()?;
+        let add = git(tmp.path(), &["add", "README.md"]);
+        if !add.status.success() {
+            return None;
+        }
+        let commit = git(tmp.path(), &["commit", "-q", "-m", "init"]);
+        if !commit.status.success() {
+            return None;
+        }
+
+        let branch =
+            String::from_utf8_lossy(&git(tmp.path(), &["branch", "--show-current"]).stdout)
+                .trim()
+                .to_string();
+        if branch.is_empty() {
+            return None;
+        }
+        Some((tmp, branch))
+    }
+
+    #[test]
+    fn merge_phase_branch_and_validate_merges_clean_branch() {
+        let Some((tmp, base_branch)) = init_git_repo() else {
+            return;
+        };
+
+        let create = git(tmp.path(), &["switch", "-c", "phase-3-run-001"]);
+        assert!(create.status.success());
+        fs::write(tmp.path().join("feature.txt"), "feature\n").unwrap();
+        assert!(git(tmp.path(), &["add", "feature.txt"]).status.success());
+        assert!(
+            git(tmp.path(), &["commit", "-q", "-m", "feature"])
+                .status
+                .success(),
+            "{}",
+            String::from_utf8_lossy(&git(tmp.path(), &["status"]).stderr)
+        );
+        assert!(git(tmp.path(), &["switch", &base_branch]).status.success());
+
+        let start_commit = String::from_utf8_lossy(&git(tmp.path(), &["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string();
+        let phase_worktree = phase_worktree::PhaseWorktree {
+            repo_root: tmp.path().to_path_buf(),
+            base_branch: base_branch.clone(),
+            start_commit,
+            branch: "phase-3-run-001".to_string(),
+            path: tmp.path().to_path_buf(),
+        };
+
+        let mut config = ProjectConfig::default();
+        config.defaults.dod = Some("true".to_string());
+        let log_path = tmp.path().join("execution.jsonl");
+        let log = ExecutionLog::new(&log_path).unwrap();
+
+        merge_phase_branch_and_validate(&phase_worktree, &config, &log).unwrap();
+
+        let merged = git(
+            tmp.path(),
+            &[
+                "merge-base",
+                "--is-ancestor",
+                "phase-3-run-001",
+                &base_branch,
+            ],
+        );
+        assert!(merged.status.success());
+
+        let log_body = fs::read_to_string(log_path).unwrap();
+        assert!(log_body.contains("\"event\":\"merge\""));
+        assert!(log_body.contains("\"event\":\"test_executed\""));
+    }
+
+    #[test]
+    fn merge_phase_branch_and_validate_escalates_on_unresolved_conflict() {
+        let Some((tmp, base_branch)) = init_git_repo() else {
+            return;
+        };
+
+        fs::write(tmp.path().join("shared.txt"), "line\n").unwrap();
+        assert!(git(tmp.path(), &["add", "shared.txt"]).status.success());
+        assert!(
+            git(tmp.path(), &["commit", "-q", "-m", "shared base"])
+                .status
+                .success()
+        );
+
+        assert!(
+            git(tmp.path(), &["switch", "-c", "phase-3-run-002"])
+                .status
+                .success()
+        );
+        fs::write(tmp.path().join("shared.txt"), "line from branch\n").unwrap();
+        assert!(git(tmp.path(), &["add", "shared.txt"]).status.success());
+        assert!(
+            git(tmp.path(), &["commit", "-q", "-m", "branch change"])
+                .status
+                .success()
+        );
+
+        assert!(git(tmp.path(), &["switch", &base_branch]).status.success());
+        fs::write(tmp.path().join("shared.txt"), "line from base\n").unwrap();
+        assert!(git(tmp.path(), &["add", "shared.txt"]).status.success());
+        assert!(
+            git(tmp.path(), &["commit", "-q", "-m", "base change"])
+                .status
+                .success()
+        );
+
+        let start_commit = String::from_utf8_lossy(&git(tmp.path(), &["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string();
+        let phase_worktree = phase_worktree::PhaseWorktree {
+            repo_root: tmp.path().to_path_buf(),
+            base_branch: base_branch.clone(),
+            start_commit,
+            branch: "phase-3-run-002".to_string(),
+            path: tmp.path().to_path_buf(),
+        };
+
+        let mut config = ProjectConfig::default();
+        config.defaults.dod = Some("true".to_string());
+        let log = ExecutionLog::new(&tmp.path().join("execution.jsonl")).unwrap();
+
+        let err = merge_phase_branch_and_validate(&phase_worktree, &config, &log)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("merge conflict unresolved"));
+    }
+
+    fn write_phase_task(project_root: &Path, phase: &str, id: u32, status: &str) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("kanban")
+            .join(phase)
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        let file = tasks_dir.join(format!("{id:03}-task-{id}.md"));
+        let content = format!(
+            "---\nid: {id}\ntitle: task-{id}\nstatus: {status}\npriority: high\ntags: []\ndepends_on: []\nclass: standard\n---\n\nTask {id}\n"
+        );
+        fs::write(file, content).unwrap();
+    }
+
+    fn write_phase_doc(project_root: &Path, phase: &str) {
+        let phase_dir = project_root.join(".batty").join("kanban").join(phase);
+        fs::create_dir_all(&phase_dir).unwrap();
+        fs::write(phase_dir.join("PHASE.md"), format!("# {phase}\n")).unwrap();
+    }
+
+    #[test]
+    fn run_all_phases_returns_when_every_phase_is_complete() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_phase_task(tmp.path(), "phase-1", 1, "done");
+        write_phase_task(tmp.path(), "phase-2", 1, "done");
+
+        let result = run_all_phases(
+            &ProjectConfig::default(),
+            "claude",
+            None,
+            false,
+            false,
+            false,
+            true,
+            tmp.path(),
+            None,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn run_all_phases_executes_discovered_phases_in_dry_run_mode() {
+        let Some((tmp, _base_branch)) = init_git_repo() else {
+            return;
+        };
+        fs::write(tmp.path().join("CLAUDE.md"), "# Steering\n").unwrap();
+        write_phase_doc(tmp.path(), "phase-1");
+        write_phase_doc(tmp.path(), "phase-2");
+        write_phase_task(tmp.path(), "phase-1", 1, "backlog");
+        write_phase_task(tmp.path(), "phase-2", 1, "backlog");
+        write_phase_task(tmp.path(), "phase-9", 1, "done");
+
+        let result = run_all_phases(
+            &ProjectConfig::default(),
+            "claude",
+            None,
+            false,
+            false,
+            false,
+            true,
+            tmp.path(),
+            None,
+        );
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]
