@@ -11,6 +11,8 @@ mod orchestrator;
 mod paths;
 mod policy;
 mod prompt;
+mod review;
+mod sequencer;
 mod supervisor;
 mod task;
 mod tier2;
@@ -582,7 +584,8 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    let cwd = std::env::current_dir().context("failed to get current directory (was it deleted?)")?;
+    let cwd =
+        std::env::current_dir().context("failed to get current directory (was it deleted?)")?;
     let (config, config_path) = ProjectConfig::load(&cwd)?;
 
     if !is_config_command || cli.verbose > 0 {
@@ -606,10 +609,8 @@ async fn main() -> Result<()> {
         } => {
             // Detached mode: spawn a background batty worker and return immediately.
             // The worker runs with --foreground to avoid recursive spawning.
-            if !attach && !foreground && !dry_run {
-                let tasks_dir = paths::resolve_kanban_root(&cwd)
-                    .join(&target)
-                    .join("tasks");
+            if target != "all" && !attach && !foreground && !dry_run {
+                let tasks_dir = paths::resolve_kanban_root(&cwd).join(&target).join("tasks");
                 if !tasks_dir.is_dir() {
                     anyhow::bail!(
                         "phase board not found: {} (expected {})",
@@ -669,18 +670,38 @@ async fn main() -> Result<()> {
             let agent_name = agent.as_deref().unwrap_or(&config.defaults.agent);
             let policy_str = policy.as_deref();
 
-            work::run_phase(
-                &target,
-                &config,
-                agent_name,
-                policy_str,
-                attach,
-                worktree,
-                new,
-                dry_run,
-                &cwd,
-                config_path.as_deref(),
-            )?;
+            if target == "all" {
+                if parallel != 1 {
+                    anyhow::bail!(
+                        "`batty work all --parallel` is planned for phase 4; use --parallel 1 for now"
+                    );
+                }
+
+                work::run_all_phases(
+                    &config,
+                    agent_name,
+                    policy_str,
+                    attach,
+                    worktree,
+                    new,
+                    dry_run,
+                    &cwd,
+                    config_path.as_deref(),
+                )?;
+            } else {
+                work::run_phase(
+                    &target,
+                    &config,
+                    agent_name,
+                    policy_str,
+                    attach,
+                    worktree,
+                    new,
+                    dry_run,
+                    &cwd,
+                    config_path.as_deref(),
+                )?;
+            }
         }
         Command::Attach { target } => {
             let session = tmux::session_name(&target);
@@ -763,7 +784,9 @@ async fn main() -> Result<()> {
             if summary.kanban_skills_removed {
                 println!("  kanban-md skills: removed");
             } else {
-                println!("  kanban-md skills: skipped (kanban-md not available or skills not present)");
+                println!(
+                    "  kanban-md skills: skipped (kanban-md not available or skills not present)"
+                );
             }
 
             if summary.gitignore_entries_removed.is_empty() {
