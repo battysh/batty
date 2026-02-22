@@ -520,6 +520,23 @@ pub fn run(
             Ok(event_count) => {
                 if event_count > 0 {
                     debug!(events = event_count, "new events extracted");
+                    // Feed output to stuck detector for loop detection and progress tracking
+                    if let Some(ref mut stuck) = stuck_detector {
+                        let snapshot = buffer.snapshot();
+                        for evt in snapshot.iter().skip(snapshot.len().saturating_sub(event_count)) {
+                            let line = format!("{evt:?}");
+                            stuck.on_output(&line);
+                            // Progress events: task completed, command ran, file changes
+                            if line.contains("TaskCompleted")
+                                || line.contains("CommandRan")
+                                || line.contains("FileCreated")
+                                || line.contains("FileModified")
+                                || line.contains("CommitMade")
+                            {
+                                stuck.on_progress();
+                            }
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -532,9 +549,6 @@ pub fn run(
         if let Some(last_event) = events.last() {
             let line = format!("{last_event:?}");
             if line != last_line {
-                // Feed the raw summary to the detector for prompt matching
-                // In practice, we'd feed the actual output lines, but the event
-                // buffer gives us the structured view
                 last_line = line;
             }
         }

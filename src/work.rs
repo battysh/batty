@@ -1,25 +1,30 @@
 //! Work command — the main orchestration pipeline.
 //!
 //! `batty work <phase>` reads a kanban phase board, constructs a prompt
-//! for the agent describing the phase context, spawns the agent in a PTY,
-//! supervises the session (auto-answering prompts per policy), runs DoD
-//! checks when the agent signals completion, and writes a structured
-//! execution log.
+//! for the agent describing the phase context, spawns the agent in a tmux
+//! session, supervises with the orchestrator (auto-answering prompts via
+//! send-keys per policy, Tier 2 supervisor agent for unknowns), and writes
+//! a structured execution log.
 
 use std::path::Path;
-use std::sync::mpsc;
-use std::thread;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use portable_pty::PtySize;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::agent;
 use crate::config::ProjectConfig;
+use crate::detector::DetectorConfig;
 use crate::log::{ExecutionLog, LogEvent};
+use crate::orchestrator::{
+    self, LogFileObserver, OrchestratorConfig, OrchestratorResult, StuckConfig,
+};
 use crate::policy::PolicyEngine;
-use crate::supervisor::{self, SessionConfig, SessionResult, SupervisorEvent};
 use crate::task;
+use crate::tier2::Tier2Config;
 
 /// Run the full work pipeline for a phase.
 pub fn run_phase(
@@ -103,66 +108,79 @@ pub fn run_phase(
         work_dir: spawn_config.work_dir.clone(),
     })?;
 
-    // 8. Build session config
-    let session_config = SessionConfig {
+    // 8. Build orchestrator config
+    let orch_log = log_dir.join("orchestrator.log");
+    let observer = LogFileObserver::new(&orch_log)?;
+
+    // Load project docs for Tier 2 supervisor context
+    let system_prompt = crate::tier2::load_project_docs(project_root);
+    let tier2_config = Tier2Config {
+        system_prompt: Some(system_prompt),
+        ..Tier2Config::default()
+    };
+
+    let config = OrchestratorConfig {
         spawn: spawn_config,
         patterns: adapter.prompt_patterns(),
         policy: policy_engine,
-        pty_size: terminal_size(),
+        detector: DetectorConfig::default(),
+        phase: phase.to_string(),
+        project_root: project_root.to_path_buf(),
+        poll_interval: OrchestratorConfig::default_poll_interval(),
+        buffer_size: OrchestratorConfig::default_buffer_size(),
+        tier2: Some(tier2_config),
+        log_pane: true,
+        log_pane_height_pct: 20,
+        stuck: Some(StuckConfig::default()),
+        answer_delay: Duration::from_secs(1),
     };
 
-    // 9. Set up event channel and log bridge
-    let (event_tx, event_rx) = mpsc::channel::<SupervisorEvent>();
+    // 9. Set up stop signal (for Ctrl-C handling)
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = stop.clone();
+    ctrlc::set_handler(move || {
+        stop_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+    })
+    .ok(); // best-effort — may fail if handler already set
 
-    // Spawn a thread to bridge supervisor events to the execution log
-    let log_path_clone = log_path.clone();
-    let log_thread = thread::spawn(move || -> Result<()> {
-        let log = ExecutionLog::new(&log_path_clone)?;
-        for event in event_rx {
-            let log_event: LogEvent = (&event).into();
-            if let Err(e) = log.log(log_event) {
-                warn!("failed to write log event: {e}");
-            }
-        }
-        Ok(())
-    });
-
-    // 10. Run the supervised session
+    // 10. Run the orchestrator
     info!(
         agent = adapter.name(),
         phase = phase,
-        "launching supervised agent session"
+        "launching tmux-based supervised session"
     );
 
-    let result = supervisor::run_session(session_config, adapter.as_ref(), Some(event_tx))?;
+    let session = crate::tmux::session_name(phase);
+    println!(
+        "\x1b[36m[batty]\x1b[0m starting {} in tmux session '{}'",
+        phase, session
+    );
+    println!(
+        "\x1b[36m[batty]\x1b[0m attach with: batty attach {}",
+        phase
+    );
 
-    // Wait for the log thread to finish
-    drop(log_thread);
+    let result = orchestrator::run(config, Box::new(observer), stop)?;
 
     // 11. Log the result
     match &result {
-        SessionResult::Completed => {
+        OrchestratorResult::Completed => {
             execution_log.log(LogEvent::RunCompleted {
-                summary: "agent completed successfully".to_string(),
+                summary: "executor completed".to_string(),
             })?;
-            info!("session completed successfully");
+            info!("session completed");
         }
-        SessionResult::Error { detail } => {
+        OrchestratorResult::Detached => {
+            execution_log.log(LogEvent::SessionEnded {
+                result: "detached/stopped".to_string(),
+            })?;
+            info!("session detached");
+        }
+        OrchestratorResult::Error { detail } => {
             execution_log.log(LogEvent::RunFailed {
                 reason: detail.clone(),
             })?;
-            warn!(detail = %detail, "session ended with error");
-        }
-        SessionResult::Exited { code } => {
-            let summary = match code {
-                Some(0) => "agent exited normally".to_string(),
-                Some(c) => format!("agent exited with code {c}"),
-                None => "agent exited with unknown code".to_string(),
-            };
-            execution_log.log(LogEvent::SessionEnded {
-                result: summary.clone(),
-            })?;
-            info!(summary = %summary, "session ended");
+            info!(detail = %detail, "session error");
         }
     }
 
