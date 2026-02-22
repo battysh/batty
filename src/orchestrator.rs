@@ -51,6 +51,8 @@ pub struct OrchestratorConfig {
     pub log_pane: bool,
     /// Log pane height as percentage of terminal (default: 20).
     pub log_pane_height_pct: u32,
+    /// Stuck detection configuration (None = disabled).
+    pub stuck: Option<StuckConfig>,
 }
 
 impl OrchestratorConfig {
@@ -246,6 +248,200 @@ impl StatusBar {
     }
 }
 
+/// Configuration for stuck detection.
+#[derive(Debug, Clone)]
+pub struct StuckConfig {
+    /// How long without progress events before considering stuck (default: 300s = 5 min).
+    pub timeout: Duration,
+    /// Maximum nudges before escalating to human (default: 2).
+    pub max_nudges: u32,
+    /// Whether to auto-relaunch on executor crash (default: false).
+    pub auto_relaunch: bool,
+}
+
+impl Default for StuckConfig {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(300),
+            max_nudges: 2,
+            auto_relaunch: false,
+        }
+    }
+}
+
+/// Stuck states detected by the stuck detector.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StuckState {
+    /// Executor is making progress — all good.
+    Normal,
+    /// No progress events for extended period.
+    Stalled { since: Duration },
+    /// Same output repeating (detected by event buffer).
+    Looping,
+    /// Executor process/pane has exited unexpectedly.
+    Crashed,
+}
+
+/// Recovery action recommended by the stuck detector.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StuckAction {
+    /// No action needed.
+    None,
+    /// Inject a nudge hint via send-keys.
+    Nudge { message: String },
+    /// Escalate to human — executor is stuck.
+    Escalate { reason: String },
+    /// Relaunch the executor (crash recovery).
+    Relaunch,
+}
+
+/// Monitors executor progress and detects stuck states.
+pub struct StuckDetector {
+    config: StuckConfig,
+    /// When the last meaningful progress was detected.
+    last_progress: Instant,
+    /// How many nudges have been sent so far.
+    nudge_count: u32,
+    /// Last few output lines for loop detection.
+    recent_lines: Vec<String>,
+    /// Maximum lines to track for loop detection.
+    loop_window: usize,
+}
+
+impl StuckDetector {
+    pub fn new(config: StuckConfig) -> Self {
+        Self {
+            config,
+            last_progress: Instant::now(),
+            nudge_count: 0,
+            recent_lines: Vec::new(),
+            loop_window: 20,
+        }
+    }
+
+    /// Signal that meaningful progress was made (task completed, command ran, file changed, etc.).
+    pub fn on_progress(&mut self) {
+        self.last_progress = Instant::now();
+        self.nudge_count = 0;
+        self.recent_lines.clear();
+    }
+
+    /// Feed an output line for loop detection.
+    pub fn on_output(&mut self, line: &str) {
+        let trimmed = line.trim().to_string();
+        if trimmed.is_empty() {
+            return;
+        }
+        self.recent_lines.push(trimmed);
+        if self.recent_lines.len() > self.loop_window {
+            self.recent_lines.remove(0);
+        }
+    }
+
+    /// Record that a nudge was sent.
+    pub fn nudge_sent(&mut self) {
+        self.nudge_count += 1;
+    }
+
+    /// Check for stuck state based on elapsed time and output patterns.
+    ///
+    /// Call this periodically from the orchestrator loop.
+    /// `session_alive` indicates whether the tmux session/pane still exists.
+    pub fn check(&self, session_alive: bool) -> (StuckState, StuckAction) {
+        // Crash detection
+        if !session_alive {
+            let action = if self.config.auto_relaunch {
+                StuckAction::Relaunch
+            } else {
+                StuckAction::Escalate {
+                    reason: "executor process crashed".to_string(),
+                }
+            };
+            return (StuckState::Crashed, action);
+        }
+
+        // Loop detection: check if the last N lines are all the same
+        if self.detect_loop() {
+            if self.nudge_count < self.config.max_nudges {
+                return (
+                    StuckState::Looping,
+                    StuckAction::Nudge {
+                        message: "You seem to be looping. Try a different approach.".to_string(),
+                    },
+                );
+            } else {
+                return (
+                    StuckState::Looping,
+                    StuckAction::Escalate {
+                        reason: format!(
+                            "executor stuck in loop after {} nudges",
+                            self.nudge_count
+                        ),
+                    },
+                );
+            }
+        }
+
+        // Stall detection: no progress for timeout duration
+        let elapsed = self.last_progress.elapsed();
+        if elapsed >= self.config.timeout {
+            if self.nudge_count < self.config.max_nudges {
+                return (
+                    StuckState::Stalled { since: elapsed },
+                    StuckAction::Nudge {
+                        message: "No progress detected. Are you stuck? Try breaking the task into smaller steps.".to_string(),
+                    },
+                );
+            } else {
+                return (
+                    StuckState::Stalled { since: elapsed },
+                    StuckAction::Escalate {
+                        reason: format!(
+                            "no progress for {}s after {} nudges",
+                            elapsed.as_secs(),
+                            self.nudge_count
+                        ),
+                    },
+                );
+            }
+        }
+
+        (StuckState::Normal, StuckAction::None)
+    }
+
+    /// Detect output loops: if the last N lines contain a small repeating pattern.
+    fn detect_loop(&self) -> bool {
+        let lines = &self.recent_lines;
+        if lines.len() < 6 {
+            return false;
+        }
+
+        // Check if the last 6+ lines are all identical
+        let last = &lines[lines.len() - 1];
+        let repeated = lines.iter().rev().take(6).all(|l| l == last);
+        if repeated {
+            return true;
+        }
+
+        // Check for 2-line repeating pattern (ABABABAB)
+        if lines.len() >= 8 {
+            let a = &lines[lines.len() - 2];
+            let b = &lines[lines.len() - 1];
+            let pattern_repeats = lines
+                .iter()
+                .rev()
+                .take(8)
+                .enumerate()
+                .all(|(i, l)| if i % 2 == 0 { l == b } else { l == a });
+            if pattern_repeats {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
 /// Run the full orchestrator loop.
 ///
 /// Creates a tmux session, sets up pipe-pane, and supervises the executor.
@@ -294,12 +490,13 @@ pub fn run(
     let buffer = EventBuffer::new(config.buffer_size);
     let mut watcher = PipeWatcher::new(&pipe_log, buffer.clone());
     let mut detector = PromptDetector::new(config.patterns, config.detector);
+    let mut stuck_detector = config.stuck.map(StuckDetector::new);
 
     info!(session = %session, "orchestrator loop starting");
     observer.on_event("● supervising");
     status_bar.update(StatusIndicator::Ok, "supervising")?;
 
-    // 6. Supervision loop
+    // 7. Supervision loop
     let mut last_line = String::new();
     let result = loop {
         if stop.load(Ordering::Relaxed) {
@@ -379,10 +576,41 @@ pub fn run(
             _ => {}
         }
 
+        // Stuck detection
+        if let Some(ref mut stuck) = stuck_detector {
+            let session_alive = tmux::session_exists(&session);
+            let (state, action) = stuck.check(session_alive);
+
+            match action {
+                StuckAction::None => {}
+                StuckAction::Nudge { ref message } => {
+                    warn!(state = ?state, "executor may be stuck, nudging");
+                    observer.on_event(&format!("⚠ stuck: nudging executor"));
+                    status_bar.force_update(StatusIndicator::Failure, "stuck — nudging")?;
+
+                    if let Err(e) = tmux::send_keys(&session, message, true) {
+                        warn!(error = %e, "failed to send nudge");
+                    }
+                    stuck.nudge_sent();
+                }
+                StuckAction::Escalate { ref reason } => {
+                    warn!(reason = %reason, "executor stuck — escalating");
+                    observer.on_escalate(&format!("stuck: {reason}"));
+                    status_bar.force_update(StatusIndicator::NeedsInput, "STUCK — needs input")?;
+                }
+                StuckAction::Relaunch => {
+                    info!("executor crashed — auto-relaunching");
+                    observer.on_event("✗ crash detected — relaunching");
+                    status_bar.force_update(StatusIndicator::Failure, "crashed — relaunching")?;
+                    // Relaunch is handled by the caller (not implemented in this phase)
+                }
+            }
+        }
+
         std::thread::sleep(config.poll_interval);
     };
 
-    // 7. Cleanup
+    // 8. Cleanup
     info!(result = ?result, "orchestrator loop ended");
 
     Ok(result)
@@ -760,6 +988,7 @@ mod tests {
             tier2: None,
             log_pane: false, // don't create log pane in tests
             log_pane_height_pct: 20,
+            stuck: None,
         };
 
         // Clean up any leftover session
@@ -805,6 +1034,7 @@ mod tests {
             tier2: None,
             log_pane: false, // don't create log pane in tests
             log_pane_height_pct: 20,
+            stuck: None,
         };
 
         let _ = tmux::kill_session("batty-test-stop");
@@ -897,6 +1127,7 @@ mod tests {
             tier2: None,
             log_pane: true,
             log_pane_height_pct: 20,
+            stuck: None,
         };
 
         let _ = tmux::kill_session("batty-test-logpane-orch");
@@ -980,5 +1211,156 @@ mod tests {
         let _ = bar.init();
         // update should not panic even if session doesn't exist
         bar.update(StatusIndicator::Ok, "test").unwrap();
+    }
+
+    #[test]
+    fn stuck_default_config() {
+        let config = StuckConfig::default();
+        assert_eq!(config.timeout, Duration::from_secs(300));
+        assert_eq!(config.max_nudges, 2);
+        assert!(!config.auto_relaunch);
+    }
+
+    #[test]
+    fn stuck_normal_when_recent_progress() {
+        let sd = StuckDetector::new(StuckConfig {
+            timeout: Duration::from_secs(60),
+            max_nudges: 2,
+            auto_relaunch: false,
+        });
+        let (state, action) = sd.check(true);
+        assert_eq!(state, StuckState::Normal);
+        assert_eq!(action, StuckAction::None);
+    }
+
+    #[test]
+    fn stuck_stalled_after_timeout() {
+        let mut sd = StuckDetector::new(StuckConfig {
+            timeout: Duration::from_millis(50),
+            max_nudges: 2,
+            auto_relaunch: false,
+        });
+        // Make last_progress in the past
+        sd.last_progress = Instant::now() - Duration::from_millis(100);
+
+        let (state, action) = sd.check(true);
+        assert!(matches!(state, StuckState::Stalled { .. }));
+        assert!(matches!(action, StuckAction::Nudge { .. }));
+    }
+
+    #[test]
+    fn stuck_escalates_after_max_nudges() {
+        let mut sd = StuckDetector::new(StuckConfig {
+            timeout: Duration::from_millis(50),
+            max_nudges: 2,
+            auto_relaunch: false,
+        });
+        sd.last_progress = Instant::now() - Duration::from_millis(100);
+        sd.nudge_count = 2; // already used all nudges
+
+        let (state, action) = sd.check(true);
+        assert!(matches!(state, StuckState::Stalled { .. }));
+        assert!(matches!(action, StuckAction::Escalate { .. }));
+    }
+
+    #[test]
+    fn stuck_crash_detected() {
+        let sd = StuckDetector::new(StuckConfig {
+            timeout: Duration::from_secs(300),
+            max_nudges: 2,
+            auto_relaunch: false,
+        });
+        let (state, action) = sd.check(false);
+        assert_eq!(state, StuckState::Crashed);
+        assert!(matches!(action, StuckAction::Escalate { .. }));
+    }
+
+    #[test]
+    fn stuck_crash_auto_relaunch() {
+        let sd = StuckDetector::new(StuckConfig {
+            timeout: Duration::from_secs(300),
+            max_nudges: 2,
+            auto_relaunch: true,
+        });
+        let (state, action) = sd.check(false);
+        assert_eq!(state, StuckState::Crashed);
+        assert_eq!(action, StuckAction::Relaunch);
+    }
+
+    #[test]
+    fn stuck_loop_detection() {
+        let mut sd = StuckDetector::new(StuckConfig::default());
+
+        // Feed 6 identical lines
+        for _ in 0..6 {
+            sd.on_output("ERROR: retry failed");
+        }
+
+        let (state, action) = sd.check(true);
+        assert_eq!(state, StuckState::Looping);
+        assert!(matches!(action, StuckAction::Nudge { .. }));
+    }
+
+    #[test]
+    fn stuck_loop_ab_pattern() {
+        let mut sd = StuckDetector::new(StuckConfig::default());
+
+        // Feed ABABABAB pattern
+        for _ in 0..4 {
+            sd.on_output("Running tests...");
+            sd.on_output("Tests failed. Retrying...");
+        }
+
+        let (state, action) = sd.check(true);
+        assert_eq!(state, StuckState::Looping);
+        assert!(matches!(action, StuckAction::Nudge { .. }));
+    }
+
+    #[test]
+    fn stuck_no_loop_with_varied_output() {
+        let mut sd = StuckDetector::new(StuckConfig::default());
+
+        sd.on_output("line 1");
+        sd.on_output("line 2");
+        sd.on_output("line 3");
+        sd.on_output("line 4");
+        sd.on_output("line 5");
+        sd.on_output("line 6");
+
+        let (state, action) = sd.check(true);
+        assert_eq!(state, StuckState::Normal);
+        assert_eq!(action, StuckAction::None);
+    }
+
+    #[test]
+    fn stuck_progress_resets_state() {
+        let mut sd = StuckDetector::new(StuckConfig {
+            timeout: Duration::from_millis(50),
+            max_nudges: 2,
+            auto_relaunch: false,
+        });
+        sd.last_progress = Instant::now() - Duration::from_millis(100);
+        sd.nudge_count = 1;
+
+        // Feed identical lines for loop
+        for _ in 0..6 {
+            sd.on_output("stuck line");
+        }
+
+        // Progress should reset everything
+        sd.on_progress();
+
+        let (state, action) = sd.check(true);
+        assert_eq!(state, StuckState::Normal);
+        assert_eq!(action, StuckAction::None);
+        assert_eq!(sd.nudge_count, 0);
+    }
+
+    #[test]
+    fn stuck_empty_output_ignored() {
+        let mut sd = StuckDetector::new(StuckConfig::default());
+        sd.on_output("   ");
+        sd.on_output("");
+        assert!(sd.recent_lines.is_empty());
     }
 }
