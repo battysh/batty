@@ -8,6 +8,7 @@ mod events;
 mod install;
 mod log;
 mod orchestrator;
+mod paths;
 mod policy;
 mod prompt;
 mod supervisor;
@@ -78,7 +79,7 @@ fn resolve_latest_worktree_board_dir(project_root: &Path, phase: &str) -> Result
         let Some(run) = parse_run_number(&name, &prefix) else {
             continue;
         };
-        let board_dir = path.join("kanban").join(phase);
+        let board_dir = paths::resolve_kanban_root(&path).join(phase);
         if !board_dir.is_dir() {
             continue;
         }
@@ -96,7 +97,8 @@ fn resolve_board_dir(project_root: &Path, phase: &str) -> Result<PathBuf> {
     let session = tmux::session_name(phase);
     if tmux::session_exists(&session) {
         let session_root = tmux::session_path(&session)?;
-        let active_board = PathBuf::from(session_root).join("kanban").join(phase);
+        let session_root_path = PathBuf::from(session_root);
+        let active_board = paths::resolve_kanban_root(&session_root_path).join(phase);
         if active_board.is_dir() {
             return Ok(active_board);
         }
@@ -111,7 +113,7 @@ fn resolve_board_dir(project_root: &Path, phase: &str) -> Result<PathBuf> {
         return Ok(worktree_board);
     }
 
-    let fallback = project_root.join("kanban").join(phase);
+    let fallback = paths::resolve_kanban_root(project_root).join(phase);
     if fallback.is_dir() {
         return Ok(fallback);
     }
@@ -267,7 +269,7 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    let cwd = std::env::current_dir()?;
+    let cwd = std::env::current_dir().context("failed to get current directory (was it deleted?)")?;
     let (config, config_path) = ProjectConfig::load(&cwd)?;
 
     if !is_config_command || cli.verbose > 0 {
@@ -292,7 +294,9 @@ async fn main() -> Result<()> {
             // Detached mode: spawn a background batty worker and return immediately.
             // The worker runs with --foreground to avoid recursive spawning.
             if !attach && !foreground && !dry_run {
-                let tasks_dir = cwd.join("kanban").join(&target).join("tasks");
+                let tasks_dir = paths::resolve_kanban_root(&cwd)
+                    .join(&target)
+                    .join("tasks");
                 if !tasks_dir.is_dir() {
                     anyhow::bail!(
                         "phase board not found: {} (expected {})",
@@ -408,6 +412,58 @@ async fn main() -> Result<()> {
             for path in &summary.unchanged {
                 println!("  unchanged: {}", path.display());
             }
+
+            if summary.kanban_skills_installed {
+                println!("  kanban-md skills: installed");
+            } else {
+                println!("  kanban-md skills: skipped (kanban-md not available)");
+            }
+
+            if summary.gitignore_entries_added.is_empty() {
+                println!("  .gitignore: already up to date");
+            } else {
+                for entry in &summary.gitignore_entries_added {
+                    println!("  .gitignore: added {}", entry);
+                }
+            }
+        }
+        Command::Remove { target, dir } => {
+            let destination = PathBuf::from(dir);
+            let remove_target = match target {
+                InstallTarget::Both => install::InstallTarget::Both,
+                InstallTarget::Claude => install::InstallTarget::Claude,
+                InstallTarget::Codex => install::InstallTarget::Codex,
+            };
+            let summary = install::remove_assets(&destination, remove_target)?;
+
+            println!(
+                "Removed Batty project assets from {}",
+                destination.display()
+            );
+            for path in &summary.removed {
+                println!("  removed:   {}", path.display());
+            }
+            for path in &summary.not_found {
+                println!("  not found: {}", path.display());
+            }
+
+            if summary.kanban_skills_removed {
+                println!("  kanban-md skills: removed");
+            } else {
+                println!("  kanban-md skills: skipped (kanban-md not available or skills not present)");
+            }
+
+            if summary.gitignore_entries_removed.is_empty() {
+                println!("  .gitignore: no batty entries found");
+            } else {
+                for entry in &summary.gitignore_entries_removed {
+                    println!("  .gitignore: removed {}", entry);
+                }
+            }
+
+            println!();
+            println!("To fully remove Batty, also run: rm -rf .batty");
+            println!("(worktrees under .batty/worktrees/ may contain local branches)");
         }
         Command::Board { target, print_dir } => {
             let board_dir = resolve_board_dir(&cwd, &target)?;

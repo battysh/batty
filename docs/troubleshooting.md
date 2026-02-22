@@ -9,7 +9,7 @@ batty install
 ```
 
 - Run `batty config` and confirm expected defaults
-- Ensure the requested phase board exists under `kanban/<phase>/`
+- Ensure the requested phase board exists under `.batty/kanban/<phase>/` (or `kanban/<phase>/` for legacy projects)
 - Confirm `tmux` is installed and available
 
 ## `batty resume` cannot find a session

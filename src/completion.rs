@@ -50,7 +50,9 @@ pub fn evaluate_phase_completion(
     project_config: &ProjectConfig,
     orchestrator_result: &OrchestratorResult,
 ) -> Result<CompletionDecision> {
-    let tasks_dir = execution_root.join("kanban").join(phase).join("tasks");
+    let tasks_dir = crate::paths::resolve_kanban_root(execution_root)
+        .join(phase)
+        .join("tasks");
     let tasks = task::load_tasks_from_dir(&tasks_dir)
         .with_context(|| format!("failed to reload tasks from {}", tasks_dir.display()))?;
 
@@ -169,8 +171,7 @@ pub fn evaluate_phase_completion(
 fn expected_summary_paths(execution_root: &Path, phase: &str) -> Vec<PathBuf> {
     vec![
         execution_root.join("phase-summary.md"),
-        execution_root
-            .join("kanban")
+        crate::paths::resolve_kanban_root(execution_root)
             .join(phase)
             .join("phase-summary.md"),
     ]

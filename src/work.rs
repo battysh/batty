@@ -88,9 +88,7 @@ pub fn resume_phase(
     project_root: &Path,
 ) -> Result<()> {
     let resume = resolve_resume_context(target, project_root)?;
-    let tasks_dir = resume
-        .execution_root
-        .join("kanban")
+    let tasks_dir = crate::paths::resolve_kanban_root(&resume.execution_root)
         .join(&resume.phase)
         .join("tasks");
     let tasks = task::load_tasks_from_dir(&tasks_dir)
@@ -278,7 +276,9 @@ fn resolve_resume_context(target: &str, project_root: &Path) -> Result<ResumeCon
     }
 
     let execution_root = PathBuf::from(crate::tmux::session_path(&session)?);
-    let tasks_dir = execution_root.join("kanban").join(&phase).join("tasks");
+    let tasks_dir = crate::paths::resolve_kanban_root(&execution_root)
+        .join(&phase)
+        .join("tasks");
     if !tasks_dir.is_dir() {
         bail!(
             "phase board not found in resumed worktree: {}",
@@ -300,7 +300,7 @@ fn resolve_resume_context(target: &str, project_root: &Path) -> Result<ResumeCon
 }
 
 fn infer_phase_for_session(execution_root: &Path, session: &str) -> Result<String> {
-    let kanban_root = execution_root.join("kanban");
+    let kanban_root = crate::paths::resolve_kanban_root(execution_root);
     for entry in std::fs::read_dir(&kanban_root)
         .with_context(|| format!("failed to read {}", kanban_root.display()))?
     {
@@ -396,7 +396,7 @@ pub fn run_phase(
     config_path: Option<&Path>,
 ) -> Result<()> {
     // 1. Validate the phase board exists before launching.
-    let source_phase_dir = project_root.join("kanban").join(phase);
+    let source_phase_dir = crate::paths::resolve_kanban_root(project_root).join(phase);
     let source_tasks_dir = source_phase_dir.join("tasks");
 
     if !source_tasks_dir.is_dir() {
@@ -447,7 +447,7 @@ pub fn run_phase(
     };
 
     // 3. Load tasks for context from the resolved workspace.
-    let phase_dir = execution_root.join("kanban").join(phase);
+    let phase_dir = crate::paths::resolve_kanban_root(&execution_root).join(phase);
     let tasks_dir = phase_dir.join("tasks");
     let tasks = task::load_tasks_from_dir(&tasks_dir)
         .with_context(|| format!("failed to load tasks from {}", tasks_dir.display()))?;
@@ -913,12 +913,13 @@ fn compose_launch_context(
         )
     })?;
 
-    let phase_doc_path = execution_root.join("kanban").join(phase).join("PHASE.md");
+    let phase_doc_path = crate::paths::resolve_kanban_root(execution_root)
+        .join(phase)
+        .join("PHASE.md");
     if !phase_doc_path.is_file() {
         bail!(
-            "missing required phase context file: {}. Add kanban/{}/PHASE.md before running `batty work {}`",
+            "missing required phase context file: {}. Add a PHASE.md in your phase directory before running `batty work {}`",
             phase_doc_path.display(),
-            phase,
             phase
         );
     }
@@ -1186,8 +1187,7 @@ fn latest_claim_identity_from_activity(
     phase: &str,
     execution_root: &Path,
 ) -> Result<Option<String>> {
-    let activity_path = execution_root
-        .join("kanban")
+    let activity_path = crate::paths::resolve_kanban_root(execution_root)
         .join(phase)
         .join("activity.jsonl");
     if !activity_path.is_file() {
