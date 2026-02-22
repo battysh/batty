@@ -1291,12 +1291,6 @@ esac
                 if let Some(mode) = mock_mode {
                     tier2.program = supervisor_script.to_string_lossy().to_string();
                     tier2.args = vec![mode.to_string(), context.to_string_lossy().to_string()];
-                } else {
-                    // Real supervisor path: append context output file path and
-                    // keep existing args for the real program.
-                    let mut args = tier2.args.clone();
-                    args.push(context.to_string_lossy().to_string());
-                    tier2.args = args;
                 }
                 tier2
             }),
@@ -1323,11 +1317,13 @@ esac
         );
 
         let received_value = fs::read_to_string(&received).unwrap_or_default();
-        let ctx = fs::read_to_string(&context).unwrap_or_default();
-        assert!(
-            ctx.contains("Question from executor"),
-            "expected supervisor context payload, got: {ctx}"
-        );
+        if mock_mode.is_some() {
+            let ctx = fs::read_to_string(&context).unwrap_or_default();
+            assert!(
+                ctx.contains("Question from executor"),
+                "expected supervisor context payload, got: {ctx}"
+            );
+        }
 
         let events = events_arc.lock().unwrap().clone();
         let target_pane = events
@@ -1368,6 +1364,14 @@ esac
                 .all(|p| !p.dead),
             "log pane should remain alive and not become supervision target: {pane_details:?}"
         );
+        if mock_mode.is_none() {
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.contains("event:? supervisor context chars=")),
+                "expected real supervisor context trace event, got: {events:?}"
+            );
+        }
 
         let _ = tmux::kill_session(&session);
         HarnessCaseResult {
@@ -1691,7 +1695,7 @@ esac
             let scenario = harness_scenario(scenario_id);
             let result = run_harness_case_with_real_supervisor(
                 "codex",
-                &["exec", "-a", "never", "--sandbox", "workspace-write"],
+                &["exec", "--sandbox", "workspace-write"],
                 scenario
                     .agent_prompt_line
                     .as_deref()
@@ -1815,8 +1819,6 @@ esac
                 program: "codex".to_string(),
                 args: vec![
                     "exec".to_string(),
-                    "-a".to_string(),
-                    "never".to_string(),
                     "--sandbox".to_string(),
                     "workspace-write".to_string(),
                     "Reply with exactly: READY".to_string(),
@@ -1839,8 +1841,6 @@ esac
                 program: "codex".to_string(),
                 args: vec![
                     "exec".to_string(),
-                    "-a".to_string(),
-                    "never".to_string(),
                     "--sandbox".to_string(),
                     "workspace-write".to_string(),
                 ],

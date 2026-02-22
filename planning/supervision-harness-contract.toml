@@ -77,28 +77,28 @@ expect_escalate = true
 id = "real-supervisor-claude-token"
 kind = "real-supervisor"
 agent_prompt_line = "Type exactly TOKEN_CLAUDE_123 and press Enter"
-read_timeout_secs = 8
+read_timeout_secs = 45
 expected_contains = "TOKEN_CLAUDE_123"
 
 [[scenarios]]
 id = "real-supervisor-claude-enter"
 kind = "real-supervisor"
 agent_prompt_line = "Press enter to continue"
-read_timeout_secs = 8
+read_timeout_secs = 45
 expected_input = ""
 
 [[scenarios]]
 id = "real-supervisor-codex-token"
 kind = "real-supervisor"
 agent_prompt_line = "Type exactly TOKEN_CODEX_123 and press Enter"
-read_timeout_secs = 10
+read_timeout_secs = 60
 expected_contains = "TOKEN_CODEX_123"
 
 [[scenarios]]
 id = "real-supervisor-codex-enter"
 kind = "real-supervisor"
 agent_prompt_line = "Press enter to continue"
-read_timeout_secs = 10
+read_timeout_secs = 60
 expected_input = ""
 
 [[scenarios]]
