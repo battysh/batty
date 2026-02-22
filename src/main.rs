@@ -4,6 +4,8 @@ mod agent;
 mod cli;
 mod config;
 #[allow(dead_code)]
+mod dod;
+#[allow(dead_code)]
 mod policy;
 #[allow(dead_code)]
 mod prompt;
