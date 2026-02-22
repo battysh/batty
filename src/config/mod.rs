@@ -85,6 +85,10 @@ fn default_detector_unknown_request_fallback() -> bool {
     true
 }
 
+fn default_detector_idle_input_fallback() -> bool {
+    true
+}
+
 impl Default for Defaults {
     fn default() -> Self {
         Self {
@@ -130,6 +134,8 @@ pub struct DetectorSettings {
     pub answer_cooldown_millis: u64,
     #[serde(default = "default_detector_unknown_request_fallback")]
     pub unknown_request_fallback: bool,
+    #[serde(default = "default_detector_idle_input_fallback")]
+    pub idle_input_fallback: bool,
 }
 
 impl Default for DetectorSettings {
@@ -138,6 +144,7 @@ impl Default for DetectorSettings {
             silence_timeout_secs: default_detector_silence_timeout_secs(),
             answer_cooldown_millis: default_detector_answer_cooldown_millis(),
             unknown_request_fallback: default_detector_unknown_request_fallback(),
+            idle_input_fallback: default_detector_idle_input_fallback(),
         }
     }
 }
@@ -207,6 +214,7 @@ mod tests {
         assert_eq!(config.detector.silence_timeout_secs, 3);
         assert_eq!(config.detector.answer_cooldown_millis, 1000);
         assert!(config.detector.unknown_request_fallback);
+        assert!(config.detector.idle_input_fallback);
     }
 
     #[test]
@@ -229,6 +237,7 @@ trace_io = true
 silence_timeout_secs = 5
 answer_cooldown_millis = 1500
 unknown_request_fallback = true
+idle_input_fallback = true
 "#;
         let config: ProjectConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.defaults.agent, "codex");
@@ -245,6 +254,7 @@ unknown_request_fallback = true
         assert_eq!(config.detector.silence_timeout_secs, 5);
         assert_eq!(config.detector.answer_cooldown_millis, 1500);
         assert!(config.detector.unknown_request_fallback);
+        assert!(config.detector.idle_input_fallback);
     }
 
     #[test]
@@ -257,6 +267,8 @@ agent = "aider"
         assert_eq!(config.defaults.agent, "aider");
         assert_eq!(config.defaults.policy, Policy::Observe);
         assert_eq!(config.defaults.max_retries, 3);
+        assert!(config.detector.unknown_request_fallback);
+        assert!(config.detector.idle_input_fallback);
     }
 
     #[test]

@@ -38,6 +38,10 @@ pub enum Command {
         #[arg(long, default_value_t = false)]
         attach: bool,
 
+        /// Force creation of a new phase worktree run
+        #[arg(long, default_value_t = false)]
+        new: bool,
+
         /// Internal: keep work process in foreground (skip auto-backgrounding).
         #[arg(long, hide = true, default_value_t = false)]
         foreground: bool,
@@ -51,4 +55,14 @@ pub enum Command {
 
     /// Show project configuration
     Config,
+
+    /// Open kanban-md TUI for a phase (prefers active run worktree)
+    Board {
+        /// Phase name (e.g., "phase-2.5")
+        target: String,
+
+        /// Print resolved board directory and exit
+        #[arg(long, default_value_t = false)]
+        print_dir: bool,
+    },
 }

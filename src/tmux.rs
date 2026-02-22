@@ -107,6 +107,25 @@ pub fn pane_id(target: &str) -> Result<String> {
     Ok(pane)
 }
 
+/// Get the configured session working directory path.
+pub fn session_path(session: &str) -> Result<String> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "-t", session, "#{session_path}"])
+        .output()
+        .with_context(|| format!("failed to resolve session path for '{session}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux display-message session_path failed: {stderr}");
+    }
+
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        bail!("tmux returned empty session path for '{session}'");
+    }
+    Ok(path)
+}
+
 /// Create a detached tmux session running the given command.
 ///
 /// The session is created with `new-session -d` so it starts in the background.
@@ -447,6 +466,18 @@ mod tests {
         // Kill
         kill_session(session).unwrap();
         assert!(!session_exists(session));
+    }
+
+    #[test]
+    fn session_path_returns_working_directory() {
+        let session = "batty-test-session-path";
+        let _ = kill_session(session);
+
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+        let path = session_path(session).unwrap();
+        assert_eq!(path, "/tmp");
+
+        kill_session(session).unwrap();
     }
 
     #[test]

@@ -13,6 +13,7 @@ trace_io = true
 silence_timeout_secs = 3
 answer_cooldown_millis = 1000
 unknown_request_fallback = true
+idle_input_fallback = true
 
 [policy.auto_answer]
 "Continue? [y/n]" = "y"
