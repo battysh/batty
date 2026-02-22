@@ -313,7 +313,7 @@ impl Tier2SnapshotWriter {
 ```\n",
             timestamp = now_epoch(),
             session = self.session,
-            prompt_kind = format!("{:?}", prompt.kind),
+            prompt_kind = format_args!("{:?}", prompt.kind),
             prompt_preview = preview_for_log(&prompt.matched_text, 160),
             original_chars = context.chars().count(),
             persisted_chars = redacted.chars().count(),
@@ -1810,7 +1810,7 @@ fn handle_prompt(
                     prompt_text,
                     t2_config.system_prompt.as_deref(),
                 );
-                if let Some(writer) = tier2_snapshot_writer.as_deref_mut() {
+                if let Some(writer) = tier2_snapshot_writer.as_mut() {
                     match writer.persist(detected_prompt, &context) {
                         Ok(path) => {
                             observer.on_event(&format!(

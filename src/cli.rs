@@ -85,6 +85,17 @@ pub enum Command {
         dir: String,
     },
 
+    /// Remove installed Batty assets from a project
+    Remove {
+        /// Steering/skill removal target (default: both)
+        #[arg(long, value_enum, default_value_t = InstallTarget::Both)]
+        target: InstallTarget,
+
+        /// Target directory (default: current directory)
+        #[arg(long, default_value = ".")]
+        dir: String,
+    },
+
     /// Open kanban-md TUI for a phase (prefers active run worktree)
     Board {
         /// Phase name (e.g., "phase-2.5")
@@ -153,6 +164,30 @@ mod tests {
     fn work_subcommand_requires_worktree_for_new() {
         let err = Cli::try_parse_from(["batty", "work", "phase-2.5", "--new"]).unwrap_err();
         assert!(err.to_string().contains("--worktree"));
+    }
+
+    #[test]
+    fn remove_subcommand_parses_defaults() {
+        let cli = Cli::parse_from(["batty", "remove"]);
+        match cli.command {
+            Command::Remove { target, dir } => {
+                assert_eq!(target, InstallTarget::Both);
+                assert_eq!(dir, ".");
+            }
+            other => panic!("expected remove command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_subcommand_parses_target_and_dir() {
+        let cli = Cli::parse_from(["batty", "remove", "--target", "claude", "--dir", "/tmp/x"]);
+        match cli.command {
+            Command::Remove { target, dir } => {
+                assert_eq!(target, InstallTarget::Claude);
+                assert_eq!(dir, "/tmp/x");
+            }
+            other => panic!("expected remove command, got {other:?}"),
+        }
     }
 
     #[test]

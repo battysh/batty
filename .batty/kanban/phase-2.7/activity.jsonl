@@ -30,3 +30,6 @@
 {"timestamp":"2026-02-22T00:52:24.587127644-05:00","action":"move","task_id":7,"detail":"backlog -\u003e in-progress"}
 {"timestamp":"2026-02-22T00:57:07.13552975-05:00","action":"create","task_id":6,"detail":"In supervisor pane we do not want to see [batty] in the stream"}
 {"timestamp":"2026-02-22T01:00:16.337453734-05:00","action":"move","task_id":7,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T13:22:07.706184397-05:00","action":"claim","task_id":6,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T13:22:07.709075415-05:00","action":"move","task_id":6,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T13:23:37.697059815-05:00","action":"move","task_id":6,"detail":"in-progress -\u003e backlog"}

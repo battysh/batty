@@ -157,10 +157,29 @@ batty install --dir /tmp/demo      # explicit destination
 
 Then it writes:
 
-- `CLAUDE.md` (Claude steering doc)
-- `AGENTS.md` (Codex steering doc)
+- `.claude/rules/batty-workflow.md` (Batty workflow rules — auto-loaded by Claude Code alongside your existing CLAUDE.md)
+- `.agents/rules/batty-workflow.md` (same content — auto-loaded by Codex alongside your existing AGENTS.md)
 - `.batty/skills/claude/SKILL.md`
 - `.batty/skills/codex/SKILL.md`
+
+And installs kanban-md skills (`kanban-md` and `kanban-based-development`) for the selected agent(s).
+
+Kanban boards default to `.batty/kanban/` for new projects. Existing projects with boards at `kanban/` continue to work — Batty resolves the active location automatically.
+
+Batty never touches your existing `CLAUDE.md` or `AGENTS.md` — workflow instructions are installed as rules files that agents load automatically alongside your project's own steering docs.
+
+Remove installed Batty assets from a project:
+
+```sh
+batty remove                       # remove both agents' assets (default)
+batty remove --target claude      # Claude only
+batty remove --target codex       # Codex only
+batty remove --dir /tmp/demo      # explicit target directory
+```
+
+`batty remove` deletes the workflow rules, skill files, and kanban-md skills that `batty install` created. It prints each removed/not-found file and a reminder to `rm -rf .batty` for full cleanup (worktrees under `.batty/worktrees/` may contain local branches).
+
+Note: "phase" is Batty's prescribed unit of work, but it maps to whatever your team calls a sprint, story, milestone, or iteration.
 
 Lint workflow (stable command names):
 
