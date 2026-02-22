@@ -167,6 +167,25 @@ Two-tier prompt handling:
 
 Everything runs in tmux. Output captured via `pipe-pane`. Answers injected via `send-keys`. Status in tmux status bar. Events in orchestrator pane.
 
+## tmux Compatibility
+
+Batty probes tmux capabilities on each `work`/`resume` startup and logs:
+- tmux version
+- `pipe-pane` support (required)
+- `pipe-pane -o` support (resume safety optimization)
+- status style option support
+- log-pane split mode (`-l` lines or `-p` percent fallback)
+
+Compatibility matrix:
+
+| tmux version | Status | Behavior |
+| --- | --- | --- |
+| `>= 3.2` | Known-good | Full feature path (`pipe-pane -o`, styled status bar, `split-window -l`) |
+| `3.1.x` | Supported with fallbacks | Uses compatible split/status behavior where needed |
+| `< 3.1` | Not supported | Batty fails fast when required `pipe-pane` capability is missing |
+
+If required capabilities are missing, Batty exits with remediation guidance to install/upgrade tmux (recommended `>= 3.2`).
+
 ## Architecture
 
 ```
