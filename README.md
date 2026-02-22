@@ -210,11 +210,11 @@ By default, Batty uses your current branch/worktree. Pass `--worktree` to resume
 If the phase branch is merged back to the base branch, Batty cleans up the run worktree automatically; otherwise it keeps the worktree for inspection/rework.
 
 ```sh
-batty work all                  # chain phases sequentially
-batty work all --parallel 3     # three phases in parallel
 batty attach phase-2.4          # reconnect to a running session
 batty resume phase-2.4          # resume supervision for an existing run
 ```
+
+Planned (not implemented yet): `batty work all` and `batty work all --parallel <N>`.
 
 ## What You See
 
@@ -327,15 +327,17 @@ If required capabilities are missing, Batty exits with remediation guidance to i
 
 ## Project Status
 
-Phase 1 complete. Phase 2 complete. Phase 2.4 (supervision harness validation) is next. Phase 2.5 (runtime hardening + dogfood) follows.
+- Phases 1, 2, 2.4, 2.5, and 2.6 are complete.
+- Phase 2.7 is in progress.
+- Phases 3A and later are planned.
 
 ## Links
 
-- Website: [batty.sh](https://batty.sh)
+- Website: TBD
 - GitHub: [github.com/battysh/batty](https://github.com/battysh/batty)
-- Discord: [discord.gg/battyterm](https://discord.gg/battyterm)
-- Twitter: [@battyterm](https://twitter.com/battyterm)
-- Bluesky: [@battyterm.bsky.social](https://bsky.app/profile/battyterm.bsky.social)
+- Discord: TBD
+- Twitter/X: TBD
+- Bluesky: TBD
 
 ## License
 
