@@ -57,3 +57,9 @@
 {"timestamp":"2026-02-21T19:31:28.910875938-05:00","action":"edit","task_id":9,"detail":"Test-gated completion (DoD)"}
 {"timestamp":"2026-02-21T19:31:28.910965647-05:00","action":"release","task_id":9,"detail":"tiger-moss"}
 {"timestamp":"2026-02-21T19:31:28.936858577-05:00","action":"move","task_id":9,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T19:31:52.66995051-05:00","action":"claim","task_id":11,"detail":"tiger-moss"}
+{"timestamp":"2026-02-21T19:31:52.67008925-05:00","action":"move","task_id":11,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T19:34:16.884216393-05:00","action":"edit","task_id":11,"detail":"Structured execution log"}
+{"timestamp":"2026-02-21T19:34:20.154486616-05:00","action":"edit","task_id":11,"detail":"Structured execution log"}
+{"timestamp":"2026-02-21T19:34:20.154566937-05:00","action":"release","task_id":11,"detail":"tiger-moss"}
+{"timestamp":"2026-02-21T19:34:20.179812811-05:00","action":"move","task_id":11,"detail":"in-progress -\u003e done"}
