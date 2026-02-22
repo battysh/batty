@@ -122,25 +122,25 @@ cargo run -- work my-phase
 
 **Two-tier prompt handling:**
 
-| Tier | Trigger | Response Time | Example |
-|------|---------|---------------|---------|
-| **Tier 1** | Regex match on known prompt | Instant | `Continue? [y/n]` -> `y` |
-| **Tier 2** | Unknown prompt or silence | 5-60s | "Should I use async or sync?" -> supervisor decides with project context |
+| Tier       | Trigger                    | Response Time | Example                                                                  |
+|------------|----------------------------|---------------|--------------------------------------------------------------------------|
+| **Tier 1** | Regex match on known prompt | Instant       | `Continue? [y/n]` -> `y`                                                |
+| **Tier 2** | Unknown prompt or silence   | 5-60s         | "Should I use async or sync?" -> supervisor decides with project context |
 
 Everything runs inside tmux. Output captured via `pipe-pane`. Answers injected via `send-keys`. Status in the tmux status bar. Events in the orchestrator pane. No custom terminal. No daemon. Just tmux.
 
 ## CLI Reference
 
-| Command | What it does |
-|---------|-------------|
-| `batty work <phase>` | Launch supervised execution of a phase board |
-| `batty attach <phase>` | Reattach to a running tmux session |
-| `batty resume <phase>` | Resume supervision after crash/restart |
-| `batty board <phase>` | Open the kanban board TUI |
-| `batty board-list` | List all boards with status and task counts |
-| `batty config [--json]` | Show resolved configuration |
-| `batty install` | Set up Batty in your project |
-| `batty remove` | Remove Batty assets from your project |
+| Command                | What it does                                 |
+|------------------------|----------------------------------------------|
+| `batty work <phase>`   | Launch supervised execution of a phase board |
+| `batty attach <phase>` | Reattach to a running tmux session           |
+| `batty resume <phase>` | Resume supervision after crash/restart       |
+| `batty board <phase>`  | Open the kanban board TUI                    |
+| `batty board-list`     | List all boards with status and task counts  |
+| `batty config [--json]`| Show resolved configuration                  |
+| `batty install`        | Set up Batty in your project                 |
+| `batty remove`         | Remove Batty assets from your project        |
 
 ### Key Flags
 
@@ -196,18 +196,18 @@ Full reference: [Configuration Docs](https://battysh.github.io/batty/reference/c
 
 Batty is actively developed and dogfooded -- we build Batty using Batty.
 
-| Phase | Status | What |
-|-------|--------|------|
-| Phase 1 | Done | Core agent runner, 323+ tests |
-| Phase 2 | Done | tmux supervisor, two-tier prompts, status bar |
-| Phase 2.4 | Done | Supervision harness validation |
-| Phase 2.5 | Done | Runtime hardening, worktree isolation |
-| Phase 2.6 | Done | Install workflow, config polish |
-| Phase 2.7 | In Progress | Hotkeys, context snapshots, docs |
-| Phase 3A | Planned | Sequencer, human review gate, merge automation |
-| Phase 3B | Planned | AI director review |
-| Phase 4 | Planned | Parallel multi-agent execution |
-| Phase 5 | Planned | Polish and ship |
+| Phase     | Status      | What                                            |
+|-----------|-------------|-------------------------------------------------|
+| Phase 1   | Done        | Core agent runner, 323+ tests                   |
+| Phase 2   | Done        | tmux supervisor, two-tier prompts, status bar    |
+| Phase 2.4 | Done        | Supervision harness validation                   |
+| Phase 2.5 | Done        | Runtime hardening, worktree isolation             |
+| Phase 2.6 | Done        | Install workflow, config polish                   |
+| Phase 2.7 | In Progress | Hotkeys, context snapshots, docs                 |
+| Phase 3A  | Planned     | Sequencer, human review gate, merge automation   |
+| Phase 3B  | Planned     | AI director review                                |
+| Phase 4   | Planned     | Parallel multi-agent execution                    |
+| Phase 5   | Planned     | Polish and ship                                   |
 
 ## Links
 
