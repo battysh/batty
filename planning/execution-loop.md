@@ -1,16 +1,24 @@
 # Batty Execution Loop
 
+Status:
+- Phases 1-2.7: runtime supervision flow is implemented.
+- Phase 3A/3B: review gate + director flow below is planned/aspirational.
+
 ## `batty work <phase>`
 
 Run it, watch it work, intervene only when needed.
 
 ### Step 1: Setup
 
-Create isolated worktree for the run. Create tmux session. Launch executor in main pane. Start pipe-pane for output capture. Open orchestrator log pane at bottom. Set status bar.
+Resolve run context. Create tmux session. Launch executor in main pane. Start pipe-pane for output capture. Open orchestrator log pane at bottom. Set status bar.
+
+Notes:
+- Current default: run in current branch/worktree.
+- Optional isolation: `--worktree` (or `--worktree --new` for a fresh run worktree).
 
 ### Step 2: Launch Executor
 
-Compose prompt from phase board + project config + CLAUDE.md. Tell the executor: work through the board, commit per task, write statements of work, produce phase-summary.md when done.
+Compose prompt from phase board + project config + instruction docs (`AGENTS.md` / `CLAUDE.md`, adapter-dependent order). Tell the executor to work through the board and produce `phase-summary.md` when done.
 
 ### Step 3: Supervise (tmux-based)
 
@@ -40,17 +48,26 @@ tmux executor pane
 
 ### Step 4: Completion
 
-Executor finishes all tasks. Produces phase-summary.md. Worktree has: one commit per task, statements of work, all tests passing.
+Completion contract validates:
+- board tasks complete
+- milestone marker complete
+- `phase-summary.md` exists
+- executor session is stable
+- DoD command passes (if configured)
 
 ### Step 5: Review Gate
 
 Reviewer receives: diff, phase summary, statements of work, execution log, project docs.
 
-In Phase 3A this reviewer is human. In Phase 3B this reviewer can be a director agent.
+Status: planned for Phase 3A/3B.
+- In Phase 3A this reviewer is human.
+- In Phase 3B this reviewer can be a director agent.
 
 Decision: **merge** / **rework** (relaunch executor with feedback) / **escalate** (surface to human).
 
 ### Step 6: Merge
+
+Status: planned for Phase 3A+ automation.
 
 Merge phase branch to main. Resolve conflicts (review gate escalates if needed). Run tests. Clean up. Next phase.
 
