@@ -2,6 +2,7 @@
 name = "phase-2.4-supervision-harness-contract"
 version = 1
 description = "Scenario matrix and assertion contract for tmux supervision harness validation."
+implementation_status = "implemented (phase-2.4 complete); retained for regression validation"
 
 [[scenarios]]
 id = "mock-direct"

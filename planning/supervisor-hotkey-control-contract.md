@@ -3,6 +3,8 @@
 This contract defines operator hotkeys for pausing and resuming Batty
 supervision during an active tmux run.
 
+Status: implemented in `src/tmux.rs` and `src/orchestrator.rs`; kept as the behavior contract for regression checks.
+
 ## Default Hotkeys
 
 - Pause supervision: `Prefix + Shift+P` (`C-b P` with tmux default prefix)
