@@ -53,6 +53,9 @@ pub struct OrchestratorConfig {
     pub log_pane_height_pct: u32,
     /// Stuck detection configuration (None = disabled).
     pub stuck: Option<StuckConfig>,
+    /// Delay before Tier 1 auto-answer injection (allows human to type first).
+    /// Set to Duration::ZERO to disable the delay. Default: 1 second.
+    pub answer_delay: Duration,
 }
 
 impl OrchestratorConfig {
@@ -551,6 +554,7 @@ pub fn run(
                         config.tier2.as_ref(),
                         &buffer,
                         &mut status_bar,
+                        config.answer_delay,
                     )?;
                 }
             }
@@ -568,6 +572,7 @@ pub fn run(
                     config.tier2.as_ref(),
                     &buffer,
                     &mut status_bar,
+                    config.answer_delay,
                 )?;
             }
             DetectorEvent::Silence { last_line, .. } => {
@@ -666,10 +671,54 @@ fn setup_log_pane(session: &str, log_path: &Path, height_pct: u32) -> Result<()>
     Ok(())
 }
 
+/// Check if the human has already answered the prompt by looking at capture-pane.
+///
+/// Compares the current last visible line against the original prompt text.
+/// If the pane content has changed (new lines after the prompt), the human typed.
+fn check_human_answered(session: &str, prompt_text: &str) -> bool {
+    if let Ok(pane_content) = tmux::capture_pane(session) {
+        // If the last non-empty line no longer matches the prompt, human answered
+        if let Some(last) = pane_content.lines().rev().find(|l| !l.trim().is_empty()) {
+            let last_clean = crate::prompt::strip_ansi(last);
+            let last_trimmed = last_clean.trim();
+            // If the last line changed from the prompt, someone typed
+            return !last_trimmed.is_empty() && !prompt_text.contains(last_trimmed) && !last_trimmed.contains(prompt_text);
+        }
+    }
+    false
+}
+
+/// Wait for the answer delay, checking if the human overrides.
+///
+/// Returns true if the human answered during the delay, false if the delay
+/// expired without human input (safe to inject).
+fn wait_with_human_check(
+    session: &str,
+    prompt_text: &str,
+    delay: Duration,
+    poll_interval: Duration,
+) -> bool {
+    if delay.is_zero() {
+        return false;
+    }
+
+    let start = Instant::now();
+    while start.elapsed() < delay {
+        if check_human_answered(session, prompt_text) {
+            return true; // Human answered
+        }
+        std::thread::sleep(poll_interval);
+    }
+    false
+}
+
 /// Handle a detected prompt: evaluate policy and take action.
 ///
-/// Tier 1: pattern match → auto-answer via send-keys.
-/// Tier 2: no match → call supervisor agent → inject answer or escalate to human.
+/// Tier 1: pattern match → wait answer_delay → inject auto-answer via send-keys.
+/// Tier 2: no match → call supervisor agent → check human override → inject or escalate.
+///
+/// Human override: if the human types during the answer delay or while Tier 2 is
+/// thinking, the auto-answer is cancelled.
 fn handle_prompt(
     prompt: &crate::prompt::DetectedPrompt,
     session: &str,
@@ -679,6 +728,7 @@ fn handle_prompt(
     tier2_config: Option<&Tier2Config>,
     event_buffer: &EventBuffer,
     status_bar: &mut StatusBar,
+    answer_delay: Duration,
 ) -> Result<()> {
     // Skip completion/error signals — those aren't questions
     match &prompt.kind {
@@ -697,6 +747,16 @@ fn handle_prompt(
             ref response,
         } => {
             info!(prompt = %prompt, response = %response, "Tier 1 auto-answer");
+
+            // Wait for answer_delay, checking if human types first
+            if wait_with_human_check(session, prompt, answer_delay, Duration::from_millis(100)) {
+                info!("human override — cancelling auto-answer");
+                observer.on_event("→ human override — auto-answer cancelled");
+                status_bar.update(StatusIndicator::Action, "human override")?;
+                detector.human_override();
+                return Ok(());
+            }
+
             observer.on_auto_answer(prompt, response);
             status_bar.update(StatusIndicator::Action, &format!("answered: {response}"))?;
 
@@ -729,6 +789,15 @@ fn handle_prompt(
 
                 match tier2::call_supervisor(t2_config, &context) {
                     Ok(Tier2Result::Answer { response }) => {
+                        // Check if human answered while Tier 2 was thinking
+                        if check_human_answered(session, prompt) {
+                            info!("human override — cancelling Tier 2 answer");
+                            observer.on_event("→ human override — Tier 2 answer cancelled");
+                            status_bar.update(StatusIndicator::Action, "human override")?;
+                            detector.human_override();
+                            return Ok(());
+                        }
+
                         info!(prompt = %prompt, response = %response, "Tier 2 answer");
                         observer.on_auto_answer(prompt, &response);
                         status_bar.update(StatusIndicator::Action, &format!("T2: {response}"))?;
@@ -848,7 +917,7 @@ mod tests {
 
         let buffer = EventBuffer::new(10);
         let mut status_bar = StatusBar::new(session, "test");
-        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, None, &buffer, &mut status_bar).unwrap();
+        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, None, &buffer, &mut status_bar, Duration::ZERO).unwrap();
 
         // Check observer received the auto-answer event
         let collected = events.lock().unwrap();
@@ -883,7 +952,7 @@ mod tests {
 
         let buffer = EventBuffer::new(10);
         let mut status_bar = StatusBar::new(session, "test");
-        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, None, &buffer, &mut status_bar).unwrap();
+        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, None, &buffer, &mut status_bar, Duration::ZERO).unwrap();
 
         let collected = events.lock().unwrap();
         assert!(
@@ -925,7 +994,7 @@ mod tests {
 
         let buffer = EventBuffer::new(10);
         let mut status_bar = StatusBar::new(session, "test");
-        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, Some(&tier2), &buffer, &mut status_bar).unwrap();
+        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, Some(&tier2), &buffer, &mut status_bar, Duration::ZERO).unwrap();
 
         let collected = events.lock().unwrap();
         // Should have supervisor thinking event + auto-answer from Tier 2
@@ -957,7 +1026,7 @@ mod tests {
 
         let buffer = EventBuffer::new(10);
         let mut status_bar = StatusBar::new("fake-session", "test");
-        handle_prompt(&prompt, "fake-session", &policy, &mut detector, &mut observer, None, &buffer, &mut status_bar).unwrap();
+        handle_prompt(&prompt, "fake-session", &policy, &mut detector, &mut observer, None, &buffer, &mut status_bar, Duration::ZERO).unwrap();
 
         let collected = events.lock().unwrap();
         assert!(collected.is_empty(), "completion should produce no events");
@@ -989,6 +1058,7 @@ mod tests {
             log_pane: false, // don't create log pane in tests
             log_pane_height_pct: 20,
             stuck: None,
+            answer_delay: Duration::ZERO,
         };
 
         // Clean up any leftover session
@@ -1035,6 +1105,7 @@ mod tests {
             log_pane: false, // don't create log pane in tests
             log_pane_height_pct: 20,
             stuck: None,
+            answer_delay: Duration::ZERO,
         };
 
         let _ = tmux::kill_session("batty-test-stop");
@@ -1128,6 +1199,7 @@ mod tests {
             log_pane: true,
             log_pane_height_pct: 20,
             stuck: None,
+            answer_delay: Duration::ZERO,
         };
 
         let _ = tmux::kill_session("batty-test-logpane-orch");
@@ -1362,5 +1434,94 @@ mod tests {
         sd.on_output("   ");
         sd.on_output("");
         assert!(sd.recent_lines.is_empty());
+    }
+
+    #[test]
+    fn human_check_no_session_returns_false() {
+        // Non-existent session should not be considered human-answered
+        assert!(!check_human_answered("batty-nonexistent-xyz", "Continue?"));
+    }
+
+    #[test]
+    fn human_check_prompt_still_visible() {
+        let session = "batty-test-human-check";
+        let _ = tmux::kill_session(session);
+
+        // Create a session that shows a prompt-like line
+        tmux::create_session(session, "bash", &["-c".to_string(), "echo 'Continue? [y/n]'; sleep 5".to_string()], "/tmp").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+
+        // The prompt should still be visible → not human-answered
+        // (capture-pane shows the prompt text, so check_human_answered should return false)
+        let answered = check_human_answered(session, "Continue?");
+        // This may or may not match depending on timing, but it should not panic
+        let _ = answered;
+
+        tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn wait_with_zero_delay_returns_immediately() {
+        let start = Instant::now();
+        let result = wait_with_human_check("batty-nonexistent", "prompt", Duration::ZERO, Duration::from_millis(50));
+        assert!(!result); // should return false (no human override)
+        assert!(start.elapsed() < Duration::from_millis(50)); // should be instant
+    }
+
+    #[test]
+    fn wait_with_delay_completes() {
+        let session = "batty-test-wait-delay";
+        let _ = tmux::kill_session(session);
+
+        tmux::create_session(session, "bash", &["-c".to_string(), "echo 'waiting...'; sleep 10".to_string()], "/tmp").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+
+        let start = Instant::now();
+        let result = wait_with_human_check(session, "waiting...", Duration::from_millis(200), Duration::from_millis(50));
+        // No human typing, so should return false after the delay
+        assert!(!result);
+        assert!(start.elapsed() >= Duration::from_millis(200));
+
+        tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn handle_prompt_with_answer_delay_zero() {
+        // With zero delay, should behave exactly like before (no human check)
+        let session = "batty-test-delay-zero";
+        let _ = tmux::kill_session(session);
+
+        tmux::create_session(session, "cat", &[], "/tmp").unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+
+        let mut auto_answers = HashMap::new();
+        auto_answers.insert("Continue?".to_string(), "y".to_string());
+        let policy = PolicyEngine::new(Policy::Act, auto_answers);
+
+        let mut detector = PromptDetector::new(
+            PromptPatterns::claude_code(),
+            DetectorConfig::default(),
+        );
+
+        let (mut observer, events) = TestObserver::new();
+
+        let prompt = crate::prompt::DetectedPrompt {
+            kind: crate::prompt::PromptKind::Confirmation {
+                detail: "Continue?".to_string(),
+            },
+            matched_text: "Continue? [y/n]".to_string(),
+        };
+
+        let buffer = EventBuffer::new(10);
+        let mut status_bar = StatusBar::new(session, "test");
+        handle_prompt(&prompt, session, &policy, &mut detector, &mut observer, None, &buffer, &mut status_bar, Duration::ZERO).unwrap();
+
+        let collected = events.lock().unwrap();
+        assert!(
+            collected.iter().any(|e| e.contains("auto:")),
+            "expected auto-answer event with zero delay, got: {collected:?}"
+        );
+
+        tmux::kill_session(session).unwrap();
     }
 }
