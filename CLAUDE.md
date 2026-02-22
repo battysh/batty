@@ -20,16 +20,26 @@ See `planning/architecture.md` for the full architecture and `planning/dev-philo
 ## Project Structure
 
 ```
-src/              # Rust source
-planning/        # Architecture, roadmap, philosophy docs
-.batty/           # Batty runtime config, kanban boards, logs, worktrees
-  kanban/         # Kanban boards (one per phase)
-    phase-1/      # DONE: core agent runner
-    phase-2/      # tmux-based intelligent supervisor
-    phase-2.5/    # Adjustments and ideas (parking lot)
-    phase-3/      # Director & review gate
-    phase-4/      # Parallel execution
-    phase-5/      # Polish + ship
+src/               # Rust source
+docs/              # User and reference documentation
+assets/            # Static assets (images, demos)
+scripts/           # Utility scripts
+planning/          # Architecture, roadmap, philosophy docs
+.agents/           # Codex agent rules/skills
+.claude/           # Claude agent rules/skills
+.batty/            # Batty runtime config, kanban boards, logs, worktrees
+  kanban/          # Phase boards + docs-update board
+    phase-1/       # DONE: Core Agent Runner
+    phase-2/       # DONE: tmux-based Intelligent Supervisor
+    phase-2.4/     # DONE: Supervision Harness Validation
+    phase-2.5/     # DONE: Runtime Hardening + Dogfood
+    phase-2.6/     # DONE: Backlog Rollover from 2.5
+    phase-2.7/     # IN PROGRESS: Minor Improvements
+    docs-update/   # NEXT: Documentation Sync
+    phase-3/       # PLANNED: 3A Sequencer + Human Review Gate
+    phase-3b/      # PLANNED: 3B AI Director Review
+    phase-4/       # PLANNED: Parallel Execution
+    phase-5/       # PLANNED: Polish + Ship
 ```
 
 ## Development Principles
@@ -47,9 +57,26 @@ planning/        # Architecture, roadmap, philosophy docs
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 portable-pty = "0.8"
+term_size = "0.3"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 serde_yaml = "0.9"
 toml = "0.8"
 regex = "1"
+anyhow = "1"
+thiserror = "2"
+ctrlc = "3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ```
+
+## CLI Commands
+
+- `batty work <phase>`: run a phase with supervision
+- `batty attach <phase>`: attach to a running tmux session
+- `batty resume <phase|session>`: resume supervision for an existing run
+- `batty board <phase>`: open phase board in kanban-md TUI
+- `batty config [--json]`: show resolved configuration
+- `batty install [--target both|claude|codex] [--dir PATH]`: install project assets
+- `batty remove [--target both|claude|codex] [--dir PATH]`: remove installed project assets
