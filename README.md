@@ -18,6 +18,13 @@ cargo run -- config
 cargo run -- work phase-2.4
 ```
 
+`batty config` has two output modes:
+
+```sh
+batty config          # concise human-readable sections
+batty config --json   # machine-readable JSON for scripts
+```
+
 By default, `work` starts tmux detached and backgrounds Batty supervision.
 Use `--attach` to immediately enter the tmux session in the same terminal.
 By default, Batty resumes the latest existing worktree for that phase (if any).
