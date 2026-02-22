@@ -7,6 +7,7 @@ mod policy;
 mod prompt;
 mod supervisor;
 mod task;
+mod tmux;
 mod work;
 
 use anyhow::Result;
@@ -49,6 +50,10 @@ async fn main() -> Result<()> {
             let policy_str = policy.as_deref();
 
             work::run_phase(&target, &config, agent_name, policy_str, &cwd)?;
+        }
+        Command::Attach { target } => {
+            let session = tmux::session_name(&target);
+            tmux::attach(&session)?;
         }
         Command::Config => {
             println!("Project config:");

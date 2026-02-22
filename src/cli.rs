@@ -35,6 +35,12 @@ pub enum Command {
         policy: Option<String>,
     },
 
+    /// Attach to a running batty tmux session
+    Attach {
+        /// Phase name to attach to (e.g., "phase-1")
+        target: String,
+    },
+
     /// Show project configuration
     Config,
 }
