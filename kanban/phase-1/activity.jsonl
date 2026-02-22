@@ -63,3 +63,9 @@
 {"timestamp":"2026-02-21T19:34:20.154486616-05:00","action":"edit","task_id":11,"detail":"Structured execution log"}
 {"timestamp":"2026-02-21T19:34:20.154566937-05:00","action":"release","task_id":11,"detail":"tiger-moss"}
 {"timestamp":"2026-02-21T19:34:20.179812811-05:00","action":"move","task_id":11,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T19:34:33.67991726-05:00","action":"claim","task_id":12,"detail":"tiger-moss"}
+{"timestamp":"2026-02-21T19:34:33.680047334-05:00","action":"move","task_id":12,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T19:39:36.783346793-05:00","action":"edit","task_id":12,"detail":"batty work \u003cphase\u003e — full phase runner command"}
+{"timestamp":"2026-02-21T19:39:40.267840256-05:00","action":"edit","task_id":12,"detail":"batty work \u003cphase\u003e — full phase runner command"}
+{"timestamp":"2026-02-21T19:39:40.26796467-05:00","action":"release","task_id":12,"detail":"tiger-moss"}
+{"timestamp":"2026-02-21T19:39:40.290709001-05:00","action":"move","task_id":12,"detail":"in-progress -\u003e done"}
