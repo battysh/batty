@@ -45,3 +45,9 @@
 {"timestamp":"2026-02-21T19:23:26.321180488-05:00","action":"edit","task_id":6,"detail":"Claude Code adapter"}
 {"timestamp":"2026-02-21T19:23:26.321313246-05:00","action":"release","task_id":6,"detail":"coral-rain"}
 {"timestamp":"2026-02-21T19:23:26.343396324-05:00","action":"move","task_id":6,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T19:23:34.882122543-05:00","action":"claim","task_id":7,"detail":"coral-rain"}
+{"timestamp":"2026-02-21T19:23:34.882243431-05:00","action":"move","task_id":7,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T19:28:38.986986788-05:00","action":"edit","task_id":7,"detail":"PTY supervision — bidirectional interactive wrapper"}
+{"timestamp":"2026-02-21T19:28:41.937940272-05:00","action":"edit","task_id":7,"detail":"PTY supervision — bidirectional interactive wrapper"}
+{"timestamp":"2026-02-21T19:28:41.938046282-05:00","action":"release","task_id":7,"detail":"coral-rain"}
+{"timestamp":"2026-02-21T19:28:41.959600752-05:00","action":"move","task_id":7,"detail":"in-progress -\u003e done"}
