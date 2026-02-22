@@ -136,7 +136,7 @@ pub fn run_phase(
         adapter.as_ref(),
         config_path,
     )?;
-    let context_snapshot_path = log_dir.join(format!("{phase}-{timestamp}-launch-context.md"));
+    let context_snapshot_path = log_dir.join("launch-context.md");
     std::fs::write(&context_snapshot_path, &launch_context.prompt).with_context(|| {
         format!(
             "failed to write launch context snapshot to {}",
