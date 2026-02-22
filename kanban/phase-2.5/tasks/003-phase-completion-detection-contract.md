@@ -3,6 +3,9 @@ id: 3
 title: Phase completion detection contract
 status: backlog
 priority: critical
+created: 0001-01-01T00:00:00Z
+updated: 2026-02-21T22:39:55.559960178-05:00
+started: 2026-02-21T22:32:49.146404708-05:00
 tags:
     - core
     - reliability
@@ -31,3 +34,6 @@ Completion requires all of the following:
 
 - Persist completion decision reason to execution log.
 - This contract is reused by `batty work all`.
+
+[[2026-02-21]] Sat 22:39
+Picked accidentally; released while completing #2 first in dependency order.

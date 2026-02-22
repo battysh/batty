@@ -40,6 +40,18 @@ impl AgentAdapter for CodexCliAdapter {
         PromptPatterns::codex_cli()
     }
 
+    fn instruction_candidates(&self) -> &'static [&'static str] {
+        &["AGENTS.md", "CLAUDE.md"]
+    }
+
+    fn wrap_launch_prompt(&self, prompt: &str) -> String {
+        format!(
+            "You are running as Codex under Batty supervision.\n\
+             Treat the launch context below as authoritative session context.\n\n\
+             {prompt}"
+        )
+    }
+
     fn format_input(&self, response: &str) -> String {
         format!("{response}\n")
     }
@@ -93,5 +105,22 @@ mod tests {
     fn name_is_codex_cli() {
         let adapter = CodexCliAdapter::new(None);
         assert_eq!(adapter.name(), "codex-cli");
+    }
+
+    #[test]
+    fn codex_prefers_agents_md_instruction_order() {
+        let adapter = CodexCliAdapter::new(None);
+        assert_eq!(
+            adapter.instruction_candidates(),
+            &["AGENTS.md", "CLAUDE.md"]
+        );
+    }
+
+    #[test]
+    fn codex_wraps_launch_prompt() {
+        let adapter = CodexCliAdapter::new(None);
+        let wrapped = adapter.wrap_launch_prompt("Launch body");
+        assert!(wrapped.contains("Codex under Batty supervision"));
+        assert!(wrapped.contains("Launch body"));
     }
 }

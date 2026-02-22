@@ -6,7 +6,7 @@
 //! send-keys per policy, Tier 2 supervisor agent for unknowns), and writes
 //! a structured execution log.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -19,7 +19,7 @@ use tracing::{info, warn};
 mod phase_worktree;
 
 use crate::agent;
-use crate::config::ProjectConfig;
+use crate::config::{Policy, ProjectConfig};
 use crate::detector::DetectorConfig;
 use crate::log::{ExecutionLog, LogEvent};
 use crate::orchestrator::{
@@ -38,7 +38,9 @@ pub fn run_phase(
     policy_override: Option<&str>,
     auto_attach: bool,
     force_new_worktree: bool,
+    dry_run: bool,
     project_root: &Path,
+    config_path: Option<&Path>,
 ) -> Result<()> {
     // 1. Validate the phase board exists before creating an isolated worktree.
     let source_phase_dir = project_root.join("kanban").join(phase);
@@ -124,13 +126,57 @@ pub fn run_phase(
         None => project_config.defaults.policy,
     };
 
+    // 7. Compose deterministic launch context (with required file validation).
+    let launch_context = compose_launch_context(
+        phase,
+        &tasks,
+        &execution_root,
+        project_config,
+        policy_tier,
+        adapter.as_ref(),
+        config_path,
+    )?;
+    let context_snapshot_path = log_dir.join(format!("{phase}-{timestamp}-launch-context.md"));
+    std::fs::write(&context_snapshot_path, &launch_context.prompt).with_context(|| {
+        format!(
+            "failed to write launch context snapshot to {}",
+            context_snapshot_path.display()
+        )
+    })?;
+    execution_log.log(LogEvent::LaunchContextSnapshot {
+        phase: phase.to_string(),
+        agent: adapter.name().to_string(),
+        instructions_path: launch_context.instructions_path.display().to_string(),
+        phase_doc_path: launch_context.phase_doc_path.display().to_string(),
+        config_source: launch_context.config_source.clone(),
+        snapshot_path: context_snapshot_path.display().to_string(),
+        snapshot: launch_context.prompt.clone(),
+    })?;
+
+    if dry_run {
+        println!("[batty] dry-run launch context for {phase}:\n");
+        println!("----- BEGIN BATTY LAUNCH CONTEXT -----");
+        println!("{}", launch_context.prompt);
+        println!("----- END BATTY LAUNCH CONTEXT -----");
+        println!(
+            "\n[batty] launch context snapshot: {}",
+            context_snapshot_path.display()
+        );
+
+        execution_log.log(LogEvent::RunCompleted {
+            summary: "dry-run launch context composed".to_string(),
+        })?;
+        handle_worktree_finalize(phase, &execution_log, &phase_worktree, RunOutcome::DryRun);
+        execution_log.log(LogEvent::SessionEnded {
+            result: "DryRun".to_string(),
+        })?;
+        return Ok(());
+    }
+
     let policy_engine = PolicyEngine::new(policy_tier, project_config.policy.auto_answer.clone());
 
-    // 7. Build the phase prompt for the agent
-    let prompt = build_phase_prompt(phase, &tasks, &execution_root);
-
     // 8. Get spawn config from adapter
-    let spawn_config = adapter.spawn_config(&prompt, &execution_root);
+    let spawn_config = adapter.spawn_config(&launch_context.prompt, &execution_root);
 
     execution_log.log(LogEvent::AgentLaunched {
         agent: adapter.name().to_string(),
@@ -278,7 +324,8 @@ fn handle_worktree_finalize(
             info!(
                 phase = phase,
                 branch = %phase_worktree.branch,
-                "worktree cleaned after successful merge"
+                outcome = ?outcome,
+                "worktree cleaned"
             );
         }
         Ok(CleanupDecision::KeptForReview) => {
@@ -321,8 +368,107 @@ fn handle_worktree_finalize(
     }
 }
 
-/// Build a prompt describing the phase context for the agent.
-fn build_phase_prompt(phase: &str, tasks: &[task::Task], project_root: &Path) -> String {
+#[derive(Debug)]
+struct LaunchContextSnapshot {
+    prompt: String,
+    instructions_path: PathBuf,
+    phase_doc_path: PathBuf,
+    config_source: String,
+}
+
+/// Compose launch context for agent execution.
+///
+/// Includes required steering docs, phase docs, board state, and effective
+/// policy/default config. The resulting prompt is adapter-wrapped.
+fn compose_launch_context(
+    phase: &str,
+    tasks: &[task::Task],
+    execution_root: &Path,
+    project_config: &ProjectConfig,
+    policy_tier: Policy,
+    adapter: &dyn agent::AgentAdapter,
+    config_path: Option<&Path>,
+) -> Result<LaunchContextSnapshot> {
+    let instructions_path = resolve_instruction_file(execution_root, adapter)?;
+    let instructions = std::fs::read_to_string(&instructions_path).with_context(|| {
+        format!(
+            "failed to read required agent instructions file {}",
+            instructions_path.display()
+        )
+    })?;
+
+    let phase_doc_path = execution_root.join("kanban").join(phase).join("PHASE.md");
+    if !phase_doc_path.is_file() {
+        bail!(
+            "missing required phase context file: {}. Add kanban/{}/PHASE.md before running `batty work {}`",
+            phase_doc_path.display(),
+            phase,
+            phase
+        );
+    }
+    let phase_doc = std::fs::read_to_string(&phase_doc_path).with_context(|| {
+        format!(
+            "failed to read required phase context file {}",
+            phase_doc_path.display()
+        )
+    })?;
+
+    let raw_prompt = build_phase_prompt(
+        phase,
+        tasks,
+        execution_root,
+        &instructions_path,
+        &instructions,
+        &phase_doc_path,
+        &phase_doc,
+        project_config,
+        policy_tier,
+        config_path,
+    );
+    let wrapped_prompt = adapter.wrap_launch_prompt(&raw_prompt);
+
+    Ok(LaunchContextSnapshot {
+        prompt: wrapped_prompt,
+        instructions_path,
+        phase_doc_path,
+        config_source: config_source_label(config_path),
+    })
+}
+
+fn resolve_instruction_file(
+    execution_root: &Path,
+    adapter: &dyn agent::AgentAdapter,
+) -> Result<PathBuf> {
+    for candidate in adapter.instruction_candidates() {
+        let path = execution_root.join(candidate);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+
+    let candidates = adapter.instruction_candidates().join(", ");
+    bail!(
+        "missing required agent instruction file for '{}'. Checked [{}] in {}. Add one of these files at the project root before running `batty work`",
+        adapter.name(),
+        candidates,
+        execution_root.display()
+    );
+}
+
+/// Build prompt text describing complete launch context for the agent.
+#[allow(clippy::too_many_arguments)]
+fn build_phase_prompt(
+    phase: &str,
+    tasks: &[task::Task],
+    project_root: &Path,
+    instructions_path: &Path,
+    instructions: &str,
+    phase_doc_path: &Path,
+    phase_doc: &str,
+    project_config: &ProjectConfig,
+    policy_tier: Policy,
+    config_path: Option<&Path>,
+) -> String {
     let mut prompt = String::new();
 
     prompt.push_str(&format!(
@@ -331,22 +477,39 @@ fn build_phase_prompt(phase: &str, tasks: &[task::Task], project_root: &Path) ->
         project_root.display()
     ));
 
-    // Summarize tasks by status
-    let backlog: Vec<_> = tasks.iter().filter(|t| t.status == "backlog").collect();
-    let in_progress: Vec<_> = tasks.iter().filter(|t| t.status == "in-progress").collect();
-    let done: Vec<_> = tasks.iter().filter(|t| t.status == "done").collect();
+    let backlog = tasks.iter().filter(|t| t.status == "backlog").count();
+    let in_progress = tasks.iter().filter(|t| t.status == "in-progress").count();
+    let done = tasks.iter().filter(|t| t.status == "done").count();
 
     prompt.push_str(&format!(
         "Board status: {} backlog, {} in-progress, {} done (of {} total)\n\n",
-        backlog.len(),
-        in_progress.len(),
-        done.len(),
+        backlog,
+        in_progress,
+        done,
         tasks.len()
     ));
 
-    if !backlog.is_empty() {
-        prompt.push_str("Backlog tasks:\n");
-        for t in &backlog {
+    prompt.push_str(&format!(
+        "Agent instructions source: {}\n\n",
+        display_path(project_root, instructions_path)
+    ));
+    prompt.push_str("## Active Agent Instructions\n");
+    prompt.push_str(instructions.trim());
+    prompt.push_str("\n\n");
+
+    prompt.push_str(&format!(
+        "Phase context source: {}\n\n",
+        display_path(project_root, phase_doc_path)
+    ));
+    prompt.push_str("## Phase Context\n");
+    prompt.push_str(phase_doc.trim());
+    prompt.push_str("\n\n");
+
+    prompt.push_str("## Current Board State\n");
+    if tasks.is_empty() {
+        prompt.push_str("(no tasks)\n");
+    } else {
+        for t in tasks {
             let deps = if t.depends_on.is_empty() {
                 String::new()
             } else {
@@ -359,28 +522,97 @@ fn build_phase_prompt(phase: &str, tasks: &[task::Task], project_root: &Path) ->
                         .join(", ")
                 )
             };
-            prompt.push_str(&format!("  #{}: {}{}\n", t.id, t.title, deps));
-            if !t.description.is_empty() {
-                prompt.push_str(&format!("     {}\n", t.description));
-            }
+            prompt.push_str(&format!("  #{} [{}] {}{}\n", t.id, t.status, t.title, deps));
         }
-        prompt.push('\n');
     }
+    prompt.push('\n');
 
-    if !in_progress.is_empty() {
-        prompt.push_str("In-progress tasks:\n");
-        for t in &in_progress {
-            prompt.push_str(&format!("  #{}: {}\n", t.id, t.title));
+    prompt.push_str("## .batty/config.toml Policy and Execution Defaults\n");
+    prompt.push_str(&format!("source: {}\n", config_source_label(config_path)));
+    prompt.push_str(&format!(
+        "defaults.agent: {}\n",
+        project_config.defaults.agent
+    ));
+    prompt.push_str(&format!(
+        "defaults.policy: {}\n",
+        policy_name(project_config.defaults.policy)
+    ));
+    prompt.push_str(&format!("effective.policy: {}\n", policy_name(policy_tier)));
+    prompt.push_str(&format!(
+        "defaults.dod: {}\n",
+        project_config.defaults.dod.as_deref().unwrap_or("(none)")
+    ));
+    prompt.push_str(&format!(
+        "defaults.max_retries: {}\n",
+        project_config.defaults.max_retries
+    ));
+    prompt.push_str(&format!(
+        "supervisor.enabled: {}\n",
+        project_config.supervisor.enabled
+    ));
+    prompt.push_str(&format!(
+        "supervisor.program: {}\n",
+        project_config.supervisor.program
+    ));
+    prompt.push_str(&format!(
+        "supervisor.args: [{}]\n",
+        project_config.supervisor.args.join(", ")
+    ));
+    prompt.push_str(&format!(
+        "supervisor.timeout_secs: {}\n",
+        project_config.supervisor.timeout_secs
+    ));
+    prompt.push_str(&format!(
+        "detector.silence_timeout_secs: {}\n",
+        project_config.detector.silence_timeout_secs
+    ));
+    prompt.push_str(&format!(
+        "detector.answer_cooldown_millis: {}\n",
+        project_config.detector.answer_cooldown_millis
+    ));
+    prompt.push_str(&format!(
+        "detector.unknown_request_fallback: {}\n",
+        project_config.detector.unknown_request_fallback
+    ));
+
+    let mut auto_answers: Vec<_> = project_config.policy.auto_answer.iter().collect();
+    auto_answers.sort_by(|(ka, _), (kb, _)| ka.cmp(kb));
+    if auto_answers.is_empty() {
+        prompt.push_str("policy.auto_answer: (none)\n");
+    } else {
+        prompt.push_str("policy.auto_answer:\n");
+        for (pattern, response) in auto_answers {
+            prompt.push_str(&format!("  - {:?} => {:?}\n", pattern, response));
         }
-        prompt.push('\n');
     }
+    prompt.push('\n');
 
     prompt.push_str(
-        "Follow the workflow in CLAUDE.md to pick tasks, implement, test, and close them.\n",
+        "Follow the workflow in the active agent instructions to pick tasks, implement, test, and close them.\n",
     );
     prompt.push_str("Work through the backlog in dependency order.\n");
 
     prompt
+}
+
+fn display_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string())
+}
+
+fn config_source_label(config_path: Option<&Path>) -> String {
+    config_path
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "(defaults — no .batty/config.toml found)".to_string())
+}
+
+fn policy_name(policy: Policy) -> &'static str {
+    match policy {
+        Policy::Observe => "observe",
+        Policy::Suggest => "suggest",
+        Policy::Act => "act",
+    }
 }
 
 /// Get the current terminal size, falling back to 80x24.
@@ -398,6 +630,7 @@ fn terminal_size() -> PtySize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
 
     use crate::task::Task;
@@ -417,53 +650,106 @@ mod tests {
     }
 
     #[test]
-    fn phase_prompt_includes_board_summary() {
+    fn compose_launch_context_includes_required_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("CLAUDE.md"), "# Steering\nUse workflow.\n").unwrap();
+        fs::create_dir_all(tmp.path().join("kanban/phase-1")).unwrap();
+        fs::write(
+            tmp.path().join("kanban/phase-1/PHASE.md"),
+            "# Phase 1\nBuild it.\n",
+        )
+        .unwrap();
+
         let tasks = vec![
             make_task(1, "scaffolding", "done", vec![]),
-            make_task(2, "CI setup", "done", vec![1]),
-            make_task(3, "task reader", "backlog", vec![1]),
-            make_task(4, "prompt detection", "in-progress", vec![]),
+            make_task(2, "CI setup", "backlog", vec![1]),
         ];
+        let adapter = crate::agent::adapter_from_name("claude").unwrap();
+        let config = ProjectConfig::default();
+        let snapshot = compose_launch_context(
+            "phase-1",
+            &tasks,
+            tmp.path(),
+            &config,
+            Policy::Observe,
+            adapter.as_ref(),
+            None,
+        )
+        .unwrap();
 
-        let prompt = build_phase_prompt("phase-1", &tasks, Path::new("/project"));
-
-        assert!(prompt.contains("phase-1"));
-        assert!(prompt.contains("/project"));
-        assert!(prompt.contains("1 backlog"));
-        assert!(prompt.contains("1 in-progress"));
-        assert!(prompt.contains("2 done"));
-        assert!(prompt.contains("4 total"));
+        assert!(snapshot.prompt.contains("# Steering"));
+        assert!(snapshot.prompt.contains("# Phase 1"));
+        assert!(snapshot.prompt.contains("#2 [backlog] CI setup"));
+        assert!(snapshot.prompt.contains("depends on: #1"));
+        assert!(snapshot.prompt.contains("defaults.agent: claude"));
+        assert!(snapshot.prompt.contains("effective.policy: observe"));
     }
 
     #[test]
-    fn phase_prompt_shows_backlog_with_deps() {
-        let tasks = vec![
-            make_task(1, "first task", "done", vec![]),
-            make_task(2, "second task", "backlog", vec![1]),
-        ];
+    fn compose_launch_context_errors_when_instruction_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("kanban/phase-1")).unwrap();
+        fs::write(tmp.path().join("kanban/phase-1/PHASE.md"), "Phase doc\n").unwrap();
 
-        let prompt = build_phase_prompt("phase-1", &tasks, Path::new("/work"));
+        let adapter = crate::agent::adapter_from_name("claude").unwrap();
+        let err = compose_launch_context(
+            "phase-1",
+            &[],
+            tmp.path(),
+            &ProjectConfig::default(),
+            Policy::Observe,
+            adapter.as_ref(),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
 
-        assert!(prompt.contains("#2: second task"));
-        assert!(prompt.contains("depends on: #1"));
+        assert!(err.contains("missing required agent instruction file"));
     }
 
     #[test]
-    fn phase_prompt_shows_descriptions() {
-        let tasks = vec![make_task(5, "adapter", "backlog", vec![])];
+    fn compose_launch_context_errors_when_phase_doc_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("CLAUDE.md"), "Steering\n").unwrap();
+        fs::create_dir_all(tmp.path().join("kanban/phase-1")).unwrap();
 
-        let prompt = build_phase_prompt("phase-1", &tasks, Path::new("/work"));
+        let adapter = crate::agent::adapter_from_name("claude").unwrap();
+        let err = compose_launch_context(
+            "phase-1",
+            &[],
+            tmp.path(),
+            &ProjectConfig::default(),
+            Policy::Observe,
+            adapter.as_ref(),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
 
-        assert!(prompt.contains("Description for task 5"));
+        assert!(err.contains("missing required phase context file"));
     }
 
     #[test]
-    fn phase_prompt_empty_board() {
-        let tasks = vec![];
-        let prompt = build_phase_prompt("phase-1", &tasks, Path::new("/work"));
+    fn compose_launch_context_applies_codex_wrapper() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("AGENTS.md"), "Codex steering\n").unwrap();
+        fs::create_dir_all(tmp.path().join("kanban/phase-1")).unwrap();
+        fs::write(tmp.path().join("kanban/phase-1/PHASE.md"), "Phase doc\n").unwrap();
 
-        assert!(prompt.contains("0 backlog"));
-        assert!(prompt.contains("0 total"));
+        let adapter = crate::agent::adapter_from_name("codex").unwrap();
+        let snapshot = compose_launch_context(
+            "phase-1",
+            &[make_task(9, "wrapping", "backlog", vec![])],
+            tmp.path(),
+            &ProjectConfig::default(),
+            Policy::Observe,
+            adapter.as_ref(),
+            None,
+        )
+        .unwrap();
+
+        assert!(snapshot.prompt.contains("Codex under Batty supervision"));
+        assert!(snapshot.instructions_path.ends_with("AGENTS.md"));
     }
 
     #[test]
@@ -485,7 +771,9 @@ mod tests {
             None,
             false,
             false,
+            false,
             tmp.path(),
+            None,
         );
         assert!(result.is_err());
         assert!(
