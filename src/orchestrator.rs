@@ -47,6 +47,10 @@ pub struct OrchestratorConfig {
     pub buffer_size: usize,
     /// Tier 2 supervisor agent configuration (None = disable Tier 2).
     pub tier2: Option<Tier2Config>,
+    /// Whether to create an orchestrator log pane (default: true).
+    pub log_pane: bool,
+    /// Log pane height as percentage of terminal (default: 20).
+    pub log_pane_height_pct: u32,
 }
 
 impl OrchestratorConfig {
@@ -161,14 +165,17 @@ pub fn run(
     tmux::setup_pipe_pane(&session, &pipe_log)?;
     observer.on_event(&format!("● pipe-pane → {}", pipe_log.display()));
 
-    // 4. Initialize components
+    // 4. Set up orchestrator log pane
+    let orch_log = log_dir.join("orchestrator.log");
+    if config.log_pane {
+        setup_log_pane(&session, &orch_log, config.log_pane_height_pct)?;
+        observer.on_event("● log pane created");
+    }
+
+    // 5. Initialize components
     let buffer = EventBuffer::new(config.buffer_size);
     let mut watcher = PipeWatcher::new(&pipe_log, buffer.clone());
     let mut detector = PromptDetector::new(config.patterns, config.detector);
-
-    // 5. Attach to the session (in the main thread, so user can see and interact)
-    // We DON'T attach here — the orchestrator runs in the background.
-    // The user attaches separately via `batty attach` or we attach after setup.
 
     info!(session = %session, "orchestrator loop starting");
     observer.on_event("● supervising");
@@ -256,6 +263,56 @@ pub fn run(
     info!(result = ?result, "orchestrator loop ended");
 
     Ok(result)
+}
+
+/// Set up the orchestrator log pane in the tmux session.
+///
+/// Creates a vertical split at the bottom of the session showing `tail -f`
+/// on the orchestrator log file. The executor pane stays focused (selected).
+fn setup_log_pane(session: &str, log_path: &Path, height_pct: u32) -> Result<()> {
+    // Ensure log file exists (tail -f needs it)
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Touch the file so tail -f can start immediately
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+
+    // Calculate lines from percentage (use session height or fallback to 50)
+    let lines = std::cmp::max(3, (50 * height_pct / 100) as u32);
+
+    // Split the window to create the log pane at the bottom
+    // Use -l (lines) instead of -p (percentage) for tmux compatibility
+    let output = std::process::Command::new("tmux")
+        .args([
+            "split-window",
+            "-v",
+            "-l",
+            &lines.to_string(),
+            "-t",
+            session,
+            "tail",
+            "-f",
+            &log_path.display().to_string(),
+        ])
+        .output()
+        .context("failed to create log pane")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!(stderr = %stderr, "log pane creation failed — continuing without it");
+        return Ok(()); // Non-fatal — status bar still works
+    }
+
+    // Select the executor pane (pane 0) so the user types there, not in the log pane
+    let _ = std::process::Command::new("tmux")
+        .args(["select-pane", "-t", &format!("{session}:.0")])
+        .output();
+
+    info!(session = session, "orchestrator log pane created");
+    Ok(())
 }
 
 /// Handle a detected prompt: evaluate policy and take action.
@@ -563,6 +620,8 @@ mod tests {
             poll_interval: Duration::from_millis(100),
             buffer_size: 50,
             tier2: None,
+            log_pane: false, // don't create log pane in tests
+            log_pane_height_pct: 20,
         };
 
         // Clean up any leftover session
@@ -606,6 +665,8 @@ mod tests {
             poll_interval: Duration::from_millis(100),
             buffer_size: 50,
             tier2: None,
+            log_pane: false, // don't create log pane in tests
+            log_pane_height_pct: 20,
         };
 
         let _ = tmux::kill_session("batty-test-stop");
@@ -652,5 +713,74 @@ mod tests {
             Duration::from_millis(200)
         );
         assert_eq!(OrchestratorConfig::default_buffer_size(), 50);
+    }
+
+    #[test]
+    fn log_pane_setup() {
+        let session = "batty-test-logpane-unit";
+        let _ = tmux::kill_session(session);
+
+        tmux::create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("orchestrator.log");
+
+        setup_log_pane(session, &log_path, 20).unwrap();
+
+        // Should now have 2 panes
+        let panes = tmux::list_panes(session).unwrap();
+        assert_eq!(panes.len(), 2, "expected 2 panes (executor + log), got {}", panes.len());
+
+        tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn orchestrator_with_log_pane() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop.clone();
+        let (observer, events) = TestObserver::new();
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        let config = OrchestratorConfig {
+            spawn: SpawnConfig {
+                program: "sleep".to_string(),
+                args: vec!["10".to_string()],
+                work_dir: "/tmp".to_string(),
+                env: vec![],
+            },
+            patterns: PromptPatterns::claude_code(),
+            policy: PolicyEngine::new(Policy::Act, HashMap::new()),
+            detector: DetectorConfig::default(),
+            phase: "test-logpane-orch".to_string(),
+            project_root: tmp.path().to_path_buf(),
+            poll_interval: Duration::from_millis(100),
+            buffer_size: 50,
+            tier2: None,
+            log_pane: true,
+            log_pane_height_pct: 20,
+        };
+
+        let _ = tmux::kill_session("batty-test-logpane-orch");
+
+        // Stop quickly
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            stop_clone.store(true, Ordering::Relaxed);
+        });
+
+        let result = run(config, Box::new(observer), stop).unwrap();
+        assert!(matches!(result, OrchestratorResult::Detached));
+
+        handle.join().unwrap();
+
+        // Should have log pane creation event
+        let collected = events.lock().unwrap();
+        assert!(
+            collected.iter().any(|e| e.contains("log pane")),
+            "expected log pane event, got: {collected:?}"
+        );
+
+        let _ = tmux::kill_session("batty-test-logpane-orch");
     }
 }
