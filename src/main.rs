@@ -5,6 +5,7 @@ mod detector;
 mod dod;
 mod events;
 mod log;
+mod orchestrator;
 mod policy;
 mod prompt;
 mod supervisor;
