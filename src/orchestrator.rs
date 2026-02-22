@@ -677,6 +677,61 @@ enum StartMode {
     Resume,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupervisorMode {
+    Working,
+    Paused,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupervisorHotkeyAction {
+    Pause,
+    Resume,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupervisorTransition {
+    Paused,
+    Resumed,
+    AlreadyPaused,
+    AlreadyWorking,
+}
+
+fn parse_supervisor_hotkey_action(raw: &str) -> Option<SupervisorHotkeyAction> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "pause" => Some(SupervisorHotkeyAction::Pause),
+        "resume" => Some(SupervisorHotkeyAction::Resume),
+        _ => None,
+    }
+}
+
+fn apply_supervisor_hotkey_action(
+    mode: &mut SupervisorMode,
+    action: SupervisorHotkeyAction,
+    detector: &mut PromptDetector,
+) -> SupervisorTransition {
+    match (action, *mode) {
+        (SupervisorHotkeyAction::Pause, SupervisorMode::Working) => {
+            *mode = SupervisorMode::Paused;
+            detector.human_override();
+            SupervisorTransition::Paused
+        }
+        (SupervisorHotkeyAction::Pause, SupervisorMode::Paused) => {
+            detector.human_override();
+            SupervisorTransition::AlreadyPaused
+        }
+        (SupervisorHotkeyAction::Resume, SupervisorMode::Paused) => {
+            *mode = SupervisorMode::Working;
+            detector.human_override();
+            SupervisorTransition::Resumed
+        }
+        (SupervisorHotkeyAction::Resume, SupervisorMode::Working) => {
+            detector.human_override();
+            SupervisorTransition::AlreadyWorking
+        }
+    }
+}
+
 fn now_epoch() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -992,6 +1047,20 @@ fn run_with_mode(
         }
     }
 
+    // 5.25 Configure hotkeys for runtime supervisor pause/resume control.
+    let mut hotkeys_enabled = true;
+    if let Err(e) = tmux::configure_supervisor_hotkeys(&session) {
+        hotkeys_enabled = false;
+        warn!(error = %e, "failed to configure supervisor hotkeys");
+        observer.on_event("⚠ supervisor hotkeys unavailable");
+    } else {
+        observer.on_event(&format!(
+            "● supervisor hotkeys: pause {}, resume {}",
+            tmux::SUPERVISOR_PAUSE_HOTKEY,
+            tmux::SUPERVISOR_RESUME_HOTKEY
+        ));
+    }
+
     // 5.5 Optional auto-attach
     if config.auto_attach {
         if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
@@ -1033,6 +1102,7 @@ fn run_with_mode(
     let mut detector = PromptDetector::new(config.patterns, config.detector);
     let mut stuck_detector = config.stuck.map(StuckDetector::new);
     let mut last_handled_pane_signature = String::new();
+    let mut supervisor_mode = SupervisorMode::Working;
 
     info!(session = %session, "orchestrator loop starting");
     observer.on_event("● supervising");
@@ -1105,6 +1175,46 @@ fn run_with_mode(
             break OrchestratorResult::Completed;
         }
 
+        if hotkeys_enabled {
+            match tmux::take_supervisor_hotkey_action(&session) {
+                Ok(Some(raw_action)) => {
+                    if let Some(action) = parse_supervisor_hotkey_action(&raw_action) {
+                        match apply_supervisor_hotkey_action(
+                            &mut supervisor_mode,
+                            action,
+                            &mut detector,
+                        ) {
+                            SupervisorTransition::Paused => {
+                                observer.on_event("→ supervisor paused via hotkey");
+                                status_bar.force_update(
+                                    StatusIndicator::StateChange,
+                                    "PAUSED — manual input only",
+                                )?;
+                            }
+                            SupervisorTransition::Resumed => {
+                                observer.on_event("→ supervisor resumed via hotkey");
+                                status_bar.force_update(StatusIndicator::Ok, "supervising")?;
+                            }
+                            SupervisorTransition::AlreadyPaused => {
+                                observer.on_event("→ pause hotkey ignored (already paused)");
+                            }
+                            SupervisorTransition::AlreadyWorking => {
+                                observer.on_event("→ resume hotkey ignored (already supervising)");
+                            }
+                        }
+                    } else {
+                        warn!(action = %raw_action, "unknown supervisor hotkey action");
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(error = %e, "failed to read supervisor hotkey state");
+                    observer.on_event("⚠ supervisor hotkey polling disabled");
+                    hotkeys_enabled = false;
+                }
+            }
+        }
+
         // Poll for new output
         match watcher.poll() {
             Ok(event_count) => {
@@ -1165,19 +1275,24 @@ fn run_with_mode(
                 last_pane_signature = signature;
                 let event = detector.on_output(&detector_line);
                 if let Some(DetectorEvent::PromptDetected(ref prompt)) = event {
-                    handle_prompt(
-                        prompt,
-                        &executor_pane,
-                        &config.policy,
-                        &mut detector,
-                        &mut *observer,
-                        config.tier2.as_ref(),
-                        &buffer,
-                        &mut status_bar,
-                        config.answer_delay,
-                    )?;
-                    if matches!(mode, StartMode::Resume) {
-                        last_handled_pane_signature = last_pane_signature.clone();
+                    if supervisor_mode == SupervisorMode::Paused {
+                        debug!("supervisor paused: suppressing inline prompt automation");
+                        detector.human_override();
+                    } else {
+                        handle_prompt(
+                            prompt,
+                            &executor_pane,
+                            &config.policy,
+                            &mut detector,
+                            &mut *observer,
+                            config.tier2.as_ref(),
+                            &buffer,
+                            &mut status_bar,
+                            config.answer_delay,
+                        )?;
+                        if matches!(mode, StartMode::Resume) {
+                            last_handled_pane_signature = last_pane_signature.clone();
+                        }
                     }
                 }
             }
@@ -1191,6 +1306,9 @@ fn run_with_mode(
                     && last_pane_signature == last_handled_pane_signature
                 {
                     debug!("resume dedupe: skipping repeated prompt handling");
+                } else if supervisor_mode == SupervisorMode::Paused {
+                    debug!("supervisor paused: suppressing prompt automation");
+                    detector.human_override();
                 } else {
                     handle_prompt(
                         prompt,
@@ -1210,6 +1328,11 @@ fn run_with_mode(
             }
             DetectorEvent::UnknownRequest { last_line, .. } => {
                 debug!(last_line = %last_line, "unknown request fallback triggered");
+                if supervisor_mode == SupervisorMode::Paused {
+                    debug!("supervisor paused: suppressing unknown-request fallback");
+                    detector.human_override();
+                    continue;
+                }
                 let pane_content = tmux::capture_pane(&executor_pane).unwrap_or_default();
                 let maybe_idle_input = if config.idle_input_fallback {
                     extract_idle_input_prompt(&pane_content)
@@ -1281,6 +1404,12 @@ fn run_with_mode(
                 false
             };
             let (state, action) = stuck.check(session_alive);
+
+            if supervisor_mode == SupervisorMode::Paused && !matches!(&action, StuckAction::None) {
+                debug!(state = ?state, "supervisor paused: suppressing stuck action");
+                std::thread::sleep(config.poll_interval);
+                continue;
+            }
 
             match action {
                 StuckAction::None => {}
@@ -2837,6 +2966,71 @@ esac
         assert_eq!(StatusIndicator::Thinking.symbol(), "?");
         assert_eq!(StatusIndicator::NeedsInput.symbol(), "⚠");
         assert_eq!(StatusIndicator::Failure.symbol(), "✗");
+    }
+
+    #[test]
+    fn parse_supervisor_hotkey_action_accepts_pause_resume() {
+        assert_eq!(
+            parse_supervisor_hotkey_action("pause"),
+            Some(SupervisorHotkeyAction::Pause)
+        );
+        assert_eq!(
+            parse_supervisor_hotkey_action("RESUME"),
+            Some(SupervisorHotkeyAction::Resume)
+        );
+        assert_eq!(parse_supervisor_hotkey_action("unknown"), None);
+    }
+
+    #[test]
+    fn apply_supervisor_hotkey_action_transitions_and_noops() {
+        let mut detector =
+            PromptDetector::new(PromptPatterns::claude_code(), DetectorConfig::default());
+        let mut mode = SupervisorMode::Working;
+
+        let paused =
+            apply_supervisor_hotkey_action(&mut mode, SupervisorHotkeyAction::Pause, &mut detector);
+        assert_eq!(paused, SupervisorTransition::Paused);
+        assert_eq!(mode, SupervisorMode::Paused);
+
+        let noop_pause =
+            apply_supervisor_hotkey_action(&mut mode, SupervisorHotkeyAction::Pause, &mut detector);
+        assert_eq!(noop_pause, SupervisorTransition::AlreadyPaused);
+        assert_eq!(mode, SupervisorMode::Paused);
+
+        let resumed = apply_supervisor_hotkey_action(
+            &mut mode,
+            SupervisorHotkeyAction::Resume,
+            &mut detector,
+        );
+        assert_eq!(resumed, SupervisorTransition::Resumed);
+        assert_eq!(mode, SupervisorMode::Working);
+
+        let noop_resume = apply_supervisor_hotkey_action(
+            &mut mode,
+            SupervisorHotkeyAction::Resume,
+            &mut detector,
+        );
+        assert_eq!(noop_resume, SupervisorTransition::AlreadyWorking);
+        assert_eq!(mode, SupervisorMode::Working);
+    }
+
+    #[test]
+    fn apply_supervisor_hotkey_action_resets_detector_state() {
+        let mut detector =
+            PromptDetector::new(PromptPatterns::claude_code(), DetectorConfig::default());
+        detector.answer_injected();
+        assert!(matches!(
+            detector.state(),
+            crate::detector::SupervisorState::Answering { .. }
+        ));
+
+        let mut mode = SupervisorMode::Working;
+        let _ =
+            apply_supervisor_hotkey_action(&mut mode, SupervisorHotkeyAction::Pause, &mut detector);
+        assert!(matches!(
+            detector.state(),
+            crate::detector::SupervisorState::Working
+        ));
     }
 
     #[test]

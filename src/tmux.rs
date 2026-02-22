@@ -12,6 +12,12 @@ use anyhow::{Context, Result, bail};
 use tracing::{debug, info, warn};
 
 static PROBE_COUNTER: AtomicU64 = AtomicU64::new(1);
+const SUPERVISOR_CONTROL_OPTION: &str = "@batty_supervisor_control";
+
+/// Default tmux-prefix hotkey for pausing Batty supervision.
+pub const SUPERVISOR_PAUSE_HOTKEY: &str = "C-b P";
+/// Default tmux-prefix hotkey for resuming Batty supervision.
+pub const SUPERVISOR_RESUME_HOTKEY: &str = "C-b R";
 
 /// Known split strategies for creating the orchestrator log pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -565,6 +571,71 @@ pub fn set_mouse(session: &str, enabled: bool) -> Result<()> {
     tmux_set(session, "mouse", value)
 }
 
+fn bind_supervisor_hotkey(session: &str, key: &str, action: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args([
+            "bind-key",
+            "-T",
+            "prefix",
+            key,
+            "set-option",
+            "-t",
+            session,
+            SUPERVISOR_CONTROL_OPTION,
+            action,
+        ])
+        .output()
+        .with_context(|| format!("failed to bind supervisor hotkey '{key}' for '{session}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux bind-key {key} failed: {stderr}");
+    }
+
+    Ok(())
+}
+
+/// Configure per-session supervisor hotkeys:
+/// - `Prefix + Shift+P` -> pause automation
+/// - `Prefix + Shift+R` -> resume automation
+pub fn configure_supervisor_hotkeys(session: &str) -> Result<()> {
+    tmux_set(session, SUPERVISOR_CONTROL_OPTION, "")?;
+    bind_supervisor_hotkey(session, "P", "pause")?;
+    bind_supervisor_hotkey(session, "R", "resume")?;
+    Ok(())
+}
+
+/// Read and clear a queued supervisor hotkey action for the session.
+///
+/// Returns `Some("pause")` / `Some("resume")` when set, or `None` when idle.
+pub fn take_supervisor_hotkey_action(session: &str) -> Result<Option<String>> {
+    let output = Command::new("tmux")
+        .args([
+            "show-options",
+            "-v",
+            "-t",
+            session,
+            SUPERVISOR_CONTROL_OPTION,
+        ])
+        .output()
+        .with_context(|| {
+            format!("failed to read supervisor control option for session '{session}'")
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux show-options supervisor control failed: {stderr}");
+    }
+
+    let action = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if action.is_empty() {
+        return Ok(None);
+    }
+
+    tmux_set(session, SUPERVISOR_CONTROL_OPTION, "")?;
+    Ok(Some(action))
+}
+
 /// Split the window to create a new pane.
 ///
 /// Returns Ok(()) on success. The new pane is at the bottom (vertical split)
@@ -986,6 +1057,48 @@ mod tests {
             panes.iter().any(|p| p.active),
             "expected one active pane, got: {panes:?}"
         );
+
+        kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn configure_supervisor_hotkeys_initializes_control_option() {
+        let session = "batty-test-supervisor-hotkeys";
+        let _ = kill_session(session);
+
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+        configure_supervisor_hotkeys(session).unwrap();
+
+        let output = Command::new("tmux")
+            .args([
+                "show-options",
+                "-v",
+                "-t",
+                session,
+                SUPERVISOR_CONTROL_OPTION,
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).trim().is_empty());
+
+        kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn take_supervisor_hotkey_action_reads_and_clears() {
+        let session = "batty-test-supervisor-action";
+        let _ = kill_session(session);
+
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+        configure_supervisor_hotkeys(session).unwrap();
+        tmux_set(session, SUPERVISOR_CONTROL_OPTION, "pause").unwrap();
+
+        let first = take_supervisor_hotkey_action(session).unwrap();
+        assert_eq!(first.as_deref(), Some("pause"));
+
+        let second = take_supervisor_hotkey_action(session).unwrap();
+        assert!(second.is_none(), "expected action to be cleared");
 
         kill_session(session).unwrap();
     }
