@@ -33,3 +33,9 @@
 {"timestamp":"2026-02-22T13:22:07.706184397-05:00","action":"claim","task_id":6,"detail":"cape-staff"}
 {"timestamp":"2026-02-22T13:22:07.709075415-05:00","action":"move","task_id":6,"detail":"backlog -\u003e in-progress"}
 {"timestamp":"2026-02-22T13:23:37.697059815-05:00","action":"move","task_id":6,"detail":"in-progress -\u003e backlog"}
+{"timestamp":"2026-02-22T16:05:34.293743129-05:00","action":"move","task_id":6,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T16:06:19.398360175-05:00","action":"edit","task_id":6,"detail":"In supervisor pane we do not want to see [batty] in the stream"}
+{"timestamp":"2026-02-22T16:11:48.362587418-05:00","action":"edit","task_id":6,"detail":"In supervisor pane we do not want to see [batty] in the stream"}
+{"timestamp":"2026-02-22T16:11:51.590736915-05:00","action":"move","task_id":6,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T16:11:51.622762873-05:00","action":"edit","task_id":6,"detail":"In supervisor pane we do not want to see [batty] in the stream"}
+{"timestamp":"2026-02-22T16:11:51.623015875-05:00","action":"release","task_id":6,"detail":"cape-staff"}
