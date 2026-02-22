@@ -1,156 +1,111 @@
 # Troubleshooting
 
-## 1) `batty work` exits immediately
+Quick fixes for common Batty issues.
 
-Symptoms:
-- Process exits quickly with a board/tooling error.
+## `batty work` exits immediately
 
-Cause:
-- Missing phase board directory or missing required tooling.
+**Cause:** Missing phase board directory or missing tools.
 
-Fix:
 ```sh
-batty install
-batty config
-batty board phase-2.7 --print-dir
+batty install                          # check/install tools
+batty config                           # verify configuration
+batty board my-phase --print-dir       # confirm board path exists
 ```
-- Confirm the phase board exists under `.batty/kanban/<phase>/` (legacy projects may still use `kanban/<phase>/`).
-- Confirm `tmux` and `kanban-md` are installed and available on `PATH`.
 
-## 2) tmux version/capability error on startup
+Boards live under `.batty/kanban/<phase>/`. Legacy projects may use `kanban/<phase>/`.
 
-Symptoms:
-- Startup fails with a `pipe-pane`/capability error.
+## tmux version error on startup
 
-Cause:
-- tmux is too old or missing required features.
+**Cause:** tmux is too old or missing required features (`pipe-pane`).
 
-Fix:
-- Check version: `tmux -V`
-- Recommended version: `>= 3.2` (3.1.x is fallback path; `< 3.1` is not supported).
-- Reinstall/upgrade tmux, then retry `batty work <phase>` or `batty resume <phase>`.
-
-## 3) `kanban-md` not found
-
-Symptoms:
-- Errors indicate `kanban-md` is missing when opening boards or running workflow steps.
-
-Cause:
-- `kanban-md` is not installed (or not on `PATH`).
-
-Fix:
 ```sh
-batty install
-# fallback:
+tmux -V                                # check version
+```
+
+Recommended: >= 3.2. Minimum: 3.1. Below 3.1 is not supported. Upgrade tmux and retry.
+
+## `kanban-md` not found
+
+**Cause:** `kanban-md` is not installed or not on `PATH`.
+
+```sh
+batty install                          # attempts auto-install
+# or manually:
 cargo install kanban-md --locked
 ```
-- Ensure `~/.cargo/bin` (or your install path) is in `PATH`.
 
-## 4) `batty resume` cannot find session
+Ensure `~/.cargo/bin` is in your `PATH`.
 
-Symptoms:
-- Resume reports missing phase/session.
+## `batty resume` cannot find session
 
-Cause:
-- The tmux session is gone, renamed, or phase target does not match.
+**Cause:** The tmux session no longer exists.
 
-Fix:
 ```sh
-tmux list-sessions
-batty resume batty-phase-2-7
+tmux list-sessions                     # see what's running
+batty resume batty-my-phase            # try the full session name
 ```
-- If no session exists, start a fresh run with `batty work phase-2.7`.
 
-## 5) Board path is not the one you expect
+If no session exists, start fresh with `batty work my-phase`.
 
-Symptoms:
-- Board operations seem to target the wrong run or wrong phase directory.
+## Board path is wrong
 
-Cause:
-- Batty resolves board paths from active session/worktree/fallback rules.
+**Cause:** Batty resolves board paths from active sessions, worktrees, and fallback rules.
 
-Fix:
 ```sh
-batty board phase-2.7 --print-dir
+batty board my-phase --print-dir       # show resolved path
 ```
-- Use printed path to verify whether Batty selected active tmux run board, latest worktree board, or repo fallback.
 
-## 6) Supervisor is not responding or responses are delayed
+## Supervisor not responding
 
-Symptoms:
-- Tier 2 answers never arrive, or come too slowly.
+**Cause:** Supervisor program misconfigured, timeout too low, or supervision is paused.
 
-Cause:
-- Supervisor program/path mismatch, timeout too low, or paused supervision.
+1. Check the tmux status bar -- if it says `PAUSED`, press `C-b R` to resume
+2. Verify config:
 
-Fix:
-- Check pause state in tmux status bar (`PAUSED` means no auto answers).
-- Resume with `Prefix + Shift+R` (`C-b R` by default).
-- Inspect and tune:
-  - `supervisor.program`
-  - `supervisor.args`
-  - `supervisor.timeout_secs`
-  - `supervisor.trace_io`
-- Use `batty config --json` to inspect effective values.
-
-## 7) Worktree confusion or stale run directories
-
-Symptoms:
-- `--worktree` resumes an unexpected run, or stale branches remain.
-
-Cause:
-- Existing `.batty/worktrees/<phase>-run-###` run directories are reused by default.
-
-Fix:
 ```sh
-batty work phase-2.7 --worktree --new
+batty config --json | grep -A5 supervisor
 ```
-- This forces a fresh run worktree.
-- For full project cleanup after uninstalling assets: `batty remove` then `rm -rf .batty` (destructive; verify first).
 
-## 8) Dangerous mode behavior is unclear
+Key settings: `supervisor.program`, `supervisor.args`, `supervisor.timeout_secs`, `supervisor.trace_io`.
 
-Symptoms:
-- Agent commands appear to run with fewer safety prompts than expected.
+## Worktree confusion
 
-Cause:
-- `dangerous_mode.enabled = true` wraps supported agent commands with dangerous flags.
+**Cause:** `--worktree` resumes the latest existing run by default.
 
-Fix:
-- Verify config:
+```sh
+batty work my-phase --worktree --new   # force a fresh run
+```
+
+For full cleanup: `batty remove` then `rm -rf .batty` (destructive -- verify first).
+
+## Dangerous mode is active unexpectedly
+
+**Cause:** `dangerous_mode.enabled = true` in config.
+
 ```toml
 [dangerous_mode]
 enabled = false
 ```
-- Keep disabled unless you explicitly need reduced approval/sandbox friction.
-- Re-enable only in trusted environments with clear risk acceptance.
 
-## 9) Need deeper Tier 2 debugging context
+## Debugging Tier 2 decisions
 
-Symptoms:
-- Hard to understand why supervisor answered/escalated a prompt.
+Inspect context snapshots:
 
-Cause:
-- Tier 2 decisions rely on composed runtime context that is easiest to inspect from snapshot files.
+```
+.batty/logs/<run>/tier2-context-<n>.md
+```
 
-Fix:
-- Inspect `.batty/logs/<run>/tier2-context-<n>.md`.
-- Correlate snapshot content with orchestrator events to verify prompt text and context quality.
-- Enable/confirm `supervisor.trace_io = true` for richer orchestration logs.
+Correlate with orchestrator events. Enable `supervisor.trace_io = true` for richer logs.
 
-## 10) Detector appears stuck in a loop or repeated nudges/escalations
+## Detector stuck in a loop
 
-Symptoms:
-- Repeated nudge/escalate behavior without forward progress.
+**Cause:** Repeated stale output with no forward progress.
 
-Cause:
-- Prompt detector or stuck detector sees repeated stale output with no meaningful progress.
+Check detector settings in config:
 
-Fix:
-- Check detector settings:
-  - `detector.silence_timeout_secs`
-  - `detector.answer_cooldown_millis`
-  - `detector.unknown_request_fallback`
-  - `detector.idle_input_fallback`
-- Verify session is not paused (`C-b R` to resume).
-- If loop persists, attach (`batty attach <phase>`), provide manual guidance in executor pane, and continue.
+- `detector.silence_timeout_secs`
+- `detector.answer_cooldown_millis`
+- `detector.unknown_request_fallback`
+- `detector.idle_input_fallback`
+
+If the loop persists, attach with `batty attach <phase>`, provide manual input in the executor pane, and continue.
