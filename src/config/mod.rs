@@ -49,6 +49,42 @@ fn default_max_retries() -> u32 {
     3
 }
 
+fn default_supervisor_enabled() -> bool {
+    true
+}
+
+fn default_supervisor_program() -> String {
+    "claude".to_string()
+}
+
+fn default_supervisor_args() -> Vec<String> {
+    vec![
+        "-p".to_string(),
+        "--output-format".to_string(),
+        "text".to_string(),
+    ]
+}
+
+fn default_supervisor_timeout_secs() -> u64 {
+    60
+}
+
+fn default_supervisor_trace_io() -> bool {
+    true
+}
+
+fn default_detector_silence_timeout_secs() -> u64 {
+    3
+}
+
+fn default_detector_answer_cooldown_millis() -> u64 {
+    1000
+}
+
+fn default_detector_unknown_request_fallback() -> bool {
+    true
+}
+
 impl Default for Defaults {
     fn default() -> Self {
         Self {
@@ -60,6 +96,52 @@ impl Default for Defaults {
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SupervisorConfig {
+    #[serde(default = "default_supervisor_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_supervisor_program")]
+    pub program: String,
+    #[serde(default = "default_supervisor_args")]
+    pub args: Vec<String>,
+    #[serde(default = "default_supervisor_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_supervisor_trace_io")]
+    pub trace_io: bool,
+}
+
+impl Default for SupervisorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_supervisor_enabled(),
+            program: default_supervisor_program(),
+            args: default_supervisor_args(),
+            timeout_secs: default_supervisor_timeout_secs(),
+            trace_io: default_supervisor_trace_io(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DetectorSettings {
+    #[serde(default = "default_detector_silence_timeout_secs")]
+    pub silence_timeout_secs: u64,
+    #[serde(default = "default_detector_answer_cooldown_millis")]
+    pub answer_cooldown_millis: u64,
+    #[serde(default = "default_detector_unknown_request_fallback")]
+    pub unknown_request_fallback: bool,
+}
+
+impl Default for DetectorSettings {
+    fn default() -> Self {
+        Self {
+            silence_timeout_secs: default_detector_silence_timeout_secs(),
+            answer_cooldown_millis: default_detector_answer_cooldown_millis(),
+            unknown_request_fallback: default_detector_unknown_request_fallback(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct ProjectConfig {
     #[serde(default)]
@@ -67,6 +149,10 @@ pub struct ProjectConfig {
     #[serde(default)]
     #[allow(dead_code)] // Used by policy engine, wired in task #12
     pub policy: PolicyConfig,
+    #[serde(default)]
+    pub supervisor: SupervisorConfig,
+    #[serde(default)]
+    pub detector: DetectorSettings,
 }
 
 impl ProjectConfig {
@@ -110,6 +196,17 @@ mod tests {
         assert_eq!(config.defaults.policy, Policy::Observe);
         assert_eq!(config.defaults.max_retries, 3);
         assert!(config.defaults.dod.is_none());
+        assert!(config.supervisor.enabled);
+        assert_eq!(config.supervisor.program, "claude");
+        assert_eq!(
+            config.supervisor.args,
+            vec!["-p", "--output-format", "text"]
+        );
+        assert_eq!(config.supervisor.timeout_secs, 60);
+        assert!(config.supervisor.trace_io);
+        assert_eq!(config.detector.silence_timeout_secs, 3);
+        assert_eq!(config.detector.answer_cooldown_millis, 1000);
+        assert!(config.detector.unknown_request_fallback);
     }
 
     #[test]
@@ -120,6 +217,18 @@ agent = "codex"
 policy = "act"
 dod = "cargo test --workspace"
 max_retries = 5
+
+[supervisor]
+enabled = true
+program = "claude"
+args = ["-p", "--output-format", "text"]
+timeout_secs = 45
+trace_io = true
+
+[detector]
+silence_timeout_secs = 5
+answer_cooldown_millis = 1500
+unknown_request_fallback = true
 "#;
         let config: ProjectConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.defaults.agent, "codex");
@@ -129,6 +238,13 @@ max_retries = 5
             Some("cargo test --workspace")
         );
         assert_eq!(config.defaults.max_retries, 5);
+        assert!(config.supervisor.enabled);
+        assert_eq!(config.supervisor.program, "claude");
+        assert_eq!(config.supervisor.timeout_secs, 45);
+        assert!(config.supervisor.trace_io);
+        assert_eq!(config.detector.silence_timeout_secs, 5);
+        assert_eq!(config.detector.answer_cooldown_millis, 1500);
+        assert!(config.detector.unknown_request_fallback);
     }
 
     #[test]

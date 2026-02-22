@@ -32,7 +32,10 @@ pub enum PipeEvent {
     /// Executor modified a file.
     FileModified { path: String },
     /// Executor ran a command.
-    CommandRan { command: String, success: Option<bool> },
+    CommandRan {
+        command: String,
+        success: Option<bool>,
+    },
     /// Test execution detected.
     TestRan { passed: bool, detail: String },
     /// Executor is asking a question (prompt detected).
@@ -404,7 +407,9 @@ mod tests {
     #[test]
     fn detect_task_started() {
         let patterns = EventPatterns::default_patterns();
-        let event = patterns.classify("Picked and moved task #3: kanban reader").unwrap();
+        let event = patterns
+            .classify("Picked and moved task #3: kanban reader")
+            .unwrap();
         match event {
             PipeEvent::TaskStarted { task_id, title } => {
                 assert_eq!(task_id, "3");
@@ -424,7 +429,9 @@ mod tests {
     #[test]
     fn detect_task_completed() {
         let patterns = EventPatterns::default_patterns();
-        let event = patterns.classify("Moved task #3: in-progress -> done").unwrap();
+        let event = patterns
+            .classify("Moved task #3: in-progress -> done")
+            .unwrap();
         match event {
             PipeEvent::TaskCompleted { task_id } => assert_eq!(task_id, "3"),
             other => panic!("expected TaskCompleted, got: {other:?}"),
@@ -434,7 +441,9 @@ mod tests {
     #[test]
     fn detect_commit() {
         let patterns = EventPatterns::default_patterns();
-        let event = patterns.classify("[main abc1234] fix the auth bug").unwrap();
+        let event = patterns
+            .classify("[main abc1234] fix the auth bug")
+            .unwrap();
         match event {
             PipeEvent::CommitMade { hash, message } => {
                 assert_eq!(hash, "abc1234");
@@ -447,7 +456,9 @@ mod tests {
     #[test]
     fn detect_test_passed() {
         let patterns = EventPatterns::default_patterns();
-        let event = patterns.classify("test result: ok. 42 passed; 0 failed").unwrap();
+        let event = patterns
+            .classify("test result: ok. 42 passed; 0 failed")
+            .unwrap();
         match event {
             PipeEvent::TestRan { passed, .. } => assert!(passed),
             other => panic!("expected TestRan, got: {other:?}"),
@@ -457,7 +468,9 @@ mod tests {
     #[test]
     fn detect_test_failed() {
         let patterns = EventPatterns::default_patterns();
-        let event = patterns.classify("test result: FAILED. 40 passed; 2 failed").unwrap();
+        let event = patterns
+            .classify("test result: FAILED. 40 passed; 2 failed")
+            .unwrap();
         match event {
             PipeEvent::TestRan { passed, .. } => assert!(!passed),
             other => panic!("expected TestRan, got: {other:?}"),
@@ -497,14 +510,20 @@ mod tests {
     #[test]
     fn detect_prompt() {
         let patterns = EventPatterns::default_patterns();
-        let event = patterns.classify("Allow tool Read on /home/user/file.rs?").unwrap();
+        let event = patterns
+            .classify("Allow tool Read on /home/user/file.rs?")
+            .unwrap();
         assert!(matches!(event, PipeEvent::PromptDetected { .. }));
     }
 
     #[test]
     fn no_match_on_normal_output() {
         let patterns = EventPatterns::default_patterns();
-        assert!(patterns.classify("Writing function to parse YAML...").is_none());
+        assert!(
+            patterns
+                .classify("Writing function to parse YAML...")
+                .is_none()
+        );
     }
 
     // ── EventBuffer ──
@@ -512,8 +531,12 @@ mod tests {
     #[test]
     fn buffer_push_and_snapshot() {
         let buf = EventBuffer::new(3);
-        buf.push(PipeEvent::OutputLine { line: "a".to_string() });
-        buf.push(PipeEvent::OutputLine { line: "b".to_string() });
+        buf.push(PipeEvent::OutputLine {
+            line: "a".to_string(),
+        });
+        buf.push(PipeEvent::OutputLine {
+            line: "b".to_string(),
+        });
 
         let snap = buf.snapshot();
         assert_eq!(snap.len(), 2);
@@ -522,14 +545,30 @@ mod tests {
     #[test]
     fn buffer_evicts_oldest_when_full() {
         let buf = EventBuffer::new(2);
-        buf.push(PipeEvent::OutputLine { line: "a".to_string() });
-        buf.push(PipeEvent::OutputLine { line: "b".to_string() });
-        buf.push(PipeEvent::OutputLine { line: "c".to_string() });
+        buf.push(PipeEvent::OutputLine {
+            line: "a".to_string(),
+        });
+        buf.push(PipeEvent::OutputLine {
+            line: "b".to_string(),
+        });
+        buf.push(PipeEvent::OutputLine {
+            line: "c".to_string(),
+        });
 
         let snap = buf.snapshot();
         assert_eq!(snap.len(), 2);
-        assert_eq!(snap[0], PipeEvent::OutputLine { line: "b".to_string() });
-        assert_eq!(snap[1], PipeEvent::OutputLine { line: "c".to_string() });
+        assert_eq!(
+            snap[0],
+            PipeEvent::OutputLine {
+                line: "b".to_string()
+            }
+        );
+        assert_eq!(
+            snap[1],
+            PipeEvent::OutputLine {
+                line: "c".to_string()
+            }
+        );
     }
 
     #[test]
@@ -539,19 +578,28 @@ mod tests {
 
         // Push 60 events — should keep only the last 50
         for i in 0..60 {
-            buf.push(PipeEvent::OutputLine { line: format!("line {i}") });
+            buf.push(PipeEvent::OutputLine {
+                line: format!("line {i}"),
+            });
         }
         assert_eq!(buf.len(), 50);
 
         let snap = buf.snapshot();
         // First event should be line 10 (0-9 evicted)
-        assert_eq!(snap[0], PipeEvent::OutputLine { line: "line 10".to_string() });
+        assert_eq!(
+            snap[0],
+            PipeEvent::OutputLine {
+                line: "line 10".to_string()
+            }
+        );
     }
 
     #[test]
     fn buffer_clear() {
         let buf = EventBuffer::new(10);
-        buf.push(PipeEvent::OutputLine { line: "x".to_string() });
+        buf.push(PipeEvent::OutputLine {
+            line: "x".to_string(),
+        });
         assert_eq!(buf.len(), 1);
 
         buf.clear();
@@ -567,10 +615,21 @@ mod tests {
     #[test]
     fn buffer_format_summary_has_events() {
         let buf = EventBuffer::new(10);
-        buf.push(PipeEvent::TaskStarted { task_id: "3".to_string(), title: "foo".to_string() });
-        buf.push(PipeEvent::FileCreated { path: "src/x.rs".to_string() });
-        buf.push(PipeEvent::TestRan { passed: true, detail: "ok".to_string() });
-        buf.push(PipeEvent::CommitMade { hash: "abc1234".to_string(), message: "fix".to_string() });
+        buf.push(PipeEvent::TaskStarted {
+            task_id: "3".to_string(),
+            title: "foo".to_string(),
+        });
+        buf.push(PipeEvent::FileCreated {
+            path: "src/x.rs".to_string(),
+        });
+        buf.push(PipeEvent::TestRan {
+            passed: true,
+            detail: "ok".to_string(),
+        });
+        buf.push(PipeEvent::CommitMade {
+            hash: "abc1234".to_string(),
+            message: "fix".to_string(),
+        });
 
         let summary = buf.format_summary();
         assert!(summary.contains("→ task #3 started: foo"));
@@ -586,12 +645,16 @@ mod tests {
 
         let handle = std::thread::spawn(move || {
             for i in 0..50 {
-                buf2.push(PipeEvent::OutputLine { line: format!("thread {i}") });
+                buf2.push(PipeEvent::OutputLine {
+                    line: format!("thread {i}"),
+                });
             }
         });
 
         for i in 0..50 {
-            buf.push(PipeEvent::OutputLine { line: format!("main {i}") });
+            buf.push(PipeEvent::OutputLine {
+                line: format!("main {i}"),
+            });
         }
 
         handle.join().unwrap();
@@ -620,8 +683,16 @@ mod tests {
         assert!(count >= 2, "expected at least 2 events, got {count}");
 
         let events = buffer.snapshot();
-        assert!(events.iter().any(|e| matches!(e, PipeEvent::TaskStarted { .. })));
-        assert!(events.iter().any(|e| matches!(e, PipeEvent::TestRan { passed: true, .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PipeEvent::TaskStarted { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PipeEvent::TestRan { passed: true, .. }))
+        );
     }
 
     #[test]
@@ -685,7 +756,11 @@ mod tests {
 
         watcher.poll().unwrap();
         let events = buffer.snapshot();
-        assert!(events.iter().any(|e| matches!(e, PipeEvent::TestRan { passed: true, .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PipeEvent::TestRan { passed: true, .. }))
+        );
     }
 
     // ── PipeEvent serialization ──
@@ -704,15 +779,37 @@ mod tests {
     #[test]
     fn all_pipe_events_serialize() {
         let events = vec![
-            PipeEvent::TaskStarted { task_id: "1".to_string(), title: "test".to_string() },
-            PipeEvent::FileCreated { path: "x.rs".to_string() },
-            PipeEvent::FileModified { path: "y.rs".to_string() },
-            PipeEvent::CommandRan { command: "ls".to_string(), success: Some(true) },
-            PipeEvent::TestRan { passed: true, detail: "ok".to_string() },
-            PipeEvent::PromptDetected { prompt: "y/n".to_string() },
-            PipeEvent::TaskCompleted { task_id: "1".to_string() },
-            PipeEvent::CommitMade { hash: "abc".to_string(), message: "fix".to_string() },
-            PipeEvent::OutputLine { line: "hi".to_string() },
+            PipeEvent::TaskStarted {
+                task_id: "1".to_string(),
+                title: "test".to_string(),
+            },
+            PipeEvent::FileCreated {
+                path: "x.rs".to_string(),
+            },
+            PipeEvent::FileModified {
+                path: "y.rs".to_string(),
+            },
+            PipeEvent::CommandRan {
+                command: "ls".to_string(),
+                success: Some(true),
+            },
+            PipeEvent::TestRan {
+                passed: true,
+                detail: "ok".to_string(),
+            },
+            PipeEvent::PromptDetected {
+                prompt: "y/n".to_string(),
+            },
+            PipeEvent::TaskCompleted {
+                task_id: "1".to_string(),
+            },
+            PipeEvent::CommitMade {
+                hash: "abc".to_string(),
+                message: "fix".to_string(),
+            },
+            PipeEvent::OutputLine {
+                line: "hi".to_string(),
+            },
         ];
 
         for event in events {

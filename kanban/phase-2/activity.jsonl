@@ -1,4 +1,40 @@
-{"timestamp":"2026-02-21T18:40:33.967489105-05:00","action":"create","task_id":1,"detail":"batty work all — sequential board runner"}
-{"timestamp":"2026-02-21T18:40:33.990939993-05:00","action":"create","task_id":2,"detail":"Board state reader and task picker"}
-{"timestamp":"2026-02-21T18:40:34.014710613-05:00","action":"create","task_id":3,"detail":"Stop conditions and error handling"}
-{"timestamp":"2026-02-21T18:40:34.038332493-05:00","action":"create","task_id":4,"detail":"batty work all exit criteria"}
+{"timestamp":"2026-02-21T20:25:05.990573186-05:00","action":"claim","task_id":1,"detail":"zinc-ivory"}
+{"timestamp":"2026-02-21T20:25:05.991145796-05:00","action":"move","task_id":1,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T20:27:32.591263721-05:00","action":"edit","task_id":1,"detail":"tmux session lifecycle"}
+{"timestamp":"2026-02-21T20:27:38.348864002-05:00","action":"move","task_id":1,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T20:27:50.760657301-05:00","action":"claim","task_id":2,"detail":"zinc-ivory"}
+{"timestamp":"2026-02-21T20:27:50.76083182-05:00","action":"move","task_id":2,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T20:30:08.343383155-05:00","action":"edit","task_id":2,"detail":"Event extraction from piped output"}
+{"timestamp":"2026-02-21T20:30:08.368065431-05:00","action":"move","task_id":2,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T20:30:20.007228326-05:00","action":"claim","task_id":3,"detail":"zinc-ivory"}
+{"timestamp":"2026-02-21T20:30:20.007325038-05:00","action":"move","task_id":3,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T20:32:12.758983607-05:00","action":"edit","task_id":3,"detail":"Prompt detection heuristic"}
+{"timestamp":"2026-02-21T20:32:12.784327147-05:00","action":"move","task_id":3,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T20:32:26.017889207-05:00","action":"claim","task_id":4,"detail":"zinc-ivory"}
+{"timestamp":"2026-02-21T20:32:26.018050331-05:00","action":"move","task_id":4,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T20:34:39.161833393-05:00","action":"edit","task_id":4,"detail":"Tier 1: regex auto-answer via send-keys"}
+{"timestamp":"2026-02-21T20:34:39.185845377-05:00","action":"move","task_id":4,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T20:34:54.816357202-05:00","action":"claim","task_id":5,"detail":"zinc-ivory"}
+{"timestamp":"2026-02-21T20:34:54.816514496-05:00","action":"move","task_id":5,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T20:38:12.463463835-05:00","action":"edit","task_id":5,"detail":"Tier 2: on-demand supervisor agent"}
+{"timestamp":"2026-02-21T20:38:12.490257943-05:00","action":"move","task_id":5,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T20:38:26.914031466-05:00","action":"claim","task_id":7,"detail":"zinc-ivory"}
+{"timestamp":"2026-02-21T20:38:26.914205134-05:00","action":"move","task_id":7,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T20:42:58.354045569-05:00","action":"edit","task_id":7,"detail":"Batty orchestrator log pane"}
+{"timestamp":"2026-02-21T20:43:03.398371894-05:00","action":"move","task_id":7,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T20:43:14.211610581-05:00","action":"claim","task_id":6,"detail":"zinc-ivory"}
+{"timestamp":"2026-02-21T20:43:14.211775142-05:00","action":"move","task_id":6,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T20:46:17.40259721-05:00","action":"edit","task_id":6,"detail":"tmux status bar integration"}
+{"timestamp":"2026-02-21T20:46:20.03573941-05:00","action":"move","task_id":6,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T20:46:30.970897537-05:00","action":"claim","task_id":8,"detail":"zinc-ivory"}
+{"timestamp":"2026-02-21T20:46:30.971036268-05:00","action":"move","task_id":8,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T20:49:12.513751592-05:00","action":"edit","task_id":8,"detail":"Stuck detection and recovery"}
+{"timestamp":"2026-02-21T20:49:15.649726972-05:00","action":"move","task_id":8,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T20:49:26.893514922-05:00","action":"claim","task_id":9,"detail":"zinc-ivory"}
+{"timestamp":"2026-02-21T20:49:26.893632925-05:00","action":"move","task_id":9,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T20:52:06.881220746-05:00","action":"edit","task_id":9,"detail":"Human override protocol"}
+{"timestamp":"2026-02-21T20:52:10.058219449-05:00","action":"move","task_id":9,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T20:52:21.705334082-05:00","action":"claim","task_id":10,"detail":"zinc-ivory"}
+{"timestamp":"2026-02-21T20:52:21.705469207-05:00","action":"move","task_id":10,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T20:54:40.699044382-05:00","action":"edit","task_id":10,"detail":"Phase 2 exit criteria"}
+{"timestamp":"2026-02-21T20:54:44.006415754-05:00","action":"move","task_id":10,"detail":"in-progress -\u003e done"}

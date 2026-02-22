@@ -7,13 +7,16 @@
 //! a structured execution log.
 
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use portable_pty::PtySize;
-use tracing::info;
+use tracing::{info, warn};
+
+#[path = "worktree.rs"]
+mod phase_worktree;
 
 use crate::agent;
 use crate::config::ProjectConfig;
@@ -25,6 +28,7 @@ use crate::orchestrator::{
 use crate::policy::PolicyEngine;
 use crate::task;
 use crate::tier2::Tier2Config;
+use phase_worktree::{CleanupDecision, RunOutcome};
 
 /// Run the full work pipeline for a phase.
 pub fn run_phase(
@@ -32,21 +36,37 @@ pub fn run_phase(
     project_config: &ProjectConfig,
     agent_name: &str,
     policy_override: Option<&str>,
+    auto_attach: bool,
     project_root: &Path,
 ) -> Result<()> {
-    // 1. Locate the phase board
-    let phase_dir = project_root.join("kanban").join(phase);
-    let tasks_dir = phase_dir.join("tasks");
+    // 1. Validate the phase board exists before creating an isolated worktree.
+    let source_phase_dir = project_root.join("kanban").join(phase);
+    let source_tasks_dir = source_phase_dir.join("tasks");
 
-    if !tasks_dir.is_dir() {
+    if !source_tasks_dir.is_dir() {
         bail!(
             "phase board not found: {} (expected {})",
             phase,
-            tasks_dir.display()
+            source_tasks_dir.display()
         );
     }
 
-    // 2. Load tasks for context
+    // 2. Create worktree for this run (earliest isolation boundary).
+    let phase_worktree = phase_worktree::prepare_phase_worktree(project_root, phase)
+        .with_context(|| format!("failed to create isolated worktree for phase '{phase}'"))?;
+    let execution_root = phase_worktree.path.clone();
+
+    info!(
+        phase = phase,
+        branch = %phase_worktree.branch,
+        base_branch = %phase_worktree.base_branch,
+        worktree = %execution_root.display(),
+        "phase worktree prepared"
+    );
+
+    // 3. Load tasks for context from the isolated worktree.
+    let phase_dir = execution_root.join("kanban").join(phase);
+    let tasks_dir = phase_dir.join("tasks");
     let tasks = task::load_tasks_from_dir(&tasks_dir)
         .with_context(|| format!("failed to load tasks from {}", tasks_dir.display()))?;
 
@@ -56,7 +76,7 @@ pub fn run_phase(
         "loaded phase board"
     );
 
-    // 3. Set up execution log
+    // 4. Set up execution log
     let log_dir = project_root.join(".batty").join("logs");
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -71,6 +91,12 @@ pub fn run_phase(
     execution_log.log(LogEvent::SessionStarted {
         phase: phase.to_string(),
     })?;
+    execution_log.log(LogEvent::PhaseWorktreeCreated {
+        phase: phase.to_string(),
+        path: execution_root.display().to_string(),
+        branch: phase_worktree.branch.clone(),
+        base_branch: phase_worktree.base_branch.clone(),
+    })?;
 
     // Log all tasks
     for t in &tasks {
@@ -81,11 +107,11 @@ pub fn run_phase(
         })?;
     }
 
-    // 4. Resolve agent adapter
+    // 5. Resolve agent adapter
     let adapter = agent::adapter_from_name(agent_name)
         .with_context(|| format!("unknown agent: {agent_name}"))?;
 
-    // 5. Resolve policy
+    // 6. Resolve policy
     let policy_tier = match policy_override {
         Some("observe") => crate::config::Policy::Observe,
         Some("suggest") => crate::config::Policy::Suggest,
@@ -96,11 +122,11 @@ pub fn run_phase(
 
     let policy_engine = PolicyEngine::new(policy_tier, project_config.policy.auto_answer.clone());
 
-    // 6. Build the phase prompt for the agent
-    let prompt = build_phase_prompt(phase, &tasks, project_root);
+    // 7. Build the phase prompt for the agent
+    let prompt = build_phase_prompt(phase, &tasks, &execution_root);
 
-    // 7. Get spawn config from adapter
-    let spawn_config = adapter.spawn_config(&prompt, project_root);
+    // 8. Get spawn config from adapter
+    let spawn_config = adapter.spawn_config(&prompt, &execution_root);
 
     execution_log.log(LogEvent::AgentLaunched {
         agent: adapter.name().to_string(),
@@ -108,34 +134,46 @@ pub fn run_phase(
         work_dir: spawn_config.work_dir.clone(),
     })?;
 
-    // 8. Build orchestrator config
+    // 9. Build orchestrator config
     let orch_log = log_dir.join("orchestrator.log");
     let observer = LogFileObserver::new(&orch_log)?;
 
     // Load project docs for Tier 2 supervisor context
-    let system_prompt = crate::tier2::load_project_docs(project_root);
-    let tier2_config = Tier2Config {
-        system_prompt: Some(system_prompt),
-        ..Tier2Config::default()
+    let tier2_config = if project_config.supervisor.enabled {
+        let system_prompt = crate::tier2::load_project_docs(&execution_root);
+        Some(Tier2Config {
+            program: project_config.supervisor.program.clone(),
+            args: project_config.supervisor.args.clone(),
+            timeout: Duration::from_secs(project_config.supervisor.timeout_secs),
+            system_prompt: Some(system_prompt),
+            trace_io: project_config.supervisor.trace_io,
+        })
+    } else {
+        None
     };
 
     let config = OrchestratorConfig {
         spawn: spawn_config,
         patterns: adapter.prompt_patterns(),
         policy: policy_engine,
-        detector: DetectorConfig::default(),
+        detector: DetectorConfig {
+            silence_timeout: Duration::from_secs(project_config.detector.silence_timeout_secs),
+            answer_cooldown: Duration::from_millis(project_config.detector.answer_cooldown_millis),
+            unknown_request_fallback: project_config.detector.unknown_request_fallback,
+        },
         phase: phase.to_string(),
         project_root: project_root.to_path_buf(),
         poll_interval: OrchestratorConfig::default_poll_interval(),
         buffer_size: OrchestratorConfig::default_buffer_size(),
-        tier2: Some(tier2_config),
+        tier2: tier2_config,
         log_pane: true,
         log_pane_height_pct: 20,
         stuck: Some(StuckConfig::default()),
         answer_delay: Duration::from_secs(1),
+        auto_attach,
     };
 
-    // 9. Set up stop signal (for Ctrl-C handling)
+    // 10. Set up stop signal (for Ctrl-C handling)
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = stop.clone();
     ctrlc::set_handler(move || {
@@ -143,7 +181,7 @@ pub fn run_phase(
     })
     .ok(); // best-effort — may fail if handler already set
 
-    // 10. Run the orchestrator
+    // 11. Run the orchestrator
     info!(
         agent = adapter.name(),
         phase = phase,
@@ -156,13 +194,23 @@ pub fn run_phase(
         phase, session
     );
     println!(
-        "\x1b[36m[batty]\x1b[0m attach with: batty attach {}",
-        phase
+        "\x1b[36m[batty]\x1b[0m worktree: {} ({})",
+        execution_root.display(),
+        phase_worktree.branch
     );
+    if !auto_attach {
+        println!("\x1b[36m[batty]\x1b[0m attach with: batty attach {}", phase);
+    }
 
-    let result = orchestrator::run(config, Box::new(observer), stop)?;
+    let result = match orchestrator::run(config, Box::new(observer), stop) {
+        Ok(result) => result,
+        Err(e) => {
+            handle_worktree_finalize(phase, &execution_log, &phase_worktree, RunOutcome::Failed);
+            return Err(e);
+        }
+    };
 
-    // 11. Log the result
+    // 12. Log the result
     match &result {
         OrchestratorResult::Completed => {
             execution_log.log(LogEvent::RunCompleted {
@@ -184,6 +232,12 @@ pub fn run_phase(
         }
     }
 
+    let run_outcome = match &result {
+        OrchestratorResult::Completed => RunOutcome::Completed,
+        OrchestratorResult::Detached | OrchestratorResult::Error { .. } => RunOutcome::Failed,
+    };
+    handle_worktree_finalize(phase, &execution_log, &phase_worktree, run_outcome);
+
     execution_log.log(LogEvent::SessionEnded {
         result: format!("{result:?}"),
     })?;
@@ -194,6 +248,67 @@ pub fn run_phase(
     );
 
     Ok(())
+}
+
+fn handle_worktree_finalize(
+    phase: &str,
+    execution_log: &ExecutionLog,
+    phase_worktree: &phase_worktree::PhaseWorktree,
+    outcome: RunOutcome,
+) {
+    match phase_worktree.finalize(outcome) {
+        Ok(CleanupDecision::Cleaned) => {
+            if let Err(e) = execution_log.log(LogEvent::PhaseWorktreeCleaned {
+                phase: phase.to_string(),
+                path: phase_worktree.path.display().to_string(),
+                branch: phase_worktree.branch.clone(),
+            }) {
+                warn!(error = %e, "failed to log worktree cleanup");
+            }
+            info!(
+                phase = phase,
+                branch = %phase_worktree.branch,
+                "worktree cleaned after successful merge"
+            );
+        }
+        Ok(CleanupDecision::KeptForReview) => {
+            if let Err(e) = execution_log.log(LogEvent::PhaseWorktreeRetained {
+                phase: phase.to_string(),
+                path: phase_worktree.path.display().to_string(),
+                branch: phase_worktree.branch.clone(),
+                reason: "run completed but branch is not merged yet".to_string(),
+            }) {
+                warn!(error = %e, "failed to log retained worktree");
+            }
+            println!(
+                "\x1b[36m[batty]\x1b[0m retained worktree for review: {} ({})",
+                phase_worktree.path.display(),
+                phase_worktree.branch
+            );
+        }
+        Ok(CleanupDecision::KeptForFailure) => {
+            if let Err(e) = execution_log.log(LogEvent::PhaseWorktreeRetained {
+                phase: phase.to_string(),
+                path: phase_worktree.path.display().to_string(),
+                branch: phase_worktree.branch.clone(),
+                reason: "run failed/detached".to_string(),
+            }) {
+                warn!(error = %e, "failed to log retained failure worktree");
+            }
+            println!(
+                "\x1b[36m[batty]\x1b[0m retained failed worktree: {} ({})",
+                phase_worktree.path.display(),
+                phase_worktree.branch
+            );
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                branch = %phase_worktree.branch,
+                "failed to finalize phase worktree"
+            );
+        }
+    }
 }
 
 /// Build a prompt describing the phase context for the agent.
@@ -353,7 +468,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let config = ProjectConfig::default();
 
-        let result = run_phase("nonexistent", &config, "claude", None, tmp.path());
+        let result = run_phase("nonexistent", &config, "claude", None, false, tmp.path());
         assert!(result.is_err());
         assert!(
             result
