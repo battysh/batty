@@ -11,6 +11,8 @@ mod orchestrator;
 mod paths;
 mod policy;
 mod prompt;
+mod review;
+mod sequencer;
 mod supervisor;
 mod task;
 mod tier2;
@@ -264,7 +266,10 @@ fn phase_sort_key(name: &str) -> Option<f64> {
         return Some(n);
     }
     // Try parsing just the leading digits (e.g. "3b" → 3.0)
-    let digits: String = after_phase.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = after_phase
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     if !digits.is_empty() {
         return digits.parse::<f64>().ok();
     }
@@ -285,10 +290,7 @@ fn derive_phase_status(tasks: &[task::Task]) -> &'static str {
 
     let total = tasks.len();
     let done = tasks.iter().filter(|t| t.status == "done").count();
-    let in_progress = tasks
-        .iter()
-        .filter(|t| t.status == "in-progress")
-        .count();
+    let in_progress = tasks.iter().filter(|t| t.status == "in-progress").count();
 
     if done == total {
         "Done"
@@ -305,14 +307,23 @@ fn derive_phase_status(tasks: &[task::Task]) -> &'static str {
 /// Read the git branch name for a worktree directory, if available.
 fn worktree_branch(worktree_dir: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
-        .args(["-C", &worktree_dir.to_string_lossy(), "branch", "--show-current"])
+        .args([
+            "-C",
+            &worktree_dir.to_string_lossy(),
+            "branch",
+            "--show-current",
+        ])
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if branch.is_empty() { None } else { Some(branch) }
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
 }
 
 /// Read the last commit summary (short hash + subject) for a worktree directory.
@@ -359,7 +370,10 @@ impl TaskCounts {
             match task::load_tasks_from_dir(tasks_dir) {
                 Ok(tasks) => {
                     let done = tasks.iter().filter(|t| t.status == "done").count();
-                    Self { done, total: tasks.len() }
+                    Self {
+                        done,
+                        total: tasks.len(),
+                    }
                 }
                 Err(_) => Self { done: 0, total: 0 },
             }
@@ -582,7 +596,8 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    let cwd = std::env::current_dir().context("failed to get current directory (was it deleted?)")?;
+    let cwd =
+        std::env::current_dir().context("failed to get current directory (was it deleted?)")?;
     let (config, config_path) = ProjectConfig::load(&cwd)?;
 
     if !is_config_command || cli.verbose > 0 {
@@ -606,10 +621,8 @@ async fn main() -> Result<()> {
         } => {
             // Detached mode: spawn a background batty worker and return immediately.
             // The worker runs with --foreground to avoid recursive spawning.
-            if !attach && !foreground && !dry_run {
-                let tasks_dir = paths::resolve_kanban_root(&cwd)
-                    .join(&target)
-                    .join("tasks");
+            if target != "all" && !attach && !foreground && !dry_run {
+                let tasks_dir = paths::resolve_kanban_root(&cwd).join(&target).join("tasks");
                 if !tasks_dir.is_dir() {
                     anyhow::bail!(
                         "phase board not found: {} (expected {})",
@@ -669,18 +682,38 @@ async fn main() -> Result<()> {
             let agent_name = agent.as_deref().unwrap_or(&config.defaults.agent);
             let policy_str = policy.as_deref();
 
-            work::run_phase(
-                &target,
-                &config,
-                agent_name,
-                policy_str,
-                attach,
-                worktree,
-                new,
-                dry_run,
-                &cwd,
-                config_path.as_deref(),
-            )?;
+            if target == "all" {
+                if parallel != 1 {
+                    anyhow::bail!(
+                        "`batty work all --parallel` is planned for phase 4; use --parallel 1 for now"
+                    );
+                }
+
+                work::run_all_phases(
+                    &config,
+                    agent_name,
+                    policy_str,
+                    attach,
+                    worktree,
+                    new,
+                    dry_run,
+                    &cwd,
+                    config_path.as_deref(),
+                )?;
+            } else {
+                work::run_phase(
+                    &target,
+                    &config,
+                    agent_name,
+                    policy_str,
+                    attach,
+                    worktree,
+                    new,
+                    dry_run,
+                    &cwd,
+                    config_path.as_deref(),
+                )?;
+            }
         }
         Command::Attach { target } => {
             let session = tmux::session_name(&target);
@@ -763,7 +796,9 @@ async fn main() -> Result<()> {
             if summary.kanban_skills_removed {
                 println!("  kanban-md skills: removed");
             } else {
-                println!("  kanban-md skills: skipped (kanban-md not available or skills not present)");
+                println!(
+                    "  kanban-md skills: skipped (kanban-md not available or skills not present)"
+                );
             }
 
             if summary.gitignore_entries_removed.is_empty() {
@@ -1078,8 +1113,14 @@ mod tests {
 
         // phase-3 worktree line: indented, shows Done 2/2
         let wt_line = lines[3];
-        assert!(wt_line.contains("Done"), "expected worktree Done, got: {wt_line}");
-        assert!(wt_line.contains("2/2"), "expected worktree 2/2, got: {wt_line}");
+        assert!(
+            wt_line.contains("Done"),
+            "expected worktree Done, got: {wt_line}"
+        );
+        assert!(
+            wt_line.contains("2/2"),
+            "expected worktree 2/2, got: {wt_line}"
+        );
 
         // Summary uses effective (worktree) status: both boards "Done"
         assert!(output.contains("2 done"));
