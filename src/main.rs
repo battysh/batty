@@ -189,6 +189,10 @@ fn render_config_human(config: &ProjectConfig, config_path: Option<&Path>) -> St
     );
     output.push('\n');
 
+    output.push_str("Dangerous Mode\n");
+    push_kv(&mut output, "enabled", config.dangerous_mode.enabled);
+    output.push('\n');
+
     output.push_str("Policy Auto Answers\n");
     let mut auto_answers: Vec<_> = config.policy.auto_answer.iter().collect();
     auto_answers.sort_by(|a, b| a.0.cmp(b.0));
@@ -234,6 +238,9 @@ fn render_config_json(config: &ProjectConfig, config_path: Option<&Path>) -> Res
             "answer_cooldown_millis": config.detector.answer_cooldown_millis,
             "unknown_request_fallback": config.detector.unknown_request_fallback,
             "idle_input_fallback": config.detector.idle_input_fallback
+        },
+        "dangerous_mode": {
+            "enabled": config.dangerous_mode.enabled
         },
         "policy": {
             "auto_answer": auto_answer
@@ -471,6 +478,7 @@ mod tests {
 
         assert!(rendered.contains("Defaults"));
         assert!(rendered.contains("Supervisor"));
+        assert!(rendered.contains("Dangerous Mode"));
         assert!(rendered.contains("Source Path"));
         assert!(rendered.contains("args"));
         assert!(rendered.contains("-p, --output-format, text"));
@@ -486,6 +494,7 @@ mod tests {
         assert_eq!(value["defaults"]["agent"], "claude");
         assert_eq!(value["defaults"]["policy"], "observe");
         assert!(value["supervisor"]["args"].is_array());
+        assert_eq!(value["dangerous_mode"]["enabled"], false);
         assert_eq!(
             value["source_path"],
             "(defaults — no .batty/config.toml found)"

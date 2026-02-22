@@ -208,12 +208,21 @@ fn preview_for_log(text: &str, max_chars: usize) -> String {
     }
 }
 
-fn supervisor_cmd_for_log(config: &Tier2Config) -> String {
-    if config.args.is_empty() {
-        config.program.clone()
-    } else {
-        format!("{} {}", config.program, config.args.join(" "))
+fn command_for_log(program: &str, args: &[String]) -> String {
+    if args.is_empty() {
+        return program.to_string();
     }
+
+    let rendered_args = args
+        .iter()
+        .map(|arg| preview_for_log(arg, 80))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{program} {rendered_args}")
+}
+
+fn supervisor_cmd_for_log(config: &Tier2Config) -> String {
+    command_for_log(&config.program, &config.args)
 }
 
 fn is_ui_noise_line(line: &str) -> bool {
@@ -1106,6 +1115,16 @@ fn run_with_mode(
 
     info!(session = %session, "orchestrator loop starting");
     observer.on_event("● supervising");
+    observer.on_event(&format!(
+        "● executor command: {}",
+        command_for_log(&config.spawn.program, &config.spawn.args)
+    ));
+    if let Some(t2) = config.tier2.as_ref() {
+        observer.on_event(&format!(
+            "● supervisor command: {}",
+            supervisor_cmd_for_log(t2)
+        ));
+    }
     status_bar.update(StatusIndicator::Ok, "supervising")?;
 
     // 6.5 Resume state rebuild from persisted logs + current pane output.

@@ -93,9 +93,25 @@ answer_cooldown_millis = 1000
 unknown_request_fallback = true
 idle_input_fallback = true
 
+[dangerous_mode]
+enabled = false
+
 [policy.auto_answer]
 "Continue? [y/n]" = "y"
 ```
+
+To force dangerous-mode flags for both executor and supervisor commands, set:
+
+```toml
+[dangerous_mode]
+enabled = true
+```
+
+When enabled, Batty prepends:
+- `--dangerously-skip-permissions` for `claude`
+- `--dangerously-bypass-approvals-and-sandbox` for `codex`
+
+Batty logs effective executor/supervisor launch commands in the orchestrator log pane so you can verify the final program/args used at runtime.
 
 Reconnect to an existing session:
 
