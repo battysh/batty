@@ -402,12 +402,11 @@ impl StatusBar {
         force: bool,
     ) -> Result<()> {
         // Debounce check
-        if !force {
-            if let Some(last) = self.last_update {
-                if last.elapsed() < self.min_interval {
-                    return Ok(());
-                }
-            }
+        if !force
+            && let Some(last) = self.last_update
+            && last.elapsed() < self.min_interval
+        {
+            return Ok(());
         }
 
         let left = format!(
@@ -779,10 +778,11 @@ fn detect_log_pane(session: &str) -> Option<String> {
 }
 
 fn resolve_executor_pane(session: &str, state: Option<&SupervisionState>) -> Result<String> {
-    if let Some(saved) = state {
-        if tmux::pane_exists(&saved.executor_pane) && !tmux::pane_dead(&saved.executor_pane)? {
-            return Ok(saved.executor_pane.clone());
-        }
+    if let Some(saved) = state
+        && tmux::pane_exists(&saved.executor_pane)
+        && !tmux::pane_dead(&saved.executor_pane)?
+    {
+        return Ok(saved.executor_pane.clone());
     }
 
     let panes = tmux::list_pane_details(session)?;
@@ -1157,27 +1157,27 @@ fn run_with_mode(
 
         // Also check capture-pane for the most current visible content
         // This catches prompts that pipe-pane hasn't flushed yet
-        if let Ok(pane_content) = tmux::capture_pane(&executor_pane) {
-            if let Some((signature, detector_line)) = pane_detector_snapshot(&pane_content) {
-                // Only treat as new output when meaningful pane content changes.
-                if signature != last_pane_signature {
-                    last_pane_signature = signature;
-                    let event = detector.on_output(&detector_line);
-                    if let Some(DetectorEvent::PromptDetected(ref prompt)) = event {
-                        handle_prompt(
-                            prompt,
-                            &executor_pane,
-                            &config.policy,
-                            &mut detector,
-                            &mut *observer,
-                            config.tier2.as_ref(),
-                            &buffer,
-                            &mut status_bar,
-                            config.answer_delay,
-                        )?;
-                        if matches!(mode, StartMode::Resume) {
-                            last_handled_pane_signature = last_pane_signature.clone();
-                        }
+        if let Ok(pane_content) = tmux::capture_pane(&executor_pane)
+            && let Some((signature, detector_line)) = pane_detector_snapshot(&pane_content)
+        {
+            // Only treat as new output when meaningful pane content changes.
+            if signature != last_pane_signature {
+                last_pane_signature = signature;
+                let event = detector.on_output(&detector_line);
+                if let Some(DetectorEvent::PromptDetected(ref prompt)) = event {
+                    handle_prompt(
+                        prompt,
+                        &executor_pane,
+                        &config.policy,
+                        &mut detector,
+                        &mut *observer,
+                        config.tier2.as_ref(),
+                        &buffer,
+                        &mut status_bar,
+                        config.answer_delay,
+                    )?;
+                    if matches!(mode, StartMode::Resume) {
+                        last_handled_pane_signature = last_pane_signature.clone();
                     }
                 }
             }
@@ -1286,7 +1286,7 @@ fn run_with_mode(
                 StuckAction::None => {}
                 StuckAction::Nudge { ref message } => {
                     warn!(state = ?state, "executor may be stuck, nudging");
-                    observer.on_event(&format!("⚠ stuck: nudging executor"));
+                    observer.on_event("⚠ stuck: nudging executor");
                     status_bar.force_update(StatusIndicator::Failure, "stuck — nudging")?;
 
                     if let Err(e) = tmux::send_keys(&executor_pane, message, true) {
@@ -1351,7 +1351,7 @@ fn setup_log_pane(
 
     match split_mode {
         tmux::SplitMode::Lines => {
-            let lines = std::cmp::max(3, (50 * height_pct / 100) as u32);
+            let lines = std::cmp::max(3, 50 * height_pct / 100);
             if let Err(e) = tmux::split_window_vertical_lines(session, lines, &tail_cmd) {
                 warn!(error = %e, "log pane creation with -l failed — continuing without it");
                 return Ok(());
@@ -1391,10 +1391,10 @@ fn check_human_answered(executor_pane: &str, prompt_text: &str) -> bool {
             let last_normalized = normalize_input_line_prefix(last_trimmed);
 
             // For synthetic idle-input prompts, ignore the unchanged input line.
-            if let Some(pending) = extract_pending_input_from_supervisor_prompt(prompt_text) {
-                if last_normalized == pending {
-                    return false;
-                }
+            if let Some(pending) = extract_pending_input_from_supervisor_prompt(prompt_text)
+                && last_normalized == pending
+            {
+                return false;
             }
 
             // If the last line changed from the prompt, someone typed
@@ -1438,6 +1438,7 @@ fn wait_with_human_check(
 ///
 /// Human override: if the human types during the answer delay or while Tier 2 is
 /// thinking, the auto-answer is cancelled.
+#[allow(clippy::too_many_arguments)] // Orchestrator wiring passes explicit context parts to keep call-site intent readable.
 fn handle_prompt(
     prompt: &crate::prompt::DetectedPrompt,
     executor_pane: &str,

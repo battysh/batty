@@ -138,6 +138,24 @@ batty install --dir /tmp/demo      # explicit destination
 - `.batty/skills/claude/SKILL.md`
 - `.batty/skills/codex/SKILL.md`
 
+Lint workflow (stable command names):
+
+```sh
+make lint      # fmt check + strict clippy
+make lint-fix  # fmt + clippy --fix for local cleanup
+```
+
+Expanded commands used by the aliases:
+
+```sh
+cargo fmt -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo fmt
+cargo clippy --fix --allow-dirty --allow-staged
+```
+
+CI runs the strict lint checks on every pull request and blocks merges on failures.
+
 ### Minimal Command
 
 ```sh
