@@ -2,6 +2,7 @@ mod agent;
 mod cli;
 mod config;
 mod dod;
+mod events;
 mod log;
 mod policy;
 mod prompt;
