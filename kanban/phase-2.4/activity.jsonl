@@ -1,2 +1,31 @@
 {"timestamp":"2026-02-21T22:04:26.707196615-05:00","action":"claim","task_id":1,"detail":"vine-fawn"}
 {"timestamp":"2026-02-21T22:04:26.707290411-05:00","action":"move","task_id":1,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T22:13:15.26888241-05:00","action":"edit","task_id":1,"detail":"Harness architecture and contract"}
+{"timestamp":"2026-02-21T22:13:19.252157905-05:00","action":"move","task_id":1,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T22:13:33.196502293-05:00","action":"move","task_id":2,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T22:13:33.219109545-05:00","action":"edit","task_id":2,"detail":"Deterministic mock executor fixture"}
+{"timestamp":"2026-02-21T22:13:33.242469983-05:00","action":"move","task_id":2,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T22:13:33.265297842-05:00","action":"move","task_id":3,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T22:13:33.289244497-05:00","action":"edit","task_id":3,"detail":"Deterministic mock supervisor fixture"}
+{"timestamp":"2026-02-21T22:13:33.312704708-05:00","action":"move","task_id":3,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T22:13:33.334192232-05:00","action":"move","task_id":4,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T22:13:33.36759283-05:00","action":"edit","task_id":4,"detail":"tmux pane invariants and persistence assertions"}
+{"timestamp":"2026-02-21T22:13:33.389972289-05:00","action":"move","task_id":4,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T22:13:33.413845926-05:00","action":"move","task_id":5,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T22:13:33.435867509-05:00","action":"edit","task_id":5,"detail":"Mock scenario matrix in real tmux"}
+{"timestamp":"2026-02-21T22:13:33.456546797-05:00","action":"move","task_id":5,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T22:13:46.826644064-05:00","action":"move","task_id":6,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T22:13:46.847212581-05:00","action":"edit","task_id":6,"detail":"Real supervisor (Claude) with mocked executor"}
+{"timestamp":"2026-02-21T22:13:46.869558748-05:00","action":"move","task_id":6,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T22:13:46.892598106-05:00","action":"move","task_id":7,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T22:13:46.915733354-05:00","action":"edit","task_id":7,"detail":"Real supervisor (Codex) with mocked executor"}
+{"timestamp":"2026-02-21T22:13:46.938940941-05:00","action":"move","task_id":7,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T22:13:46.962742025-05:00","action":"move","task_id":8,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T22:13:46.985955519-05:00","action":"edit","task_id":8,"detail":"Real executor+supervisor smoke (Claude pair)"}
+{"timestamp":"2026-02-21T22:13:47.006963934-05:00","action":"move","task_id":8,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T22:13:47.029022611-05:00","action":"move","task_id":9,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T22:13:47.049454752-05:00","action":"edit","task_id":9,"detail":"Real executor+supervisor smoke (Codex pair)"}
+{"timestamp":"2026-02-21T22:13:47.070969317-05:00","action":"move","task_id":9,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-21T22:13:54.101680833-05:00","action":"move","task_id":10,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-21T22:13:54.122967492-05:00","action":"edit","task_id":10,"detail":"Testing prompt catalog and runbook"}
+{"timestamp":"2026-02-21T22:13:54.14574019-05:00","action":"move","task_id":10,"detail":"in-progress -\u003e done"}

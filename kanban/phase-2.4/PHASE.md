@@ -38,3 +38,8 @@ Recent runs exposed fragile behavior around Tier 2 supervisor interfacing, pane 
 - Real executor+supervisor smoke tests are available and documented via opt-in env flags.
 - Prompt catalog and runbook are published with expected outcomes.
 - Phase 2.5 explicitly depends on completion of this validation phase.
+
+## References
+
+- Contract: `planning/supervision-harness-contract.toml`
+- Runbook: `planning/phase-2.4-harness-runbook.md`
