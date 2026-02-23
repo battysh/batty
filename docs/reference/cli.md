@@ -14,16 +14,17 @@ Hierarchical agent command system for software development
 Usage: batty [OPTIONS] <COMMAND>
 
 Commands:
-  work        Execute a task or work through the board
-  attach      Attach to a running batty tmux session
-  resume      Resume supervision for an existing phase/session run
-  config      Show project configuration
-  completions Generate shell completions
-  install     Initialize Batty assets and required external tools
-  remove      Remove installed Batty assets from a project
-  board       Open kanban-md TUI for a phase (prefers active run worktree)
-  board-list  List all phase boards with status and task counts
-  help        Print this message or the help of the given subcommand(s)
+  work         Execute a task or work through the board
+  attach       Attach to a running batty tmux session
+  resume       Resume supervision for an existing phase/session run
+  config       Show project configuration
+  completions  Generate shell completions
+  install      Initialize Batty assets and required external tools
+  remove       Remove installed Batty assets from a project
+  board        Open kanban-md TUI for a phase (prefers active run worktree)
+  merge        Launch Claude to commit, rebase, and merge a worktree run into main
+  list         List all phase boards with status and task counts
+  help         Print this message or the help of the given subcommand(s)
 
 Options:
   -v, --verbose...
@@ -81,14 +82,20 @@ Options:
           Print help
 ```
 
-## `batty board-list`
+## `batty completions`
 
-List all phase boards with status and task counts
+Generate shell completions
 
 ```text
-List all phase boards with status and task counts
+Generate shell completions
 
-Usage: batty board-list [OPTIONS]
+Usage: batty completions [OPTIONS] <SHELL>
+
+Arguments:
+  <SHELL>
+          Shell to generate completion script for
+          
+          [possible values: bash, zsh, fish]
 
 Options:
   -v, --verbose...
@@ -118,29 +125,6 @@ Options:
           Print help
 ```
 
-## `batty completions`
-
-Generate shell completions
-
-```text
-Generate shell completions
-
-Usage: batty completions [OPTIONS] <SHELL>
-
-Arguments:
-  <SHELL>
-          Shell to generate completion script for
-
-          [possible values: bash, zsh, fish]
-
-Options:
-  -v, --verbose...
-          Verbosity level (-v, -vv, -vvv)
-
-  -h, --help
-          Print help
-```
-
 ## `batty install`
 
 Initialize Batty assets and required external tools
@@ -162,6 +146,55 @@ Options:
           
           [default: .]
 
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty list`
+
+List all phase boards with status and task counts
+
+```text
+List all phase boards with status and task counts
+
+Usage: batty list [OPTIONS]
+
+Options:
+      --watch
+          Continuously refresh the board listing
+
+      --interval <INTERVAL>
+          Refresh interval in seconds (used with --watch)
+          
+          [default: 2]
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty merge`
+
+Launch Claude to commit, rebase, and merge a worktree run into main
+
+```text
+Launch Claude to commit, rebase, and merge a worktree run into main
+
+Usage: batty merge [OPTIONS] <PHASE> <RUN>
+
+Arguments:
+  <PHASE>
+          Phase name (e.g., "phase-2.7")
+
+  <RUN>
+          Run identifier (e.g., "run-002" or just "002")
+
+Options:
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 
@@ -261,3 +294,4 @@ Options:
   -h, --help
           Print help
 ```
+

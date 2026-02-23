@@ -38,7 +38,7 @@ planning/          # Architecture, roadmap, philosophy docs
     docs-update/   # NEXT: Documentation Sync
     phase-3/       # DONE: 3A Sequencer + Human Review Gate
     phase-3b/      # DONE: 3B AI Director Review
-    phase-4/       # PLANNED: Parallel Agents, DAG Scheduler, Ship
+    phase-4/       # DONE: Parallel DAG Scheduler, Merge Queue, Ship
 ```
 
 ## Development Principles
@@ -80,3 +80,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 - `batty config [--json]`: show resolved configuration
 - `batty install [--target both|claude|codex] [--dir PATH]`: install project assets
 - `batty remove [--target both|claude|codex] [--dir PATH]`: remove installed project assets
+- `batty merge <phase> <run>`: merge a worktree run back into main
+- `batty work all`: run all phases in sequence
+- `batty work <phase> --parallel N`: run with N parallel agents
