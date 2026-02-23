@@ -1,0 +1,31 @@
+{"timestamp":"2026-02-22T15:47:01.817258994-05:00","action":"claim","task_id":1,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T15:47:01.817646563-05:00","action":"move","task_id":1,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T15:51:40.661597816-05:00","action":"edit","task_id":1,"detail":"Director review agent"}
+{"timestamp":"2026-02-22T15:51:45.322603663-05:00","action":"move","task_id":1,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T15:51:45.355307902-05:00","action":"edit","task_id":1,"detail":"Director review agent"}
+{"timestamp":"2026-02-22T15:51:45.355443807-05:00","action":"release","task_id":1,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T15:51:49.459001998-05:00","action":"claim","task_id":2,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T15:51:49.459115602-05:00","action":"move","task_id":2,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T15:52:05.542200085-05:00","action":"edit","task_id":2,"detail":"Director rework orchestration"}
+{"timestamp":"2026-02-22T15:52:12.653556793-05:00","action":"edit","task_id":2,"detail":"Director rework orchestration"}
+{"timestamp":"2026-02-22T15:52:15.33785483-05:00","action":"move","task_id":2,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T15:52:15.371595603-05:00","action":"edit","task_id":2,"detail":"Director rework orchestration"}
+{"timestamp":"2026-02-22T15:52:15.371686598-05:00","action":"release","task_id":2,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T15:52:17.411323421-05:00","action":"claim","task_id":3,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T15:52:17.41145228-05:00","action":"move","task_id":3,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T15:56:05.458126116-05:00","action":"edit","task_id":3,"detail":"Director policy and escalation controls"}
+{"timestamp":"2026-02-22T15:56:07.985233796-05:00","action":"move","task_id":3,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T15:56:08.008869066-05:00","action":"edit","task_id":3,"detail":"Director policy and escalation controls"}
+{"timestamp":"2026-02-22T15:56:08.008956434-05:00","action":"release","task_id":3,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T15:56:10.273591674-05:00","action":"claim","task_id":4,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T15:56:10.273712222-05:00","action":"move","task_id":4,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T15:57:39.859662739-05:00","action":"edit","task_id":4,"detail":"Director decision audit trail"}
+{"timestamp":"2026-02-22T15:57:42.263178293-05:00","action":"move","task_id":4,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T15:57:42.295832692-05:00","action":"edit","task_id":4,"detail":"Director decision audit trail"}
+{"timestamp":"2026-02-22T15:57:42.295928914-05:00","action":"release","task_id":4,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T15:57:44.806185424-05:00","action":"claim","task_id":5,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T15:57:44.806322381-05:00","action":"move","task_id":5,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T15:58:24.926016838-05:00","action":"edit","task_id":5,"detail":"Phase 3B exit criteria"}
+{"timestamp":"2026-02-22T15:58:29.158191712-05:00","action":"move","task_id":5,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T15:58:29.192396335-05:00","action":"edit","task_id":5,"detail":"Phase 3B exit criteria"}
+{"timestamp":"2026-02-22T15:58:29.192879799-05:00","action":"release","task_id":5,"detail":"cape-staff"}

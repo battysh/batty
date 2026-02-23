@@ -70,10 +70,10 @@ cargo run -- work my-phase
 ## What You See
 
 ```
-┌─── tmux: batty-my-phase ──────────────────────────────┐
+┌─── tmux: batty-my-phase ───────────────────────────────┐
 │                                                        │
 │  Claude Code working on task #3...                     │
-│  Creating src/auth/middleware.rs                        │
+│  Creating src/auth/middleware.rs                       │
 │  Running cargo test... 47 passed                       │
 │                                                        │
 ├────────────────────────────────────────────────────────┤
@@ -81,7 +81,7 @@ cargo run -- work my-phase
 │  [batty] supervisor thinking: "which auth strategy?"   │
 │  [batty] supervisor answered -> JWT with refresh       │
 ├────────────────────────────────────────────────────────┤
-│  [batty] my-phase | task #3 | 2/8 done | supervising  │
+│  [batty] my-phase | task #3 | 2/8 done | supervising   │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -222,11 +222,10 @@ Batty is actively developed and dogfooded -- we build Batty using Batty.
 | Phase 2.4 | Done        | Supervision harness validation                   |
 | Phase 2.5 | Done        | Runtime hardening, worktree isolation             |
 | Phase 2.6 | Done        | Install workflow, config polish                   |
-| Phase 2.7 | In Progress | Hotkeys, context snapshots, docs                 |
-| Phase 3A  | Planned     | Sequencer, human review gate, merge automation   |
-| Phase 3B  | Planned     | AI director review                                |
-| Phase 4   | Planned     | Parallel multi-agent execution                    |
-| Phase 5   | Planned     | Polish and ship                                   |
+| Phase 2.7 | Done        | Hotkeys, context snapshots, docs                 |
+| Phase 3A  | Done        | Sequencer, human review gate, merge automation   |
+| Phase 3B  | Done        | AI director review                                |
+| Phase 4   | Planned     | Parallel agents, DAG scheduler, ship             |
 
 ## Links
 

@@ -1,0 +1,78 @@
+{"timestamp":"2026-02-22T14:45:31.440063139-05:00","action":"create","task_id":1,"detail":"Update README.md project status section"}
+{"timestamp":"2026-02-22T14:45:37.743338624-05:00","action":"create","task_id":2,"detail":"Update CLAUDE.md project structure and dependencies"}
+{"timestamp":"2026-02-22T14:45:45.035112603-05:00","action":"create","task_id":3,"detail":"Update planning/roadmap.md phase statuses"}
+{"timestamp":"2026-02-22T14:45:50.051204166-05:00","action":"create","task_id":4,"detail":"Fix planning/architecture.md stale kanban path"}
+{"timestamp":"2026-02-22T14:45:53.696973542-05:00","action":"create","task_id":5,"detail":"Fix planning/tech-stack.md dependency list"}
+{"timestamp":"2026-02-22T14:45:58.475260348-05:00","action":"create","task_id":6,"detail":"Add batty remove to docs/reference/cli.md"}
+{"timestamp":"2026-02-22T14:46:12.581443417-05:00","action":"create","task_id":7,"detail":"Expand docs/architecture.md with module map"}
+{"timestamp":"2026-02-22T14:46:17.434396543-05:00","action":"create","task_id":8,"detail":"Add docs/reference/modules.md source code reference"}
+{"timestamp":"2026-02-22T14:46:21.303931528-05:00","action":"create","task_id":9,"detail":"Update docs/getting-started.md with new commands and modes"}
+{"timestamp":"2026-02-22T14:46:32.322891207-05:00","action":"create","task_id":10,"detail":"Expand docs/troubleshooting.md with real-world issues"}
+{"timestamp":"2026-02-22T14:46:39.69880672-05:00","action":"create","task_id":11,"detail":"Audit and update planning/ docs for completed phases"}
+{"timestamp":"2026-02-22T14:50:04.829808519-05:00","action":"claim","task_id":1,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:50:04.833537795-05:00","action":"move","task_id":1,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T14:51:20.996562683-05:00","action":"edit","task_id":1,"detail":"Update README.md project status section"}
+{"timestamp":"2026-02-22T14:51:29.806375974-05:00","action":"edit","task_id":1,"detail":"Update README.md project status section"}
+{"timestamp":"2026-02-22T14:51:29.806451667-05:00","action":"release","task_id":1,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:51:29.828280722-05:00","action":"move","task_id":1,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T14:51:36.237908566-05:00","action":"claim","task_id":2,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:51:36.238002639-05:00","action":"move","task_id":2,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T14:52:21.824766208-05:00","action":"edit","task_id":2,"detail":"Update CLAUDE.md project structure and dependencies"}
+{"timestamp":"2026-02-22T14:52:27.799540351-05:00","action":"edit","task_id":2,"detail":"Update CLAUDE.md project structure and dependencies"}
+{"timestamp":"2026-02-22T14:52:27.799638877-05:00","action":"release","task_id":2,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:52:27.820523978-05:00","action":"move","task_id":2,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T14:52:34.495779547-05:00","action":"claim","task_id":3,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:52:34.495868407-05:00","action":"move","task_id":3,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T14:53:05.975645344-05:00","action":"edit","task_id":3,"detail":"Update planning/roadmap.md phase statuses"}
+{"timestamp":"2026-02-22T14:53:10.970797253-05:00","action":"edit","task_id":3,"detail":"Update planning/roadmap.md phase statuses"}
+{"timestamp":"2026-02-22T14:53:10.97096076-05:00","action":"release","task_id":3,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:53:10.995352144-05:00","action":"move","task_id":3,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T14:53:15.389268909-05:00","action":"claim","task_id":4,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:53:15.389381588-05:00","action":"move","task_id":4,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T14:53:31.307078913-05:00","action":"edit","task_id":4,"detail":"Fix planning/architecture.md stale kanban path"}
+{"timestamp":"2026-02-22T14:53:31.36778895-05:00","action":"edit","task_id":4,"detail":"Fix planning/architecture.md stale kanban path"}
+{"timestamp":"2026-02-22T14:53:31.367881292-05:00","action":"release","task_id":4,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:53:31.392181919-05:00","action":"move","task_id":4,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T14:53:41.007384909-05:00","action":"edit","task_id":4,"detail":"Fix planning/architecture.md stale kanban path"}
+{"timestamp":"2026-02-22T14:53:43.998960081-05:00","action":"claim","task_id":5,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:53:43.999074151-05:00","action":"move","task_id":5,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T14:54:07.45471973-05:00","action":"edit","task_id":5,"detail":"Fix planning/tech-stack.md dependency list"}
+{"timestamp":"2026-02-22T14:54:07.514915252-05:00","action":"edit","task_id":5,"detail":"Fix planning/tech-stack.md dependency list"}
+{"timestamp":"2026-02-22T14:54:07.514991966-05:00","action":"release","task_id":5,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:54:07.538188682-05:00","action":"move","task_id":5,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T14:54:10.232865033-05:00","action":"claim","task_id":6,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:54:10.232983657-05:00","action":"move","task_id":6,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T14:54:44.670911332-05:00","action":"edit","task_id":6,"detail":"Add batty remove to docs/reference/cli.md"}
+{"timestamp":"2026-02-22T14:54:49.127608219-05:00","action":"edit","task_id":6,"detail":"Add batty remove to docs/reference/cli.md"}
+{"timestamp":"2026-02-22T14:54:49.127682254-05:00","action":"release","task_id":6,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:54:49.150078052-05:00","action":"move","task_id":6,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T14:54:51.98553739-05:00","action":"claim","task_id":7,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:54:51.985620384-05:00","action":"move","task_id":7,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T14:55:25.6887821-05:00","action":"edit","task_id":7,"detail":"Expand docs/architecture.md with module map"}
+{"timestamp":"2026-02-22T14:55:25.744161146-05:00","action":"edit","task_id":7,"detail":"Expand docs/architecture.md with module map"}
+{"timestamp":"2026-02-22T14:55:25.744235575-05:00","action":"release","task_id":7,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:55:25.764988148-05:00","action":"move","task_id":7,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T14:55:29.866324068-05:00","action":"claim","task_id":9,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:55:29.866420745-05:00","action":"move","task_id":9,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T14:56:07.497467452-05:00","action":"edit","task_id":9,"detail":"Update docs/getting-started.md with new commands and modes"}
+{"timestamp":"2026-02-22T14:56:07.556790124-05:00","action":"edit","task_id":9,"detail":"Update docs/getting-started.md with new commands and modes"}
+{"timestamp":"2026-02-22T14:56:07.556917575-05:00","action":"release","task_id":9,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:56:07.578812688-05:00","action":"move","task_id":9,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T14:56:13.196522423-05:00","action":"claim","task_id":8,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:56:13.196640425-05:00","action":"move","task_id":8,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T14:57:10.064850103-05:00","action":"edit","task_id":8,"detail":"Add docs/reference/modules.md source code reference"}
+{"timestamp":"2026-02-22T14:57:10.130895267-05:00","action":"edit","task_id":8,"detail":"Add docs/reference/modules.md source code reference"}
+{"timestamp":"2026-02-22T14:57:10.131025451-05:00","action":"release","task_id":8,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:57:10.156426419-05:00","action":"move","task_id":8,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T14:57:13.64431424-05:00","action":"claim","task_id":10,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:57:13.644467784-05:00","action":"move","task_id":10,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T14:57:57.132110396-05:00","action":"edit","task_id":10,"detail":"Expand docs/troubleshooting.md with real-world issues"}
+{"timestamp":"2026-02-22T14:57:57.18840556-05:00","action":"edit","task_id":10,"detail":"Expand docs/troubleshooting.md with real-world issues"}
+{"timestamp":"2026-02-22T14:57:57.188511717-05:00","action":"release","task_id":10,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:57:57.210245141-05:00","action":"move","task_id":10,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-22T14:58:00.9082285-05:00","action":"claim","task_id":11,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:58:00.908316133-05:00","action":"move","task_id":11,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-22T14:59:18.870952952-05:00","action":"edit","task_id":11,"detail":"Audit and update planning/ docs for completed phases"}
+{"timestamp":"2026-02-22T14:59:18.937274079-05:00","action":"edit","task_id":11,"detail":"Audit and update planning/ docs for completed phases"}
+{"timestamp":"2026-02-22T14:59:18.937372478-05:00","action":"release","task_id":11,"detail":"cape-staff"}
+{"timestamp":"2026-02-22T14:59:18.962048576-05:00","action":"move","task_id":11,"detail":"in-progress -\u003e done"}

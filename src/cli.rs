@@ -113,6 +113,14 @@ pub enum Command {
         print_dir: bool,
     },
 
+    /// Launch Claude to commit, rebase, and merge a worktree run into main
+    Merge {
+        /// Phase name (e.g., "phase-2.7")
+        phase: String,
+        /// Run identifier (e.g., "run-002" or just "002")
+        run: String,
+    },
+
     /// List all phase boards with status and task counts
     #[command(alias = "board-list")]
     List {
@@ -270,6 +278,30 @@ mod tests {
                 assert_eq!(interval, 5);
             }
             other => panic!("expected list command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_subcommand_parses_phase_and_run() {
+        let cli = Cli::parse_from(["batty", "merge", "phase-2.7", "run-002"]);
+        match cli.command {
+            Command::Merge { phase, run } => {
+                assert_eq!(phase, "phase-2.7");
+                assert_eq!(run, "run-002");
+            }
+            other => panic!("expected merge command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_subcommand_parses_bare_run_number() {
+        let cli = Cli::parse_from(["batty", "merge", "phase-2.7", "002"]);
+        match cli.command {
+            Command::Merge { phase, run } => {
+                assert_eq!(phase, "phase-2.7");
+                assert_eq!(run, "002");
+            }
+            other => panic!("expected merge command, got {other:?}"),
         }
     }
 }
