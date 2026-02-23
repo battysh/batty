@@ -17,7 +17,7 @@ Developers need a workflow model for building with agents: structured phases, su
 
 `batty work <phase>` — Rust CLI that reads a kanban board, spawns an agent in a PTY, supervises the session. Policy engine, prompt detection, test gates, execution logging.
 
-All 11 tasks done. Current project test inventory is 323 tests.
+All 11 tasks done. Current project test inventory is 394 tests.
 
 ---
 
@@ -83,7 +83,7 @@ Close out the rolled-over reliability and developer-experience work from 2.5.
 
 ---
 
-## Phase 2.7: Minor Improvements (In Progress)
+## Phase 2.7: Minor Improvements (Done)
 
 Ship low-risk quality and workflow improvements after hardening.
 
@@ -97,7 +97,7 @@ Ship low-risk quality and workflow improvements after hardening.
 
 ---
 
-## Phase 3A: Sequencer + Human Review Gate
+## Phase 3A: Sequencer + Human Review Gate (Done)
 
 Separate phase chaining from AI evaluation so we can ship useful automation earlier.
 
@@ -112,7 +112,7 @@ Separate phase chaining from AI evaluation so we can ship useful automation earl
 
 ---
 
-## Phase 3B: AI Director Review (Upgrade)
+## Phase 3B: AI Director Review (Done)
 
 Add automated review once the human-gated sequencer is stable.
 
@@ -125,24 +125,20 @@ Add automated review once the human-gated sequencer is stable.
 
 ---
 
-## Phase 4: Parallel Execution
+## Phase 4: Parallel DAG Scheduler, Merge Queue, Ship (Done)
 
-`batty work all --parallel N` — multiple tmux windows, one per phase.
+`batty work <phase> --parallel N` — DAG-aware parallel agent execution.
 
-- Git worktree per parallel phase
-- Merge queue — serialize merges, rebase, re-test
-- tmux window switching to monitor multiple phases
+- **Task dependency DAG** — topological sort with cycle detection from task frontmatter
+- **Parallel agent spawner** — per-agent worktrees, tmux windows, slot management
+- **DAG scheduler** — dispatches ready tasks to idle agents as dependencies complete
+- **Merge serialization queue** — FIFO merge with rebase, conflict detection, retry
+- **Parallel status bar** — multi-agent progress in tmux status line
+- **Shell completions** — bash/zsh/fish via `batty completions`
+- **`batty merge` command** — orchestrated worktree merge back into main
+- **Board sync** — uncommitted kanban changes propagated into worktrees
 
----
-
-## Phase 5: Polish + Ship
-
-Target: 10 users, 1 GitHub star.
-
-- Config file, error handling, crash recovery
-- CLI completions (zsh/bash/fish)
-- README, demo GIF, `cargo install batty-cli`, Homebrew
-- Blog post explaining the workflow model
+**Exit:** Parallel execution works end-to-end with DAG scheduling and serialized merges. Phase 5 (polish) consolidated here — completions, README, and `cargo install batty-cli` are shipped.
 
 ---
 
@@ -169,11 +165,13 @@ Target: 10 users, 1 GitHub star.
 
 ## Scope Cutting
 
-Cut last first:
+All planned phases are complete. Phase 5 was consolidated into Phase 4.
 
-1. Phase 5 (polish) — ship rough.
-2. Phase 4 (parallel) — sequential proves the thesis.
-3. Phase 3B (AI director) — human review in 3A is enough to ship.
-4. Phase 3A rework automation details — can start with manual retries.
-5. Phase 2 supervisor depth — human can answer more questions manually.
+Original cut priority (preserved for reference):
+
+1. Phase 5 (polish) — shipped as part of Phase 4.
+2. Phase 4 (parallel) — done.
+3. Phase 3B (AI director) — done.
+4. Phase 3A rework automation — done.
+5. Phase 2 supervisor depth — done.
 6. Phase 1 — **never cut.**

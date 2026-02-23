@@ -109,3 +109,41 @@ Check detector settings in config:
 - `detector.idle_input_fallback`
 
 If the loop persists, attach with `batty attach <phase>`, provide manual input in the executor pane, and continue.
+
+## `batty work all` skips a phase
+
+**Cause:** The phase is already marked complete or has no backlog tasks.
+
+```sh
+batty board-list                   # check status of all phases
+batty board my-phase               # inspect the specific board
+```
+
+Phases are discovered by scanning `.batty/kanban/` and sorted by numeric suffix. A phase with all tasks in `done` status is considered complete and skipped.
+
+## `batty merge` cannot find the worktree
+
+**Cause:** The worktree directory doesn't exist or the run number is wrong.
+
+```sh
+ls .batty/worktrees/               # list available worktree runs
+batty merge phase-4 001            # use the correct run number
+```
+
+The run argument accepts `run-001`, `001`, or `1` — all resolve to the same worktree.
+
+## Parallel agents fail with dependency cycle
+
+**Cause:** Tasks in the board have circular `depends` entries.
+
+```sh
+batty work my-phase --dry-run      # shows the DAG and detects cycles
+```
+
+Fix the task frontmatter to remove the cycle. The DAG scheduler reports which tasks form the cycle.
+
+## Merge queue conflict during parallel run
+
+**Cause:** Two parallel agents modified the same files. The merge queue serializes merges but cannot auto-resolve all conflicts.
+
+Attach to the session and resolve conflicts manually, or re-run the conflicting task with `--new` to get a fresh worktree.

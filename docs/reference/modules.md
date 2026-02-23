@@ -7,7 +7,7 @@ Contributor-facing map of Batty source modules.
 | Path | Purpose |
 |---|---|
 | `src/main.rs` | CLI entrypoint and top-level command dispatch. |
-| `src/cli.rs` | clap command/flag definitions (`work`, `attach`, `resume`, `config`, `install`, `remove`, `board`). |
+| `src/cli.rs` | clap command/flag definitions (`work`, `attach`, `resume`, `config`, `install`, `remove`, `board`, `merge`, `list`). |
 | `src/paths.rs` | Canonical path helpers for `.batty/` assets and boards. |
 | `src/work.rs` | `batty work`/`resume` orchestration pipeline and launch-context composition. |
 | `src/orchestrator.rs` | Core supervision loop (event polling, detector loop, policy/tier decisions, status updates). |
@@ -28,6 +28,12 @@ Contributor-facing map of Batty source modules.
 | `src/agent/mod.rs` | `AgentAdapter` trait, adapter registry, and spawn contract. |
 | `src/agent/claude.rs` | Claude adapter implementation and prompt pattern wiring. |
 | `src/agent/codex.rs` | Codex adapter implementation and launch prompt wrapping. |
+| `src/sequencer.rs` | Multi-phase sequencing and ordering for `batty work all`. |
+| `src/review.rs` | AI director review decisions (merge / rework / escalate). |
+| `src/dag.rs` | Task dependency DAG construction, topological sort, cycle detection. |
+| `src/scheduler.rs` | Parallel DAG-aware task scheduler with agent slot management. |
+| `src/merge_queue.rs` | Serialized merge queue for parallel worktree results. |
+| `src/shell_completion.rs` | Shell completion script generation (bash/zsh/fish). |
 | `src/bin/docsgen.rs` | Docs generator for `docs/reference/*.md` and config docs. |
 
 ## Key Traits and Types
@@ -48,10 +54,14 @@ Contributor-facing map of Batty source modules.
 | `ExecutionLog` + `LogEntry` | `src/log/mod.rs` | Structured JSONL event persistence API. |
 | `PhaseWorktree` | `src/worktree.rs` | Run-scoped worktree metadata used by `work/resume`. |
 | `CompletionDecision` | `src/completion.rs` | Final completion signal used to stop a phase cleanly. |
+| `TaskDag` | `src/dag.rs` | Dependency graph for task ordering and ready-set computation. |
+| `ParallelScheduler` | `src/scheduler.rs` | DAG-aware scheduler that dispatches tasks to agent slots. |
+| `MergeQueue` | `src/merge_queue.rs` | FIFO queue that serializes worktree merges after parallel runs. |
+| `ReviewDecision` | `src/review.rs` | Director review outcome (merge / rework / escalate). |
 
 ## Test Coverage Snapshot
 
-- Current test inventory: `323` tests (`cargo test -- --list`).
+- Current test inventory: `394` tests (`cargo test -- --list`).
 - Core modules include colocated `#[cfg(test)]` suites (detector, orchestrator, tmux, work, config, policy, agent adapters, docsgen, etc.).
 - Tests emphasize:
   - prompt-detection transitions and fallback behavior

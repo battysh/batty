@@ -65,10 +65,12 @@ The agent picks tasks from the board, implements them, runs tests, and commits. 
 
 ```sh
 batty work my-phase        # start supervised execution
+batty work all             # run all phases in sequence
 batty attach my-phase      # reattach to a running session
 batty resume my-phase      # resume supervision after crash
 batty board my-phase       # open the kanban board TUI
 batty board-list           # list all boards with status
+batty merge phase-4 001    # merge a worktree run into main
 batty config               # show resolved configuration
 ```
 
@@ -81,6 +83,7 @@ batty config               # show resolved configuration
 | `--policy suggest` | Override the default policy tier |
 | `--worktree` | Run in an isolated git worktree |
 | `--worktree --new` | Force a fresh worktree (don't resume existing) |
+| `--parallel 3` | Run with 3 parallel agents (DAG-aware scheduling) |
 | `--dry-run` | Show the composed launch context and exit |
 
 ## Configuration

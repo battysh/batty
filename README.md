@@ -134,17 +134,19 @@ Everything runs inside tmux. Output captured via `pipe-pane`. Answers injected v
 
 ## CLI Reference
 
-| Command                | What it does                                 |
-|------------------------|----------------------------------------------|
-| `batty work <phase>`   | Launch supervised execution of a phase board |
-| `batty attach <phase>` | Reattach to a running tmux session           |
-| `batty resume <phase>` | Resume supervision after crash/restart       |
-| `batty board <phase>`  | Open the kanban board TUI                    |
-| `batty board-list`     | List all boards with status and task counts  |
-| `batty config [--json]`| Show resolved configuration                  |
-| `batty completions <shell>` | Print shell completion script        |
-| `batty install`        | Set up Batty in your project                 |
-| `batty remove`         | Remove Batty assets from your project        |
+| Command                      | What it does                                 |
+|------------------------------|----------------------------------------------|
+| `batty work <phase>`         | Launch supervised execution of a phase board |
+| `batty work all`             | Run all phases in sequence                   |
+| `batty attach <phase>`       | Reattach to a running tmux session           |
+| `batty resume <phase>`       | Resume supervision after crash/restart       |
+| `batty board <phase>`        | Open the kanban board TUI                    |
+| `batty board-list`           | List all boards with status and task counts  |
+| `batty merge <phase> <run>`  | Merge a worktree run back into main          |
+| `batty config [--json]`      | Show resolved configuration                  |
+| `batty completions <shell>`  | Print shell completion script                |
+| `batty install`              | Set up Batty in your project                 |
+| `batty remove`               | Remove Batty assets from your project        |
 
 ### Key Flags
 
@@ -152,6 +154,7 @@ Everything runs inside tmux. Output captured via `pipe-pane`. Answers injected v
 batty work my-phase --attach       # open tmux immediately
 batty work my-phase --agent codex  # use Codex instead of default
 batty work my-phase --worktree     # isolate in git worktree
+batty work my-phase --parallel 3   # run with 3 parallel agents
 batty work my-phase --dry-run      # show launch context, don't start
 ```
 
@@ -215,17 +218,17 @@ Full reference: [Configuration Docs](https://battysh.github.io/batty/reference/c
 
 Batty is actively developed and dogfooded -- we build Batty using Batty.
 
-| Phase     | Status      | What                                            |
-|-----------|-------------|-------------------------------------------------|
-| Phase 1   | Done        | Core agent runner, 323+ tests                   |
-| Phase 2   | Done        | tmux supervisor, two-tier prompts, status bar    |
-| Phase 2.4 | Done        | Supervision harness validation                   |
-| Phase 2.5 | Done        | Runtime hardening, worktree isolation             |
-| Phase 2.6 | Done        | Install workflow, config polish                   |
-| Phase 2.7 | Done        | Hotkeys, context snapshots, docs                 |
-| Phase 3A  | Done        | Sequencer, human review gate, merge automation   |
-| Phase 3B  | Done        | AI director review                                |
-| Phase 4   | Planned     | Parallel agents, DAG scheduler, ship             |
+| Phase     | Status | What                                           |
+|-----------|--------|-------------------------------------------------|
+| Phase 1   | Done   | Core agent runner, 394+ tests                   |
+| Phase 2   | Done   | tmux supervisor, two-tier prompts, status bar   |
+| Phase 2.4 | Done   | Supervision harness validation                  |
+| Phase 2.5 | Done   | Runtime hardening, worktree isolation            |
+| Phase 2.6 | Done   | Install workflow, config polish                  |
+| Phase 2.7 | Done   | Hotkeys, context snapshots, docs                |
+| Phase 3A  | Done   | Sequencer, human review gate, merge automation  |
+| Phase 3B  | Done   | AI director review                              |
+| Phase 4   | Done   | Parallel DAG scheduler, merge queue, ship       |
 
 ## Links
 

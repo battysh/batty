@@ -87,6 +87,12 @@ When output goes silent and no regex matches, Batty asks the supervisor anyway. 
 | `task/mod.rs` | kanban-md task parsing and selection |
 | `supervisor/mod.rs` | Supervisor runtime abstractions |
 | `dod/mod.rs` | Definition-of-done gates |
+| `sequencer.rs` | Multi-phase sequencing for `batty work all` |
+| `review.rs` | AI director review decisions (merge / rework / escalate) |
+| `dag.rs` | Task dependency DAG construction and cycle detection |
+| `scheduler.rs` | Parallel DAG-aware task scheduler |
+| `merge_queue.rs` | Serialized merge queue for parallel worktree results |
+| `shell_completion.rs` | Shell completion script generation |
 | `bin/docsgen.rs` | Documentation generator |
 
 ## tmux Compatibility
