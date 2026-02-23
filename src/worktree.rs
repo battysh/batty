@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use anyhow::{Context, Result, bail};
-use tracing::warn;
+use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
 pub struct PhaseWorktree {
@@ -519,6 +519,70 @@ fn delete_branch(repo_root: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// Sync the phase board from the source tree into the worktree.
+///
+/// Worktrees are created from committed state, so any uncommitted kanban
+/// changes (new tasks, reworked boards, etc.) would be lost. This copies
+/// the phase directory from `source_kanban_root/<phase>/` into
+/// `worktree_kanban_root/<phase>/`, overwriting whatever git checked out.
+///
+/// Only syncs when the source directory exists and differs from the
+/// worktree (i.e., the source tree has uncommitted kanban changes).
+pub fn sync_phase_board_to_worktree(
+    project_root: &Path,
+    worktree_root: &Path,
+    phase: &str,
+) -> Result<()> {
+    let source_phase_dir = crate::paths::resolve_kanban_root(project_root).join(phase);
+    if !source_phase_dir.is_dir() {
+        return Ok(());
+    }
+
+    let dest_kanban_root = crate::paths::resolve_kanban_root(worktree_root);
+    let dest_phase_dir = dest_kanban_root.join(phase);
+
+    // Remove stale destination and copy fresh.
+    if dest_phase_dir.exists() {
+        std::fs::remove_dir_all(&dest_phase_dir).with_context(|| {
+            format!(
+                "failed to remove stale phase board at {}",
+                dest_phase_dir.display()
+            )
+        })?;
+    }
+
+    copy_dir_recursive(&source_phase_dir, &dest_phase_dir).with_context(|| {
+        format!(
+            "failed to sync phase board from {} to {}",
+            source_phase_dir.display(),
+            dest_phase_dir.display()
+        )
+    })?;
+
+    info!(
+        phase = phase,
+        source = %source_phase_dir.display(),
+        dest = %dest_phase_dir.display(),
+        "synced phase board into worktree"
+    );
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -814,5 +878,119 @@ mod tests {
         assert!(second[0].path.exists());
 
         cleanup_agent_worktrees(tmp.path(), &second);
+    }
+
+    #[test]
+    fn sync_phase_board_copies_uncommitted_tasks_into_worktree() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        // Create a committed phase board with one task.
+        let kanban = tmp.path().join(".batty").join("kanban");
+        let phase_dir = kanban.join("my-phase").join("tasks");
+        fs::create_dir_all(&phase_dir).unwrap();
+        fs::write(phase_dir.join("001-old.md"), "old task\n").unwrap();
+        fs::write(
+            kanban.join("my-phase").join("config.yml"),
+            "version: 10\nnext_id: 2\n",
+        )
+        .unwrap();
+        git(tmp.path(), &["add", ".batty"]);
+        git(tmp.path(), &["commit", "-q", "-m", "add phase board"]);
+
+        // Create a worktree — it will have the committed (old) board.
+        let worktree = prepare_phase_worktree(tmp.path(), "my-phase").unwrap();
+        let wt_task = worktree
+            .path
+            .join(".batty")
+            .join("kanban")
+            .join("my-phase")
+            .join("tasks")
+            .join("001-old.md");
+        assert!(wt_task.exists(), "worktree should have committed task");
+
+        // Now add a new task to the source tree (uncommitted).
+        fs::write(phase_dir.join("002-new.md"), "new task\n").unwrap();
+
+        // Sync.
+        sync_phase_board_to_worktree(tmp.path(), &worktree.path, "my-phase").unwrap();
+
+        // Worktree should now have both tasks.
+        let wt_tasks_dir = worktree
+            .path
+            .join(".batty")
+            .join("kanban")
+            .join("my-phase")
+            .join("tasks");
+        assert!(wt_tasks_dir.join("001-old.md").exists());
+        assert!(
+            wt_tasks_dir.join("002-new.md").exists(),
+            "uncommitted task should be synced into worktree"
+        );
+
+        // The new file content should match.
+        let content = fs::read_to_string(wt_tasks_dir.join("002-new.md")).unwrap();
+        assert_eq!(content, "new task\n");
+
+        cleanup_worktree(tmp.path(), &worktree);
+    }
+
+    #[test]
+    fn sync_phase_board_overwrites_stale_worktree_board() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        // Create a committed phase board.
+        let kanban = tmp.path().join(".batty").join("kanban");
+        let phase_dir = kanban.join("my-phase").join("tasks");
+        fs::create_dir_all(&phase_dir).unwrap();
+        fs::write(phase_dir.join("001-old.md"), "original\n").unwrap();
+        fs::write(
+            kanban.join("my-phase").join("config.yml"),
+            "version: 10\nnext_id: 2\n",
+        )
+        .unwrap();
+        git(tmp.path(), &["add", ".batty"]);
+        git(tmp.path(), &["commit", "-q", "-m", "add phase board"]);
+
+        let worktree = prepare_phase_worktree(tmp.path(), "my-phase").unwrap();
+
+        // Rewrite the source task (uncommitted change).
+        fs::write(phase_dir.join("001-old.md"), "rewritten\n").unwrap();
+
+        sync_phase_board_to_worktree(tmp.path(), &worktree.path, "my-phase").unwrap();
+
+        let wt_content = fs::read_to_string(
+            worktree
+                .path
+                .join(".batty")
+                .join("kanban")
+                .join("my-phase")
+                .join("tasks")
+                .join("001-old.md"),
+        )
+        .unwrap();
+        assert_eq!(
+            wt_content, "rewritten\n",
+            "worktree board should reflect source tree changes"
+        );
+
+        cleanup_worktree(tmp.path(), &worktree);
+    }
+
+    #[test]
+    fn sync_phase_board_noop_when_source_missing() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        let worktree = prepare_phase_worktree(tmp.path(), "nonexistent").unwrap();
+
+        // Should not error when source phase dir doesn't exist.
+        sync_phase_board_to_worktree(tmp.path(), &worktree.path, "nonexistent").unwrap();
+
+        cleanup_worktree(tmp.path(), &worktree);
     }
 }

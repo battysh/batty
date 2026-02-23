@@ -14,10 +14,12 @@ Thumbs.db
 .env.*
 
 # Batty runtime artifacts
-.batty/logs/
-.batty/worktrees/
 site/
 
 # Added by cargo
 
 /target
+
+# Batty runtime (managed by batty install)
+.batty/logs/
+.batty/worktrees/

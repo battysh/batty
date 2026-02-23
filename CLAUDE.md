@@ -34,7 +34,7 @@ planning/          # Architecture, roadmap, philosophy docs
     phase-2.4/     # DONE: Supervision Harness Validation
     phase-2.5/     # DONE: Runtime Hardening + Dogfood
     phase-2.6/     # DONE: Backlog Rollover from 2.5
-    phase-2.7/     # IN PROGRESS: Minor Improvements
+    phase-2.7/     # DONE: Minor Improvements
     docs-update/   # NEXT: Documentation Sync
     phase-3/       # DONE: 3A Sequencer + Human Review Gate
     phase-3b/      # DONE: 3B AI Director Review

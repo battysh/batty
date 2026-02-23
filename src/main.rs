@@ -880,6 +880,73 @@ async fn main() -> Result<()> {
                 anyhow::bail!("kanban-md tui exited with non-zero status");
             }
         }
+        Command::Merge { phase, run } => {
+            // Normalize run identifier: accept "run-002", "002", or "2"
+            let run_num: u32 = run
+                .strip_prefix("run-")
+                .unwrap_or(&run)
+                .parse()
+                .with_context(|| format!("invalid run number: '{run}' — expected e.g. '002' or 'run-002'"))?;
+
+            let phase_slug = sanitize_phase_for_worktree_prefix(&phase);
+            let worktree_dir_name = format!("{phase_slug}-run-{run_num:03}");
+            let worktree_path = cwd
+                .join(".batty")
+                .join("worktrees")
+                .join(&worktree_dir_name);
+
+            if !worktree_path.is_dir() {
+                anyhow::bail!(
+                    "worktree not found: {} — check `ls .batty/worktrees/` for available runs",
+                    worktree_path.display()
+                );
+            }
+
+            let session = format!("batty-merge-{worktree_dir_name}");
+            let work_dir = worktree_path.display().to_string();
+
+            let merge_prompt = format!(
+                "You are merging a worktree branch into main. Work directory: {work_dir}\n\
+                \n\
+                Steps:\n\
+                1. Run git status and git diff to review all changes.\n\
+                2. If there are uncommitted changes, stage and commit them with a detailed commit message.\n\
+                3. Run git fetch origin and rebase onto origin/main with: git rebase origin/main\n\
+                4. If there are conflicts, resolve them smartly, then git add and git rebase --continue.\n\
+                5. Push the branch with: git push --force-with-lease\n\
+                6. Switch to main with: git checkout main\n\
+                7. Merge the branch with: git merge {worktree_dir_name}\n\
+                8. Push main with: git push origin main\n\
+                9. Report what you did.\n\
+                \n\
+                Be thorough. If anything looks wrong, explain and ask before proceeding."
+            );
+
+            // Write the prompt to a file so tmux doesn't mangle it when
+            // constructing the shell command (newlines, quotes, backticks).
+            let prompt_dir = worktree_path.join(".batty");
+            std::fs::create_dir_all(&prompt_dir)
+                .context("failed to create .batty dir in worktree for merge prompt")?;
+            let prompt_file = prompt_dir.join("merge-prompt.txt");
+            std::fs::write(&prompt_file, &merge_prompt)
+                .context("failed to write merge prompt file")?;
+
+            let shell_cmd = format!(
+                "claude \"$(cat {})\"",
+                prompt_file.display()
+            );
+
+            tmux::create_session(
+                &session,
+                "bash",
+                &["-c".to_string(), shell_cmd],
+                &work_dir,
+            )?;
+
+            println!("[batty] merge session created: {session}");
+            println!("[batty] attaching...");
+            tmux::attach(&session)?;
+        }
         Command::List { watch, interval } => {
             if watch {
                 loop {

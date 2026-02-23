@@ -1121,6 +1121,22 @@ fn run_phase_with_rework(
             "phase worktree prepared"
         );
 
+        // Sync the phase board from the source tree into the worktree so
+        // uncommitted kanban changes (new/reworked tasks) are not lost.
+        if !resumed_worktree {
+            eprintln!(
+                "[batty] syncing phase board '{phase}' from source tree into worktree"
+            );
+            phase_worktree::sync_phase_board_to_worktree(
+                project_root,
+                &execution_root,
+                phase,
+            )
+            .with_context(|| {
+                format!("failed to sync phase board into worktree for '{phase}'")
+            })?;
+        }
+
         (
             execution_root,
             phase_worktree.branch.clone(),
