@@ -1,6 +1,6 @@
 version: 10
 board:
-    name: phase-4-parallel-execution
+    name: phase-4-parallel-agents-and-ship
 tasks_dir: tasks
 statuses:
     - name: backlog
@@ -44,4 +44,4 @@ tui:
           color: "208"
         - after: 168h
           color: "196"
-next_id: 4
+next_id: 8

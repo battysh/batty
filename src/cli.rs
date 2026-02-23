@@ -74,6 +74,13 @@ pub enum Command {
         json: bool,
     },
 
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completion script for
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
+
     /// Initialize Batty assets and required external tools
     Install {
         /// Steering/skill install target (default: both)
@@ -126,6 +133,13 @@ pub enum InstallTarget {
     Codex,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,6 +183,15 @@ mod tests {
         match cli.command {
             Command::Config { json } => assert!(json),
             other => panic!("expected config command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn completions_subcommand_parses_shell() {
+        let cli = Cli::parse_from(["batty", "completions", "zsh"]);
+        match cli.command {
+            Command::Completions { shell } => assert_eq!(shell, CompletionShell::Zsh),
+            other => panic!("expected completions command, got {other:?}"),
         }
     }
 

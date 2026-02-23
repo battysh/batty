@@ -2,17 +2,21 @@ mod agent;
 mod cli;
 mod completion;
 mod config;
+mod dag;
 mod detector;
 mod dod;
 mod events;
 mod install;
 mod log;
+mod merge_queue;
 mod orchestrator;
 mod paths;
 mod policy;
 mod prompt;
 mod review;
+mod scheduler;
 mod sequencer;
+mod shell_completion;
 mod supervisor;
 mod task;
 mod tier2;
@@ -25,7 +29,7 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use cli::{Cli, Command, InstallTarget};
 use config::ProjectConfig;
@@ -599,11 +603,15 @@ fn list_boards(project_root: &Path) -> Result<String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let first_arg = std::env::args().nth(1);
     let cli = Cli::parse();
-    let is_config_command = matches!(&cli.command, Command::Config { .. });
+    let is_quiet_meta_command = matches!(
+        &cli.command,
+        Command::Config { .. } | Command::Completions { .. }
+    ) || first_arg.as_deref() == Some("completions");
 
     let filter = match cli.verbose {
-        0 if is_config_command => "batty=warn",
+        0 if is_quiet_meta_command => "batty=warn",
         0 => "batty=info",
         1 => "batty=debug",
         _ => "batty=trace",
@@ -613,14 +621,19 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
+    if let Command::Completions { shell } = &cli.command {
+        shell_completion::print(*shell)?;
+        return Ok(());
+    }
+
     let cwd =
         std::env::current_dir().context("failed to get current directory (was it deleted?)")?;
     let (config, config_path) = ProjectConfig::load(&cwd)?;
 
-    if !is_config_command || cli.verbose > 0 {
+    if !is_quiet_meta_command || cli.verbose > 0 {
         match config_path {
-            Some(ref p) => info!("loaded config from {}", p.display()),
-            None => info!("no .batty/config.toml found, using defaults"),
+            Some(ref p) => debug!("loaded config from {}", p.display()),
+            None => debug!("no .batty/config.toml found, using defaults"),
         }
     }
 
@@ -718,18 +731,34 @@ async fn main() -> Result<()> {
                     config_path.as_deref(),
                 )?;
             } else {
-                work::run_phase(
-                    &target,
-                    &config,
-                    agent_name,
-                    policy_str,
-                    attach,
-                    worktree,
-                    new,
-                    dry_run,
-                    &cwd,
-                    config_path.as_deref(),
-                )?;
+                if parallel > 1 {
+                    work::run_phase_parallel(
+                        &target,
+                        parallel,
+                        &config,
+                        agent_name,
+                        policy_str,
+                        attach,
+                        worktree,
+                        new,
+                        dry_run,
+                        &cwd,
+                        config_path.as_deref(),
+                    )?;
+                } else {
+                    work::run_phase(
+                        &target,
+                        &config,
+                        agent_name,
+                        policy_str,
+                        attach,
+                        worktree,
+                        new,
+                        dry_run,
+                        &cwd,
+                        config_path.as_deref(),
+                    )?;
+                }
             }
         }
         Command::Attach { target } => {
@@ -745,6 +774,9 @@ async fn main() -> Result<()> {
             } else {
                 print!("{}", render_config_human(&config, config_path.as_deref()));
             }
+        }
+        Command::Completions { shell } => {
+            shell_completion::print(shell)?;
         }
         Command::Install { target, dir } => {
             let destination = PathBuf::from(dir);

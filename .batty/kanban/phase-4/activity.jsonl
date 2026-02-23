@@ -4,3 +4,47 @@
 {"timestamp":"2026-02-21T18:40:59.496385201-05:00","action":"create","task_id":4,"detail":"PTY-to-xterm.js bridge via Tauri IPC"}
 {"timestamp":"2026-02-21T18:40:59.519156165-05:00","action":"create","task_id":5,"detail":"Keypress-to-render latency instrumentation"}
 {"timestamp":"2026-02-21T18:40:59.54247739-05:00","action":"create","task_id":6,"detail":"batty work inside Batty terminal"}
+{"timestamp":"2026-02-23T00:55:35.566944931-05:00","action":"claim","task_id":1,"detail":"smoke-light"}
+{"timestamp":"2026-02-23T00:55:35.567119891-05:00","action":"move","task_id":1,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-23T00:57:49.117936896-05:00","action":"edit","task_id":1,"detail":"Build task dependency DAG from kanban-md board"}
+{"timestamp":"2026-02-23T00:57:49.121537448-05:00","action":"edit","task_id":1,"detail":"Build task dependency DAG from kanban-md board"}
+{"timestamp":"2026-02-23T00:57:49.121609616-05:00","action":"release","task_id":1,"detail":"smoke-light"}
+{"timestamp":"2026-02-23T00:57:55.841703231-05:00","action":"move","task_id":1,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-23T00:57:55.864358854-05:00","action":"edit","task_id":1,"detail":"Build task dependency DAG from kanban-md board"}
+{"timestamp":"2026-02-23T00:57:55.864469345-05:00","action":"release","task_id":1,"detail":"smoke-light"}
+{"timestamp":"2026-02-23T00:57:58.480056189-05:00","action":"claim","task_id":2,"detail":"smoke-light"}
+{"timestamp":"2026-02-23T00:57:58.480139346-05:00","action":"move","task_id":2,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-23T01:04:37.99428059-05:00","action":"edit","task_id":2,"detail":"Spawn N parallel agents in tmux windows with per-agent worktrees"}
+{"timestamp":"2026-02-23T01:04:38.014964913-05:00","action":"move","task_id":2,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-23T01:04:38.036016767-05:00","action":"edit","task_id":2,"detail":"Spawn N parallel agents in tmux windows with per-agent worktrees"}
+{"timestamp":"2026-02-23T01:04:38.036095146-05:00","action":"release","task_id":2,"detail":"smoke-light"}
+{"timestamp":"2026-02-23T01:04:41.152646328-05:00","action":"claim","task_id":3,"detail":"smoke-light"}
+{"timestamp":"2026-02-23T01:04:41.152753231-05:00","action":"move","task_id":3,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-23T01:09:32.416664252-05:00","action":"edit","task_id":3,"detail":"DAG-driven task scheduler with claim coordination"}
+{"timestamp":"2026-02-23T01:09:32.437643197-05:00","action":"move","task_id":3,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-23T01:09:32.4616534-05:00","action":"edit","task_id":3,"detail":"DAG-driven task scheduler with claim coordination"}
+{"timestamp":"2026-02-23T01:09:32.461870444-05:00","action":"release","task_id":3,"detail":"smoke-light"}
+{"timestamp":"2026-02-23T01:09:36.718204007-05:00","action":"claim","task_id":4,"detail":"smoke-light"}
+{"timestamp":"2026-02-23T01:09:36.718329626-05:00","action":"move","task_id":4,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-23T01:11:28.657464257-05:00","action":"edit","task_id":4,"detail":"Merge serialization queue for parallel agent results"}
+{"timestamp":"2026-02-23T01:11:28.68056776-05:00","action":"move","task_id":4,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-23T01:11:28.704736393-05:00","action":"edit","task_id":4,"detail":"Merge serialization queue for parallel agent results"}
+{"timestamp":"2026-02-23T01:11:28.704863193-05:00","action":"release","task_id":4,"detail":"smoke-light"}
+{"timestamp":"2026-02-23T01:11:32.64175631-05:00","action":"claim","task_id":6,"detail":"smoke-light"}
+{"timestamp":"2026-02-23T01:11:32.641837144-05:00","action":"move","task_id":6,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-23T01:18:49.797662509-05:00","action":"edit","task_id":6,"detail":"Shell completions and crate publishing"}
+{"timestamp":"2026-02-23T01:18:49.820373904-05:00","action":"move","task_id":6,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-23T01:18:49.842457174-05:00","action":"edit","task_id":6,"detail":"Shell completions and crate publishing"}
+{"timestamp":"2026-02-23T01:18:49.842580969-05:00","action":"release","task_id":6,"detail":"smoke-light"}
+{"timestamp":"2026-02-23T01:18:54.278673827-05:00","action":"claim","task_id":5,"detail":"smoke-light"}
+{"timestamp":"2026-02-23T01:18:54.278845223-05:00","action":"move","task_id":5,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-23T01:20:11.384723744-05:00","action":"edit","task_id":5,"detail":"Extend status bar for parallel agent progress"}
+{"timestamp":"2026-02-23T01:20:11.404629115-05:00","action":"move","task_id":5,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-23T01:20:11.425760913-05:00","action":"edit","task_id":5,"detail":"Extend status bar for parallel agent progress"}
+{"timestamp":"2026-02-23T01:20:11.425903805-05:00","action":"release","task_id":5,"detail":"smoke-light"}
+{"timestamp":"2026-02-23T01:20:21.485380544-05:00","action":"claim","task_id":7,"detail":"smoke-light"}
+{"timestamp":"2026-02-23T01:20:21.485487508-05:00","action":"move","task_id":7,"detail":"backlog -\u003e in-progress"}
+{"timestamp":"2026-02-23T01:23:59.582551481-05:00","action":"edit","task_id":7,"detail":"Integration tests and exit criteria"}
+{"timestamp":"2026-02-23T01:23:59.6057482-05:00","action":"move","task_id":7,"detail":"in-progress -\u003e done"}
+{"timestamp":"2026-02-23T01:23:59.62980235-05:00","action":"edit","task_id":7,"detail":"Integration tests and exit criteria"}
+{"timestamp":"2026-02-23T01:23:59.629885398-05:00","action":"release","task_id":7,"detail":"smoke-light"}

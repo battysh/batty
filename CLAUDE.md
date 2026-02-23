@@ -36,10 +36,9 @@ planning/          # Architecture, roadmap, philosophy docs
     phase-2.6/     # DONE: Backlog Rollover from 2.5
     phase-2.7/     # IN PROGRESS: Minor Improvements
     docs-update/   # NEXT: Documentation Sync
-    phase-3/       # PLANNED: 3A Sequencer + Human Review Gate
-    phase-3b/      # PLANNED: 3B AI Director Review
-    phase-4/       # PLANNED: Parallel Execution
-    phase-5/       # PLANNED: Polish + Ship
+    phase-3/       # DONE: 3A Sequencer + Human Review Gate
+    phase-3b/      # DONE: 3B AI Director Review
+    phase-4/       # PLANNED: Parallel Agents, DAG Scheduler, Ship
 ```
 
 ## Development Principles
