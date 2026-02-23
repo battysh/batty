@@ -376,6 +376,76 @@ pub fn create_session(session: &str, program: &str, args: &[String], work_dir: &
     Ok(())
 }
 
+/// Create a detached tmux window in an existing session running the given command.
+pub fn create_window(
+    session: &str,
+    window_name: &str,
+    program: &str,
+    args: &[String],
+    work_dir: &str,
+) -> Result<()> {
+    if !session_exists(session) {
+        bail!("tmux session '{session}' not found");
+    }
+
+    let mut cmd = Command::new("tmux");
+    cmd.args([
+        "new-window",
+        "-d",
+        "-t",
+        session,
+        "-n",
+        window_name,
+        "-c",
+        work_dir,
+    ]);
+    cmd.arg(program);
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to create tmux window '{window_name}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux new-window failed: {stderr}");
+    }
+
+    Ok(())
+}
+
+/// Rename an existing tmux window target (e.g. `session:0` or `session:old`).
+pub fn rename_window(target: &str, new_name: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["rename-window", "-t", target, new_name])
+        .output()
+        .with_context(|| format!("failed to rename tmux window target '{target}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux rename-window failed: {stderr}");
+    }
+
+    Ok(())
+}
+
+/// Select a tmux window target (e.g. `session:agent-1`).
+pub fn select_window(target: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["select-window", "-t", target])
+        .output()
+        .with_context(|| format!("failed to select tmux window '{target}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux select-window failed: {stderr}");
+    }
+
+    Ok(())
+}
+
 /// Set up pipe-pane to capture all output from the target pane to a log file.
 ///
 /// Uses `tmux pipe-pane -t <session> "cat >> <log_path>"` to stream all PTY
@@ -743,6 +813,25 @@ pub fn list_panes(session: &str) -> Result<Vec<String>> {
     Ok(panes)
 }
 
+#[cfg(test)]
+fn list_window_names(session: &str) -> Result<Vec<String>> {
+    let output = Command::new("tmux")
+        .args(["list-windows", "-t", session, "-F", "#{window_name}"])
+        .output()
+        .with_context(|| format!("failed to list windows for session '{session}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux list-windows failed: {stderr}");
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect())
+}
+
 /// List panes in a session with command/active/dead metadata.
 pub fn list_pane_details(session: &str) -> Result<Vec<PaneDetails>> {
     let output = Command::new("tmux")
@@ -900,6 +989,23 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
 
+        kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn create_window_adds_named_window_to_existing_session() {
+        let session = "batty-test-window-create";
+        let _ = kill_session(session);
+
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+        rename_window(&format!("{session}:0"), "agent-1").unwrap();
+        create_window(session, "agent-2", "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        let names = list_window_names(session).unwrap();
+        assert!(names.contains(&"agent-1".to_string()));
+        assert!(names.contains(&"agent-2".to_string()));
+
+        select_window(&format!("{session}:agent-1")).unwrap();
         kill_session(session).unwrap();
     }
 

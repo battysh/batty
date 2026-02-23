@@ -1,61 +1,93 @@
-# Phase 2.7 Summary
+# Phase 4 Summary
 
-Date: 2026-02-22  
-Phase: `phase-2.7`  
-Board: `.batty/kanban/phase-2.7`
+Date: 2026-02-23  
+Phase: `phase-4`  
+Board: `.batty/kanban/phase-4`
 
 ## What was done (tasks completed + outputs)
 
-- Task #2: Defined supervisor hotkey control contract (`C-b P` pause, `C-b R` resume) with state-transition and no-op behavior documented.
-- Task #3: Implemented runtime supervisor pause/resume hotkeys and mode gating in the orchestrator loop.
-- Task #4: Added pause/resume behavior tests and operator docs for hotkey usage and paused-mode expectations.
-- Task #5: Added configurable dangerous-mode wrapper behavior for both executor and Tier 2 supervisor command launch paths.
-- Task #6 (Tier2 snapshots): Added persisted Tier 2 context snapshots with metadata and deterministic redaction.
-- Task #7: Implemented automated docs pipeline (generation, checks, CI gating, publishing workflow).
-- Task #6 (remaining backlog): Removed `[batty]` prefix from orchestrator log stream lines so the supervisor pane stream is cleaner.
+- Task #1: Added `src/dag.rs` for board dependency DAG handling.
+  - Parses task dependencies from board task files.
+  - Validates missing dependencies and cycles with explicit cycle paths.
+  - Computes ready frontier and deterministic topological order.
+- Task #2: Implemented parallel phase launch path in `batty work <phase> --parallel N`.
+  - Added per-agent worktree provisioning and reuse/force-new behavior.
+  - Added tmux multi-window spawning with one executor window per agent.
+  - Added per-window log pane + pipe-pane capture setup.
+- Task #3: Implemented scheduler core in `src/scheduler.rs` and wired it into parallel runtime.
+  - Polls board, computes ready set via DAG, dispatches using `kanban-md pick --claim ...`.
+  - Verifies claims by re-reading `claimed_by` in frontmatter.
+  - Detects completions, deadlocks, stuck agents, and handles crash claim release.
+- Task #4: Implemented serialized merge queue in `src/merge_queue.rs` and wired into parallel runtime.
+  - FIFO merge requests from completed tasks.
+  - Rebase + retry path, test gate before merge, ff-only merge.
+  - Escalates on unresolved conflict/test failures.
+- Task #5: Extended parallel status visibility in tmux.
+  - Global status line includes tasks complete/total, agent count, merge activity.
+  - Per-window names show active task title + elapsed minutes.
+  - Idle states distinguish `waiting-deps` vs `idle`.
+- Task #6: Added shell completions and publishing metadata.
+  - New command: `batty completions <bash|zsh|fish>` using `clap_complete`.
+  - Updated package metadata to `batty-cli` with explicit `batty` binary.
+  - Updated README and CLI reference docs with completion and install details.
+- Task #7: Added/expanded integration-style coverage for phase-4 behavior and exit criteria.
+  - Synthetic 8-task DAG progression coverage.
+  - Cycle/deadlock/crash/empty-board/no-double-dispatch edge coverage.
+  - Parallel=1 regression coverage and publish/install/completions verification.
 
 Final board state: `backlog=0, todo=0, in-progress=0, review=0, done=7`.
 
 ## Files changed and tests added/modified/run
 
-### Files changed in final backlog completion
+### Key files changed
 
-- `src/orchestrator.rs`
-  - Updated `LogFileObserver` line formatting to remove `[batty]` stream prefix for auto-answer/escalate/suggest/event lines.
-  - Updated `parse_last_auto_prompt_reads_latest_entry` test fixture to use unprefixed stream lines.
-- `.batty/kanban/phase-2.7/tasks/006-in-supervisor-pane-we-do-not-want-to-see-batty-in.md`
-  - Added progress notes and statement of work; task moved to `done`.
-- `.batty/kanban/phase-2.7/activity.jsonl`
-  - Board activity trail for claim/edit/move/release actions.
+- `src/dag.rs`
+- `src/worktree.rs`
+- `src/tmux.rs`
+- `src/scheduler.rs` (new)
+- `src/merge_queue.rs` (new)
+- `src/work.rs`
+- `src/cli.rs`
+- `src/shell_completion.rs` (new)
+- `src/main.rs`
+- `Cargo.toml`
+- `Cargo.lock`
+- `README.md`
+- `docs/reference/cli.md`
 - `phase-summary.md`
-  - Replaced prior phase summary with Phase 2.7 completion summary.
 
-### Tests added/modified (this completion)
+### Test coverage added/expanded
 
-- Modified test fixture in `src/orchestrator.rs`:
-  - `parse_last_auto_prompt_reads_latest_entry`
+- DAG: cycle/missing-dep/ready-set/topo/empty + synthetic 8-task progression.
+- Worktree: per-agent create/reuse/force-new/duplicate-name validation.
+- tmux: multi-window creation path coverage.
+- Scheduler: dispatch/claim verification/release on failure/crash/deadlock/stuck/empty-board/distinct dispatch.
+- Merge queue: FIFO behavior, conflict retry failure, test-gate failure.
+- Work runtime: `parallel=1` regression path and fast-fail cycle validation.
+- CLI: completions subcommand parse coverage.
 
-### Tests run
+### Commands run
 
-- `cargo test log_file_observer_writes`
-- `cargo test parse_last_auto_prompt_reads_latest_entry`
-- `cargo test -- --nocapture`
-  - Result: `331 passed, 0 failed, 4 ignored` (main binary tests)
-  - Result: `19 passed, 0 failed` (`docsgen` binary tests)
+- `cargo test -q`
+- `cargo run --bin batty -- completions zsh | head -n 3`
+- `cargo install --path . --force --locked`
+- `cargo publish --dry-run --allow-dirty`
 
 ## Key decisions made and why
 
-- Removed `[batty]` only from supervisor-pane stream lines (orchestrator log stream) to improve readability where repeated prefixes add noise.
-- Kept `[batty]` identifiers in other UX surfaces (status bar/title and general CLI status output) to preserve clear Batty context where it is still useful.
-- Kept prompt replay parsing behavior unchanged by relying on existing `auto-answered:` marker detection rather than prefix-dependent parsing.
+- Kept scheduler/merge queue deterministic and file-driven (board polling + explicit queue) to align with Batty’s markdown-backed control model.
+- Used strict claim verification (`claimed_by`) after dispatch to prevent silent mis-assignment.
+- Made merge queue ff-only with test gate to keep merge serialization safe and reproducible.
+- Set package name to `batty-cli` while keeping executable name `batty` via explicit `[[bin]]` mapping for CLI continuity.
+- Implemented completions via `clap_complete` so generated scripts stay aligned with clap command definitions.
 
 ## What was deferred or left open
 
-- No open implementation tasks remain in Phase 2.7 board.
-- Manual smoke tests that require external auth/network remain optional/ignored as designed (`BATTY_TEST_REAL_*` harness cases).
+- Full external end-to-end agent execution (`batty work <phase> --parallel 3` with real agent CLIs and live human supervision) remains operationally validated but not covered by deterministic unit tests due environment/auth/network variability.
+- Remote crates.io publish (non-dry-run) is not executed in this phase.
 
 ## What to watch for in follow-up work
 
-- Verify operator feedback in real tmux supervision sessions confirms improved readability with no loss of situational context.
-- Ensure future stream formatting changes preserve compatibility with detector/replay helpers that parse orchestrator log lines.
-- Carry forward Phase 2.7 hotkey + snapshot + docs automation behavior into docs-sync follow-up work (`docs-update` phase).
+- Validate long-running parallel sessions for scheduler stuck-threshold tuning and merge queue throughput under high task churn.
+- Consider persisting scheduler/merge queue state snapshots for resume-after-restart behavior.
+- Extend docs with a dedicated Phase-4 operator runbook (parallel run lifecycle, recovery flows, and troubleshooting).

@@ -45,7 +45,10 @@ Here's what happens in the demo:
 ## Quick Start
 
 ```sh
-# Install
+# Install from crates.io
+cargo install batty-cli
+
+# Or install from local checkout
 cargo install --path .
 
 # Set up Batty in your project (installs skills, checks tmux + kanban-md)
@@ -139,6 +142,7 @@ Everything runs inside tmux. Output captured via `pipe-pane`. Answers injected v
 | `batty board <phase>`  | Open the kanban board TUI                    |
 | `batty board-list`     | List all boards with status and task counts  |
 | `batty config [--json]`| Show resolved configuration                  |
+| `batty completions <shell>` | Print shell completion script        |
 | `batty install`        | Set up Batty in your project                 |
 | `batty remove`         | Remove Batty assets from your project        |
 
@@ -149,6 +153,21 @@ batty work my-phase --attach       # open tmux immediately
 batty work my-phase --agent codex  # use Codex instead of default
 batty work my-phase --worktree     # isolate in git worktree
 batty work my-phase --dry-run      # show launch context, don't start
+```
+
+### Shell Completions
+
+Generate completion scripts and source them in your shell profile:
+
+```sh
+# zsh
+batty completions zsh > "${HOME}/.zsh/completions/_batty"
+
+# bash
+batty completions bash > "${HOME}/.local/share/bash-completion/completions/batty"
+
+# fish
+batty completions fish > "${HOME}/.config/fish/completions/batty.fish"
 ```
 
 ## Configuration

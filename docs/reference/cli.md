@@ -18,6 +18,7 @@ Commands:
   attach      Attach to a running batty tmux session
   resume      Resume supervision for an existing phase/session run
   config      Show project configuration
+  completions Generate shell completions
   install     Initialize Batty assets and required external tools
   remove      Remove installed Batty assets from a project
   board       Open kanban-md TUI for a phase (prefers active run worktree)
@@ -110,6 +111,29 @@ Options:
       --json
           Emit machine-readable JSON output
 
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty completions`
+
+Generate shell completions
+
+```text
+Generate shell completions
+
+Usage: batty completions [OPTIONS] <SHELL>
+
+Arguments:
+  <SHELL>
+          Shell to generate completion script for
+
+          [possible values: bash, zsh, fish]
+
+Options:
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 
@@ -237,4 +261,3 @@ Options:
   -h, --help
           Print help
 ```
-

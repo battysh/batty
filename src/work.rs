@@ -10,6 +10,8 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::collections::{HashMap, HashSet};
+use std::io::IsTerminal;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -549,6 +551,531 @@ pub fn run_phase(
     )
 }
 
+fn resolve_policy_tier(
+    policy_override: Option<&str>,
+    project_config: &ProjectConfig,
+) -> Result<Policy> {
+    let policy_tier = match policy_override {
+        Some("observe") => crate::config::Policy::Observe,
+        Some("suggest") => crate::config::Policy::Suggest,
+        Some("act") => crate::config::Policy::Act,
+        Some(other) => bail!("unknown policy: {other} (expected observe/suggest/act)"),
+        None => project_config.defaults.policy,
+    };
+    Ok(policy_tier)
+}
+
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn truncate_label(input: &str, max_chars: usize) -> String {
+    let compact = input.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max_chars {
+        compact
+    } else {
+        let truncated = compact.chars().take(max_chars).collect::<String>();
+        format!("{truncated}...")
+    }
+}
+
+fn parallel_agent_slot_names(parallel: u32) -> Vec<String> {
+    (1..=parallel).map(|idx| format!("agent-{idx}")).collect()
+}
+
+fn generate_parallel_agent_names(parallel: u32, execution_root: &Path) -> Result<Vec<String>> {
+    let mut names = Vec::with_capacity(parallel as usize);
+    let mut seen = HashSet::new();
+
+    for idx in 1..=parallel {
+        let mut selected = None;
+        for _ in 0..8 {
+            let candidate = generate_claim_identity(execution_root)?;
+            if seen.insert(candidate.clone()) {
+                selected = Some(candidate);
+                break;
+            }
+        }
+
+        if let Some(name) = selected {
+            names.push(name);
+            continue;
+        }
+
+        // Deterministic fallback if kanban-md repeatedly generated collisions.
+        for candidate in parallel_agent_slot_names(parallel.saturating_mul(2).max(8)) {
+            if seen.insert(candidate.clone()) {
+                names.push(candidate);
+                break;
+            }
+        }
+
+        if names.len() != idx as usize {
+            bail!("failed to generate unique parallel agent names");
+        }
+    }
+
+    Ok(names)
+}
+
+fn setup_parallel_log_pane(
+    window_target: &str,
+    executor_pane: &str,
+    log_path: &Path,
+    split_mode: crate::tmux::SplitMode,
+) -> Result<()> {
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+
+    let tail_cmd = vec![
+        "tail".to_string(),
+        "-f".to_string(),
+        log_path.display().to_string(),
+    ];
+
+    match split_mode {
+        crate::tmux::SplitMode::Lines => {
+            if let Err(e) = crate::tmux::split_window_vertical_lines(window_target, 10, &tail_cmd) {
+                warn!(error = %e, "parallel log pane creation with -l failed");
+                return Ok(());
+            }
+        }
+        crate::tmux::SplitMode::Percent => {
+            if let Err(e) = crate::tmux::split_window_vertical_percent(window_target, 20, &tail_cmd)
+            {
+                warn!(error = %e, "parallel log pane creation with -p failed");
+                return Ok(());
+            }
+        }
+        crate::tmux::SplitMode::Disabled => return Ok(()),
+    }
+
+    let _ = Command::new("tmux")
+        .args(["select-pane", "-t", executor_pane])
+        .output();
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)] // Parallel launch path mirrors run_phase controls.
+pub fn run_phase_parallel(
+    phase: &str,
+    parallel: u32,
+    project_config: &ProjectConfig,
+    agent_name: &str,
+    policy_override: Option<&str>,
+    auto_attach: bool,
+    use_worktree: bool,
+    force_new_worktree: bool,
+    dry_run: bool,
+    project_root: &Path,
+    config_path: Option<&Path>,
+) -> Result<()> {
+    if parallel <= 1 {
+        return run_phase(
+            phase,
+            project_config,
+            agent_name,
+            policy_override,
+            auto_attach,
+            use_worktree,
+            force_new_worktree,
+            dry_run,
+            project_root,
+            config_path,
+        );
+    }
+
+    let phase_dir = crate::paths::resolve_kanban_root(project_root).join(phase);
+    let source_tasks_dir = phase_dir.join("tasks");
+    if !source_tasks_dir.is_dir() {
+        bail!(
+            "phase board not found: {} (expected {})",
+            phase,
+            source_tasks_dir.display()
+        );
+    }
+    let source_dag = crate::dag::TaskDag::from_tasks_dir(&source_tasks_dir)?;
+    let _ = source_dag.topological_sort()?;
+
+    let adapter = agent::adapter_from_name(agent_name)
+        .with_context(|| format!("unknown agent: {agent_name}"))?;
+    let policy_tier = resolve_policy_tier(policy_override, project_config)?;
+    let claim_identity = resolve_claim_identity(phase, project_root)?;
+    let slots = generate_parallel_agent_names(parallel, project_root)?;
+    let worktrees =
+        phase_worktree::prepare_agent_worktrees(project_root, phase, &slots, force_new_worktree)
+            .with_context(|| format!("failed to prepare per-agent worktrees for phase '{phase}'"))?;
+    let mut branch_by_agent = HashMap::new();
+    for (idx, worktree) in worktrees.iter().enumerate() {
+        branch_by_agent.insert(slots[idx].clone(), worktree.branch.clone());
+    }
+
+    let tmux_caps = crate::tmux::probe_capabilities()?;
+    if !tmux_caps.pipe_pane {
+        bail!("{}", tmux_caps.remediation_message());
+    }
+
+    let session = crate::tmux::session_name(phase);
+    if crate::tmux::session_exists(&session) {
+        bail!(
+            "tmux session '{}' already exists — attach with `batty attach {}` or kill it first",
+            session,
+            phase
+        );
+    }
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let run_log_dir = project_root
+        .join(".batty")
+        .join("logs")
+        .join(format!("parallel-{phase}-{timestamp}"));
+    std::fs::create_dir_all(&run_log_dir)
+        .with_context(|| format!("failed to create parallel log dir {}", run_log_dir.display()))?;
+    let mut agent_panes: HashMap<String, String> = HashMap::new();
+
+    for (index, worktree) in worktrees.iter().enumerate() {
+        let slot = &slots[index];
+        let tasks_dir = crate::paths::resolve_kanban_root(&worktree.path)
+            .join(phase)
+            .join("tasks");
+        let tasks = task::load_tasks_from_dir(&tasks_dir).with_context(|| {
+            format!(
+                "failed to load tasks from {} for {}",
+                tasks_dir.display(),
+                slot
+            )
+        })?;
+
+        let launch_context = compose_launch_context(
+            phase,
+            &tasks,
+            &worktree.path,
+            None,
+            &claim_identity.agent,
+            claim_identity.source.as_str(),
+            project_config,
+            policy_tier,
+            adapter.as_ref(),
+            config_path,
+        )?;
+
+        let prompt = format!(
+            "## Parallel Agent Slot\n\
+slot.name: {slot}\n\
+slot.index: {}\n\
+slot.total: {parallel}\n\
+slot.claim_agent_name: {slot}\n\n\
+Use claim.agent_name = {slot} for all kanban-md --claim operations in this slot, even if other context shows a different claim identity.\n\n\
+{}",
+            index + 1,
+            launch_context.prompt
+        );
+
+        let mut spawn_config = adapter.spawn_config(&prompt, &worktree.path);
+        let (program, args) = apply_dangerous_mode_wrapper(
+            spawn_config.program,
+            spawn_config.args,
+            project_config.dangerous_mode.enabled,
+        );
+        spawn_config.program = program;
+        spawn_config.args = args;
+
+        if dry_run {
+            println!(
+                "[batty] dry-run {} -> worktree={} branch={} cmd={} {}",
+                slot,
+                worktree.path.display(),
+                worktree.branch,
+                spawn_config.program,
+                spawn_config.args.join(" ")
+            );
+            continue;
+        }
+
+        if index == 0 {
+            crate::tmux::create_session(
+                &session,
+                &spawn_config.program,
+                &spawn_config.args,
+                &spawn_config.work_dir,
+            )?;
+            crate::tmux::rename_window(&format!("{session}:0"), slot)?;
+            let _ = crate::tmux::tmux_set(&session, "remain-on-exit", "on");
+        } else {
+            crate::tmux::create_window(
+                &session,
+                slot,
+                &spawn_config.program,
+                &spawn_config.args,
+                &spawn_config.work_dir,
+            )?;
+        }
+
+        let window_target = format!("{session}:{slot}");
+        let pane = crate::tmux::pane_id(&window_target)?;
+        let slot_log_dir = run_log_dir.join(slot);
+        std::fs::create_dir_all(&slot_log_dir)?;
+        crate::tmux::setup_pipe_pane(&pane, &slot_log_dir.join("pty-output.log"))?;
+        setup_parallel_log_pane(
+            &window_target,
+            &pane,
+            &slot_log_dir.join("orchestrator.log"),
+            tmux_caps.split_mode,
+        )?;
+        agent_panes.insert(slot.clone(), pane.clone());
+
+        info!(
+            phase = phase,
+            slot = slot,
+            branch = %worktree.branch,
+            path = %worktree.path.display(),
+            "parallel agent slot launched"
+        );
+    }
+
+    if dry_run {
+        return Ok(());
+    }
+
+    let _ = crate::tmux::set_status_left(
+        &session,
+        &format!(" [batty] {phase} | parallel {parallel} agents"),
+    );
+    let _ = crate::tmux::set_status_right(&session, "[running]");
+    let _ = crate::tmux::select_window(&format!("{}:{}", session, slots[0]));
+
+    println!(
+        "\x1b[36m[batty]\x1b[0m started {} parallel agent windows in session '{}'",
+        parallel, session
+    );
+    println!("\x1b[36m[batty]\x1b[0m logs: {}", run_log_dir.display());
+    println!(
+        "\x1b[36m[batty]\x1b[0m claim identity: {} ({})",
+        claim_identity.agent,
+        claim_identity.source.as_str()
+    );
+
+    if auto_attach && std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
+        let session_for_attach = session.clone();
+        std::thread::spawn(move || {
+            let _ = crate::tmux::attach(&session_for_attach);
+        });
+    } else {
+        println!("\x1b[36m[batty]\x1b[0m attach with: batty attach {}", phase);
+    }
+
+    let scheduler_config = crate::scheduler::SchedulerConfig::default();
+    let poll_interval = scheduler_config.poll_interval;
+    let mut scheduler = crate::scheduler::Scheduler::new(
+        phase_dir.clone(),
+        slots.clone(),
+        scheduler_config,
+        crate::scheduler::ShellCommandRunner,
+    );
+    let merge_target_branch = current_git_branch(project_root)
+        .context("failed to determine merge target branch for parallel merge queue")?;
+    let verify_command = project_config
+        .defaults
+        .dod
+        .clone()
+        .unwrap_or_else(|| "cargo test".to_string());
+    let mut merge_queue = crate::merge_queue::MergeQueue::new(
+        project_root.to_path_buf(),
+        merge_target_branch.clone(),
+        verify_command,
+        1,
+    );
+    let mut active_assignments: HashMap<String, (u32, String, u64)> = HashMap::new();
+
+    loop {
+        let now = now_epoch_secs();
+        let pre_states = scheduler.agent_states().clone();
+        let tick = scheduler.tick(now)?;
+
+        if !tick.dispatched.is_empty() {
+            for dispatch in &tick.dispatched {
+                println!(
+                    "\x1b[36m[batty]\x1b[0m scheduler dispatched task #{} ({}) -> {}",
+                    dispatch.task_id, dispatch.task_title, dispatch.agent
+                );
+                active_assignments.insert(
+                    dispatch.agent.clone(),
+                    (dispatch.task_id, dispatch.task_title.clone(), now),
+                );
+            }
+        }
+
+        if !tick.completed.is_empty() {
+            println!(
+                "\x1b[36m[batty]\x1b[0m scheduler observed completed tasks: {}",
+                tick.completed
+                    .iter()
+                    .map(|id| format!("#{id}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+
+            for task_id in &tick.completed {
+                let completed_agent = pre_states.iter().find_map(|(agent, state)| {
+                    if let crate::scheduler::AgentState::Busy { task_id: active, .. } = state
+                        && active == task_id
+                    {
+                        Some(agent.clone())
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some(agent) = completed_agent
+                    && let Some(branch) = branch_by_agent.get(&agent)
+                {
+                    active_assignments.remove(&agent);
+                    merge_queue.enqueue(crate::merge_queue::MergeRequest {
+                        task_id: *task_id,
+                        agent,
+                        branch: branch.clone(),
+                    });
+                    println!(
+                        "\x1b[36m[batty]\x1b[0m merge queue depth: {}",
+                        merge_queue.len()
+                    );
+                }
+            }
+        }
+
+        let states = scheduler.agent_states().clone();
+        let active_agents = states
+            .values()
+            .filter(|state| matches!(state, crate::scheduler::AgentState::Busy { .. }))
+            .count();
+        let waiting_agents = if tick.ready.is_empty() {
+            states
+                .values()
+                .filter(|state| matches!(state, crate::scheduler::AgentState::Idle))
+                .count()
+        } else {
+            0
+        };
+
+        let status_left = format!(
+            " [{}/{} tasks] [{} agents] [{} merging]",
+            tick.done_tasks,
+            tick.total_tasks,
+            slots.len(),
+            usize::from(!merge_queue.is_empty())
+        );
+        let status_right = if waiting_agents > 0 {
+            format!("[active {active_agents}] [waiting {waiting_agents}]")
+        } else {
+            format!("[active {active_agents}] [ready {}]", tick.ready.len())
+        };
+        let _ = crate::tmux::set_status_left(&session, &status_left);
+        let _ = crate::tmux::set_status_right(&session, &status_right);
+
+        for (agent, state) in &states {
+            if let crate::scheduler::AgentState::Busy { task_id, .. } = state
+                && !active_assignments.contains_key(agent)
+            {
+                active_assignments.insert(
+                    agent.clone(),
+                    (*task_id, format!("task-{task_id}"), now),
+                );
+            }
+        }
+
+        for agent in &slots {
+            let label = if let Some((task_id, title, started_epoch)) = active_assignments.get(agent) {
+                let elapsed_secs = now.saturating_sub(*started_epoch);
+                let elapsed_mins = elapsed_secs / 60;
+                let title = truncate_label(title, 20);
+                format!("{agent} #{task_id} {title} {elapsed_mins}m")
+            } else if tick.ready.is_empty() {
+                format!("{agent} waiting-deps")
+            } else {
+                format!("{agent} idle")
+            };
+            if let Some(pane) = agent_panes.get(agent) {
+                let _ = crate::tmux::rename_window(pane, &label);
+            }
+        }
+
+        for (agent, state) in states {
+            if let crate::scheduler::AgentState::Busy { .. } = state
+                && let Some(pane) = agent_panes.get(&agent)
+            {
+                let alive = crate::tmux::pane_exists(pane)
+                    && !crate::tmux::pane_dead(pane).unwrap_or(false);
+                if !alive {
+                    println!(
+                        "\x1b[36m[batty]\x1b[0m scheduler detected crashed agent pane for {} — releasing claim",
+                        agent
+                    );
+                    scheduler.handle_agent_crash(&agent)?;
+                }
+            }
+        }
+
+        if !tick.stuck.is_empty() {
+            let detail = tick
+                .stuck
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "{} task #{} stalled {}s",
+                        entry.agent, entry.task_id, entry.stalled_secs
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            bail!("scheduler detected stuck task(s): {detail}");
+        }
+
+        if tick.deadlocked {
+            bail!(
+                "scheduler deadlock: no ready tasks, all agents idle, and unfinished tasks remain"
+            );
+        }
+
+        if !merge_queue.is_empty() {
+            match merge_queue.process_next() {
+                Ok(Some(merged)) => {
+                    println!(
+                        "\x1b[36m[batty]\x1b[0m merge queue merged task #{} from {} ({}) into {}",
+                        merged.task_id, merged.agent, merged.branch, merge_target_branch
+                    );
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    bail!("merge queue failure: {err}");
+                }
+            }
+        }
+
+        if tick.all_done {
+            println!(
+                "\x1b[36m[batty]\x1b[0m scheduler complete: all active tasks are done"
+            );
+            break;
+        }
+
+        std::thread::sleep(poll_interval);
+    }
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)] // Phase launch combines config and runtime toggles; keeping explicit args avoids opaque builders.
 fn run_phase_with_rework(
     phase: &str,
@@ -620,6 +1147,8 @@ fn run_phase_with_rework(
     let tasks_dir = phase_dir.join("tasks");
     let tasks = task::load_tasks_from_dir(&tasks_dir)
         .with_context(|| format!("failed to load tasks from {}", tasks_dir.display()))?;
+    let task_dag = crate::dag::TaskDag::from_tasks_dir(&tasks_dir)?;
+    let _ = task_dag.topological_sort()?;
 
     info!(
         phase = phase,
@@ -663,13 +1192,7 @@ fn run_phase_with_rework(
         .with_context(|| format!("unknown agent: {agent_name}"))?;
 
     // 6. Resolve policy
-    let policy_tier = match policy_override {
-        Some("observe") => crate::config::Policy::Observe,
-        Some("suggest") => crate::config::Policy::Suggest,
-        Some("act") => crate::config::Policy::Act,
-        Some(other) => bail!("unknown policy: {other} (expected observe/suggest/act)"),
-        None => project_config.defaults.policy,
-    };
+    let policy_tier = resolve_policy_tier(policy_override, project_config)?;
 
     // 6b. Resolve the persistent claim identity for this phase workspace.
     let claim_identity = resolve_claim_identity(phase, &execution_root)?;
@@ -2066,6 +2589,103 @@ mod tests {
             apply_dangerous_mode_wrapper("aider".to_string(), vec!["task".to_string()], true);
         assert_eq!(program, "aider");
         assert_eq!(args, vec!["task"]);
+    }
+
+    #[test]
+    fn parallel_agent_slot_names_are_stable_and_sequential() {
+        assert_eq!(
+            parallel_agent_slot_names(3),
+            vec![
+                "agent-1".to_string(),
+                "agent-2".to_string(),
+                "agent-3".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn run_phase_parallel_one_delegates_without_parallel_side_effects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = run_phase_parallel(
+            "phase-9",
+            1,
+            &ProjectConfig::default(),
+            "claude",
+            None,
+            false,
+            false,
+            false,
+            true,
+            tmp.path(),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("phase board not found"));
+    }
+
+    #[test]
+    fn run_phase_parallel_fails_fast_on_dependency_cycle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("kanban").join("phase-x").join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+
+        fs::write(
+            tasks_dir.join("001-a.md"),
+            "---\nid: 1\ntitle: a\nstatus: backlog\npriority: high\ntags: []\ndepends_on:\n  - 2\nclass: standard\n---\n\nA\n",
+        )
+        .unwrap();
+        fs::write(
+            tasks_dir.join("002-b.md"),
+            "---\nid: 2\ntitle: b\nstatus: backlog\npriority: high\ntags: []\ndepends_on:\n  - 1\nclass: standard\n---\n\nB\n",
+        )
+        .unwrap();
+
+        let err = run_phase_parallel(
+            "phase-x",
+            2,
+            &ProjectConfig::default(),
+            "claude",
+            None,
+            false,
+            false,
+            false,
+            true,
+            tmp.path(),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("dependency cycle detected"));
+    }
+
+    #[test]
+    fn resolve_policy_tier_uses_override_or_default() {
+        let config = ProjectConfig::default();
+        assert_eq!(
+            resolve_policy_tier(Some("observe"), &config).unwrap(),
+            Policy::Observe
+        );
+        assert_eq!(
+            resolve_policy_tier(Some("suggest"), &config).unwrap(),
+            Policy::Suggest
+        );
+        assert_eq!(
+            resolve_policy_tier(Some("act"), &config).unwrap(),
+            Policy::Act
+        );
+        assert_eq!(
+            resolve_policy_tier(None, &config).unwrap(),
+            config.defaults.policy
+        );
+    }
+
+    #[test]
+    fn resolve_policy_tier_rejects_invalid_values() {
+        let err = resolve_policy_tier(Some("invalid"), &ProjectConfig::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown policy"));
     }
 
     #[test]

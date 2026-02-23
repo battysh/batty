@@ -1,13 +1,23 @@
 [package]
-name = "batty"
+name = "batty-cli"
 version = "0.1.0"
 edition = "2024"
 description = "Hierarchical agent command system for software development"
 license = "MIT"
+repository = "https://github.com/battysh/batty"
+homepage = "https://github.com/battysh/batty"
+readme = "README.md"
+keywords = ["cli", "tmux", "automation", "agent", "kanban"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "batty"
+path = "src/main.rs"
 
 [dependencies]
 # CLI
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 
 # PTY
 portable-pty = "0.8"

@@ -7,6 +7,7 @@
 //! - rejected/failed/unmerged runs are retained for inspection
 
 use std::ffi::OsStr;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -18,6 +19,12 @@ pub struct PhaseWorktree {
     pub repo_root: PathBuf,
     pub base_branch: String,
     pub start_commit: String,
+    pub branch: String,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentWorktree {
     pub branch: String,
     pub path: PathBuf,
 }
@@ -136,6 +143,103 @@ pub fn resolve_phase_worktree(
     }
 
     Ok((prepare_phase_worktree(project_root, phase)?, false))
+}
+
+/// Prepare (or reuse) one worktree per parallel agent slot for a phase.
+///
+/// Layout:
+/// - path: `.batty/worktrees/<phase>/<agent>/`
+/// - branch: `batty/<phase-slug>/<agent-slug>`
+pub fn prepare_agent_worktrees(
+    project_root: &Path,
+    phase: &str,
+    agent_names: &[String],
+    force_new: bool,
+) -> Result<Vec<AgentWorktree>> {
+    if agent_names.is_empty() {
+        bail!("parallel agent worktree preparation requires at least one agent");
+    }
+
+    let repo_root = resolve_repo_root(project_root)?;
+    let base_branch = current_branch(&repo_root)?;
+    let phase_slug = sanitize_phase_for_branch(phase);
+    let phase_dir = repo_root.join(".batty").join("worktrees").join(phase);
+    std::fs::create_dir_all(&phase_dir).with_context(|| {
+        format!(
+            "failed to create agent worktree phase directory {}",
+            phase_dir.display()
+        )
+    })?;
+
+    let mut seen_agent_slugs = HashSet::new();
+    for agent in agent_names {
+        let slug = sanitize_phase_for_branch(agent);
+        if !seen_agent_slugs.insert(slug.clone()) {
+            bail!(
+                "agent names contain duplicate sanitized slug '{}'; use unique agent names",
+                slug
+            );
+        }
+    }
+
+    let mut worktrees = Vec::with_capacity(agent_names.len());
+    for agent in agent_names {
+        let agent_slug = sanitize_phase_for_branch(agent);
+        let branch = format!("batty/{phase_slug}/{agent_slug}");
+        let path = phase_dir.join(&agent_slug);
+
+        if force_new {
+            let _ = remove_worktree(&repo_root, &path);
+            let _ = delete_branch(&repo_root, &branch);
+        }
+
+        if path.exists() {
+            if !branch_exists(&repo_root, &branch)? {
+                bail!(
+                    "agent worktree path exists but branch is missing: {} ({})",
+                    path.display(),
+                    branch
+                );
+            }
+            if !worktree_registered(&repo_root, &path)? {
+                bail!(
+                    "agent worktree path exists but is not registered in git worktree list: {}",
+                    path.display()
+                );
+            }
+        } else {
+            let path_s = path.to_string_lossy().to_string();
+            let add_output = if branch_exists(&repo_root, &branch)? {
+                run_git(&repo_root, ["worktree", "add", path_s.as_str(), branch.as_str()])?
+            } else {
+                run_git(
+                    &repo_root,
+                    [
+                        "worktree",
+                        "add",
+                        "-b",
+                        branch.as_str(),
+                        path_s.as_str(),
+                        base_branch.as_str(),
+                    ],
+                )?
+            };
+            if !add_output.status.success() {
+                bail!(
+                    "git worktree add failed for agent '{}': {}",
+                    agent,
+                    String::from_utf8_lossy(&add_output.stderr).trim()
+                );
+            }
+        }
+
+        worktrees.push(AgentWorktree {
+            branch,
+            path,
+        });
+    }
+
+    Ok(worktrees)
 }
 
 fn latest_phase_worktree(project_root: &Path, phase: &str) -> Result<Option<PhaseWorktree>> {
@@ -324,6 +428,27 @@ fn branch_exists(repo_root: &Path, branch: &str) -> Result<bool> {
     }
 }
 
+fn worktree_registered(repo_root: &Path, path: &Path) -> Result<bool> {
+    let output = run_git(repo_root, ["worktree", "list", "--porcelain"])?;
+    if !output.status.success() {
+        bail!(
+            "failed to list worktrees: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let target = path.to_string_lossy().to_string();
+    let listed = String::from_utf8_lossy(&output.stdout);
+    for line in listed.lines() {
+        if let Some(candidate) = line.strip_prefix("worktree ")
+            && candidate.trim() == target
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn is_merged_into_base(repo_root: &Path, branch: &str, base_branch: &str) -> Result<bool> {
     let output = run_git(
         repo_root,
@@ -444,6 +569,13 @@ mod tests {
     fn cleanup_worktree(repo_root: &Path, worktree: &PhaseWorktree) {
         let _ = remove_worktree(repo_root, &worktree.path);
         let _ = delete_branch(repo_root, &worktree.branch);
+    }
+
+    fn cleanup_agent_worktrees(repo_root: &Path, worktrees: &[AgentWorktree]) {
+        for wt in worktrees {
+            let _ = remove_worktree(repo_root, &wt.path);
+            let _ = delete_branch(repo_root, &wt.branch);
+        }
     }
 
     #[test]
@@ -605,5 +737,82 @@ mod tests {
         );
 
         cleanup_worktree(tmp.path(), &resolved);
+    }
+
+    #[test]
+    fn prepare_agent_worktrees_creates_layout_and_branches() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        let names = vec!["agent-1".to_string(), "agent-2".to_string()];
+        let worktrees = prepare_agent_worktrees(tmp.path(), "phase-4", &names, false).unwrap();
+
+        assert_eq!(worktrees.len(), 2);
+        assert_eq!(
+            worktrees[0].path,
+            tmp.path()
+                .join(".batty")
+                .join("worktrees")
+                .join("phase-4")
+                .join("agent-1")
+        );
+        assert_eq!(worktrees[0].branch, "batty/phase-4/agent-1");
+        assert!(branch_exists(tmp.path(), "batty/phase-4/agent-1").unwrap());
+        assert!(branch_exists(tmp.path(), "batty/phase-4/agent-2").unwrap());
+
+        cleanup_agent_worktrees(tmp.path(), &worktrees);
+    }
+
+    #[test]
+    fn prepare_agent_worktrees_reuses_existing_agent_paths() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        let names = vec!["agent-1".to_string(), "agent-2".to_string()];
+        let first = prepare_agent_worktrees(tmp.path(), "phase-4", &names, false).unwrap();
+        let second = prepare_agent_worktrees(tmp.path(), "phase-4", &names, false).unwrap();
+
+        assert_eq!(first[0].path, second[0].path);
+        assert_eq!(first[1].path, second[1].path);
+        assert_eq!(first[0].branch, second[0].branch);
+        assert_eq!(first[1].branch, second[1].branch);
+
+        cleanup_agent_worktrees(tmp.path(), &first);
+    }
+
+    #[test]
+    fn prepare_agent_worktrees_rejects_duplicate_sanitized_names() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        let names = vec!["agent 1".to_string(), "agent-1".to_string()];
+        let err = prepare_agent_worktrees(tmp.path(), "phase-4", &names, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("duplicate sanitized slug"));
+    }
+
+    #[test]
+    fn prepare_agent_worktrees_force_new_recreates_worktrees() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        let names = vec!["agent-1".to_string()];
+        let first = prepare_agent_worktrees(tmp.path(), "phase-4", &names, false).unwrap();
+
+        fs::write(first[0].path.join("agent.txt"), "agent-1\n").unwrap();
+        git(&first[0].path, &["add", "agent.txt"]);
+        git(&first[0].path, &["commit", "-q", "-m", "agent work"]);
+
+        let second = prepare_agent_worktrees(tmp.path(), "phase-4", &names, true).unwrap();
+        let listing = run_git(tmp.path(), ["branch", "--list", "batty/phase-4/agent-1"]).unwrap();
+        assert!(listing.status.success());
+        assert!(second[0].path.exists());
+
+        cleanup_agent_worktrees(tmp.path(), &second);
     }
 }
