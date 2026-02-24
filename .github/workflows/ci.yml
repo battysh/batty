@@ -75,7 +75,15 @@ jobs:
         shell: bash
 
       - name: Install kanban-md
-        run: cargo install --git https://github.com/antopolskiy/kanban-md kanban-md
+        run: |
+          KMD_VERSION="0.32.2"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            ARCH="linux_amd64"
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            ARCH="darwin_arm64"
+          fi
+          curl -sL "https://github.com/antopolskiy/kanban-md/releases/download/v${KMD_VERSION}/kanban-md_${KMD_VERSION}_${ARCH}.tar.gz" | sudo tar xz -C /usr/local/bin kanban-md
+        shell: bash
 
       - name: Lint
         run: make lint
@@ -103,7 +111,15 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y tmux
 
       - name: Install kanban-md
-        run: cargo install --git https://github.com/antopolskiy/kanban-md kanban-md
+        run: |
+          KMD_VERSION="0.32.2"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            ARCH="linux_amd64"
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            ARCH="darwin_arm64"
+          fi
+          curl -sL "https://github.com/antopolskiy/kanban-md/releases/download/v${KMD_VERSION}/kanban-md_${KMD_VERSION}_${ARCH}.tar.gz" | sudo tar xz -C /usr/local/bin kanban-md
+        shell: bash
 
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin
