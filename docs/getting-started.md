@@ -36,8 +36,8 @@ batty install
 This does three things:
 
 1. **Checks tools** -- Verifies `tmux` and `kanban-md` are available, attempts to install them if not
-2. **Installs steering files** -- Adds workflow rules that your agent loads automatically (`.claude/rules/` for Claude Code, `.agents/rules/` for Codex)
-3. **Installs skills** -- Adds kanban-md skills so your agent knows how to work with task boards
+1. **Installs steering files** -- Adds workflow rules that your agent loads automatically (`.claude/rules/` for Claude Code, `.agents/rules/` for Codex)
+1. **Installs skills** -- Adds kanban-md skills so your agent knows how to work with task boards
 
 Batty never touches your existing `CLAUDE.md` or `AGENTS.md`.
 
@@ -95,15 +95,15 @@ batty config               # show resolved configuration
 
 ## Runtime Modes
 
-| Flag | Effect |
-|------|--------|
-| `--attach` | Open the tmux session immediately instead of backgrounding |
-| `--agent codex` | Override the default executor agent |
-| `--policy suggest` | Override the default policy tier |
-| `--worktree` | Run in an isolated git worktree |
-| `--worktree --new` | Force a fresh worktree (don't resume existing) |
-| `--parallel 3` | Run with 3 parallel agents (DAG-aware scheduling) |
-| `--dry-run` | Show the composed launch context and exit |
+| Flag               | Effect                                                     |
+| ------------------ | ---------------------------------------------------------- |
+| `--attach`         | Open the tmux session immediately instead of backgrounding |
+| `--agent codex`    | Override the default executor agent                        |
+| `--policy suggest` | Override the default policy tier                           |
+| `--worktree`       | Run in an isolated git worktree                            |
+| `--worktree --new` | Force a fresh worktree (don't resume existing)             |
+| `--parallel 3`     | Run with 3 parallel agents (DAG-aware scheduling)          |
+| `--dry-run`        | Show the composed launch context and exit                  |
 
 ## Configuration
 
@@ -134,10 +134,10 @@ Full reference: [Configuration Reference](reference/config.md)
 
 During an active tmux session:
 
-| Hotkey | Action |
-|--------|--------|
+| Hotkey  | Action                                                        |
+| ------- | ------------------------------------------------------------- |
 | `C-b P` | Pause supervision (Tier 1 and Tier 2 stop, you type manually) |
-| `C-b R` | Resume supervision |
+| `C-b R` | Resume supervision                                            |
 
 While paused, human input still works -- you just take over from Batty.
 

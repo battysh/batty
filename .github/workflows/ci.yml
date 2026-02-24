@@ -65,6 +65,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install system dependencies
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y tmux
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            brew install tmux
+          fi
+        shell: bash
+
+      - name: Install kanban-md
+        run: cargo install kanban-md
+
       - name: Lint
         run: make lint
 
@@ -86,6 +98,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Install kanban-md
+        run: cargo install kanban-md
 
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin

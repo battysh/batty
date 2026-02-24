@@ -60,7 +60,7 @@ batty board my-phase --print-dir       # show resolved path
 **Cause:** Supervisor program misconfigured, timeout too low, or supervision is paused.
 
 1. Check the tmux status bar -- if it says `PAUSED`, press `C-b R` to resume
-2. Verify config:
+1. Verify config:
 
 ```sh
 batty config --json | grep -A5 supervisor

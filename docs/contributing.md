@@ -29,10 +29,10 @@ Generation is deterministic; rerunning should not change output unless CLI/confi
 CI performs:
 
 1. Generation refresh (`./scripts/generate-docs.sh`)
-2. Markdown format check (`mdformat --check`)
-3. Markdown lint check (`markdownlint-cli2`)
-4. Internal link validation (`mkdocs build --strict`)
-5. Generated-file freshness (`git diff --exit-code` on generated docs)
+1. Markdown format check (`mdformat --check`)
+1. Markdown lint check (`markdownlint-cli2`)
+1. Internal link validation (`mkdocs build --strict`)
+1. Generated-file freshness (`git diff --exit-code` on generated docs)
 
 ## Publishing
 
