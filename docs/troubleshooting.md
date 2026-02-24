@@ -91,7 +91,7 @@ enabled = false
 
 Inspect context snapshots:
 
-```
+```text
 .batty/logs/<run>/tier2-context-<n>.md
 ```
 
