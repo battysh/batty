@@ -1,8 +1,8 @@
 site_name: Batty Docs
 site_description: Documentation for Batty, the tmux-native hierarchical agent command system.
-site_url: https://zedmor.github.io/batty/
-repo_url: https://github.com/zedmor/batty
-repo_name: zedmor/batty
+site_url: https://battysh.github.io/batty/
+repo_url: https://github.com/battysh/batty
+repo_name: battysh/batty
 strict: true
 theme:
   name: material
