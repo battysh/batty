@@ -144,7 +144,9 @@ impl OrchestratorObserver for LogFileObserver {
 
     fn on_suggest(&mut self, prompt: &str, response: &str) {
         let shown = Self::display_response(response);
-        self.append(&format!("? suggestion: respond to \"{prompt}\" with \"{shown}\""));
+        self.append(&format!(
+            "? suggestion: respond to \"{prompt}\" with \"{shown}\""
+        ));
     }
 
     fn on_event(&mut self, message: &str) {

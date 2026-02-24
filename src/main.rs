@@ -726,35 +726,33 @@ async fn main() -> Result<()> {
                     &cwd,
                     config_path.as_deref(),
                 )?;
+            } else if parallel > 1 {
+                work::run_phase_parallel(
+                    &target,
+                    parallel,
+                    &config,
+                    agent_name,
+                    policy_str,
+                    attach,
+                    worktree,
+                    new,
+                    dry_run,
+                    &cwd,
+                    config_path.as_deref(),
+                )?;
             } else {
-                if parallel > 1 {
-                    work::run_phase_parallel(
-                        &target,
-                        parallel,
-                        &config,
-                        agent_name,
-                        policy_str,
-                        attach,
-                        worktree,
-                        new,
-                        dry_run,
-                        &cwd,
-                        config_path.as_deref(),
-                    )?;
-                } else {
-                    work::run_phase(
-                        &target,
-                        &config,
-                        agent_name,
-                        policy_str,
-                        attach,
-                        worktree,
-                        new,
-                        dry_run,
-                        &cwd,
-                        config_path.as_deref(),
-                    )?;
-                }
+                work::run_phase(
+                    &target,
+                    &config,
+                    agent_name,
+                    policy_str,
+                    attach,
+                    worktree,
+                    new,
+                    dry_run,
+                    &cwd,
+                    config_path.as_deref(),
+                )?;
             }
         }
         Command::Attach { target } => {
