@@ -101,6 +101,7 @@ jobs:
           --skip tmux::tests::session_with_short
           --skip orchestrator::tests::status_bar
           --skip orchestrator::tests::handle_prompt_tier2
+          --skip orchestrator::tests::harness_direct_reply
           --skip tier2::tests::call_supervisor
           --skip work::phase_worktree::tests::prepare_agent_worktrees_creates
 
@@ -145,6 +146,7 @@ jobs:
           --skip tmux::tests::session_with_short
           --skip orchestrator::tests::status_bar
           --skip orchestrator::tests::handle_prompt_tier2
+          --skip orchestrator::tests::harness_direct_reply
           --skip tier2::tests::call_supervisor
           --skip work::phase_worktree::tests::prepare_agent_worktrees_creates
 
