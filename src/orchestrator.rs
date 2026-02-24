@@ -770,6 +770,7 @@ struct SupervisionLock {
     acquired_epoch: u64,
 }
 
+#[derive(Debug)]
 struct SupervisionLease {
     path: PathBuf,
 }
@@ -1911,6 +1912,7 @@ mod tests {
     use crate::config::Policy;
     use crate::prompt::PromptPatterns;
     use serde::Deserialize;
+    use serial_test::serial;
     use std::collections::HashMap;
     use std::fs;
     #[cfg(unix)]
@@ -2362,6 +2364,7 @@ esac
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     fn harness_direct_reply_injected_into_agent() {
         let scenario = harness_scenario("mock-direct");
         let result = run_harness_mock_case(&scenario.id);
@@ -2409,6 +2412,7 @@ esac
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     fn harness_press_enter_reply_injected_as_empty_input() {
         let scenario = harness_scenario("mock-enter");
         let result = run_harness_mock_case(&scenario.id);
@@ -2430,6 +2434,7 @@ esac
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     fn harness_supervisor_escalate_does_not_inject() {
         let scenario = harness_scenario("mock-escalate");
         let result = run_harness_mock_case(&scenario.id);
@@ -2456,6 +2461,7 @@ esac
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     fn harness_supervisor_failure_does_not_inject() {
         let scenario = harness_scenario("mock-fail");
         let result = run_harness_mock_case(&scenario.id);
@@ -2480,6 +2486,7 @@ esac
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     fn harness_supervisor_verbose_reply_rejected_for_safety() {
         let scenario = harness_scenario("mock-verbose");
         let result = run_harness_mock_case(&scenario.id);
@@ -2504,6 +2511,7 @@ esac
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     #[ignore = "manual: requires Claude auth + network; run with BATTY_TEST_REAL_CLAUDE=1"]
     fn harness_real_supervisor_claude_with_mock_executor() {
         require_env_flag("BATTY_TEST_REAL_CLAUDE");
@@ -2546,6 +2554,7 @@ esac
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     #[ignore = "manual: requires Codex auth + network; run with BATTY_TEST_REAL_CODEX=1"]
     fn harness_real_supervisor_codex_with_mock_executor() {
         require_env_flag("BATTY_TEST_REAL_CODEX");
@@ -2585,6 +2594,7 @@ esac
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     #[ignore = "manual smoke: real executor+supervisor in tmux; BATTY_TEST_REAL_E2E_CLAUDE=1"]
     fn harness_real_executor_and_supervisor_claude_smoke() {
         require_env_flag("BATTY_TEST_REAL_E2E_CLAUDE");
@@ -2662,6 +2672,7 @@ esac
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     #[ignore = "manual smoke: real executor+supervisor in tmux; BATTY_TEST_REAL_E2E_CODEX=1"]
     fn harness_real_executor_and_supervisor_codex_smoke() {
         require_env_flag("BATTY_TEST_REAL_E2E_CODEX");
@@ -2738,6 +2749,7 @@ esac
     }
 
     #[test]
+    #[serial]
     fn handle_prompt_auto_answers() {
         let session = "batty-test-autoanswer";
         let _ = tmux::kill_session(session);
@@ -2789,6 +2801,7 @@ esac
     }
 
     #[test]
+    #[serial]
     fn paused_mode_blocks_prompt_automation() {
         let session = "batty-test-paused-prompt";
         let _ = tmux::kill_session(session);
@@ -2837,6 +2850,7 @@ esac
     }
 
     #[test]
+    #[serial]
     fn resume_reenables_prompt_automation() {
         let session = "batty-test-resume-prompt";
         let _ = tmux::kill_session(session);
@@ -2911,6 +2925,7 @@ esac
     }
 
     #[test]
+    #[serial]
     fn handle_prompt_escalates_unknown() {
         let session = "batty-test-escalate";
         let _ = tmux::kill_session(session);
@@ -2955,6 +2970,7 @@ esac
     }
 
     #[test]
+    #[serial]
     fn handle_prompt_tier2_with_direct_answer() {
         // Test Tier 2 integration with a concise mock supervisor answer.
         let session = "batty-test-tier2";
@@ -3061,6 +3077,7 @@ esac
     }
 
     #[test]
+    #[serial]
     fn orchestrator_with_short_lived_process() {
         let stop = Arc::new(AtomicBool::new(false));
         let (observer, events) = TestObserver::new();
@@ -3110,6 +3127,7 @@ esac
     }
 
     #[test]
+    #[serial]
     fn orchestrator_stop_signal() {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
@@ -3187,6 +3205,7 @@ esac
     }
 
     #[test]
+    #[serial]
     fn log_pane_setup() {
         let session = "batty-test-logpane-unit";
         let _ = tmux::kill_session(session);
@@ -3219,6 +3238,7 @@ esac
     }
 
     #[test]
+    #[serial]
     fn orchestrator_with_log_pane() {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
@@ -3348,6 +3368,7 @@ esac
     }
 
     #[test]
+    #[serial]
     fn status_bar_init_and_update() {
         let session = "batty-test-statusbar";
         let _ = tmux::kill_session(session);
@@ -3369,6 +3390,7 @@ esac
     }
 
     #[test]
+    #[serial]
     fn status_bar_debounce() {
         let session = "batty-test-statusbar-deb";
         let _ = tmux::kill_session(session);
@@ -3582,6 +3604,7 @@ esac
     }
 
     #[test]
+    #[serial]
     fn human_check_prompt_still_visible() {
         let session = "batty-test-human-check";
         let _ = tmux::kill_session(session);
@@ -3695,6 +3718,7 @@ If this input should be sent now, return the exact short response to send.";
     }
 
     #[test]
+    #[serial]
     fn human_check_ignores_prefixed_idle_input_line_for_same_prompt() {
         let session = "batty-test-human-idle-prefix";
         let _ = tmux::kill_session(session);
@@ -3817,6 +3841,7 @@ Question: Continue?";
     }
 
     #[test]
+    #[serial]
     fn wait_with_delay_completes() {
         let session = "batty-test-wait-delay";
         let _ = tmux::kill_session(session);
@@ -3845,6 +3870,7 @@ Question: Continue?";
     }
 
     #[test]
+    #[serial]
     fn handle_prompt_with_answer_delay_zero() {
         // With zero delay, should behave exactly like before (no human check)
         let session = "batty-test-delay-zero";
@@ -3892,5 +3918,232 @@ Question: Continue?";
         );
 
         tmux::kill_session(session).unwrap();
+    }
+
+    // ── Coverage: utility function tests ──
+
+    #[test]
+    fn display_response_empty_returns_enter() {
+        assert_eq!(display_response(""), "<ENTER>");
+        assert_eq!(display_response("  "), "<ENTER>");
+        assert_eq!(display_response("\n"), "<ENTER>");
+    }
+
+    #[test]
+    fn display_response_non_empty_passthrough() {
+        assert_eq!(display_response("y"), "y");
+        assert_eq!(display_response("hello world"), "hello world");
+    }
+
+    #[test]
+    fn preview_for_log_short_text() {
+        assert_eq!(preview_for_log("hello", 20), "hello");
+    }
+
+    #[test]
+    fn preview_for_log_multiline_joined() {
+        assert_eq!(
+            preview_for_log("line one\nline two\nline three", 50),
+            "line one line two line three"
+        );
+    }
+
+    #[test]
+    fn preview_for_log_truncates_long_text() {
+        let result = preview_for_log("this is a longer text that should be truncated", 10);
+        assert_eq!(result, "this is a ...");
+    }
+
+    #[test]
+    fn preview_for_log_empty_lines_filtered() {
+        assert_eq!(
+            preview_for_log("hello\n\n\nworld", 50),
+            "hello world"
+        );
+    }
+
+    #[test]
+    fn command_for_log_no_args() {
+        assert_eq!(command_for_log("claude", &[]), "claude");
+    }
+
+    #[test]
+    fn command_for_log_with_args() {
+        let args = vec!["--flag".to_string(), "value".to_string()];
+        assert_eq!(command_for_log("claude", &args), "claude --flag value");
+    }
+
+    #[test]
+    fn normalize_input_line_prefix_strips_markers() {
+        assert_eq!(normalize_input_line_prefix("› hello"), "hello");
+        assert_eq!(normalize_input_line_prefix("> hello"), "hello");
+        assert_eq!(normalize_input_line_prefix("››hello"), "hello");
+        assert_eq!(normalize_input_line_prefix("no prefix"), "no prefix");
+        assert_eq!(normalize_input_line_prefix("  ›  "), "");
+    }
+
+    #[test]
+    fn next_tier2_snapshot_index_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(next_tier2_snapshot_index(tmp.path()), 1);
+    }
+
+    #[test]
+    fn next_tier2_snapshot_index_with_existing_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("tier2-context-001.md"), "").unwrap();
+        fs::write(tmp.path().join("tier2-context-003.md"), "").unwrap();
+        fs::write(tmp.path().join("other-file.txt"), "").unwrap();
+        assert_eq!(next_tier2_snapshot_index(tmp.path()), 4);
+    }
+
+    #[test]
+    fn next_tier2_snapshot_index_nonexistent_dir() {
+        let path = PathBuf::from("/tmp/batty-nonexistent-dir-for-snapshot-test");
+        assert_eq!(next_tier2_snapshot_index(&path), 1);
+    }
+
+    #[test]
+    fn redact_sensitive_context_removes_secrets() {
+        let input = "normal line\napi_key=abc123\nmore normal\nAuthorization: Bearer xyz";
+        let redacted = redact_sensitive_context(input);
+        assert!(redacted.contains("normal line"));
+        assert!(redacted.contains("more normal"));
+        assert!(!redacted.contains("abc123"));
+        assert!(!redacted.contains("Bearer xyz"));
+        assert_eq!(
+            redacted.matches("[REDACTED: potential secret-bearing line]").count(),
+            2
+        );
+    }
+
+    #[test]
+    fn redact_sensitive_context_case_insensitive() {
+        let input = "SECRET_VALUE=foo\nPASSWORD=bar\nToken: baz";
+        let redacted = redact_sensitive_context(input);
+        assert_eq!(
+            redacted.matches("[REDACTED: potential secret-bearing line]").count(),
+            3
+        );
+    }
+
+    #[test]
+    fn redact_sensitive_context_no_secrets() {
+        let input = "just normal\ncode here";
+        assert_eq!(redact_sensitive_context(input), input);
+    }
+
+    #[test]
+    fn redact_sensitive_context_all_markers() {
+        for marker in ["api_key", "api-key", "authorization:", "bearer ", "secret", "password", "token", "private key"] {
+            let input = format!("contains {marker} data");
+            let redacted = redact_sensitive_context(&input);
+            assert!(
+                redacted.contains("[REDACTED"),
+                "marker '{marker}' should trigger redaction"
+            );
+        }
+    }
+
+    #[test]
+    fn process_alive_self_is_alive() {
+        assert!(process_alive(std::process::id()));
+    }
+
+    #[test]
+    fn process_alive_bogus_pid_is_dead() {
+        assert!(!process_alive(u32::MAX));
+    }
+
+    #[test]
+    fn acquire_supervision_lease_creates_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _lease = acquire_supervision_lease(tmp.path(), "test-session").unwrap();
+        let lock_path = tmp.path().join(SUPERVISION_LOCK_FILE);
+        assert!(lock_path.exists());
+        let content = fs::read_to_string(&lock_path).unwrap();
+        let lock: SupervisionLock = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(lock.session, "test-session");
+        assert_eq!(lock.pid, std::process::id());
+    }
+
+    #[test]
+    fn acquire_supervision_lease_cleans_stale_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join(SUPERVISION_LOCK_FILE);
+        // Write a lock with a bogus PID
+        let stale = SupervisionLock {
+            pid: u32::MAX,
+            session: "old".to_string(),
+            acquired_epoch: 0,
+        };
+        fs::write(&lock_path, serde_json::to_string(&stale).unwrap()).unwrap();
+
+        // Should succeed by cleaning up stale lock
+        let _lease = acquire_supervision_lease(tmp.path(), "new-session").unwrap();
+        let content = fs::read_to_string(&lock_path).unwrap();
+        let lock: SupervisionLock = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(lock.session, "new-session");
+    }
+
+    #[test]
+    fn acquire_supervision_lease_rejects_live_duplicate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join(SUPERVISION_LOCK_FILE);
+        // Write a lock with OUR pid (so it appears alive)
+        let live = SupervisionLock {
+            pid: std::process::id(),
+            session: "existing".to_string(),
+            acquired_epoch: 0,
+        };
+        fs::write(&lock_path, serde_json::to_string(&live).unwrap()).unwrap();
+
+        let result = acquire_supervision_lease(tmp.path(), "new-session");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate supervisor")
+        );
+    }
+
+    #[test]
+    fn supervision_lease_drop_removes_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join(SUPERVISION_LOCK_FILE);
+        {
+            let _lease = acquire_supervision_lease(tmp.path(), "drop-test").unwrap();
+            assert!(lock_path.exists());
+        }
+        // After drop, lock should be removed
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn supervision_state_roundtrip_with_helper() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = SupervisionState {
+            version: 1,
+            phase: "phase-1".to_string(),
+            session: "batty-phase-1".to_string(),
+            executor_pane: "%42".to_string(),
+            log_pane: Some("%43".to_string()),
+            pipe_log: "/tmp/pipe.log".to_string(),
+            pipe_checkpoint: 1234,
+            updated_epoch: 0,
+        };
+        let path = supervision_state_path(tmp.path());
+        fs::write(&path, serde_json::to_string(&state).unwrap()).unwrap();
+        let loaded = load_supervision_state(tmp.path()).unwrap();
+        assert_eq!(loaded.executor_pane, "%42");
+        assert_eq!(loaded.pipe_checkpoint, 1234);
+        assert_eq!(loaded.phase, "phase-1");
+    }
+
+    #[test]
+    fn load_supervision_state_missing_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(load_supervision_state(tmp.path()).is_none());
     }
 }

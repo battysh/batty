@@ -379,4 +379,80 @@ mod tests {
         assert!(decision.dod_passed);
         assert_eq!(decision.dod_command, "(none)");
     }
+
+    // ── Coverage: additional completion tests ──
+
+    #[test]
+    fn describe_orchestrator_result_all_variants() {
+        assert_eq!(
+            describe_orchestrator_result(&OrchestratorResult::Completed),
+            "completed"
+        );
+        assert_eq!(
+            describe_orchestrator_result(&OrchestratorResult::Detached),
+            "detached"
+        );
+        assert_eq!(
+            describe_orchestrator_result(&OrchestratorResult::Error {
+                detail: "boom".to_string()
+            }),
+            "error: boom"
+        );
+    }
+
+    #[test]
+    fn locate_phase_summary_finds_in_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("phase-summary.md"), "summary").unwrap();
+        let result = locate_phase_summary(tmp.path(), "phase-1");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn locate_phase_summary_finds_in_kanban_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kanban = tmp.path().join("kanban/phase-1");
+        fs::create_dir_all(&kanban).unwrap();
+        fs::write(kanban.join("phase-summary.md"), "summary").unwrap();
+        let result = locate_phase_summary(tmp.path(), "phase-1");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn locate_phase_summary_returns_none_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = locate_phase_summary(tmp.path(), "phase-1");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn completion_multiple_failures_accumulates_reasons() {
+        let tmp = tempfile::tempdir().unwrap();
+        let phase = "phase-1";
+        let tasks_dir = setup_phase(tmp.path(), phase);
+
+        // Tasks not all done + no milestone + no summary
+        write_task_file(&tasks_dir, 1, "core", "backlog", &[]);
+
+        let config = ProjectConfig::default();
+        let decision =
+            evaluate_phase_completion(phase, tmp.path(), &config, &OrchestratorResult::Completed)
+                .unwrap();
+
+        assert!(!decision.is_complete);
+        let reasons = decision.failure_summary();
+        // Should have multiple reasons (board incomplete, no milestone, no summary)
+        assert!(
+            reasons.contains("board incomplete"),
+            "expected 'board incomplete' in: {reasons}"
+        );
+        assert!(
+            reasons.contains("no milestone task"),
+            "expected 'no milestone task' in: {reasons}"
+        );
+        assert!(
+            reasons.contains("phase summary artifact missing"),
+            "expected 'phase summary artifact missing' in: {reasons}"
+        );
+    }
 }

@@ -788,4 +788,229 @@ mod tests {
         assert!(tick.ready.is_empty());
         assert!(tick.dispatched.is_empty());
     }
+
+    // ── Coverage: additional scheduler tests ──
+
+    #[test]
+    fn parse_picked_task_id_extracts_number() {
+        assert_eq!(
+            parse_picked_task_id("Picked task #42: some title"),
+            Some(42)
+        );
+        assert_eq!(parse_picked_task_id("no task here"), None);
+        assert_eq!(parse_picked_task_id("task #0"), Some(0));
+    }
+
+    #[test]
+    fn split_frontmatter_extracts_yaml() {
+        let content = "---\ntitle: test\nstatus: done\n---\nBody content.\n";
+        let (fm, body) = split_frontmatter(content).unwrap();
+        assert!(fm.contains("title: test"));
+        assert!(body.contains("Body content"));
+    }
+
+    #[test]
+    fn split_frontmatter_errors_without_delimiter() {
+        let content = "No frontmatter here.\n";
+        assert!(split_frontmatter(content).is_err());
+    }
+
+    #[test]
+    fn split_frontmatter_errors_without_closing() {
+        let content = "---\ntitle: test\nno closing\n";
+        assert!(split_frontmatter(content).is_err());
+    }
+
+    #[test]
+    fn parse_claimed_by_from_task_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("task.md");
+        std::fs::write(
+            &path,
+            "---\nclaimed_by: test-agent\nstatus: in-progress\n---\nBody.\n",
+        )
+        .unwrap();
+        let result = parse_claimed_by(&path).unwrap();
+        assert_eq!(result.as_deref(), Some("test-agent"));
+    }
+
+    #[test]
+    fn parse_claimed_by_missing_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("task.md");
+        std::fs::write(&path, "---\nstatus: backlog\n---\nBody.\n").unwrap();
+        let result = parse_claimed_by(&path).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn ready_frontier_respects_dependencies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        // Task 1: no deps, backlog
+        write_task(&tasks_dir, 1, "backlog", &[], None);
+        // Task 2: depends on 1, backlog
+        write_task(&tasks_dir, 2, "backlog", &[1], None);
+        // Task 3: depends on 2, backlog
+        write_task(&tasks_dir, 3, "backlog", &[2], None);
+
+        let scheduler = scheduler_with_runner(
+            tmp.path().to_path_buf(),
+            vec!["agent-a".to_string()],
+            MockRunner::default(),
+        );
+        let snapshot = scheduler.poll_board().unwrap();
+        let ready = scheduler.ready_frontier(&snapshot).unwrap();
+        // Only task 1 should be ready (2 and 3 blocked)
+        assert_eq!(ready, vec![1]);
+    }
+
+    #[test]
+    fn ready_frontier_after_completion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        // Task 1: done
+        write_task(&tasks_dir, 1, "done", &[], None);
+        // Task 2: depends on 1, backlog - should be ready
+        write_task(&tasks_dir, 2, "backlog", &[1], None);
+        // Task 3: depends on 2, backlog - should NOT be ready
+        write_task(&tasks_dir, 3, "backlog", &[2], None);
+
+        let scheduler = scheduler_with_runner(
+            tmp.path().to_path_buf(),
+            vec!["agent-a".to_string()],
+            MockRunner::default(),
+        );
+        let snapshot = scheduler.poll_board().unwrap();
+        let ready = scheduler.ready_frontier(&snapshot).unwrap();
+        assert_eq!(ready, vec![2]);
+    }
+
+    #[test]
+    fn detect_stuck_agents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "in-progress", &[], Some("agent-a"));
+
+        let mut scheduler = scheduler_with_runner(
+            tmp.path().to_path_buf(),
+            vec!["agent-a".to_string()],
+            MockRunner::default(),
+        );
+
+        // Mark agent busy at time 100
+        scheduler.agent_states.insert(
+            "agent-a".to_string(),
+            AgentState::Busy {
+                task_id: 1,
+                last_progress_epoch: 100,
+            },
+        );
+
+        // At time 100 + stuck_timeout + 1, should be stuck
+        let stuck_time = 100 + scheduler.config.stuck_timeout.as_secs() + 1;
+        let stuck = scheduler.detect_stuck(stuck_time);
+        assert_eq!(stuck.len(), 1);
+        assert_eq!(stuck[0].agent, "agent-a");
+        assert_eq!(stuck[0].task_id, 1);
+    }
+
+    #[test]
+    fn detect_stuck_agents_not_stuck_within_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        let mut scheduler = scheduler_with_runner(
+            tmp.path().to_path_buf(),
+            vec!["agent-a".to_string()],
+            MockRunner::default(),
+        );
+
+        scheduler.agent_states.insert(
+            "agent-a".to_string(),
+            AgentState::Busy {
+                task_id: 1,
+                last_progress_epoch: 100,
+            },
+        );
+
+        // Just before timeout
+        let not_stuck_time = 100 + scheduler.config.stuck_timeout.as_secs() - 1;
+        let stuck = scheduler.detect_stuck(not_stuck_time);
+        assert!(stuck.is_empty());
+    }
+
+    #[test]
+    fn handle_agent_crash_releases_claim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "in-progress", &[], Some("agent-a"));
+
+        let runner = MockRunner::with_outputs(vec![CommandResult {
+            status_success: true,
+            stdout: "Released claim on task #1".to_string(),
+            stderr: String::new(),
+        }]);
+        let mut scheduler = scheduler_with_runner(
+            tmp.path().to_path_buf(),
+            vec!["agent-a".to_string()],
+            runner,
+        );
+        scheduler.agent_states.insert(
+            "agent-a".to_string(),
+            AgentState::Busy {
+                task_id: 1,
+                last_progress_epoch: 100,
+            },
+        );
+
+        scheduler.handle_agent_crash("agent-a").unwrap();
+        assert_eq!(
+            scheduler.agent_states.get("agent-a"),
+            Some(&AgentState::Idle)
+        );
+    }
+
+    #[test]
+    fn mark_agent_progress_updates_epoch() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("tasks")).unwrap();
+
+        let mut scheduler = scheduler_with_runner(
+            tmp.path().to_path_buf(),
+            vec!["agent-a".to_string()],
+            MockRunner::default(),
+        );
+        scheduler.agent_states.insert(
+            "agent-a".to_string(),
+            AgentState::Busy {
+                task_id: 1,
+                last_progress_epoch: 100,
+            },
+        );
+
+        scheduler.mark_agent_progress("agent-a", 200);
+        match scheduler.agent_states.get("agent-a") {
+            Some(AgentState::Busy {
+                last_progress_epoch,
+                ..
+            }) => assert_eq!(*last_progress_epoch, 200),
+            other => panic!("expected Busy, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scheduler_config_default_values() {
+        let config = SchedulerConfig::default();
+        assert_eq!(config.poll_interval, Duration::from_secs(5));
+        assert_eq!(config.stuck_timeout, Duration::from_secs(300));
+        assert_eq!(config.kanban_program, "kanban-md");
+    }
 }
