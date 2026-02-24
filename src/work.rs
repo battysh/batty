@@ -2985,4 +2985,188 @@ mod tests {
                 .contains("phase board not found")
         );
     }
+
+    // ── Coverage: utility functions ──
+
+    #[test]
+    fn truncate_label_no_truncation() {
+        assert_eq!(truncate_label("short", 10), "short");
+    }
+
+    #[test]
+    fn truncate_label_at_limit() {
+        assert_eq!(truncate_label("exact", 5), "exact");
+    }
+
+    #[test]
+    fn truncate_label_exceeds_limit() {
+        assert_eq!(truncate_label("too long for this", 7), "too lon...");
+    }
+
+    #[test]
+    fn truncate_label_compacts_whitespace() {
+        assert_eq!(truncate_label("  hello   world  ", 20), "hello world");
+    }
+
+    #[test]
+    fn truncate_label_empty() {
+        assert_eq!(truncate_label("", 10), "");
+    }
+
+    #[test]
+    fn display_path_under_root() {
+        let root = Path::new("/project/root");
+        let path = Path::new("/project/root/src/main.rs");
+        assert_eq!(display_path(root, path), "src/main.rs");
+    }
+
+    #[test]
+    fn display_path_outside_root() {
+        let root = Path::new("/project/root");
+        let path = Path::new("/other/place/file.rs");
+        assert_eq!(display_path(root, path), "/other/place/file.rs");
+    }
+
+    #[test]
+    fn config_source_label_with_path() {
+        let label = config_source_label(Some(Path::new("/etc/batty.toml")));
+        assert_eq!(label, "/etc/batty.toml");
+    }
+
+    #[test]
+    fn config_source_label_none() {
+        let label = config_source_label(None);
+        assert!(label.contains("defaults"));
+    }
+
+    #[test]
+    fn policy_name_all_variants() {
+        assert_eq!(policy_name(Policy::Observe), "observe");
+        assert_eq!(policy_name(Policy::Suggest), "suggest");
+        assert_eq!(policy_name(Policy::Act), "act");
+    }
+
+    #[test]
+    fn read_claim_identity_file_missing_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nonexistent.txt");
+        assert_eq!(read_claim_identity_file(&path).unwrap(), None);
+    }
+
+    #[test]
+    fn write_then_read_claim_identity_file_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sub/dir/claim.txt");
+        write_claim_identity_file(&path, "test-agent").unwrap();
+        let result = read_claim_identity_file(&path).unwrap();
+        assert_eq!(result.as_deref(), Some("test-agent"));
+    }
+
+    #[test]
+    fn write_claim_creates_parent_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("deep/nested/path/claim.txt");
+        assert!(!path.parent().unwrap().exists());
+        write_claim_identity_file(&path, "agent-x").unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn latest_claim_identity_from_activity_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("kanban/phase-1")).unwrap();
+        let result = latest_claim_identity_from_activity("phase-1", tmp.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn latest_claim_identity_from_activity_returns_last_claim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kanban_dir = tmp.path().join("kanban/phase-1");
+        fs::create_dir_all(&kanban_dir).unwrap();
+        fs::write(
+            kanban_dir.join("activity.jsonl"),
+            concat!(
+                "{\"timestamp\":\"t1\",\"action\":\"claim\",\"task_id\":1,\"detail\":\"first-agent\"}\n",
+                "{\"timestamp\":\"t2\",\"action\":\"move\",\"task_id\":1,\"detail\":\"done\"}\n",
+                "{\"timestamp\":\"t3\",\"action\":\"claim\",\"task_id\":2,\"detail\":\"second-agent\"}\n",
+            ),
+        )
+        .unwrap();
+        let result = latest_claim_identity_from_activity("phase-1", tmp.path()).unwrap();
+        assert_eq!(result.as_deref(), Some("second-agent"));
+    }
+
+    #[test]
+    fn latest_claim_identity_from_activity_skips_invalid_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kanban_dir = tmp.path().join("kanban/phase-1");
+        fs::create_dir_all(&kanban_dir).unwrap();
+        fs::write(
+            kanban_dir.join("activity.jsonl"),
+            concat!(
+                "not valid json\n",
+                "{\"timestamp\":\"t1\",\"action\":\"claim\",\"task_id\":1,\"detail\":\"valid-agent\"}\n",
+                "\n",
+            ),
+        )
+        .unwrap();
+        let result = latest_claim_identity_from_activity("phase-1", tmp.path()).unwrap();
+        assert_eq!(result.as_deref(), Some("valid-agent"));
+    }
+
+    #[test]
+    fn latest_claim_identity_from_activity_skips_claim_without_detail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kanban_dir = tmp.path().join("kanban/phase-1");
+        fs::create_dir_all(&kanban_dir).unwrap();
+        fs::write(
+            kanban_dir.join("activity.jsonl"),
+            "{\"timestamp\":\"t1\",\"action\":\"claim\",\"task_id\":1}\n",
+        )
+        .unwrap();
+        let result = latest_claim_identity_from_activity("phase-1", tmp.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn resolve_instruction_file_finds_claude_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("CLAUDE.md"), "instructions").unwrap();
+        let adapter = crate::agent::adapter_from_name("claude").unwrap();
+        let result = resolve_instruction_file(tmp.path(), adapter.as_ref()).unwrap();
+        assert!(result.ends_with("CLAUDE.md"));
+    }
+
+    #[test]
+    fn resolve_instruction_file_errors_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let adapter = crate::agent::adapter_from_name("claude").unwrap();
+        let err = resolve_instruction_file(tmp.path(), adapter.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing required agent instruction file"));
+        assert!(err.contains("claude"));
+    }
+
+    #[test]
+    fn claim_identity_path_is_under_batty_dir() {
+        let root = Path::new("/project");
+        let path = claim_identity_path(root);
+        assert_eq!(path, Path::new("/project/.batty/claim-agent.txt"));
+    }
+
+    #[test]
+    fn normalize_claim_agent_name_handles_at_prefix_and_whitespace() {
+        assert_eq!(
+            normalize_claim_agent_name("  @foo-bar  ").as_deref(),
+            Some("foo-bar")
+        );
+        assert_eq!(
+            normalize_claim_agent_name("plain").as_deref(),
+            Some("plain")
+        );
+        assert_eq!(normalize_claim_agent_name("  @  "), None);
+        assert_eq!(normalize_claim_agent_name(""), None);
+    }
 }
