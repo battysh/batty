@@ -1265,4 +1265,188 @@ mod tests {
         let pos2 = output.find("run-002").unwrap();
         assert!(pos1 < pos2, "run-001 should appear before run-002");
     }
+
+    // ── Coverage: additional helper function tests ──
+
+    #[test]
+    fn fmt_count_zero_shows_dash() {
+        assert_eq!(fmt_count(0, 10), "-");
+    }
+
+    #[test]
+    fn fmt_count_nonzero_shows_fraction() {
+        assert_eq!(fmt_count(3, 10), "3/10");
+    }
+
+    #[test]
+    fn policy_label_all_variants() {
+        assert_eq!(policy_label(config::Policy::Observe), "observe");
+        assert_eq!(policy_label(config::Policy::Suggest), "suggest");
+        assert_eq!(policy_label(config::Policy::Act), "act");
+    }
+
+    #[test]
+    fn main_config_source_label_with_path() {
+        let label = config_source_label(Some(std::path::Path::new("/etc/config.toml")));
+        assert_eq!(label, "/etc/config.toml");
+    }
+
+    #[test]
+    fn main_config_source_label_none() {
+        let label = config_source_label(None);
+        assert!(label.contains("defaults"));
+    }
+
+    #[test]
+    fn push_kv_formats_correctly() {
+        let mut output = String::new();
+        push_kv(&mut output, "key", "value");
+        assert!(output.contains("key"));
+        assert!(output.contains("value"));
+        assert!(output.ends_with('\n'));
+    }
+
+    #[test]
+    fn render_config_human_with_auto_answers() {
+        let mut config = ProjectConfig::default();
+        config
+            .policy
+            .auto_answer
+            .insert("Do you approve?".into(), "y".into());
+        let rendered = render_config_human(&config, Some(std::path::Path::new("/test/path")));
+        assert!(rendered.contains("Do you approve? => y"));
+        assert!(rendered.contains("/test/path"));
+    }
+
+    #[test]
+    fn render_config_human_detector_section() {
+        let config = ProjectConfig::default();
+        let rendered = render_config_human(&config, None);
+        assert!(rendered.contains("Detector"));
+        assert!(rendered.contains("silence_timeout"));
+        assert!(rendered.contains("answer_cooldown"));
+        assert!(rendered.contains("unknown_fallback"));
+        assert!(rendered.contains("idle_input_fallback"));
+    }
+
+    fn make_counts(todo: usize, wip: usize, done: usize) -> TaskCounts {
+        TaskCounts {
+            todo,
+            in_progress: wip,
+            done,
+            total: todo + wip + done,
+        }
+    }
+
+    #[test]
+    fn task_counts_from_tasks_all_statuses() {
+        let tasks = vec![
+            make_task("backlog"),
+            make_task("todo"),
+            make_task("in-progress"),
+            make_task("done"),
+            make_task("done"),
+        ];
+        let counts = TaskCounts::from_tasks(&tasks);
+        assert_eq!(counts.total, 5);
+        assert_eq!(counts.todo, 2); // backlog + todo
+        assert_eq!(counts.in_progress, 1);
+        assert_eq!(counts.done, 2);
+    }
+
+    #[test]
+    fn collect_worktrees_empty_when_no_worktrees_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = collect_worktrees(tmp.path(), "phase-1");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_run_number_valid() {
+        assert_eq!(parse_run_number("phase-1-run-003", "phase-1-run-"), Some(3));
+    }
+
+    #[test]
+    fn parse_run_number_invalid() {
+        assert_eq!(parse_run_number("phase-1-run-abc", "phase-1-run-"), None);
+        assert_eq!(parse_run_number("other-dir", "phase-1-run-"), None);
+    }
+
+    #[test]
+    fn board_info_best_worktree_prefers_active() {
+        let info = BoardInfo {
+            name: "phase-1".to_string(),
+            repo_counts: make_counts(0, 0, 1),
+            repo_status: "Done".to_string(),
+            worktrees: vec![
+                WorktreeInfo {
+                    run_name: "run-001".to_string(),
+                    active: false,
+                    counts: make_counts(0, 0, 1),
+                    status: "Done".to_string(),
+                },
+                WorktreeInfo {
+                    run_name: "run-002".to_string(),
+                    active: true,
+                    counts: make_counts(1, 0, 0),
+                    status: "In Progress".to_string(),
+                },
+            ],
+        };
+        let best = info.best_worktree().unwrap();
+        assert_eq!(best.run_name, "run-002");
+        assert!(best.active);
+    }
+
+    #[test]
+    fn board_info_best_worktree_falls_back_to_last() {
+        let info = BoardInfo {
+            name: "phase-1".to_string(),
+            repo_counts: make_counts(0, 0, 1),
+            repo_status: "Done".to_string(),
+            worktrees: vec![
+                WorktreeInfo {
+                    run_name: "run-001".to_string(),
+                    active: false,
+                    counts: make_counts(0, 0, 1),
+                    status: "Done".to_string(),
+                },
+                WorktreeInfo {
+                    run_name: "run-003".to_string(),
+                    active: false,
+                    counts: make_counts(1, 0, 0),
+                    status: "In Progress".to_string(),
+                },
+            ],
+        };
+        let best = info.best_worktree().unwrap();
+        assert_eq!(best.run_name, "run-003");
+    }
+
+    #[test]
+    fn board_info_effective_status_uses_worktree() {
+        let info = BoardInfo {
+            name: "phase-1".to_string(),
+            repo_counts: make_counts(2, 0, 0),
+            repo_status: "Not Started".to_string(),
+            worktrees: vec![WorktreeInfo {
+                run_name: "run-001".to_string(),
+                active: false,
+                counts: make_counts(0, 0, 2),
+                status: "Done".to_string(),
+            }],
+        };
+        assert_eq!(info.effective_status(), "Done");
+    }
+
+    #[test]
+    fn board_info_effective_status_falls_back_to_repo() {
+        let info = BoardInfo {
+            name: "phase-1".to_string(),
+            repo_counts: make_counts(0, 1, 0),
+            repo_status: "In Progress".to_string(),
+            worktrees: vec![],
+        };
+        assert_eq!(info.effective_status(), "In Progress");
+    }
 }
