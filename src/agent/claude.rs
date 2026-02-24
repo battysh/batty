@@ -72,10 +72,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 args.push(task_description.to_string());
             }
             ClaudeMode::Interactive => {
-                // In interactive mode, we pass the task as the initial prompt
-                // via --prompt so Claude starts working immediately.
+                // In interactive mode, we pass the task as the last positional
+                // argument so Claude starts working immediately.
                 // The user can still type into the session at any time.
-                args.push("--prompt".to_string());
                 args.push(task_description.to_string());
             }
         }
@@ -131,12 +130,12 @@ mod tests {
     }
 
     #[test]
-    fn interactive_mode_uses_prompt_flag() {
+    fn interactive_mode_passes_prompt_as_positional_arg() {
         let adapter = ClaudeCodeAdapter::new(None).with_mode(ClaudeMode::Interactive);
         let config = adapter.spawn_config("Fix the auth bug", Path::new("/work"));
         assert!(!config.args.contains(&"-p".to_string()));
-        assert!(config.args.contains(&"--prompt".to_string()));
-        assert!(config.args.contains(&"Fix the auth bug".to_string()));
+        assert!(!config.args.contains(&"--prompt".to_string()));
+        assert_eq!(config.args, vec!["Fix the auth bug"]);
     }
 
     #[test]
