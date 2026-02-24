@@ -969,7 +969,10 @@ mod tests {
         let buffer = EventBuffer::new(10);
         let mut watcher = PipeWatcher::new(&pipe_log, buffer);
         let count1 = watcher.poll().unwrap();
-        assert_eq!(count1, 0, "incomplete line should be buffered, not processed");
+        assert_eq!(
+            count1, 0,
+            "incomplete line should be buffered, not processed"
+        );
 
         // Now complete the line
         use std::io::Write;
