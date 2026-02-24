@@ -3956,10 +3956,7 @@ Question: Continue?";
 
     #[test]
     fn preview_for_log_empty_lines_filtered() {
-        assert_eq!(
-            preview_for_log("hello\n\n\nworld", 50),
-            "hello world"
-        );
+        assert_eq!(preview_for_log("hello\n\n\nworld", 50), "hello world");
     }
 
     #[test]
@@ -4012,7 +4009,9 @@ Question: Continue?";
         assert!(!redacted.contains("abc123"));
         assert!(!redacted.contains("Bearer xyz"));
         assert_eq!(
-            redacted.matches("[REDACTED: potential secret-bearing line]").count(),
+            redacted
+                .matches("[REDACTED: potential secret-bearing line]")
+                .count(),
             2
         );
     }
@@ -4022,7 +4021,9 @@ Question: Continue?";
         let input = "SECRET_VALUE=foo\nPASSWORD=bar\nToken: baz";
         let redacted = redact_sensitive_context(input);
         assert_eq!(
-            redacted.matches("[REDACTED: potential secret-bearing line]").count(),
+            redacted
+                .matches("[REDACTED: potential secret-bearing line]")
+                .count(),
             3
         );
     }
@@ -4035,7 +4036,16 @@ Question: Continue?";
 
     #[test]
     fn redact_sensitive_context_all_markers() {
-        for marker in ["api_key", "api-key", "authorization:", "bearer ", "secret", "password", "token", "private key"] {
+        for marker in [
+            "api_key",
+            "api-key",
+            "authorization:",
+            "bearer ",
+            "secret",
+            "password",
+            "token",
+            "private key",
+        ] {
             let input = format!("contains {marker} data");
             let redacted = redact_sensitive_context(&input);
             assert!(
