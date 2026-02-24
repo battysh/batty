@@ -75,7 +75,7 @@ jobs:
         shell: bash
 
       - name: Install kanban-md
-        run: cargo install kanban-md
+        run: cargo install --git https://github.com/antopolskiy/kanban-md kanban-md
 
       - name: Lint
         run: make lint
@@ -103,7 +103,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y tmux
 
       - name: Install kanban-md
-        run: cargo install kanban-md
+        run: cargo install --git https://github.com/antopolskiy/kanban-md kanban-md
 
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin
