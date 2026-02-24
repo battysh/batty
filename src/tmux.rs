@@ -350,6 +350,10 @@ pub fn create_session(session: &str, program: &str, args: &[String], work_dir: &
     cmd.args(["new-session", "-d", "-s", session, "-c", work_dir]);
     // Set a generous size so the PTY isn't tiny
     cmd.args(["-x", "220", "-y", "50"]);
+    // Unset CLAUDECODE so nested Claude Code sessions can launch.
+    // Without this, Claude Code detects the parent session's env var and
+    // refuses to start ("cannot be launched inside another Claude Code session").
+    cmd.args(["env", "-u", "CLAUDECODE"]);
     cmd.arg(program);
     for arg in args {
         cmd.arg(arg);
