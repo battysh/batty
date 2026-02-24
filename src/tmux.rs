@@ -403,6 +403,9 @@ pub fn create_window(
         "-c",
         work_dir,
     ]);
+    // Unset CLAUDECODE so nested Claude Code sessions can launch from
+    // additional windows (for example, parallel agent slots).
+    cmd.args(["env", "-u", "CLAUDECODE"]);
     cmd.arg(program);
     for arg in args {
         cmd.arg(arg);
@@ -1010,6 +1013,46 @@ mod tests {
         assert!(names.contains(&"agent-2".to_string()));
 
         select_window(&format!("{session}:agent-1")).unwrap();
+        kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn create_window_unsets_claudecode_from_session_environment() {
+        let session = "batty-test-window-unset-claudecode";
+        let _ = kill_session(session);
+
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        let output = Command::new("tmux")
+            .args(["set-environment", "-t", session, "CLAUDECODE", "1"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "failed to set CLAUDECODE in tmux session: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        create_window(
+            session,
+            "env-check",
+            "bash",
+            &[
+                "-lc".to_string(),
+                "printf '%s' \"${CLAUDECODE:-unset}\"; sleep 1".to_string(),
+            ],
+            "/tmp",
+        )
+        .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let content = capture_pane(&format!("{session}:env-check")).unwrap();
+        assert!(
+            content.contains("unset"),
+            "expected CLAUDECODE to be unset in new window, got: {content:?}"
+        );
+
         kill_session(session).unwrap();
     }
 

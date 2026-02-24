@@ -17,7 +17,7 @@ Developers need a workflow model for building with agents: structured phases, su
 
 `batty work <phase>` — Rust CLI that reads a kanban board, spawns an agent in a PTY, supervises the session. Policy engine, prompt detection, test gates, execution logging.
 
-All 11 tasks done. Current project test inventory is 394 tests.
+All 11 tasks done. Current project test inventory is 370 tests.
 
 ---
 

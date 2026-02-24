@@ -6,12 +6,12 @@
 //! send-keys per policy, Tier 2 supervisor agent for unknowns), and writes
 //! a structured execution log.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::IsTerminal;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::collections::{HashMap, HashSet};
-use std::io::IsTerminal;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -709,11 +709,12 @@ pub fn run_phase_parallel(
     let adapter = agent::adapter_from_name(agent_name)
         .with_context(|| format!("unknown agent: {agent_name}"))?;
     let policy_tier = resolve_policy_tier(policy_override, project_config)?;
-    let claim_identity = resolve_claim_identity(phase, project_root)?;
     let slots = generate_parallel_agent_names(parallel, project_root)?;
     let worktrees =
         phase_worktree::prepare_agent_worktrees(project_root, phase, &slots, force_new_worktree)
-            .with_context(|| format!("failed to prepare per-agent worktrees for phase '{phase}'"))?;
+            .with_context(|| {
+                format!("failed to prepare per-agent worktrees for phase '{phase}'")
+            })?;
     let mut branch_by_agent = HashMap::new();
     for (idx, worktree) in worktrees.iter().enumerate() {
         branch_by_agent.insert(slots[idx].clone(), worktree.branch.clone());
@@ -741,8 +742,12 @@ pub fn run_phase_parallel(
         .join(".batty")
         .join("logs")
         .join(format!("parallel-{phase}-{timestamp}"));
-    std::fs::create_dir_all(&run_log_dir)
-        .with_context(|| format!("failed to create parallel log dir {}", run_log_dir.display()))?;
+    std::fs::create_dir_all(&run_log_dir).with_context(|| {
+        format!(
+            "failed to create parallel log dir {}",
+            run_log_dir.display()
+        )
+    })?;
     let mut agent_panes: HashMap<String, String> = HashMap::new();
 
     for (index, worktree) in worktrees.iter().enumerate() {
@@ -763,8 +768,8 @@ pub fn run_phase_parallel(
             &tasks,
             &worktree.path,
             None,
-            &claim_identity.agent,
-            claim_identity.source.as_str(),
+            slot,
+            "parallel-slot",
             project_config,
             policy_tier,
             adapter.as_ref(),
@@ -777,7 +782,7 @@ slot.name: {slot}\n\
 slot.index: {}\n\
 slot.total: {parallel}\n\
 slot.claim_agent_name: {slot}\n\n\
-Use claim.agent_name = {slot} for all kanban-md --claim operations in this slot, even if other context shows a different claim identity.\n\n\
+Use claim.agent_name = {slot} for all kanban-md --claim operations in this slot.\n\n\
 {}",
             index + 1,
             launch_context.prompt
@@ -862,9 +867,8 @@ Use claim.agent_name = {slot} for all kanban-md --claim operations in this slot,
     );
     println!("\x1b[36m[batty]\x1b[0m logs: {}", run_log_dir.display());
     println!(
-        "\x1b[36m[batty]\x1b[0m claim identity: {} ({})",
-        claim_identity.agent,
-        claim_identity.source.as_str()
+        "\x1b[36m[batty]\x1b[0m slot claim identities: {}",
+        slots.join(", ")
     );
 
     if auto_attach && std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
@@ -929,7 +933,9 @@ Use claim.agent_name = {slot} for all kanban-md --claim operations in this slot,
 
             for task_id in &tick.completed {
                 let completed_agent = pre_states.iter().find_map(|(agent, state)| {
-                    if let crate::scheduler::AgentState::Busy { task_id: active, .. } = state
+                    if let crate::scheduler::AgentState::Busy {
+                        task_id: active, ..
+                    } = state
                         && active == task_id
                     {
                         Some(agent.clone())
@@ -988,15 +994,14 @@ Use claim.agent_name = {slot} for all kanban-md --claim operations in this slot,
             if let crate::scheduler::AgentState::Busy { task_id, .. } = state
                 && !active_assignments.contains_key(agent)
             {
-                active_assignments.insert(
-                    agent.clone(),
-                    (*task_id, format!("task-{task_id}"), now),
-                );
+                active_assignments
+                    .insert(agent.clone(), (*task_id, format!("task-{task_id}"), now));
             }
         }
 
         for agent in &slots {
-            let label = if let Some((task_id, title, started_epoch)) = active_assignments.get(agent) {
+            let label = if let Some((task_id, title, started_epoch)) = active_assignments.get(agent)
+            {
                 let elapsed_secs = now.saturating_sub(*started_epoch);
                 let elapsed_mins = elapsed_secs / 60;
                 let title = truncate_label(title, 20);
@@ -1064,9 +1069,7 @@ Use claim.agent_name = {slot} for all kanban-md --claim operations in this slot,
         }
 
         if tick.all_done {
-            println!(
-                "\x1b[36m[batty]\x1b[0m scheduler complete: all active tasks are done"
-            );
+            println!("\x1b[36m[batty]\x1b[0m scheduler complete: all active tasks are done");
             break;
         }
 
@@ -1124,17 +1127,11 @@ fn run_phase_with_rework(
         // Sync the phase board from the source tree into the worktree so
         // uncommitted kanban changes (new/reworked tasks) are not lost.
         if !resumed_worktree {
-            eprintln!(
-                "[batty] syncing phase board '{phase}' from source tree into worktree"
-            );
-            phase_worktree::sync_phase_board_to_worktree(
-                project_root,
-                &execution_root,
-                phase,
-            )
-            .with_context(|| {
-                format!("failed to sync phase board into worktree for '{phase}'")
-            })?;
+            eprintln!("[batty] syncing phase board '{phase}' from source tree into worktree");
+            phase_worktree::sync_phase_board_to_worktree(project_root, &execution_root, phase)
+                .with_context(|| {
+                    format!("failed to sync phase board into worktree for '{phase}'")
+                })?;
         }
 
         (

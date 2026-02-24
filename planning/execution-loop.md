@@ -2,7 +2,7 @@
 
 Status:
 - Phases 1-2.7: runtime supervision flow is implemented.
-- Phase 3A/3B: review gate + director flow below is planned/aspirational.
+- Phases 3A/3B: review gate + director flow are implemented.
 
 ## `batty work <phase>`
 
@@ -59,7 +59,7 @@ Completion contract validates:
 
 Reviewer receives: diff, phase summary, statements of work, execution log, project docs.
 
-Status: planned for Phase 3A/3B.
+Status: implemented.
 - In Phase 3A this reviewer is human.
 - In Phase 3B this reviewer can be a director agent.
 
@@ -67,7 +67,7 @@ Decision: **merge** / **rework** (relaunch executor with feedback) / **escalate*
 
 ### Step 6: Merge
 
-Status: planned for Phase 3A+ automation.
+Status: implemented.
 
 Merge phase branch to main. Resolve conflicts (review gate escalates if needed). Run tests. Clean up. Next phase.
 

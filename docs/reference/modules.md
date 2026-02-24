@@ -61,7 +61,7 @@ Contributor-facing map of Batty source modules.
 
 ## Test Coverage Snapshot
 
-- Current test inventory: `394` tests (`cargo test -- --list`).
+- Current test inventory: `370` tests (`cargo test -- --list`).
 - Core modules include colocated `#[cfg(test)]` suites (detector, orchestrator, tmux, work, config, policy, agent adapters, docsgen, etc.).
 - Tests emphasize:
   - prompt-detection transitions and fallback behavior

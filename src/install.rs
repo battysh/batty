@@ -7,6 +7,7 @@ const CLAUDE_RULES_PATH: &str = ".claude/rules/batty-workflow.md";
 const CODEX_RULES_PATH: &str = ".agents/rules/batty-workflow.md";
 const CLAUDE_SKILL_PATH: &str = ".batty/skills/claude/SKILL.md";
 const CODEX_SKILL_PATH: &str = ".batty/skills/codex/SKILL.md";
+const CONFIG_PATH: &str = ".batty/config.toml";
 const TOOL_TMUX: &str = "tmux";
 const TOOL_KANBAN_MD: &str = "kanban-md";
 
@@ -16,6 +17,32 @@ const GITIGNORE_ENTRIES: &[&str] = &[".batty/logs/", ".batty/worktrees/"];
 const SHARED_STEERING_DOC: &str = include_str!("../assets/batty-workflow.md");
 const CLAUDE_SKILL_DOC: &str = include_str!("../assets/claude-skill.md");
 const CODEX_SKILL_DOC: &str = include_str!("../assets/codex-skill.md");
+const DEFAULT_CONFIG_SCAFFOLD: &str = r#"[defaults]
+agent = "claude"        # Executor agent: claude, codex
+policy = "act"          # Policy tier: observe, suggest, act
+# dod = "your test/verification command"  # Definition-of-done command
+# max_retries = 3       # DoD retry count
+
+[supervisor]
+enabled = true
+program = "claude"
+args = ["-p", "--output-format", "text"]
+timeout_secs = 60
+# trace_io = true       # Log supervisor prompt/response pairs
+
+[detector]
+silence_timeout_secs = 3
+answer_cooldown_millis = 1000
+unknown_request_fallback = true
+idle_input_fallback = true
+
+[dangerous_mode]
+enabled = false         # Skip agent safety prompts (use with caution)
+
+[policy.auto_answer]
+"Continue? [y/n]" = "y"
+"Do you want to proceed?" = "yes"
+"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallTarget {
@@ -87,6 +114,13 @@ pub fn install_assets(destination: &Path, target: InstallTarget) -> Result<Insta
             &mut summary,
         )?;
     }
+
+    install_file_if_missing(
+        destination,
+        Path::new(CONFIG_PATH),
+        DEFAULT_CONFIG_SCAFFOLD,
+        &mut summary,
+    )?;
 
     summary.kanban_skills_installed = install_kanban_skills(destination, target)?;
     summary.gitignore_entries_added = ensure_gitignore_entries(destination)?;
@@ -488,6 +522,37 @@ fn install_file(
     Ok(())
 }
 
+fn install_file_if_missing(
+    destination: &Path,
+    relative_path: &Path,
+    content: &str,
+    summary: &mut InstallSummary,
+) -> Result<()> {
+    let full_path = destination.join(relative_path);
+
+    if let Some(parent) = full_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
+
+    if full_path.exists() {
+        if full_path.is_file() {
+            summary.unchanged.push(relative_path.to_path_buf());
+            return Ok(());
+        }
+        anyhow::bail!(
+            "failed to write {}: path exists and is not a file",
+            full_path.display()
+        );
+    }
+
+    fs::write(&full_path, content)
+        .with_context(|| format!("failed to write {}", full_path.display()))?;
+    summary.created_or_updated.push(relative_path.to_path_buf());
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,7 +568,8 @@ mod tests {
                 PathBuf::from(CLAUDE_RULES_PATH),
                 PathBuf::from(CLAUDE_SKILL_PATH),
                 PathBuf::from(CODEX_RULES_PATH),
-                PathBuf::from(CODEX_SKILL_PATH)
+                PathBuf::from(CODEX_SKILL_PATH),
+                PathBuf::from(CONFIG_PATH),
             ]
         );
         assert!(summary.unchanged.is_empty());
@@ -511,6 +577,7 @@ mod tests {
         assert!(tmp.path().join(CODEX_RULES_PATH).exists());
         assert!(tmp.path().join(CLAUDE_SKILL_PATH).exists());
         assert!(tmp.path().join(CODEX_SKILL_PATH).exists());
+        assert!(tmp.path().join(CONFIG_PATH).exists());
     }
 
     #[test]
@@ -526,7 +593,8 @@ mod tests {
                 PathBuf::from(CLAUDE_RULES_PATH),
                 PathBuf::from(CLAUDE_SKILL_PATH),
                 PathBuf::from(CODEX_RULES_PATH),
-                PathBuf::from(CODEX_SKILL_PATH)
+                PathBuf::from(CODEX_SKILL_PATH),
+                PathBuf::from(CONFIG_PATH),
             ]
         );
     }
@@ -540,13 +608,15 @@ mod tests {
             summary.created_or_updated,
             vec![
                 PathBuf::from(CLAUDE_RULES_PATH),
-                PathBuf::from(CLAUDE_SKILL_PATH)
+                PathBuf::from(CLAUDE_SKILL_PATH),
+                PathBuf::from(CONFIG_PATH),
             ]
         );
         assert!(tmp.path().join(CLAUDE_RULES_PATH).exists());
         assert!(tmp.path().join(CLAUDE_SKILL_PATH).exists());
         assert!(!tmp.path().join(CODEX_RULES_PATH).exists());
         assert!(!tmp.path().join(CODEX_SKILL_PATH).exists());
+        assert!(tmp.path().join(CONFIG_PATH).exists());
     }
 
     #[test]
@@ -558,13 +628,29 @@ mod tests {
             summary.created_or_updated,
             vec![
                 PathBuf::from(CODEX_RULES_PATH),
-                PathBuf::from(CODEX_SKILL_PATH)
+                PathBuf::from(CODEX_SKILL_PATH),
+                PathBuf::from(CONFIG_PATH),
             ]
         );
         assert!(tmp.path().join(CODEX_RULES_PATH).exists());
         assert!(tmp.path().join(CODEX_SKILL_PATH).exists());
         assert!(!tmp.path().join(CLAUDE_RULES_PATH).exists());
         assert!(!tmp.path().join(CLAUDE_SKILL_PATH).exists());
+        assert!(tmp.path().join(CONFIG_PATH).exists());
+    }
+
+    #[test]
+    fn install_does_not_overwrite_existing_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let custom = "[defaults]\nagent = \"codex\"\npolicy = \"suggest\"\n";
+        fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+        fs::write(tmp.path().join(CONFIG_PATH), custom).unwrap();
+
+        let summary = install_assets(tmp.path(), InstallTarget::Both).unwrap();
+
+        let content = fs::read_to_string(tmp.path().join(CONFIG_PATH)).unwrap();
+        assert_eq!(content, custom);
+        assert!(summary.unchanged.contains(&PathBuf::from(CONFIG_PATH)));
     }
 
     #[test]
