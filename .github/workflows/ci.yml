@@ -74,6 +74,32 @@ jobs:
       - name: Test
         run: cargo test
 
+  coverage:
+    name: Code Coverage
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.non_docs == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+
+      - name: Generate coverage
+        run: cargo tarpaulin --out xml --output-dir coverage/ --skip-clean
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage/cobertura.xml
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
   docs:
     name: Docs Quality
     needs: changes

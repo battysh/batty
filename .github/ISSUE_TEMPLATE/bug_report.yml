@@ -1,0 +1,91 @@
+name: Bug Report
+description: Report a bug in Batty
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Fill in the details below so we can investigate.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened? What did you expect instead?
+      placeholder: "Batty fails to launch Claude agent with error X when..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal steps to trigger the bug.
+      placeholder: |
+        1. Create a board with `kanban-md init`
+        2. Run `batty work my-phase`
+        3. Observe error in terminal
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened? Include error messages or log output.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Batty Version
+      description: Output of `batty --version`
+      placeholder: "batty 0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Linux
+        - macOS
+        - WSL
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: tmux-version
+    attributes:
+      label: tmux Version
+      description: Output of `tmux -V`
+      placeholder: "tmux 3.4"
+
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent CLI
+      description: Which agent were you using?
+      options:
+        - Claude Code
+        - Codex
+        - Other
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste relevant output from `.batty/logs/` or the terminal. This will be formatted as code.
+      render: shell
