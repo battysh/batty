@@ -182,7 +182,11 @@ mod tests {
     use std::fs;
 
     fn git(repo: &Path, args: &[&str]) -> Output {
-        Command::new("git").current_dir(repo).args(args).output().unwrap()
+        Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .output()
+            .unwrap()
     }
 
     fn init_repo() -> Option<(tempfile::TempDir, String)> {
@@ -204,9 +208,10 @@ mod tests {
         let _ = git(tmp.path(), &["add", "README.md"]);
         let _ = git(tmp.path(), &["commit", "-q", "-m", "init"]);
 
-        let branch = String::from_utf8_lossy(&git(tmp.path(), &["branch", "--show-current"]).stdout)
-            .trim()
-            .to_string();
+        let branch =
+            String::from_utf8_lossy(&git(tmp.path(), &["branch", "--show-current"]).stdout)
+                .trim()
+                .to_string();
         if branch.is_empty() {
             return None;
         }
@@ -219,16 +224,32 @@ mod tests {
             return;
         };
 
-        assert!(git(tmp.path(), &["switch", "-c", "agent-a"]).status.success());
+        assert!(
+            git(tmp.path(), &["switch", "-c", "agent-a"])
+                .status
+                .success()
+        );
         fs::write(tmp.path().join("a.txt"), "a\n").unwrap();
         assert!(git(tmp.path(), &["add", "a.txt"]).status.success());
-        assert!(git(tmp.path(), &["commit", "-q", "-m", "a"]).status.success());
+        assert!(
+            git(tmp.path(), &["commit", "-q", "-m", "a"])
+                .status
+                .success()
+        );
 
         assert!(git(tmp.path(), &["switch", &base]).status.success());
-        assert!(git(tmp.path(), &["switch", "-c", "agent-b"]).status.success());
+        assert!(
+            git(tmp.path(), &["switch", "-c", "agent-b"])
+                .status
+                .success()
+        );
         fs::write(tmp.path().join("b.txt"), "b\n").unwrap();
         assert!(git(tmp.path(), &["add", "b.txt"]).status.success());
-        assert!(git(tmp.path(), &["commit", "-q", "-m", "b"]).status.success());
+        assert!(
+            git(tmp.path(), &["commit", "-q", "-m", "b"])
+                .status
+                .success()
+        );
         assert!(git(tmp.path(), &["switch", &base]).status.success());
 
         let mut queue = MergeQueue::new(
@@ -261,10 +282,18 @@ mod tests {
             return;
         };
 
-        assert!(git(tmp.path(), &["switch", "-c", "agent-a"]).status.success());
+        assert!(
+            git(tmp.path(), &["switch", "-c", "agent-a"])
+                .status
+                .success()
+        );
         fs::write(tmp.path().join("a.txt"), "a\n").unwrap();
         assert!(git(tmp.path(), &["add", "a.txt"]).status.success());
-        assert!(git(tmp.path(), &["commit", "-q", "-m", "a"]).status.success());
+        assert!(
+            git(tmp.path(), &["commit", "-q", "-m", "a"])
+                .status
+                .success()
+        );
         assert!(git(tmp.path(), &["switch", &base]).status.success());
 
         let mut queue = MergeQueue::new(
@@ -297,10 +326,18 @@ mod tests {
                 .success()
         );
 
-        assert!(git(tmp.path(), &["switch", "-c", "agent-a"]).status.success());
+        assert!(
+            git(tmp.path(), &["switch", "-c", "agent-a"])
+                .status
+                .success()
+        );
         fs::write(tmp.path().join("conflict.txt"), "agent\n").unwrap();
         assert!(git(tmp.path(), &["add", "conflict.txt"]).status.success());
-        assert!(git(tmp.path(), &["commit", "-q", "-m", "agent edit"]).status.success());
+        assert!(
+            git(tmp.path(), &["commit", "-q", "-m", "agent edit"])
+                .status
+                .success()
+        );
 
         assert!(git(tmp.path(), &["switch", &base]).status.success());
         fs::write(tmp.path().join("conflict.txt"), "target\n").unwrap();

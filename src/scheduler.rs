@@ -118,7 +118,9 @@ impl BoardSnapshot {
     }
 
     fn task_path(&self, task_id: u32) -> Option<&Path> {
-        self.tasks.get(&task_id).map(|task| task.source_path.as_path())
+        self.tasks
+            .get(&task_id)
+            .map(|task| task.source_path.as_path())
     }
 }
 
@@ -257,7 +259,8 @@ impl<R: CommandRunner> Scheduler<R> {
         if let Some(task_id) = busy_task {
             self.release_claim(task_id)?;
         }
-        self.agent_states.insert(agent.to_string(), AgentState::Idle);
+        self.agent_states
+            .insert(agent.to_string(), AgentState::Idle);
         Ok(())
     }
 
@@ -375,7 +378,10 @@ impl<R: CommandRunner> Scheduler<R> {
     fn verify_claim(&self, snapshot: &BoardSnapshot, task_id: u32, agent: &str) -> Result<()> {
         let Some(task_path) = snapshot.task_path(task_id) else {
             self.release_claim(task_id)?;
-            bail!("picked task #{} not found in current board snapshot", task_id);
+            bail!(
+                "picked task #{} not found in current board snapshot",
+                task_id
+            );
         };
 
         let claimed_by = parse_claimed_by(task_path)?;
@@ -645,7 +651,9 @@ mod tests {
 
         let calls = scheduler.runner.calls();
         assert!(
-            calls.iter().any(|call| call.iter().any(|arg| arg == "--release")),
+            calls
+                .iter()
+                .any(|call| call.iter().any(|arg| arg == "--release")),
             "expected release call after failed claim verification, calls={calls:?}"
         );
     }

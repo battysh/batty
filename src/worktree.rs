@@ -6,8 +6,8 @@
 //! - merged runs are removed (worktree + branch)
 //! - rejected/failed/unmerged runs are retained for inspection
 
-use std::ffi::OsStr;
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -210,7 +210,10 @@ pub fn prepare_agent_worktrees(
         } else {
             let path_s = path.to_string_lossy().to_string();
             let add_output = if branch_exists(&repo_root, &branch)? {
-                run_git(&repo_root, ["worktree", "add", path_s.as_str(), branch.as_str()])?
+                run_git(
+                    &repo_root,
+                    ["worktree", "add", path_s.as_str(), branch.as_str()],
+                )?
             } else {
                 run_git(
                     &repo_root,
@@ -233,10 +236,7 @@ pub fn prepare_agent_worktrees(
             }
         }
 
-        worktrees.push(AgentWorktree {
-            branch,
-            path,
-        });
+        worktrees.push(AgentWorktree { branch, path });
     }
 
     Ok(worktrees)
