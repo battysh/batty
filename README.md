@@ -9,6 +9,7 @@
 <p align="center">
   <a href="https://github.com/battysh/batty/actions"><img src="https://img.shields.io/github/actions/workflow/status/battysh/batty/ci.yml?style=for-the-badge&label=CI" alt="CI"></a>
   <a href="https://codecov.io/gh/battysh/batty"><img src="https://img.shields.io/codecov/c/github/battysh/batty?style=for-the-badge&label=Coverage" alt="Coverage"></a>
+  <a href="https://crates.io/crates/batty-cli"><img src="https://img.shields.io/crates/v/batty-cli?style=for-the-badge" alt="crates.io"></a>
   <a href="https://github.com/battysh/batty/releases"><img src="https://img.shields.io/github/v/release/battysh/batty?style=for-the-badge" alt="Release"></a>
   <a href="https://github.com/battysh/batty/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="MIT License"></a>
 </p>
@@ -49,9 +50,6 @@ Here's what happens in the demo:
 # Install from crates.io
 cargo install batty-cli
 
-# Or install from local checkout
-cargo install --path .
-
 # Set up Batty in your project (installs skills, checks tmux + kanban-md)
 batty install
 
@@ -61,11 +59,16 @@ batty work my-phase
 
 That's it. A tmux session opens. Your agent works through the board. Batty supervises.
 
-### From Source (No Install)
+### Pre-built Binaries
+
+Download from [GitHub Releases](https://github.com/battysh/batty/releases) -- available for Linux (x86_64, aarch64) and macOS (x86_64, aarch64).
+
+### From Source
 
 ```sh
-cargo run -- install
-cargo run -- work my-phase
+git clone https://github.com/battysh/batty.git
+cd batty
+cargo install --path .
 ```
 
 ## What You See

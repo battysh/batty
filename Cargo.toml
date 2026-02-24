@@ -8,8 +8,21 @@ license = "MIT"
 repository = "https://github.com/battysh/batty"
 homepage = "https://github.com/battysh/batty"
 readme = "README.md"
-keywords = ["cli", "tmux", "automation", "agent", "kanban"]
+keywords = ["ai-agent", "tmux", "automation", "supervisor", "llm"]
 categories = ["command-line-utilities", "development-tools"]
+exclude = [
+    ".agents/",
+    ".batty/",
+    ".claude/",
+    ".github/",
+    ".video/",
+    "assets/*.png",
+    "assets/*.jpg",
+    "docs/",
+    "planning/",
+    "scripts/",
+    "demo.tape",
+]
 
 [[bin]]
 name = "batty"
