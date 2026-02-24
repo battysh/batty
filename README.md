@@ -33,9 +33,13 @@ Today, that's you. Watching a terminal. Copy-pasting context. Typing "y" to conf
 
 ## Demo
 
-[![Watch the demo](assets/youtube-thumbnail.jpg)](https://youtu.be/muwRo04vj08)
+<p align="center">
+  <img src="assets/demo.gif" alt="Batty CLI demo" width="800">
+</p>
 
-> **[Watch the demo on YouTube](https://youtu.be/muwRo04vj08)** -- Setting up a board, launching an agent, and watching Batty supervise the entire workflow.
+[![Watch the full demo](assets/youtube-thumbnail.jpg)](https://youtu.be/muwRo04vj08)
+
+> **[Watch the full demo on YouTube](https://youtu.be/muwRo04vj08)** -- Setting up a board, launching an agent, and watching Batty supervise the entire workflow.
 
 Here's what happens in the demo:
 
