@@ -1,9 +1,15 @@
 ---
 id: 8
 title: Fix default DoD command hardcoded to "cargo test"
-status: backlog
+status: done
 priority: medium
-tags: [bug, config]
+created: 0001-01-01T00:00:00Z
+updated: 2026-02-23T20:58:22.834576855-05:00
+started: 2026-02-23T20:57:26.34956173-05:00
+completed: 2026-02-23T20:58:22.834576539-05:00
+tags:
+    - bug
+    - config
 ---
 
 ## Bug Description
@@ -35,3 +41,6 @@ This is relatively low priority since the DoD isn't actually executed when not c
 1. Set `dod` to null in config
 2. Run a phase
 3. Check execution.jsonl — `dod_command` should indicate no DoD configured
+
+[[2026-02-23]] Mon 20:58
+Fixed completion DoD default behavior in src/completion.rs. Changes: removed hardcoded `cargo test` fallback for completion reporting; added `(none)` sentinel when DoD is not configured; DoD now executes only when defaults.dod is explicitly set; no-DoD path skips execution and is treated as passing the DoD gate. Added unit test `completion_passes_without_dod_when_unset` to verify completion succeeds with dod_executed=false and dod_command="(none)". Verification: cargo test completion::tests -- --nocapture (7 passed).

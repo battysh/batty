@@ -1,9 +1,15 @@
 ---
 id: 5
 title: Fix conflicting claim identities in parallel mode launch context
-status: backlog
+status: done
 priority: high
-tags: [bug, parallel]
+created: 0001-01-01T00:00:00Z
+updated: 2026-02-23T20:54:19.245205005-05:00
+started: 2026-02-23T20:52:40.18996382-05:00
+completed: 2026-02-23T20:54:19.245204693-05:00
+tags:
+    - bug
+    - parallel
 ---
 
 ## Bug Description
@@ -44,3 +50,6 @@ In the parallel slot context composition, the per-slot claim identity should be 
 1. `batty work <phase> --parallel 2 --dry-run`
 2. Each slot's launch context should have ONE consistent claim identity
 3. No conflicting claim_agent_name instructions in the same context
+
+[[2026-02-23]] Mon 20:54
+Implemented parallel claim identity fix in src/work.rs. In run_phase_parallel, each slot now composes launch context with slot-specific claim identity (claim.agent_name = slot, claim.source = parallel-slot) instead of reusing base single-agent identity. Updated slot instruction text to avoid contradictory guidance and updated status output to list slot claim identities. Verification: cargo test run_phase_parallel -- --nocapture (2 passed). Note: direct cargo run --bin batty -- work bug-fix --parallel 2 --dry-run verification was blocked in this workspace by git ref/worktree setup (cannot create refs/heads/batty/bug-fix/<agent>). 

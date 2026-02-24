@@ -16,7 +16,7 @@ use crate::dod::{self, DodConfig};
 use crate::orchestrator::OrchestratorResult;
 use crate::task;
 
-const DEFAULT_DOD_COMMAND: &str = "cargo test";
+const UNSET_DOD_COMMAND: &str = "(none)";
 
 #[derive(Debug, Clone)]
 pub struct CompletionDecision {
@@ -113,12 +113,13 @@ pub fn evaluate_phase_completion(
         ));
     }
 
-    let dod_command = project_config
-        .defaults
-        .dod
+    let configured_dod_command = project_config.defaults.dod.clone();
+    let dod_configured = configured_dod_command.is_some();
+    let dod_command = configured_dod_command
         .clone()
-        .unwrap_or_else(|| DEFAULT_DOD_COMMAND.to_string());
-    let should_run_dod = board_all_done && milestone_done && summary_exists && executor_stable;
+        .unwrap_or_else(|| UNSET_DOD_COMMAND.to_string());
+    let should_run_dod =
+        board_all_done && milestone_done && summary_exists && executor_stable && dod_configured;
 
     let (dod_passed, dod_executed, dod_exit_code, dod_output_lines) = if should_run_dod {
         let dod_config = DodConfig {
@@ -145,6 +146,9 @@ pub fn evaluate_phase_completion(
             ));
         }
         (result.passed, true, result.exit_code, output_lines)
+    } else if !dod_configured {
+        // No DoD configured: skip the gate entirely.
+        (true, false, None, 0)
     } else {
         (false, false, None, 0)
     };
@@ -353,5 +357,26 @@ mod tests {
                 .failure_summary()
                 .contains("executor not in stable completed state")
         );
+    }
+
+    #[test]
+    fn completion_passes_without_dod_when_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let phase = "phase-2.5";
+        let tasks_dir = setup_phase(tmp.path(), phase);
+
+        write_task_file(&tasks_dir, 1, "core", "done", &[]);
+        write_task_file(&tasks_dir, 2, "exit", "done", &["milestone"]);
+        fs::write(tmp.path().join("phase-summary.md"), "summary").unwrap();
+
+        let config = ProjectConfig::default();
+        let decision =
+            evaluate_phase_completion(phase, tmp.path(), &config, &OrchestratorResult::Completed)
+                .unwrap();
+
+        assert!(decision.is_complete);
+        assert!(!decision.dod_executed);
+        assert!(decision.dod_passed);
+        assert_eq!(decision.dod_command, "(none)");
     }
 }

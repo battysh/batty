@@ -61,6 +61,25 @@ A tmux session opens with three areas:
 
 The agent picks tasks from the board, implements them, runs tests, and commits. Batty handles the prompts.
 
+## Phase Setup Requirements
+
+Before running `batty work`, make sure your board includes at least one task tagged `milestone`.
+Batty's completion contract requires a milestone-tagged task to exist and be `done` before a phase can pass completion.
+
+Example task frontmatter:
+
+```yaml
+---
+id: 1
+title: Milestone exit task
+status: backlog
+priority: high
+tags: [milestone]
+---
+```
+
+At phase completion, Batty also requires a root-level `phase-summary.md` review packet.
+
 ## Essential Commands
 
 ```sh
@@ -69,7 +88,7 @@ batty work all             # run all phases in sequence
 batty attach my-phase      # reattach to a running session
 batty resume my-phase      # resume supervision after crash
 batty board my-phase       # open the kanban board TUI
-batty board-list           # list all boards with status
+batty list                 # list all boards with status (alias: board-list)
 batty merge phase-4 001    # merge a worktree run into main
 batty config               # show resolved configuration
 ```

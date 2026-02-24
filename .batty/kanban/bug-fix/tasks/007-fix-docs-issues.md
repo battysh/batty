@@ -1,9 +1,14 @@
 ---
 id: 7
 title: Fix documentation audit issues
-status: backlog
+status: done
 priority: medium
-tags: [docs]
+created: 0001-01-01T00:00:00Z
+updated: 2026-02-23T20:57:23.097843569-05:00
+started: 2026-02-23T20:55:29.077658724-05:00
+completed: 2026-02-23T20:57:23.097843239-05:00
+tags:
+    - docs
 ---
 
 ## Issues Found in Documentation Audit
@@ -35,3 +40,6 @@ tags: [docs]
 2. Grep for "board-list" in docs — should only appear as alias mention
 3. Grep for "394" — should not appear
 4. Grep for "planned for Phase 3" in execution-loop — should not appear
+
+[[2026-02-23]] Mon 20:57
+Completed documentation audit fixes.\n\nChanges:\n- Updated .batty/kanban/phase-4/PHASE.md status to Done.\n- Updated stale test-count references from 394/394+ to 370 in planning/roadmap.md, docs/reference/modules.md, and README.md.\n- Standardized board listing command to `batty list` (kept board-list as alias mention) in docs/getting-started.md, AGENTS.md, CLAUDE.md, and README.md.\n- Updated planning/execution-loop.md status text to reflect implemented Phase 3A/3B review+director flow and implemented merge automation.\n\nVerification:\n- rg -n "394" README.md planning docs AGENTS.md CLAUDE.md -> no matches\n- rg -n "planned for Phase 3|planned/aspirational|planned for phase 3" planning/execution-loop.md -> no matches\n- rg -n "board-list" docs AGENTS.md CLAUDE.md README.md planning -> only alias mentions remain.

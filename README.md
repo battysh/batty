@@ -141,7 +141,7 @@ Everything runs inside tmux. Output captured via `pipe-pane`. Answers injected v
 | `batty attach <phase>`       | Reattach to a running tmux session           |
 | `batty resume <phase>`       | Resume supervision after crash/restart       |
 | `batty board <phase>`        | Open the kanban board TUI                    |
-| `batty board-list`           | List all boards with status and task counts  |
+| `batty list` (alias `board-list`) | List all boards with status and task counts  |
 | `batty merge <phase> <run>`  | Merge a worktree run back into main          |
 | `batty config [--json]`      | Show resolved configuration                  |
 | `batty completions <shell>`  | Print shell completion script                |
@@ -220,7 +220,7 @@ Batty is actively developed and dogfooded -- we build Batty using Batty.
 
 | Phase     | Status | What                                           |
 |-----------|--------|-------------------------------------------------|
-| Phase 1   | Done   | Core agent runner, 394+ tests                   |
+| Phase 1   | Done   | Core agent runner, 370 tests                    |
 | Phase 2   | Done   | tmux supervisor, two-tier prompts, status bar   |
 | Phase 2.4 | Done   | Supervision harness validation                  |
 | Phase 2.5 | Done   | Runtime hardening, worktree isolation            |

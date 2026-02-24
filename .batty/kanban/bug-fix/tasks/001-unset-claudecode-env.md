@@ -1,9 +1,16 @@
 ---
 id: 1
 title: Unset CLAUDECODE env var when spawning tmux sessions
-status: backlog
+status: done
 priority: critical
-tags: [bug, runtime, milestone]
+created: 0001-01-01T00:00:00Z
+updated: 2026-02-23T20:50:46.881749634-05:00
+started: 2026-02-23T20:48:34.749608621-05:00
+completed: 2026-02-23T20:50:46.881749332-05:00
+tags:
+    - bug
+    - runtime
+    - milestone
 ---
 
 ## Bug Description
@@ -54,3 +61,6 @@ An alternative: in `apply_dangerous_mode_wrapper()` or in the spawn config assem
 
 - Unit test in `tmux.rs` that verifies `CLAUDECODE` is not present in new sessions
 - Or integration-style test that checks environment in spawned tmux sessions
+
+[[2026-02-23]] Mon 20:50
+Implemented: create_window now wraps executor command with env -u CLAUDECODE (create_session already did this), so parallel slots also launch cleanly when CLAUDECODE is present in tmux session env.\n\nTests: added tmux::tests::create_window_unsets_claudecode_from_session_environment; verified with cargo test create_window_unsets_claudecode_from_session_environment -- --nocapture.

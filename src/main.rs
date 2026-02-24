@@ -332,10 +332,7 @@ impl TaskCounts {
             .filter(|t| !is_excluded_status(&t.status))
             .collect();
         let done = active.iter().filter(|t| t.status == "done").count();
-        let in_progress = active
-            .iter()
-            .filter(|t| t.status == "in-progress")
-            .count();
+        let in_progress = active.iter().filter(|t| t.status == "in-progress").count();
         let total = active.len();
         let todo = total - done - in_progress;
         Self {
@@ -345,7 +342,6 @@ impl TaskCounts {
             total,
         }
     }
-
 }
 
 struct WorktreeInfo {
@@ -715,7 +711,7 @@ async fn main() -> Result<()> {
             if target == "all" {
                 if parallel != 1 {
                     anyhow::bail!(
-                        "`batty work all --parallel` is planned for phase 4; use --parallel 1 for now"
+                        "`batty work all --parallel` is not yet supported; use `batty work <phase> --parallel N` for individual phases"
                     );
                 }
 
@@ -886,7 +882,9 @@ async fn main() -> Result<()> {
                 .strip_prefix("run-")
                 .unwrap_or(&run)
                 .parse()
-                .with_context(|| format!("invalid run number: '{run}' — expected e.g. '002' or 'run-002'"))?;
+                .with_context(|| {
+                    format!("invalid run number: '{run}' — expected e.g. '002' or 'run-002'")
+                })?;
 
             let phase_slug = sanitize_phase_for_worktree_prefix(&phase);
             let worktree_dir_name = format!("{phase_slug}-run-{run_num:03}");
@@ -931,17 +929,9 @@ async fn main() -> Result<()> {
             std::fs::write(&prompt_file, &merge_prompt)
                 .context("failed to write merge prompt file")?;
 
-            let shell_cmd = format!(
-                "claude \"$(cat {})\"",
-                prompt_file.display()
-            );
+            let shell_cmd = format!("claude \"$(cat {})\"", prompt_file.display());
 
-            tmux::create_session(
-                &session,
-                "bash",
-                &["-c".to_string(), shell_cmd],
-                &work_dir,
-            )?;
+            tmux::create_session(&session, "bash", &["-c".to_string(), shell_cmd], &work_dir)?;
 
             println!("[batty] merge session created: {session}");
             println!("[batty] attaching...");

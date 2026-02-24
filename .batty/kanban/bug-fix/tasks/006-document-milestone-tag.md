@@ -1,9 +1,14 @@
 ---
 id: 6
 title: Document milestone tag requirement in completion contract
-status: backlog
+status: done
 priority: medium
-tags: [docs]
+created: 0001-01-01T00:00:00Z
+updated: 2026-02-23T20:55:23.00694598-05:00
+started: 2026-02-23T20:54:53.919793787-05:00
+completed: 2026-02-23T20:55:23.006945682-05:00
+tags:
+    - docs
 ---
 
 ## Gap Description
@@ -40,3 +45,6 @@ Alternatively, consider making the milestone check optional (warn but don't fail
 
 1. Check that docs mention the `milestone` tag requirement
 2. If milestone check is softened: create a board with no milestone-tagged tasks and verify completion still passes (with warning)
+
+[[2026-02-23]] Mon 20:55
+Documented milestone requirement in docs. Changes: added "Phase Setup Requirements" section in docs/getting-started.md with milestone tag requirement, example frontmatter, and phase-summary.md completion artifact note; added troubleshooting entry "Completion fails: no milestone task found" in docs/troubleshooting.md with cause and fix command (kanban-md edit <ID> --add-tag milestone). Verification: rg -n "milestone|phase-summary.md|no milestone task found" docs/getting-started.md docs/troubleshooting.md.

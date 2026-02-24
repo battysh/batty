@@ -76,7 +76,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 - `batty attach <phase>`: attach to a running tmux session
 - `batty resume <phase|session>`: resume supervision for an existing run
 - `batty board <phase>`: open phase board in kanban-md TUI
-- `batty board-list`: list all boards with status and task counts
+- `batty list` (alias: `batty board-list`): list all boards with status and task counts
 - `batty config [--json]`: show resolved configuration
 - `batty install [--target both|claude|codex] [--dir PATH]`: install project assets
 - `batty remove [--target both|claude|codex] [--dir PATH]`: remove installed project assets

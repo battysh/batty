@@ -1,9 +1,15 @@
 ---
 id: 3
 title: batty install should scaffold default config.toml
-status: backlog
+status: done
 priority: high
-tags: [feature, install]
+created: 0001-01-01T00:00:00Z
+updated: 2026-02-23T20:52:37.343236442-05:00
+started: 2026-02-23T20:51:24.502989222-05:00
+completed: 2026-02-23T20:52:37.343236105-05:00
+tags:
+    - feature
+    - install
 ---
 
 ## Gap Description
@@ -65,3 +71,9 @@ enabled = false         # Skip agent safety prompts (use with caution)
 3. Confirm `.batty/config.toml` exists with documented defaults
 4. Run `batty install --dir .` again — config should NOT be overwritten
 5. `batty config` shows values from the scaffolded file
+
+[[2026-02-23]] Mon 20:52
+Implemented install-time config scaffolding.\n\nChanges:\n- Added  scaffold template with documented sections/defaults (defaults, supervisor, detector, dangerous_mode, policy.auto_answer).\n- Added  and wired it into  so config is created only when absent and never overwritten.\n- Updated install tests for new config artifact and added .\n\nVerification:\n- cargo test install::tests -- --nocapture (24 passed).
+
+[[2026-02-23]] Mon 20:52
+Correction: implemented install-time config scaffolding in src/install.rs. Added CONFIG_PATH and DEFAULT_CONFIG_SCAFFOLD constants, added install_file_if_missing(destination, path, content, summary), and invoked it from install_assets so .batty/config.toml is created only when missing and never overwritten. Updated install tests to include config scaffold creation and idempotency; added install_does_not_overwrite_existing_config. Verification: cargo test install::tests -- --nocapture (24 passed).

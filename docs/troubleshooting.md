@@ -115,11 +115,25 @@ If the loop persists, attach with `batty attach <phase>`, provide manual input i
 **Cause:** The phase is already marked complete or has no backlog tasks.
 
 ```sh
-batty board-list                   # check status of all phases
+batty list                         # check status of all phases
 batty board my-phase               # inspect the specific board
 ```
 
 Phases are discovered by scanning `.batty/kanban/` and sorted by numeric suffix. A phase with all tasks in `done` status is considered complete and skipped.
+
+## Completion fails: no milestone task found
+
+**Cause:** The phase board has no task tagged `milestone`.
+
+Batty's completion contract requires at least one `milestone` task, and that task must be in `done` before the phase can complete.
+
+Fix by tagging a task:
+
+```sh
+kanban-md edit <ID> --add-tag milestone
+```
+
+Or create a dedicated milestone task in the board with `tags: [milestone]`.
 
 ## `batty merge` cannot find the worktree
 
