@@ -4,7 +4,7 @@ Batty coordinates three roles in one supervised tmux session. This page covers t
 
 ## The Three Roles
 
-```
+```text
 ┌──────────────────────────────────────────────┐
 │  Director                                    │
 │  Reviews completed phases -> merge / rework  │
@@ -26,7 +26,7 @@ Batty coordinates three roles in one supervised tmux session. This page covers t
 
 ## Runtime Data Flow
 
-```
+```text
 executor pane output
   -> tmux pipe-pane stream
   -> events::EventBuffer (extraction + buffering)
