@@ -63,45 +63,45 @@ When output goes silent and no regex matches, Batty asks the supervisor anyway. 
 
 ## Module Map
 
-| Module | Responsibility |
-|--------|----------------|
-| `main.rs` | CLI entrypoint and command dispatch |
-| `cli.rs` | clap command/option definitions |
-| `paths.rs` | `.batty/` path resolution |
-| `work.rs` | Phase run pipeline: context composition, launch, resume hooks |
-| `orchestrator.rs` | Core supervision loop: event ingestion, detector, policy/tier actions, status |
-| `tmux.rs` | tmux command wrapper (session, window, pane, status operations) |
-| `events.rs` | Pipe-pane event parsing, buffering, structured extraction |
-| `detector.rs` | Prompt detection state machine (silence windows, pattern matching, fallback) |
-| `tier2.rs` | Supervisor invocation, context snapshots, answer extraction |
-| `completion.rs` | Phase completion contract and signal detection |
-| `worktree.rs` | Run worktree create/reuse/cleanup, branch naming |
-| `install.rs` | `batty install` / `batty remove` asset management |
-| `agent/mod.rs` | AgentAdapter trait + adapter registry |
-| `agent/claude.rs` | Claude Code adapter |
-| `agent/codex.rs` | Codex adapter |
-| `config/mod.rs` | Config schema, loading, defaults, validation |
-| `policy/mod.rs` | Policy tiers (observe / suggest / act / fully-auto) |
-| `prompt/mod.rs` | Prompt pattern set and matching |
-| `log/mod.rs` | JSONL execution logs |
-| `task/mod.rs` | kanban-md task parsing and selection |
-| `supervisor/mod.rs` | Supervisor runtime abstractions |
-| `dod/mod.rs` | Definition-of-done gates |
-| `sequencer.rs` | Multi-phase sequencing for `batty work all` |
-| `review.rs` | AI director review decisions (merge / rework / escalate) |
-| `dag.rs` | Task dependency DAG construction and cycle detection |
-| `scheduler.rs` | Parallel DAG-aware task scheduler |
-| `merge_queue.rs` | Serialized merge queue for parallel worktree results |
-| `shell_completion.rs` | Shell completion script generation |
-| `bin/docsgen.rs` | Documentation generator |
+| Module                | Responsibility                                                                |
+| --------------------- | ----------------------------------------------------------------------------- |
+| `main.rs`             | CLI entrypoint and command dispatch                                           |
+| `cli.rs`              | clap command/option definitions                                               |
+| `paths.rs`            | `.batty/` path resolution                                                     |
+| `work.rs`             | Phase run pipeline: context composition, launch, resume hooks                 |
+| `orchestrator.rs`     | Core supervision loop: event ingestion, detector, policy/tier actions, status |
+| `tmux.rs`             | tmux command wrapper (session, window, pane, status operations)               |
+| `events.rs`           | Pipe-pane event parsing, buffering, structured extraction                     |
+| `detector.rs`         | Prompt detection state machine (silence windows, pattern matching, fallback)  |
+| `tier2.rs`            | Supervisor invocation, context snapshots, answer extraction                   |
+| `completion.rs`       | Phase completion contract and signal detection                                |
+| `worktree.rs`         | Run worktree create/reuse/cleanup, branch naming                              |
+| `install.rs`          | `batty install` / `batty remove` asset management                             |
+| `agent/mod.rs`        | AgentAdapter trait + adapter registry                                         |
+| `agent/claude.rs`     | Claude Code adapter                                                           |
+| `agent/codex.rs`      | Codex adapter                                                                 |
+| `config/mod.rs`       | Config schema, loading, defaults, validation                                  |
+| `policy/mod.rs`       | Policy tiers (observe / suggest / act / fully-auto)                           |
+| `prompt/mod.rs`       | Prompt pattern set and matching                                               |
+| `log/mod.rs`          | JSONL execution logs                                                          |
+| `task/mod.rs`         | kanban-md task parsing and selection                                          |
+| `supervisor/mod.rs`   | Supervisor runtime abstractions                                               |
+| `dod/mod.rs`          | Definition-of-done gates                                                      |
+| `sequencer.rs`        | Multi-phase sequencing for `batty work all`                                   |
+| `review.rs`           | AI director review decisions (merge / rework / escalate)                      |
+| `dag.rs`              | Task dependency DAG construction and cycle detection                          |
+| `scheduler.rs`        | Parallel DAG-aware task scheduler                                             |
+| `merge_queue.rs`      | Serialized merge queue for parallel worktree results                          |
+| `shell_completion.rs` | Shell completion script generation                                            |
+| `bin/docsgen.rs`      | Documentation generator                                                       |
 
 ## tmux Compatibility
 
-| tmux version | Status |
-|-------------|--------|
-| >= 3.2 | Full feature path (recommended) |
-| 3.1.x | Supported with fallbacks |
-| < 3.1 | Not supported (fails fast with guidance) |
+| tmux version | Status                                   |
+| ------------ | ---------------------------------------- |
+| >= 3.2       | Full feature path (recommended)          |
+| 3.1.x        | Supported with fallbacks                 |
+| < 3.1        | Not supported (fails fast with guidance) |
 
 Batty probes tmux capabilities on startup and logs: version, `pipe-pane` support, `pipe-pane -o` support, status style options, and split mode.
 

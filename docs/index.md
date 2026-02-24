@@ -15,15 +15,15 @@ Three roles in one supervised tmux session:
 Two-tier prompt handling keeps things moving:
 
 1. **Tier 1** -- Regex match on known prompts -> instant auto-answer (~80% of prompts)
-2. **Tier 2** -- Supervisor agent with full project context -> intelligent answer for the rest
+1. **Tier 2** -- Supervisor agent with full project context -> intelligent answer for the rest
 
 Everything is files. Config is TOML. Tasks are Markdown. Logs are JSONL. All git-versioned.
 
 ## Get Started
 
 1. [Getting Started](getting-started.md) -- Install, configure, run your first phase
-2. [CLI Reference](reference/cli.md) -- Every command and flag
-3. [Configuration](reference/config.md) -- All config.toml options
+1. [CLI Reference](reference/cli.md) -- Every command and flag
+1. [Configuration](reference/config.md) -- All config.toml options
 
 ## Go Deeper
 
