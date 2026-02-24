@@ -895,6 +895,7 @@ pub fn tmux_set(session: &str, option: &str, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn session_name_convention() {
@@ -905,6 +906,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn check_tmux_finds_binary() {
         let version = check_tmux().unwrap();
         assert!(
@@ -945,6 +947,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn capability_probe_reports_pipe_pane() {
         let caps = probe_capabilities().unwrap();
         assert!(
@@ -954,11 +957,13 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn nonexistent_session_does_not_exist() {
         assert!(!session_exists("batty-test-nonexistent-12345"));
     }
 
     #[test]
+    #[serial]
     fn create_and_kill_session() {
         let session = "batty-test-lifecycle";
         // Clean up in case a previous test left it
@@ -974,6 +979,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn session_path_returns_working_directory() {
         let session = "batty-test-session-path";
         let _ = kill_session(session);
@@ -986,6 +992,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn duplicate_session_is_error() {
         let session = "batty-test-dup";
         let _ = kill_session(session);
@@ -1000,6 +1007,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn create_window_adds_named_window_to_existing_session() {
         let session = "batty-test-window-create";
         let _ = kill_session(session);
@@ -1017,6 +1025,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn create_window_unsets_claudecode_from_session_environment() {
         let session = "batty-test-window-unset-claudecode";
         let _ = kill_session(session);
@@ -1057,6 +1066,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn create_session_enables_mouse_mode() {
         let session = "batty-test-mouse";
         let _ = kill_session(session);
@@ -1075,6 +1085,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn send_keys_to_session() {
         let session = "batty-test-sendkeys";
         let _ = kill_session(session);
@@ -1093,6 +1104,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn send_keys_with_enter_submits_line() {
         let session = "batty-test-sendkeys-enter";
         let _ = kill_session(session);
@@ -1121,6 +1133,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn pipe_pane_captures_output() {
         let session = "batty-test-pipe";
         let _ = kill_session(session);
@@ -1158,6 +1171,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn capture_pane_returns_content() {
         let session = "batty-test-capture";
         let _ = kill_session(session);
@@ -1182,6 +1196,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn list_panes_returns_at_least_one() {
         let session = "batty-test-panes";
         let _ = kill_session(session);
@@ -1195,6 +1210,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn list_pane_details_includes_active_flag() {
         let session = "batty-test-pane-details";
         let _ = kill_session(session);
@@ -1215,6 +1231,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn configure_supervisor_hotkeys_initializes_control_option() {
         let session = "batty-test-supervisor-hotkeys";
         let _ = kill_session(session);
@@ -1239,6 +1256,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn take_supervisor_hotkey_action_reads_and_clears() {
         let session = "batty-test-supervisor-action";
         let _ = kill_session(session);
@@ -1257,12 +1275,14 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn kill_nonexistent_session_is_ok() {
         // Should not error — idempotent
         kill_session("batty-test-nonexistent-kill-99999").unwrap();
     }
 
     #[test]
+    #[serial]
     fn session_with_short_lived_process() {
         let session = "batty-test-shortlived";
         let _ = kill_session(session);

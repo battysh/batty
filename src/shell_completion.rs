@@ -40,4 +40,16 @@ mod tests {
             assert!(matches!(mapped, Shell::Bash | Shell::Zsh | Shell::Fish));
         }
     }
+
+    #[test]
+    fn print_generates_completions_without_error() {
+        // Test all shells — output goes to stdout but should not error.
+        for shell in [
+            CompletionShell::Bash,
+            CompletionShell::Zsh,
+            CompletionShell::Fish,
+        ] {
+            print(shell).unwrap();
+        }
+    }
 }

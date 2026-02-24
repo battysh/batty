@@ -893,4 +893,158 @@ mod tests {
             assert!(json.is_ok(), "failed to serialize: {event:?}");
         }
     }
+
+    // ── Coverage: additional events tests ──
+
+    #[test]
+    fn pipe_watcher_extracts_events_from_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipe_log = tmp.path().join("pipe.log");
+        std::fs::write(
+            &pipe_log,
+            "some normal output\nRunning: cargo test\ntest result: ok. 5 passed\n",
+        )
+        .unwrap();
+
+        let buffer = EventBuffer::new(10);
+        let mut watcher = PipeWatcher::new(&pipe_log, buffer);
+        let count = watcher.poll().unwrap();
+        assert!(count > 0, "expected at least one event extracted");
+    }
+
+    #[test]
+    fn pipe_watcher_handles_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipe_log = tmp.path().join("nonexistent.log");
+
+        let buffer = EventBuffer::new(10);
+        let mut watcher = PipeWatcher::new(&pipe_log, buffer);
+        let count = watcher.poll().unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn pipe_watcher_incremental_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipe_log = tmp.path().join("pipe.log");
+        std::fs::write(&pipe_log, "Running: first command\n").unwrap();
+
+        let buffer = EventBuffer::new(10);
+        let mut watcher = PipeWatcher::new(&pipe_log, buffer);
+        let count1 = watcher.poll().unwrap();
+        assert!(count1 > 0, "should extract events from first write");
+
+        // Append more content
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&pipe_log)
+            .unwrap();
+        writeln!(f, "Running: second command").unwrap();
+
+        let count2 = watcher.poll().unwrap();
+        assert!(count2 > 0, "should extract events from appended content");
+    }
+
+    #[test]
+    fn pipe_watcher_clamps_stale_position() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipe_log = tmp.path().join("pipe.log");
+        std::fs::write(&pipe_log, "short\n").unwrap();
+
+        let buffer = EventBuffer::new(10);
+        // Start with position beyond file
+        let mut watcher = PipeWatcher::new_with_position(&pipe_log, buffer, 99999);
+        let count = watcher.poll().unwrap();
+        assert_eq!(count, 0, "should clamp and read nothing new");
+    }
+
+    #[test]
+    fn pipe_watcher_partial_line_buffering() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pipe_log = tmp.path().join("pipe.log");
+        // Write content WITHOUT trailing newline
+        std::fs::write(&pipe_log, "Running: partial").unwrap();
+
+        let buffer = EventBuffer::new(10);
+        let mut watcher = PipeWatcher::new(&pipe_log, buffer);
+        let count1 = watcher.poll().unwrap();
+        assert_eq!(count1, 0, "incomplete line should be buffered, not processed");
+
+        // Now complete the line
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&pipe_log)
+            .unwrap();
+        writeln!(f, " command").unwrap();
+
+        let count2 = watcher.poll().unwrap();
+        assert!(
+            count2 > 0,
+            "completed line should now be processed as event"
+        );
+    }
+
+    #[test]
+    fn format_summary_truncates_long_output_line() {
+        let buffer = EventBuffer::new(10);
+        let long_line = "x".repeat(100);
+        buffer.push(PipeEvent::OutputLine {
+            line: long_line.clone(),
+        });
+        let summary = buffer.format_summary();
+        assert!(
+            summary.contains("..."),
+            "long output line should be truncated with ..."
+        );
+        assert!(summary.len() < long_line.len() + 20);
+    }
+
+    #[test]
+    fn format_summary_includes_all_event_types() {
+        let buffer = EventBuffer::new(10);
+        buffer.push(PipeEvent::CommandRan {
+            command: "ls".to_string(),
+            success: Some(true),
+        });
+        buffer.push(PipeEvent::TestRan {
+            passed: true,
+            detail: "all good".to_string(),
+        });
+        buffer.push(PipeEvent::CommitMade {
+            hash: "abc1234def".to_string(),
+            message: "fix bug".to_string(),
+        });
+        buffer.push(PipeEvent::OutputLine {
+            line: "hello".to_string(),
+        });
+
+        let summary = buffer.format_summary();
+        assert!(summary.contains("$ ls"));
+        assert!(summary.contains("✓ test:"));
+        assert!(summary.contains("⊕ commit abc1234:"));
+        assert!(summary.contains("hello"));
+    }
+
+    #[test]
+    fn event_buffer_respects_capacity() {
+        let buffer = EventBuffer::new(3);
+        buffer.push(PipeEvent::OutputLine {
+            line: "a".to_string(),
+        });
+        buffer.push(PipeEvent::OutputLine {
+            line: "b".to_string(),
+        });
+        buffer.push(PipeEvent::OutputLine {
+            line: "c".to_string(),
+        });
+        buffer.push(PipeEvent::OutputLine {
+            line: "d".to_string(),
+        });
+
+        let summary = buffer.format_summary();
+        assert!(!summary.contains("  a"), "oldest event should be evicted");
+        assert!(summary.contains("  d"), "newest event should be present");
+    }
 }
