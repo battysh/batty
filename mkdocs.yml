@@ -23,5 +23,5 @@ nav:
       - Modules: reference/modules.md
   - Architecture: architecture.md
   - Troubleshooting: troubleshooting.md
-  - Contributor Docs: README.md
+  - Contributor Docs: contributing.md
 site_dir: site

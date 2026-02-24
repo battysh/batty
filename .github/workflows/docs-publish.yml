@@ -30,7 +30,7 @@ jobs:
       - name: Install docs dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install mkdocs-material
+          python -m pip install "mkdocs>=1.6,<2" mkdocs-material
 
       - name: Refresh generated references
         run: ./scripts/generate-docs.sh
