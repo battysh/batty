@@ -18,6 +18,7 @@ const SUPERVISOR_CONTROL_OPTION: &str = "@batty_supervisor_control";
 pub const SUPERVISOR_PAUSE_HOTKEY: &str = "C-b P";
 /// Default tmux-prefix hotkey for resuming Batty supervision.
 pub const SUPERVISOR_RESUME_HOTKEY: &str = "C-b R";
+const SEND_KEYS_SUBMIT_DELAY_MS: u64 = 100;
 
 /// Known split strategies for creating the orchestrator log pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -506,21 +507,32 @@ pub fn setup_pipe_pane_if_missing(target: &str, log_path: &Path) -> Result<()> {
 }
 
 /// Attach to an existing tmux session (blocks until detach/exit).
+///
+/// If already inside tmux, uses `switch-client` instead of `attach-session`.
 pub fn attach(session: &str) -> Result<()> {
     if !session_exists(session) {
         bail!(
             "tmux session '{session}' not found — is batty running? \
-             Start with `batty work <phase>`"
+             Start with `batty start` first"
         );
     }
 
+    let inside_tmux = std::env::var("TMUX").is_ok();
+
+    let (cmd, args) = if inside_tmux {
+        ("switch-client", vec!["-t", session])
+    } else {
+        ("attach-session", vec!["-t", session])
+    };
+
     let status = Command::new("tmux")
-        .args(["attach-session", "-t", session])
+        .arg(cmd)
+        .args(&args)
         .status()
-        .with_context(|| format!("failed to attach to tmux session '{session}'"))?;
+        .with_context(|| format!("failed to {cmd} to tmux session '{session}'"))?;
 
     if !status.success() {
-        bail!("tmux attach exited with non-zero status");
+        bail!("tmux {cmd} to '{session}' failed");
     }
 
     Ok(())
@@ -546,10 +558,14 @@ pub fn send_keys(target: &str, keys: &str, press_enter: bool) -> Result<()> {
     }
 
     if press_enter {
-        // Send Enter as an explicit second action so supervisor injections are
-        // always submitted.
+        // Keep submission as a separate keypress so the target app processes the
+        // literal text first, matching the watcher script's behavior.
+        if !keys.is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(SEND_KEYS_SUBMIT_DELAY_MS));
+        }
+
         let output = Command::new("tmux")
-            .args(["send-keys", "-t", target, "C-m"])
+            .args(["send-keys", "-t", target, "Enter"])
             .output()
             .with_context(|| format!("failed to send Enter to target '{target}'"))?;
 
@@ -561,6 +577,24 @@ pub fn send_keys(target: &str, keys: &str, press_enter: bool) -> Result<()> {
 
     debug!(target = target, keys = keys, "sent keys");
     Ok(())
+}
+
+/// List all tmux session names matching a prefix.
+pub fn list_sessions_with_prefix(prefix: &str) -> Vec<String> {
+    let output = Command::new("tmux")
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|name| name.starts_with(prefix))
+                .map(|s| s.to_string())
+                .collect()
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Kill a tmux session.
@@ -878,6 +912,151 @@ pub fn list_pane_details(session: &str) -> Result<Vec<PaneDetails>> {
 }
 
 /// Helper: run `tmux set -t <session> <option> <value>`.
+/// Split a pane horizontally (creates a new pane to the right).
+///
+/// `target_pane` is a tmux pane ID (e.g., `%0`). Returns the new pane's ID.
+pub fn split_window_horizontal(target_pane: &str, size_pct: u32) -> Result<String> {
+    let pct = format!("{size_pct}");
+    let output = Command::new("tmux")
+        .args([
+            "split-window",
+            "-h",
+            "-t",
+            target_pane,
+            "-p",
+            &pct,
+            "-P",
+            "-F",
+            "#{pane_id}",
+        ])
+        .output()
+        .with_context(|| format!("failed to split pane '{target_pane}' horizontally"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux split-window -h failed: {stderr}");
+    }
+
+    let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    debug!(target_pane, pane_id = %pane_id, size_pct, "horizontal split created");
+    Ok(pane_id)
+}
+
+/// Split a specific pane vertically (creates a new pane below).
+///
+/// Returns the new pane's ID.
+pub fn split_window_vertical_in_pane(
+    _session: &str,
+    pane_id: &str,
+    size_pct: u32,
+) -> Result<String> {
+    // Pane IDs (%N) are globally unique in tmux — use them directly as targets
+    let pct = format!("{size_pct}");
+    let output = Command::new("tmux")
+        .args([
+            "split-window",
+            "-v",
+            "-t",
+            pane_id,
+            "-p",
+            &pct,
+            "-P",
+            "-F",
+            "#{pane_id}",
+        ])
+        .output()
+        .with_context(|| format!("failed to split pane '{pane_id}' vertically"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux split-window -v failed for pane '{pane_id}': {stderr}");
+    }
+
+    let new_pane = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    debug!(pane_id = %new_pane, parent = pane_id, size_pct, "vertical split created");
+    Ok(new_pane)
+}
+
+/// Load text into a tmux paste buffer.
+/// Named buffer used by batty to avoid clobbering the user's paste buffer.
+const BATTY_BUFFER_NAME: &str = "batty-inject";
+
+/// Load text into a named tmux paste buffer.
+///
+/// Uses a dedicated buffer name so we never clobber the user's default
+/// paste buffer (which is what Ctrl-] / middle-click uses).
+pub fn load_buffer(content: &str) -> Result<()> {
+    let tmp = std::env::temp_dir().join(format!("batty-buf-{}", std::process::id()));
+    std::fs::write(&tmp, content)
+        .with_context(|| format!("failed to write buffer file {}", tmp.display()))?;
+
+    let output = Command::new("tmux")
+        .args(["load-buffer", "-b", BATTY_BUFFER_NAME, &tmp.to_string_lossy()])
+        .output()
+        .context("failed to run tmux load-buffer")?;
+
+    let _ = std::fs::remove_file(&tmp);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux load-buffer failed: {stderr}");
+    }
+
+    Ok(())
+}
+
+/// Paste the named batty buffer into a target pane and delete the buffer.
+///
+/// The `-d` flag deletes the buffer after pasting so it doesn't linger.
+/// The `-b` flag selects the batty-specific buffer (never the user's default).
+pub fn paste_buffer(target: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["paste-buffer", "-d", "-b", BATTY_BUFFER_NAME, "-t", target])
+        .output()
+        .with_context(|| format!("failed to paste buffer into '{target}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux paste-buffer failed: {stderr}");
+    }
+
+    Ok(())
+}
+
+/// Kill a specific tmux pane.
+pub fn kill_pane(target: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["kill-pane", "-t", target])
+        .output()
+        .with_context(|| format!("failed to kill pane '{target}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Don't error if already dead
+        if !stderr.contains("not found") {
+            bail!("tmux kill-pane failed: {stderr}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Respawn a dead pane with a new command.
+pub fn respawn_pane(target: &str, command: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["respawn-pane", "-t", target, "-k", command])
+        .output()
+        .with_context(|| format!("failed to respawn pane '{target}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux respawn-pane failed: {stderr}");
+    }
+
+    Ok(())
+}
+
+/// Helper: run `tmux set -t <session> <option> <value>`.
 pub fn tmux_set(session: &str, option: &str, value: &str) -> Result<()> {
     let output = Command::new("tmux")
         .args(["set", "-t", session, option, value])
@@ -1127,6 +1306,31 @@ mod tests {
         assert!(
             content.contains("supervisor ping\r\n") || content.contains("supervisor ping\n"),
             "expected submitted line ending in pane log, got: {content:?}"
+        );
+
+        kill_session(session).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn send_keys_enter_only_submits_prompt() {
+        let session = "batty-test-sendkeys-enter-only";
+        let _ = kill_session(session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("sendkeys-enter-only.log");
+
+        create_session(session, "cat", &[], "/tmp").unwrap();
+        setup_pipe_pane(session, &log_path).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        send_keys(session, "", true).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let content = std::fs::read_to_string(&log_path).unwrap_or_default();
+        assert!(
+            content.contains("\r\n") || content.contains('\n'),
+            "expected submitted empty line in pane log, got: {content:?}"
         );
 
         kill_session(session).unwrap();

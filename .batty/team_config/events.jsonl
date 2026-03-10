@@ -1,0 +1,7 @@
+{"event":"daemon_started","ts":1773073556}
+{"event":"agent_spawned","role":"architect","ts":1773073556}
+{"event":"agent_spawned","role":"manager","ts":1773073556}
+{"event":"agent_spawned","role":"eng-1-1","ts":1773073557}
+{"event":"agent_spawned","role":"eng-1-2","ts":1773073557}
+{"event":"agent_spawned","role":"eng-1-3","ts":1773073557}
+{"event":"agent_spawned","role":"eng-1-4","ts":1773073557}

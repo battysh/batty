@@ -1,0 +1,42 @@
+name: my-project
+
+board:
+  rotation_threshold: 20
+
+standup:
+  interval_secs: 600
+  output_lines: 40
+
+layout:
+  zones:
+    - name: architect
+      width_pct: 33
+    - name: managers
+      width_pct: 33
+    - name: engineers
+      width_pct: 34
+      split: { horizontal: 3 }
+
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+    instances: 1
+    prompt: architect.md
+    talks_to: [manager]
+    nudge_interval_secs: 900
+
+  - name: manager
+    role_type: manager
+    agent: claude
+    instances: 1
+    prompt: manager.md
+    talks_to: [architect, engineer]
+
+  - name: engineer
+    role_type: engineer
+    agent: claude
+    instances: 3
+    prompt: engineer.md
+    talks_to: [manager]
+    use_worktrees: true

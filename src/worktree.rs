@@ -813,13 +813,16 @@ mod tests {
         let worktrees = prepare_agent_worktrees(tmp.path(), "phase-4", &names, false).unwrap();
 
         assert_eq!(worktrees.len(), 2);
+        // Compare canonicalized paths to handle macOS /var vs /private/var symlink
         assert_eq!(
-            worktrees[0].path,
+            worktrees[0].path.canonicalize().unwrap(),
             tmp.path()
                 .join(".batty")
                 .join("worktrees")
                 .join("phase-4")
                 .join("agent-1")
+                .canonicalize()
+                .unwrap()
         );
         assert_eq!(worktrees[0].branch, "batty/phase-4/agent-1");
         assert!(branch_exists(tmp.path(), "batty/phase-4/agent-1").unwrap());

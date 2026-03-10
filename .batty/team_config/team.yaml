@@ -1,0 +1,53 @@
+name: batty-dev
+
+board:
+  rotation_threshold: 15
+
+standup:
+  interval_secs: 900
+  output_lines: 40
+
+layout:
+  zones:
+    - name: architect
+      width_pct: 20
+    - name: managers
+      width_pct: 20
+    - name: engineers
+      width_pct: 60
+      split: { horizontal: 4 }
+
+roles:
+  - name: human
+    role_type: user
+    channel: telegram
+    channel_config:
+      target: "<your-telegram-chat-id>"
+      provider: openclaw
+    talks_to: [architect]
+
+  - name: architect
+    role_type: architect
+    agent: claude
+    instances: 1
+    prompt: batty_architect.md
+    talks_to: [human, manager]
+    nudge_interval_secs: 1800
+    standup_interval_secs: 1800
+    owns: ["planning/**", "docs/**", "CLAUDE.md"]
+
+  - name: manager
+    role_type: manager
+    agent: claude
+    instances: 1
+    prompt: batty_manager.md
+    talks_to: [architect, engineer]
+    standup_interval_secs: 1200
+
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 4
+    prompt: batty_engineer.md
+    talks_to: [manager]
+    use_worktrees: true

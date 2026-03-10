@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[derive(Parser, Debug)]
 #[command(
     name = "batty",
-    about = "Hierarchical agent command system for software development",
+    about = "Hierarchical agent team system for software development",
     version
 )]
 pub struct Cli {
@@ -17,61 +17,88 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Execute a task or work through the board
-    Work {
-        /// Task ID or "all" to work through the board
-        target: String,
+    /// Scaffold .batty/team_config/ with default team.yaml and prompt templates
+    Init {
+        /// Template to use for scaffolding
+        #[arg(long, value_enum, default_value_t = InitTemplate::Simple)]
+        template: InitTemplate,
+    },
 
-        /// Number of parallel agents
-        #[arg(long, default_value = "1")]
-        parallel: u32,
-
-        /// Override the default agent
-        #[arg(long)]
-        agent: Option<String>,
-
-        /// Override the default policy
-        #[arg(long)]
-        policy: Option<String>,
-
+    /// Start the team daemon and tmux session
+    Start {
         /// Auto-attach to the tmux session after startup
         #[arg(long, default_value_t = false)]
         attach: bool,
+    },
 
-        /// Run in an isolated phase worktree
+    /// Stop the team daemon and kill the tmux session
+    Stop,
+
+    /// Attach to the running team tmux session
+    Attach,
+
+    /// Show all team members and their states
+    Status {
+        /// Emit machine-readable JSON output
         #[arg(long, default_value_t = false)]
-        worktree: bool,
-
-        /// Force creation of a new phase worktree run (requires --worktree)
-        #[arg(long, default_value_t = false, requires = "worktree")]
-        new: bool,
-
-        /// Show composed launch context and exit without running the executor
-        #[arg(long, default_value_t = false)]
-        dry_run: bool,
-
-        /// Internal: keep work process in foreground (skip auto-backgrounding).
-        #[arg(long, hide = true, default_value_t = false)]
-        foreground: bool,
+        json: bool,
     },
 
-    /// Attach to a running batty tmux session
-    Attach {
-        /// Phase name to attach to (e.g., "phase-1")
-        target: String,
+    /// Send a message to an agent role (human → agent injection)
+    Send {
+        /// Target role name (e.g., "architect", "manager-1")
+        role: String,
+        /// Message to inject
+        message: String,
     },
 
-    /// Resume supervision for an existing phase/session run
-    Resume {
-        /// Phase name (e.g., "phase-2.5") or tmux session name (e.g., "batty-phase-2-5")
-        target: String,
+    /// Assign a task to an engineer (used by manager agent)
+    Assign {
+        /// Target engineer instance (e.g., "eng-1-1")
+        engineer: String,
+        /// Task description
+        task: String,
     },
 
-    /// Show project configuration
+    /// Validate team config without launching
+    Validate,
+
+    /// Show resolved team configuration
     Config {
         /// Emit machine-readable JSON output
         #[arg(long, default_value_t = false)]
         json: bool,
+    },
+
+    /// Show the kanban board
+    Board,
+
+    /// List inbox messages for a team member
+    Inbox {
+        /// Member name (e.g., "architect", "manager-1", "eng-1-1")
+        member: String,
+    },
+
+    /// Read a specific message from a member's inbox
+    Read {
+        /// Member name
+        member: String,
+        /// Message ID (or prefix) from `batty inbox` output
+        id: String,
+    },
+
+    /// Acknowledge (mark delivered) a message in a member's inbox
+    Ack {
+        /// Member name
+        member: String,
+        /// Message ID (from `batty inbox` output)
+        id: String,
+    },
+
+    /// Merge an engineer's worktree branch into main
+    Merge {
+        /// Engineer instance name (e.g., "eng-1-1")
+        engineer: String,
     },
 
     /// Generate shell completions
@@ -81,64 +108,33 @@ pub enum Command {
         shell: CompletionShell,
     },
 
-    /// Initialize Batty assets and required external tools
-    Install {
-        /// Steering/skill install target (default: both)
-        #[arg(long, value_enum, default_value_t = InstallTarget::Both)]
-        target: InstallTarget,
-
-        /// Destination directory (default: current directory)
-        #[arg(long, default_value = ".")]
-        dir: String,
-    },
-
-    /// Remove installed Batty assets from a project
-    Remove {
-        /// Steering/skill removal target (default: both)
-        #[arg(long, value_enum, default_value_t = InstallTarget::Both)]
-        target: InstallTarget,
-
-        /// Target directory (default: current directory)
-        #[arg(long, default_value = ".")]
-        dir: String,
-    },
-
-    /// Open kanban-md TUI for a phase (prefers active run worktree)
-    Board {
-        /// Phase name (e.g., "phase-2.5")
-        target: String,
-
-        /// Print resolved board directory and exit
-        #[arg(long, default_value_t = false)]
-        print_dir: bool,
-    },
-
-    /// Launch Claude to commit, rebase, and merge a worktree run into main
-    Merge {
-        /// Phase name (e.g., "phase-2.7")
-        phase: String,
-        /// Run identifier (e.g., "run-002" or just "002")
-        run: String,
-    },
-
-    /// List all phase boards with status and task counts
-    #[command(alias = "board-list")]
-    List {
-        /// Continuously refresh the board listing
-        #[arg(long, default_value_t = false)]
-        watch: bool,
-
-        /// Refresh interval in seconds (used with --watch)
-        #[arg(long, default_value_t = 2)]
-        interval: u64,
+    /// Internal: run the daemon loop (spawned by `batty start`)
+    #[command(hide = true)]
+    Daemon {
+        /// Project root directory
+        #[arg(long)]
+        project_root: String,
     },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum InstallTarget {
-    Both,
-    Claude,
-    Codex,
+pub enum InitTemplate {
+    /// Single agent, no hierarchy (1 pane)
+    Solo,
+    /// Architect + 1 engineer pair (2 panes)
+    Pair,
+    /// 1 architect + 1 manager + 3 engineers (5 panes)
+    Simple,
+    /// 1 architect + 1 manager + 5 engineers with layout (7 panes)
+    Squad,
+    /// Human + architect + 3 managers + 15 engineers with Telegram (19 panes)
+    Large,
+    /// PI + 3 sub-leads + 6 researchers — research lab style (10 panes)
+    Research,
+    /// Human + tech lead + 2 eng managers + 8 developers — full product team (11 panes)
+    Software,
+    /// Batty self-development: human + architect + manager + 4 Rust engineers (6 panes)
+    Batty,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -153,44 +149,116 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resume_subcommand_parses_target() {
-        let cli = Cli::parse_from(["batty", "resume", "phase-2.5"]);
+    fn init_subcommand_defaults_to_simple() {
+        let cli = Cli::parse_from(["batty", "init"]);
         match cli.command {
-            Command::Resume { target } => assert_eq!(target, "phase-2.5"),
-            other => panic!("expected resume command, got {other:?}"),
+            Command::Init { template } => assert_eq!(template, InitTemplate::Simple),
+            other => panic!("expected init command, got {other:?}"),
         }
     }
 
     #[test]
-    fn install_subcommand_parses_defaults() {
-        let cli = Cli::parse_from(["batty", "install"]);
+    fn init_subcommand_accepts_large_template() {
+        let cli = Cli::parse_from(["batty", "init", "--template", "large"]);
         match cli.command {
-            Command::Install { target, dir } => {
-                assert_eq!(target, InstallTarget::Both);
-                assert_eq!(dir, ".");
+            Command::Init { template } => assert_eq!(template, InitTemplate::Large),
+            other => panic!("expected init command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_subcommand_defaults() {
+        let cli = Cli::parse_from(["batty", "start"]);
+        match cli.command {
+            Command::Start { attach } => assert!(!attach),
+            other => panic!("expected start command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_subcommand_with_attach() {
+        let cli = Cli::parse_from(["batty", "start", "--attach"]);
+        match cli.command {
+            Command::Start { attach } => assert!(attach),
+            other => panic!("expected start command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "stop"]);
+        assert!(matches!(cli.command, Command::Stop));
+    }
+
+    #[test]
+    fn attach_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "attach"]);
+        assert!(matches!(cli.command, Command::Attach));
+    }
+
+    #[test]
+    fn status_subcommand_defaults() {
+        let cli = Cli::parse_from(["batty", "status"]);
+        match cli.command {
+            Command::Status { json } => assert!(!json),
+            other => panic!("expected status command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_subcommand_json_flag() {
+        let cli = Cli::parse_from(["batty", "status", "--json"]);
+        match cli.command {
+            Command::Status { json } => assert!(json),
+            other => panic!("expected status command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_subcommand_parses_role_and_message() {
+        let cli = Cli::parse_from(["batty", "send", "architect", "hello world"]);
+        match cli.command {
+            Command::Send { role, message } => {
+                assert_eq!(role, "architect");
+                assert_eq!(message, "hello world");
             }
-            other => panic!("expected install command, got {other:?}"),
+            other => panic!("expected send command, got {other:?}"),
         }
     }
 
     #[test]
-    fn install_subcommand_parses_target_and_dir() {
-        let cli = Cli::parse_from(["batty", "install", "--target", "codex", "--dir", "/tmp/x"]);
+    fn assign_subcommand_parses_engineer_and_task() {
+        let cli = Cli::parse_from(["batty", "assign", "eng-1-1", "fix auth bug"]);
         match cli.command {
-            Command::Install { target, dir } => {
-                assert_eq!(target, InstallTarget::Codex);
-                assert_eq!(dir, "/tmp/x");
+            Command::Assign { engineer, task } => {
+                assert_eq!(engineer, "eng-1-1");
+                assert_eq!(task, "fix auth bug");
             }
-            other => panic!("expected install command, got {other:?}"),
+            other => panic!("expected assign command, got {other:?}"),
         }
     }
 
     #[test]
-    fn config_subcommand_parses_json_flag() {
+    fn validate_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "validate"]);
+        assert!(matches!(cli.command, Command::Validate));
+    }
+
+    #[test]
+    fn config_subcommand_json_flag() {
         let cli = Cli::parse_from(["batty", "config", "--json"]);
         match cli.command {
             Command::Config { json } => assert!(json),
             other => panic!("expected config command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_subcommand_parses_engineer() {
+        let cli = Cli::parse_from(["batty", "merge", "eng-1-1"]);
+        match cli.command {
+            Command::Merge { engineer } => assert_eq!(engineer, "eng-1-1"),
+            other => panic!("expected merge command, got {other:?}"),
         }
     }
 
@@ -204,104 +272,41 @@ mod tests {
     }
 
     #[test]
-    fn work_subcommand_requires_worktree_for_new() {
-        let err = Cli::try_parse_from(["batty", "work", "phase-2.5", "--new"]).unwrap_err();
-        assert!(err.to_string().contains("--worktree"));
-    }
-
-    #[test]
-    fn remove_subcommand_parses_defaults() {
-        let cli = Cli::parse_from(["batty", "remove"]);
+    fn inbox_subcommand_parses_member() {
+        let cli = Cli::parse_from(["batty", "inbox", "architect"]);
         match cli.command {
-            Command::Remove { target, dir } => {
-                assert_eq!(target, InstallTarget::Both);
-                assert_eq!(dir, ".");
-            }
-            other => panic!("expected remove command, got {other:?}"),
+            Command::Inbox { member } => assert_eq!(member, "architect"),
+            other => panic!("expected inbox command, got {other:?}"),
         }
     }
 
     #[test]
-    fn remove_subcommand_parses_target_and_dir() {
-        let cli = Cli::parse_from(["batty", "remove", "--target", "claude", "--dir", "/tmp/x"]);
+    fn read_subcommand_parses_member_and_id() {
+        let cli = Cli::parse_from(["batty", "read", "architect", "abc123"]);
         match cli.command {
-            Command::Remove { target, dir } => {
-                assert_eq!(target, InstallTarget::Claude);
-                assert_eq!(dir, "/tmp/x");
+            Command::Read { member, id } => {
+                assert_eq!(member, "architect");
+                assert_eq!(id, "abc123");
             }
-            other => panic!("expected remove command, got {other:?}"),
+            other => panic!("expected read command, got {other:?}"),
         }
     }
 
     #[test]
-    fn work_subcommand_parses_worktree_and_new() {
-        let cli = Cli::parse_from(["batty", "work", "phase-2.5", "--worktree", "--new"]);
+    fn ack_subcommand_parses_member_and_id() {
+        let cli = Cli::parse_from(["batty", "ack", "eng-1-1", "abc123"]);
         match cli.command {
-            Command::Work { worktree, new, .. } => {
-                assert!(worktree);
-                assert!(new);
+            Command::Ack { member, id } => {
+                assert_eq!(member, "eng-1-1");
+                assert_eq!(id, "abc123");
             }
-            other => panic!("expected work command, got {other:?}"),
+            other => panic!("expected ack command, got {other:?}"),
         }
     }
 
     #[test]
-    fn board_subcommand_parses_target() {
-        let cli = Cli::parse_from(["batty", "board", "phase-2.5"]);
-        match cli.command {
-            Command::Board { target, print_dir } => {
-                assert_eq!(target, "phase-2.5");
-                assert!(!print_dir);
-            }
-            other => panic!("expected board command, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn list_subcommand_parses() {
-        let cli = Cli::parse_from(["batty", "list"]);
-        assert!(matches!(cli.command, Command::List { .. }));
-    }
-
-    #[test]
-    fn list_subcommand_parses_board_list_alias() {
-        let cli = Cli::parse_from(["batty", "board-list"]);
-        assert!(matches!(cli.command, Command::List { .. }));
-    }
-
-    #[test]
-    fn list_subcommand_parses_watch_and_interval() {
-        let cli = Cli::parse_from(["batty", "list", "--watch", "--interval", "5"]);
-        match cli.command {
-            Command::List { watch, interval } => {
-                assert!(watch);
-                assert_eq!(interval, 5);
-            }
-            other => panic!("expected list command, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn merge_subcommand_parses_phase_and_run() {
-        let cli = Cli::parse_from(["batty", "merge", "phase-2.7", "run-002"]);
-        match cli.command {
-            Command::Merge { phase, run } => {
-                assert_eq!(phase, "phase-2.7");
-                assert_eq!(run, "run-002");
-            }
-            other => panic!("expected merge command, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn merge_subcommand_parses_bare_run_number() {
-        let cli = Cli::parse_from(["batty", "merge", "phase-2.7", "002"]);
-        match cli.command {
-            Command::Merge { phase, run } => {
-                assert_eq!(phase, "phase-2.7");
-                assert_eq!(run, "002");
-            }
-            other => panic!("expected merge command, got {other:?}"),
-        }
+    fn verbose_flag_is_global() {
+        let cli = Cli::parse_from(["batty", "-vv", "status"]);
+        assert_eq!(cli.verbose, 2);
     }
 }
