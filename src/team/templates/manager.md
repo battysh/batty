@@ -61,9 +61,11 @@ kanban-md create "Dependent task" --body "Details" --depends-on 1
 # View board summary
 kanban-md board
 # List tasks (various filters)
-kanban-md list --status todokanban-md list --status in-progress
+kanban-md list --status todo
+kanban-md list --status in-progress
 # Move a task to done after merge
-kanban-md move <id> done```
+kanban-md move <id> done
+```
 
 ## Merge Workflow
 

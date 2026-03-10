@@ -30,7 +30,8 @@ kanban-md board
 # See your assigned tasks
 kanban-md list --claimed-by <your-name>
 # Move your task to done when complete
-kanban-md move <task-id> done```
+kanban-md move <task-id> done
+```
 
 ## Code Quality
 
