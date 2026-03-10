@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use tracing::{debug, info};
 
 use super::config::{LayoutConfig, RoleType};
@@ -40,13 +40,7 @@ pub fn build_layout(
 
     // Enable pane borders with role labels using @batty_role (agent-proof)
     let _ = std::process::Command::new("tmux")
-        .args([
-            "set-option",
-            "-t",
-            session,
-            "pane-border-status",
-            "top",
-        ])
+        .args(["set-option", "-t", session, "pane-border-status", "top"])
         .output();
     let _ = std::process::Command::new("tmux")
         .args([
@@ -75,11 +69,9 @@ pub fn build_layout(
         build_zones_auto(&pane_members)
     };
 
-    // First zone's first member uses the initial pane
+    // Keep the initial pane unlabeled until the per-zone vertical layout is
+    // built, so multi-member zones can use it as the remaining container.
     let initial_pane = tmux::pane_id(session)?;
-    let first_member = &zones[0].1[0];
-    set_pane_title(session, &initial_pane, &first_member.name)?;
-    pane_map.insert(first_member.name.clone(), initial_pane.clone());
 
     // Create remaining zone columns by splitting the previous zone's pane.
     // Left-to-right: each split carves the next zone off the right side.
@@ -112,31 +104,35 @@ pub fn build_layout(
             continue;
         }
 
-        // First member of zone already has the zone pane (or we set it)
-        if zone_idx > 0 || !pane_map.contains_key(&zone_members[0].name) {
-            set_pane_title(session, zone_pane, &zone_members[0].name)?;
-            pane_map.insert(zone_members[0].name.clone(), zone_pane.clone());
+        let remaining_pane = zone_pane.clone();
+
+        for member_idx in (1..zone_members.len()).rev() {
+            let member = zone_members[member_idx];
+            let pct = split_off_current_member_pct(member_idx + 1);
+            let member_pane = tmux::split_window_vertical_in_pane(session, &remaining_pane, pct)?;
+            set_pane_title(session, &member_pane, &member.name)?;
+            debug!(
+                member = %member.name,
+                pane = %member_pane,
+                split_pct = pct,
+                "created member pane"
+            );
+            pane_map.insert(member.name.clone(), member_pane);
         }
 
-        // Split for remaining members in this zone
-        let member_count = zone_members.len();
-        for (j, member) in zone_members.iter().enumerate().skip(1) {
-            let remaining = member_count - j;
-            let pct = (100 / (remaining + 1)).max(10).min(90) as u32;
-            let pane_id = tmux::split_window_vertical_in_pane(
-                session,
-                &pane_map[&zone_members[j - 1].name],
-                pct,
-            )?;
-            set_pane_title(session, &pane_id, &member.name)?;
-            debug!(member = %member.name, pane = %pane_id, "created member pane");
-            pane_map.insert(member.name.clone(), pane_id);
-        }
+        set_pane_title(session, &remaining_pane, &zone_members[0].name)?;
+        pane_map.insert(zone_members[0].name.clone(), remaining_pane.clone());
     }
 
     info!(session, panes = pane_map.len(), "team layout created");
 
     Ok(pane_map)
+}
+
+fn split_off_current_member_pct(total_slots: usize) -> u32 {
+    (((1.0 / total_slots as f64) * 100.0).round() as u32)
+        .max(10)
+        .min(90)
 }
 
 /// Set a pane's title and store the role name in a custom tmux option.
@@ -260,6 +256,8 @@ mod tests {
     use super::super::config::TeamConfig;
     use super::super::hierarchy;
     use super::*;
+    use serial_test::serial;
+    use std::process::Command;
 
     fn make_members(yaml: &str) -> Vec<MemberInstance> {
         let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
@@ -345,5 +343,96 @@ roles:
         assert_eq!(zones[0].1[0].role_type, RoleType::Architect);
         assert_eq!(zones[1].1[0].role_type, RoleType::Manager);
         assert_eq!(zones[2].1.len(), 3);
+    }
+
+    #[test]
+    fn split_percentages_preserve_equal_zone_stack() {
+        let splits: Vec<_> = (2..=6).map(split_off_current_member_pct).collect();
+        assert_eq!(splits, vec![50, 33, 25, 20, 17]);
+    }
+
+    #[test]
+    #[serial]
+    fn build_layout_supports_architect_two_managers_and_six_engineers() {
+        let session = "batty-test-team-layout-nine";
+        let _ = crate::tmux::kill_session(session);
+
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: codex
+  - name: manager
+    role_type: manager
+    agent: codex
+    instances: 2
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 3
+    talks_to: [manager]
+"#,
+        );
+
+        let layout = Some(LayoutConfig {
+            zones: vec![
+                super::super::config::ZoneDef {
+                    name: "architect".to_string(),
+                    width_pct: 15,
+                    split: None,
+                },
+                super::super::config::ZoneDef {
+                    name: "managers".to_string(),
+                    width_pct: 25,
+                    split: Some(super::super::config::SplitDef { horizontal: 2 }),
+                },
+                super::super::config::ZoneDef {
+                    name: "engineers".to_string(),
+                    width_pct: 60,
+                    split: Some(super::super::config::SplitDef { horizontal: 6 }),
+                },
+            ],
+        });
+
+        let pane_map = build_layout(session, &members, &layout, Path::new("/tmp")).unwrap();
+        assert_eq!(pane_map.len(), 9);
+
+        let pane_count_output = Command::new("tmux")
+            .args(["list-panes", "-t", session, "-F", "#{pane_id}"])
+            .output()
+            .unwrap();
+        assert!(pane_count_output.status.success());
+        let pane_count = String::from_utf8_lossy(&pane_count_output.stdout)
+            .lines()
+            .count();
+        assert_eq!(pane_count, 9);
+
+        let engineer_heights_output = Command::new("tmux")
+            .args([
+                "list-panes",
+                "-t",
+                session,
+                "-F",
+                "#{pane_title} #{pane_height}",
+            ])
+            .output()
+            .unwrap();
+        assert!(engineer_heights_output.status.success());
+        let engineer_heights: Vec<u32> = String::from_utf8_lossy(&engineer_heights_output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let (title, height) = line.rsplit_once(' ')?;
+                if !title.starts_with("eng-") {
+                    return None;
+                }
+                height.parse().ok()
+            })
+            .collect();
+        assert_eq!(engineer_heights.len(), 6);
+        assert!(engineer_heights.iter().all(|height| *height >= 4));
+
+        crate::tmux::kill_session(session).unwrap();
     }
 }
