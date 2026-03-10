@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use tracing::{debug, info, warn};
 
 use super::board;
@@ -66,10 +66,7 @@ impl TeamDaemon {
         let mut watchers = HashMap::new();
         let stale_secs = config.team_config.standup.interval_secs * 2;
         for (name, pane_id) in &config.pane_map {
-            watchers.insert(
-                name.clone(),
-                SessionWatcher::new(pane_id, name, stale_secs),
-            );
+            watchers.insert(name.clone(), SessionWatcher::new(pane_id, name, stale_secs));
         }
 
         // Create channels for user roles
@@ -95,12 +92,15 @@ impl TeamDaemon {
         let mut nudges = HashMap::new();
         for role in &config.team_config.roles {
             if let Some(interval_secs) = role.nudge_interval_secs {
-                let prompt_file = role.prompt.as_deref().unwrap_or_else(|| match role.role_type {
-                    RoleType::Architect => "architect.md",
-                    RoleType::Manager => "manager.md",
-                    RoleType::Engineer => "engineer.md",
-                    RoleType::User => "architect.md",
-                });
+                let prompt_file = role
+                    .prompt
+                    .as_deref()
+                    .unwrap_or_else(|| match role.role_type {
+                        RoleType::Architect => "architect.md",
+                        RoleType::Manager => "manager.md",
+                        RoleType::Engineer => "engineer.md",
+                        RoleType::User => "architect.md",
+                    });
                 let prompt_path = team_config_dir.join(prompt_file);
                 if let Some(nudge_text) = extract_nudge_section(&prompt_path) {
                     // Apply nudge to all instances of this role
@@ -171,11 +171,7 @@ impl TeamDaemon {
 
     /// Spawn the correct agent in each member's pane.
     fn spawn_all_agents(&mut self) -> Result<()> {
-        let team_config_dir = self
-            .config
-            .project_root
-            .join(".batty")
-            .join("team_config");
+        let team_config_dir = self.config.project_root.join(".batty").join("team_config");
 
         // Ensure inboxes exist for all members
         let inboxes = inbox::inboxes_root(&self.config.project_root);
@@ -219,27 +215,31 @@ impl TeamDaemon {
                 self.config.project_root.clone()
             };
 
-            // Build launch script (strip ## Nudge section — that's daemon-only)
-            // Architects start active (begin planning immediately).
-            // Managers and engineers start idle (wait for directives/assignments).
+            // Build launch script (strip ## Nudge section — that's daemon-only).
+            // All roles start idle so their role prompt is loaded as persistent
+            // context instead of being interpreted as an immediate shell task.
             let agent_name = member.agent.as_deref().unwrap_or("claude");
             let prompt_text = strip_nudge_section(&self.load_prompt(member, &team_config_dir));
-            let idle = member.role_type != RoleType::Architect;
+            let idle = role_starts_idle();
 
-            let short_cmd =
-                write_launch_script(&member.name, agent_name, &prompt_text, &work_dir, &self.config.project_root, idle)?;
+            let short_cmd = write_launch_script(
+                &member.name,
+                agent_name,
+                &prompt_text,
+                &work_dir,
+                &self.config.project_root,
+                idle,
+            )?;
 
             debug!(member = %member.name, agent = agent_name, idle, "spawning agent");
             tmux::send_keys(pane_id, &short_cmd, true)?;
 
-            // Architect starts working; others start idle
             let initial_state = if idle {
                 MemberState::Idle
             } else {
                 MemberState::Working
             };
-            self.states
-                .insert(member.name.clone(), initial_state);
+            self.states.insert(member.name.clone(), initial_state);
             if !idle {
                 if let Some(watcher) = self.watchers.get_mut(&member.name) {
                     watcher.activate();
@@ -332,11 +332,7 @@ impl TeamDaemon {
             .emit(TeamEvent::task_completed(member_name))?;
 
         // Find member's manager and notify them
-        let member = self
-            .config
-            .members
-            .iter()
-            .find(|m| m.name == member_name);
+        let member = self.config.members.iter().find(|m| m.name == member_name);
 
         if let Some(member) = member {
             if let Some(mgr_name) = &member.reports_to {
@@ -348,9 +344,7 @@ impl TeamDaemon {
                         .map(|w| w.last_lines(10))
                         .unwrap_or_default();
 
-                    let msg = format!(
-                        "[{member_name}] completed task.\nLast output:\n{output}"
-                    );
+                    let msg = format!("[{member_name}] completed task.\nLast output:\n{output}");
                     message::inject_message(mgr_pane, member_name, &msg)?;
                     self.event_sink
                         .emit(TeamEvent::message_routed(member_name, mgr_name))?;
@@ -539,15 +533,9 @@ impl TeamDaemon {
         };
 
         // Find member to determine agent type
-        let member = self
-            .config
-            .members
-            .iter()
-            .find(|m| m.name == engineer);
+        let member = self.config.members.iter().find(|m| m.name == engineer);
 
-        let agent_name = member
-            .and_then(|m| m.agent.as_deref())
-            .unwrap_or("claude");
+        let agent_name = member.and_then(|m| m.agent.as_deref()).unwrap_or("claude");
 
         // Reset agent context
         let adapter = agent::adapter_from_name(agent_name);
@@ -572,7 +560,14 @@ impl TeamDaemon {
 
         // Wait for agent to reset, then launch with new task
         std::thread::sleep(Duration::from_secs(1));
-        let short_cmd = write_launch_script(engineer, agent_name, task, &work_dir, &self.config.project_root, false)?;
+        let short_cmd = write_launch_script(
+            engineer,
+            agent_name,
+            task,
+            &work_dir,
+            &self.config.project_root,
+            false,
+        )?;
         tmux::send_keys(&pane_id, &short_cmd, true)?;
 
         // Update state
@@ -636,7 +631,10 @@ impl TeamDaemon {
                 .find(|r| r.name == member.role_name);
             let receives = role_def
                 .and_then(|r| r.receives_standup)
-                .unwrap_or(matches!(member.role_type, RoleType::Manager | RoleType::Architect));
+                .unwrap_or(matches!(
+                    member.role_type,
+                    RoleType::Manager | RoleType::Architect
+                ));
             let standup_interval_secs = role_def
                 .and_then(|r| r.standup_interval_secs)
                 .unwrap_or(global_interval);
@@ -705,9 +703,10 @@ impl TeamDaemon {
         // Default: managers and architects get standups, others don't unless configured.
         let mut recipients: Vec<(MemberInstance, Duration)> = Vec::new();
         for role in &self.config.team_config.roles {
-            let receives = role
-                .receives_standup
-                .unwrap_or(matches!(role.role_type, RoleType::Manager | RoleType::Architect));
+            let receives = role.receives_standup.unwrap_or(matches!(
+                role.role_type,
+                RoleType::Manager | RoleType::Architect
+            ));
             if !receives {
                 continue;
             }
@@ -732,7 +731,8 @@ impl TeamDaemon {
 
             if last.is_none() {
                 // Initialize timer so first standup fires after one interval
-                self.last_standup.insert(recipient.name.clone(), Instant::now());
+                self.last_standup
+                    .insert(recipient.name.clone(), Instant::now());
                 continue;
             }
 
@@ -758,7 +758,8 @@ impl TeamDaemon {
                 }
             }
 
-            self.last_standup.insert(recipient.name.clone(), Instant::now());
+            self.last_standup
+                .insert(recipient.name.clone(), Instant::now());
         }
 
         if any_generated {
@@ -779,11 +780,7 @@ impl TeamDaemon {
 
         self.last_board_rotation = Instant::now();
 
-        let config_dir = self
-            .config
-            .project_root
-            .join(".batty")
-            .join("team_config");
+        let config_dir = self.config.project_root.join(".batty").join("team_config");
 
         // kanban-md uses a board/ directory — no rotation needed
         let board_dir = config_dir.join("board");
@@ -856,7 +853,11 @@ fn extract_nudge_section(prompt_path: &Path) -> Option<String> {
     }
 
     let text = lines.join("\n").trim().to_string();
-    if text.is_empty() { None } else { Some(text) }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 /// Strip the `## Nudge` section from prompt text so it's not sent to the agent.
@@ -908,10 +909,11 @@ fn write_launch_script(
 
     let agent_cmd = match agent_name {
         "codex" | "codex-cli" => {
+            let prefix = "exec codex --dangerously-bypass-approvals-and-sandbox";
             if idle {
-                "exec codex".to_string()
+                prefix.to_string()
             } else {
-                format!("exec codex '{escaped_prompt}'")
+                format!("{prefix} '{escaped_prompt}'")
             }
         }
         _ => {
@@ -920,9 +922,7 @@ fn write_launch_script(
                     "exec claude --dangerously-skip-permissions --append-system-prompt '{escaped_prompt}'"
                 )
             } else {
-                format!(
-                    "exec claude --dangerously-skip-permissions '{escaped_prompt}'"
-                )
+                format!("exec claude --dangerously-skip-permissions '{escaped_prompt}'")
             }
         }
     };
@@ -941,7 +941,10 @@ fn write_launch_script(
     let set_executable = |_path: &std::path::Path| {};
 
     // kanban-md wrapper: auto-adds --dir pointing to the project board
-    let board_dir = project_root.join(".batty").join("team_config").join("board");
+    let board_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board");
     let real_kanban = resolve_binary("kanban-md");
     let kanban_wrapper = wrapper_dir.join("kanban-md");
     std::fs::write(
@@ -976,6 +979,10 @@ fn write_launch_script(
         .with_context(|| format!("failed to write launch script {}", script_path.display()))?;
 
     Ok(format!("bash '{}'", script_path.to_string_lossy()))
+}
+
+fn role_starts_idle() -> bool {
+    true
 }
 
 /// Resolve the absolute path to a binary via `which`.
@@ -1056,14 +1063,13 @@ fn setup_engineer_worktree(
 
     if !wt_config_link.exists() {
         #[cfg(unix)]
-        std::os::unix::fs::symlink(team_config_dir, &wt_config_link)
-            .with_context(|| {
-                format!(
-                    "failed to symlink {} -> {}",
-                    wt_config_link.display(),
-                    team_config_dir.display()
-                )
-            })?;
+        std::os::unix::fs::symlink(team_config_dir, &wt_config_link).with_context(|| {
+            format!(
+                "failed to symlink {} -> {}",
+                wt_config_link.display(),
+                team_config_dir.display()
+            )
+        })?;
 
         #[cfg(not(unix))]
         {
@@ -1133,7 +1139,15 @@ mod tests {
 
     #[test]
     fn launch_script_active_sends_prompt_as_user_message() {
-        let cmd = write_launch_script("arch-1", "claude", "plan the project", Path::new("/project"), Path::new("/project"), false).unwrap();
+        let cmd = write_launch_script(
+            "arch-1",
+            "claude",
+            "plan the project",
+            Path::new("/project"),
+            Path::new("/project"),
+            false,
+        )
+        .unwrap();
         assert!(cmd.contains("batty-launch-arch-1.sh"));
         let script_path = std::env::temp_dir().join("batty-launch-arch-1.sh");
         let content = std::fs::read_to_string(&script_path).unwrap();
@@ -1143,7 +1157,15 @@ mod tests {
 
     #[test]
     fn launch_script_idle_uses_system_prompt() {
-        let cmd = write_launch_script("mgr-1", "claude", "You are the manager.", Path::new("/project"), Path::new("/project"), true).unwrap();
+        let cmd = write_launch_script(
+            "mgr-1",
+            "claude",
+            "You are the manager.",
+            Path::new("/project"),
+            Path::new("/project"),
+            true,
+        )
+        .unwrap();
         assert!(cmd.contains("batty-launch-mgr-1.sh"));
         let script_path = std::env::temp_dir().join("batty-launch-mgr-1.sh");
         let content = std::fs::read_to_string(&script_path).unwrap();
@@ -1153,15 +1175,57 @@ mod tests {
 
     #[test]
     fn launch_script_idle_codex_no_prompt() {
-        write_launch_script("eng-1", "codex", "role context", Path::new("/tmp/wt"), Path::new("/tmp"), true).unwrap();
+        write_launch_script(
+            "eng-1",
+            "codex",
+            "role context",
+            Path::new("/tmp/wt"),
+            Path::new("/tmp"),
+            true,
+        )
+        .unwrap();
         let script_path = std::env::temp_dir().join("batty-launch-eng-1.sh");
         let content = std::fs::read_to_string(&script_path).unwrap();
-        assert_eq!(content.trim().lines().last().unwrap().trim(), "exec codex");
+        assert_eq!(
+            content.trim().lines().last().unwrap().trim(),
+            "exec codex --dangerously-bypass-approvals-and-sandbox"
+        );
+    }
+
+    #[test]
+    fn launch_script_active_codex_uses_dangerous_flag() {
+        let cmd = write_launch_script(
+            "codex-active-test",
+            "codex",
+            "work the task",
+            Path::new("/tmp/wt"),
+            Path::new("/tmp"),
+            false,
+        )
+        .unwrap();
+        assert!(cmd.contains("batty-launch-codex-active-test.sh"));
+        let script_path = std::env::temp_dir().join("batty-launch-codex-active-test.sh");
+        let content = std::fs::read_to_string(&script_path).unwrap();
+        assert!(content
+            .contains("exec codex --dangerously-bypass-approvals-and-sandbox 'work the task'"));
+    }
+
+    #[test]
+    fn roles_start_idle_by_default() {
+        assert!(role_starts_idle());
     }
 
     #[test]
     fn launch_script_escapes_single_quotes() {
-        write_launch_script("eng-2", "claude", "fix the user's bug", Path::new("/tmp"), Path::new("/tmp"), false).unwrap();
+        write_launch_script(
+            "eng-2",
+            "claude",
+            "fix the user's bug",
+            Path::new("/tmp"),
+            Path::new("/tmp"),
+            false,
+        )
+        .unwrap();
         let script_path = std::env::temp_dir().join("batty-launch-eng-2.sh");
         let content = std::fs::read_to_string(&script_path).unwrap();
         assert!(content.contains("user'\\''s"));
@@ -1188,7 +1252,11 @@ mod tests {
     #[test]
     fn extract_nudge_from_file() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), "# Architect\n\n## Nudge\n\nCheck work.\nUpdate roadmap.\n\n## Other\n\nstuff\n").unwrap();
+        std::fs::write(
+            tmp.path(),
+            "# Architect\n\n## Nudge\n\nCheck work.\nUpdate roadmap.\n\n## Other\n\nstuff\n",
+        )
+        .unwrap();
         let nudge = extract_nudge_section(tmp.path()).unwrap();
         assert!(nudge.contains("Check work."));
         assert!(nudge.contains("Update roadmap."));
