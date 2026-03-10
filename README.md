@@ -181,6 +181,14 @@ roles:
 - **kanban-md** CLI (`cargo install kanban-md --locked`)
 - A coding agent: Claude Code, Codex, Aider, or similar
 
+## Built with Batty
+
+- **[chess_test](https://github.com/Zedmor/chess_test)** -- A chess engine built entirely by a Batty agent team (architect + manager + 4 engineers).
+
+<p align="center">
+  <img src="examples/chess-team-session.png" alt="Batty team session building a chess engine" width="800">
+</p>
+
 ## Links
 
 - **GitHub:** [github.com/battysh/batty](https://github.com/battysh/batty)
