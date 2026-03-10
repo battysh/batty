@@ -66,7 +66,15 @@ impl TeamDaemon {
         let mut watchers = HashMap::new();
         let stale_secs = config.team_config.standup.interval_secs * 2;
         for (name, pane_id) in &config.pane_map {
-            watchers.insert(name.clone(), SessionWatcher::new(pane_id, name, stale_secs));
+            let codex_cwd = config
+                .members
+                .iter()
+                .find(|member| member.name == *name)
+                .and_then(|member| member_codex_cwd(&config.project_root, member));
+            watchers.insert(
+                name.clone(),
+                SessionWatcher::new(pane_id, name, stale_secs, codex_cwd),
+            );
         }
 
         // Create channels for user roles
@@ -1025,6 +1033,28 @@ fn prepare_codex_context(
 
 fn role_starts_idle() -> bool {
     true
+}
+
+fn member_codex_cwd(project_root: &Path, member: &MemberInstance) -> Option<PathBuf> {
+    match member.agent.as_deref() {
+        Some("codex") | Some("codex-cli") => {
+            let work_dir = if member.use_worktrees {
+                project_root
+                    .join(".batty")
+                    .join("worktrees")
+                    .join(&member.name)
+            } else {
+                project_root.to_path_buf()
+            };
+            Some(
+                work_dir
+                    .join(".batty")
+                    .join("codex-context")
+                    .join(&member.name),
+            )
+        }
+        _ => None,
+    }
 }
 
 /// Resolve the absolute path to a binary via `which`.

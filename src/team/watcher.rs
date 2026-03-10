@@ -1,11 +1,17 @@
 //! Disk-based session monitoring — polls agent output via tmux capture-pane.
 //!
 //! Detects agent completion, crashes, and staleness by periodically capturing
-//! pane output and checking for state changes.
+//! pane output and checking for state changes. For Codex, this also tails the
+//! authoritative `~/.codex/sessions` JSONL log associated with the member's
+//! unique working directory.
 
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use serde_json::Value;
 
 use crate::tmux;
 
@@ -30,10 +36,23 @@ pub struct SessionWatcher {
     last_change: Instant,
     last_capture: String,
     stale_threshold: Duration,
+    codex: Option<CodexSessionTracker>,
+}
+
+struct CodexSessionTracker {
+    sessions_root: PathBuf,
+    cwd: PathBuf,
+    session_file: Option<PathBuf>,
+    offset: u64,
 }
 
 impl SessionWatcher {
-    pub fn new(pane_id: &str, member_name: &str, stale_secs: u64) -> Self {
+    pub fn new(
+        pane_id: &str,
+        member_name: &str,
+        stale_secs: u64,
+        codex_cwd: Option<PathBuf>,
+    ) -> Self {
         Self {
             pane_id: pane_id.to_string(),
             member_name: member_name.to_string(),
@@ -42,6 +61,12 @@ impl SessionWatcher {
             last_change: Instant::now(),
             last_capture: String::new(),
             stale_threshold: Duration::from_secs(stale_secs),
+            codex: codex_cwd.map(|cwd| CodexSessionTracker {
+                sessions_root: default_codex_sessions_root(),
+                cwd,
+                session_file: None,
+                offset: 0,
+            }),
         }
     }
 
@@ -67,18 +92,26 @@ impl SessionWatcher {
         // Capture current pane content
         let capture = tmux::capture_pane(&self.pane_id).unwrap_or_default();
         let hash = simple_hash(&capture);
+        let prompt_visible = is_at_agent_prompt(&capture);
+        let codex_completed = self.poll_codex_session().unwrap_or(false);
 
         if hash != self.last_output_hash {
             self.last_output_hash = hash;
             self.last_change = Instant::now();
             self.last_capture = capture;
-            self.state = WatcherState::Active;
+            self.state = if codex_completed {
+                WatcherState::Completed
+            } else if prompt_visible {
+                WatcherState::Idle
+            } else {
+                WatcherState::Active
+            };
         } else {
-            // Output hasn't changed — check if agent is back at idle prompt
-            let idle_secs = self.last_change.elapsed().as_secs();
-            if idle_secs >= 15 && is_at_agent_prompt(&self.last_capture) {
-                // Agent finished work and is sitting at prompt
+            self.last_capture = capture;
+            if codex_completed {
                 self.state = WatcherState::Completed;
+            } else if prompt_visible {
+                self.state = WatcherState::Idle;
             } else if self.last_change.elapsed() > self.stale_threshold {
                 self.state = WatcherState::Stale;
             }
@@ -110,12 +143,33 @@ impl SessionWatcher {
         let start = lines.len().saturating_sub(n);
         lines[start..].join("\n")
     }
+
+    fn poll_codex_session(&mut self) -> Result<bool> {
+        let Some(codex) = self.codex.as_mut() else {
+            return Ok(false);
+        };
+
+        if codex.session_file.is_none() {
+            codex.session_file = discover_codex_session_file(&codex.sessions_root, &codex.cwd)?;
+        }
+
+        let Some(session_file) = codex.session_file.clone() else {
+            return Ok(false);
+        };
+
+        if !session_file.exists() {
+            codex.session_file = None;
+            codex.offset = 0;
+            return Ok(false);
+        }
+
+        poll_codex_session_file(&session_file, &mut codex.offset)
+    }
 }
 
-/// Check if the captured pane output shows a Claude Code idle prompt.
+/// Check if the captured pane output shows an idle prompt.
 ///
-/// Claude Code shows `❯` on an empty line when waiting for input.
-/// We also check for the bash `$` prompt in case the agent exited.
+/// This covers Claude's `❯` prompt, a shell prompt, and Codex's `›` composer.
 fn is_at_agent_prompt(capture: &str) -> bool {
     let trimmed: Vec<&str> = capture
         .lines()
@@ -128,6 +182,10 @@ fn is_at_agent_prompt(capture: &str) -> bool {
         let l = line.trim();
         // Claude Code idle prompt
         if l == "❯" || l.starts_with("❯ ") {
+            return true;
+        }
+        // Codex idle composer prompt
+        if l == "›" || l.starts_with("› ") {
             return true;
         }
         // Fell back to shell
@@ -148,9 +206,122 @@ fn simple_hash(s: &str) -> u64 {
     hash
 }
 
+fn default_codex_sessions_root() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+        .join(".codex")
+        .join("sessions")
+}
+
+fn discover_codex_session_file(sessions_root: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
+    if !sessions_root.exists() {
+        return Ok(None);
+    }
+
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for year in read_dir_paths(sessions_root)? {
+        for month in read_dir_paths(&year)? {
+            for day in read_dir_paths(&month)? {
+                for entry in read_dir_paths(&day)? {
+                    if entry.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                        continue;
+                    }
+                    if session_meta_cwd(&entry)?.as_deref() != Some(cwd.as_os_str()) {
+                        continue;
+                    }
+                    let modified = fs::metadata(&entry)
+                        .and_then(|meta| meta.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    match &newest {
+                        Some((current, _)) if modified <= *current => {}
+                        _ => newest = Some((modified, entry)),
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(newest.map(|(_, path)| path))
+}
+
+fn read_dir_paths(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        paths.push(entry.path());
+    }
+    Ok(paths)
+}
+
+fn session_meta_cwd(path: &Path) -> Result<Option<std::ffi::OsString>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if entry.get("type").and_then(Value::as_str) != Some("session_meta") {
+            continue;
+        }
+        return Ok(entry
+            .get("payload")
+            .and_then(|payload| payload.get("cwd"))
+            .and_then(Value::as_str)
+            .map(std::ffi::OsString::from));
+    }
+    Ok(None)
+}
+
+fn poll_codex_session_file(path: &Path, offset: &mut u64) -> Result<bool> {
+    let file_len = fs::metadata(path)?.len();
+    if file_len < *offset {
+        *offset = 0;
+    }
+
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    reader.seek(SeekFrom::Start(*offset))?;
+
+    let mut completed = false;
+    loop {
+        let line_start = reader.stream_position()?;
+        let mut line = String::new();
+        let bytes = reader.read_line(&mut line)?;
+        if bytes == 0 {
+            break;
+        }
+        if !line.ends_with('\n') {
+            reader.seek(SeekFrom::Start(line_start))?;
+            break;
+        }
+
+        if let Ok(entry) = serde_json::from_str::<Value>(&line) {
+            if entry.get("type").and_then(Value::as_str) == Some("event_msg")
+                && entry
+                    .get("payload")
+                    .and_then(|payload| payload.get("type"))
+                    .and_then(Value::as_str)
+                    == Some("task_complete")
+            {
+                completed = true;
+            }
+        }
+
+        *offset = reader.stream_position()?;
+    }
+
+    Ok(completed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn simple_hash_differs_for_different_input() {
@@ -160,20 +331,20 @@ mod tests {
 
     #[test]
     fn new_watcher_starts_idle() {
-        let w = SessionWatcher::new("%0", "eng-1-1", 300);
+        let w = SessionWatcher::new("%0", "eng-1-1", 300, None);
         assert_eq!(w.state, WatcherState::Idle);
     }
 
     #[test]
     fn activate_sets_active() {
-        let mut w = SessionWatcher::new("%0", "eng-1-1", 300);
+        let mut w = SessionWatcher::new("%0", "eng-1-1", 300, None);
         w.activate();
         assert_eq!(w.state, WatcherState::Active);
     }
 
     #[test]
     fn deactivate_sets_idle() {
-        let mut w = SessionWatcher::new("%0", "eng-1-1", 300);
+        let mut w = SessionWatcher::new("%0", "eng-1-1", 300, None);
         w.activate();
         w.deactivate();
         assert_eq!(w.state, WatcherState::Idle);
@@ -181,7 +352,7 @@ mod tests {
 
     #[test]
     fn last_lines_returns_tail() {
-        let mut w = SessionWatcher::new("%0", "eng-1-1", 300);
+        let mut w = SessionWatcher::new("%0", "eng-1-1", 300, None);
         w.last_capture = "line1\nline2\nline3\nline4\nline5".to_string();
         assert_eq!(w.last_lines(3), "line3\nline4\nline5");
         assert_eq!(w.last_lines(10), "line1\nline2\nline3\nline4\nline5");
@@ -200,8 +371,73 @@ mod tests {
     }
 
     #[test]
+    fn detects_codex_prompt() {
+        let capture = "› Improve documentation in @filename\n\n  gpt-5.4 high · 84% left · ~/repo\n";
+        assert!(is_at_agent_prompt(capture));
+    }
+
+    #[test]
     fn no_prompt_when_working() {
         let capture = "⏺ Bash(python -m pytest)\n  ⎿  running tests...\n";
         assert!(!is_at_agent_prompt(capture));
+    }
+
+    #[test]
+    fn discovers_codex_session_by_exact_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions_root = tmp.path().join("sessions");
+        let session_dir = sessions_root.join("2026").join("03").join("10");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let wanted_cwd = tmp.path().join("repo").join(".batty").join("codex-context").join("architect");
+        let other_cwd = tmp.path().join("repo");
+        let wanted_file = session_dir.join("wanted.jsonl");
+        let other_file = session_dir.join("other.jsonl");
+
+        std::fs::write(
+            &wanted_file,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"{}\"}}}}\n",
+                wanted_cwd.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &other_file,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"{}\"}}}}\n",
+                other_cwd.display()
+            ),
+        )
+        .unwrap();
+
+        let discovered = discover_codex_session_file(&sessions_root, &wanted_cwd).unwrap();
+        assert_eq!(discovered.as_deref(), Some(wanted_file.as_path()));
+    }
+
+    #[test]
+    fn codex_session_poll_detects_task_complete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_file = tmp.path().join("session.jsonl");
+        let mut handle = File::create(&session_file).unwrap();
+        writeln!(
+            handle,
+            "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"/tmp/example\"}}}}"
+        )
+        .unwrap();
+        handle.flush().unwrap();
+
+        let mut offset = 0;
+        assert!(!poll_codex_session_file(&session_file, &mut offset).unwrap());
+
+        writeln!(
+            handle,
+            "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_complete\"}}}}"
+        )
+        .unwrap();
+        handle.flush().unwrap();
+
+        assert!(poll_codex_session_file(&session_file, &mut offset).unwrap());
+        assert!(!poll_codex_session_file(&session_file, &mut offset).unwrap());
     }
 }
