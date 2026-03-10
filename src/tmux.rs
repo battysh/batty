@@ -977,6 +977,21 @@ pub fn split_window_vertical_in_pane(
     Ok(new_pane)
 }
 
+/// Evenly spread a pane and any adjacent panes in its layout cell.
+pub fn select_layout_even(target_pane: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(["select-layout", "-E", "-t", target_pane])
+        .output()
+        .with_context(|| format!("failed to even layout for pane '{target_pane}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux select-layout -E failed: {stderr}");
+    }
+
+    Ok(())
+}
+
 /// Load text into a tmux paste buffer.
 /// Named buffer used by batty to avoid clobbering the user's paste buffer.
 const BATTY_BUFFER_NAME: &str = "batty-inject";
