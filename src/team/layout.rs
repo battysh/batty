@@ -1,7 +1,8 @@
 //! tmux layout builder — creates zones and panes from team hierarchy.
 //!
 //! Zones are vertical columns in the tmux window. Within each zone, members
-//! are stacked horizontally (top-to-bottom splits).
+//! are stacked vertically; engineer-heavy zones may first be partitioned into
+//! manager-aligned subcolumns to preserve the reporting hierarchy.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -96,7 +97,8 @@ pub fn build_layout(
         debug!(zone = i, split_pct, "created zone column");
     }
 
-    // Within each zone, split vertically for members
+    // Within each zone, split vertically for members. Engineer zones with
+    // multiple managers are partitioned into per-manager subcolumns first.
     for (zone_idx, (_, zone_members)) in zones.iter().enumerate() {
         let zone_pane = &zone_panes[zone_idx];
 
@@ -104,24 +106,16 @@ pub fn build_layout(
             continue;
         }
 
-        let remaining_pane = zone_pane.clone();
-
-        for member_idx in (1..zone_members.len()).rev() {
-            let member = zone_members[member_idx];
-            let pct = split_off_current_member_pct(member_idx + 1);
-            let member_pane = tmux::split_window_vertical_in_pane(session, &remaining_pane, pct)?;
-            set_pane_title(session, &member_pane, &member.name)?;
-            debug!(
-                member = %member.name,
-                pane = %member_pane,
-                split_pct = pct,
-                "created member pane"
-            );
-            pane_map.insert(member.name.clone(), member_pane);
+        let subgroups = split_zone_subgroups(zone_members);
+        if subgroups.len() == 1 {
+            stack_members_in_pane(session, zone_pane, &subgroups[0], &mut pane_map)?;
+            continue;
         }
 
-        set_pane_title(session, &remaining_pane, &zone_members[0].name)?;
-        pane_map.insert(zone_members[0].name.clone(), remaining_pane.clone());
+        let subgroup_panes = split_subgroup_columns(zone_pane, &subgroups)?;
+        for (subgroup_pane, subgroup_members) in subgroup_panes.iter().zip(subgroups.iter()) {
+            stack_members_in_pane(session, subgroup_pane, subgroup_members, &mut pane_map)?;
+        }
     }
 
     info!(session, panes = pane_map.len(), "team layout created");
@@ -133,6 +127,76 @@ fn split_off_current_member_pct(total_slots: usize) -> u32 {
     (((1.0 / total_slots as f64) * 100.0).round() as u32)
         .max(10)
         .min(90)
+}
+
+fn split_zone_subgroups<'a>(zone_members: &'a [&MemberInstance]) -> Vec<Vec<&'a MemberInstance>> {
+    let engineer_hierarchy = zone_members
+        .iter()
+        .all(|member| member.role_type == RoleType::Engineer && member.reports_to.is_some());
+    if !engineer_hierarchy {
+        return vec![zone_members.to_vec()];
+    }
+
+    let mut groups: Vec<(String, Vec<&MemberInstance>)> = Vec::new();
+    for member in zone_members {
+        let parent = member.reports_to.clone().unwrap_or_default();
+        if let Some((_, grouped)) = groups.iter_mut().find(|(reports_to, _)| *reports_to == parent) {
+            grouped.push(*member);
+        } else {
+            groups.push((parent, vec![*member]));
+        }
+    }
+
+    groups.into_iter().map(|(_, grouped)| grouped).collect()
+}
+
+fn split_subgroup_columns(
+    zone_pane: &str,
+    subgroups: &[Vec<&MemberInstance>],
+) -> Result<Vec<String>> {
+    let mut panes = vec![zone_pane.to_string()];
+    let mut remaining_weight: usize = subgroups.iter().map(Vec::len).sum();
+
+    for subgroup_idx in 1..subgroups.len() {
+        let right_weight: usize = subgroups[subgroup_idx..].iter().map(Vec::len).sum();
+        let split_pct =
+            ((right_weight as f64 / remaining_weight as f64) * 100.0).round() as u32;
+        let split_pct = split_pct.max(10).min(90);
+        let split_from = panes.last().unwrap();
+        let pane_id = tmux::split_window_horizontal(split_from, split_pct)?;
+        panes.push(pane_id);
+        remaining_weight = right_weight;
+    }
+
+    Ok(panes)
+}
+
+fn stack_members_in_pane(
+    session: &str,
+    pane_id: &str,
+    members: &[&MemberInstance],
+    pane_map: &mut HashMap<String, String>,
+) -> Result<()> {
+    let remaining_pane = pane_id.to_string();
+
+    for member_idx in (1..members.len()).rev() {
+        let member = members[member_idx];
+        let pct = split_off_current_member_pct(member_idx + 1);
+        let member_pane = tmux::split_window_vertical_in_pane(session, &remaining_pane, pct)?;
+        set_pane_title(session, &member_pane, &member.name)?;
+        debug!(
+            member = %member.name,
+            pane = %member_pane,
+            split_pct = pct,
+            "created member pane"
+        );
+        pane_map.insert(member.name.clone(), member_pane);
+    }
+
+    tmux::select_layout_even(&remaining_pane)?;
+    set_pane_title(session, &remaining_pane, &members[0].name)?;
+    pane_map.insert(members[0].name.clone(), remaining_pane);
+    Ok(())
 }
 
 /// Set a pane's title and store the role name in a custom tmux option.
@@ -409,29 +473,35 @@ roles:
             .count();
         assert_eq!(pane_count, 9);
 
-        let engineer_heights_output = Command::new("tmux")
+        let engineer_geometry_output = Command::new("tmux")
             .args([
                 "list-panes",
                 "-t",
                 session,
                 "-F",
-                "#{pane_title} #{pane_height}",
+                "#{pane_title} #{pane_left} #{pane_height}",
             ])
             .output()
             .unwrap();
-        assert!(engineer_heights_output.status.success());
-        let engineer_heights: Vec<u32> = String::from_utf8_lossy(&engineer_heights_output.stdout)
-            .lines()
-            .filter_map(|line| {
-                let (title, height) = line.rsplit_once(' ')?;
-                if !title.starts_with("eng-") {
-                    return None;
-                }
-                height.parse().ok()
-            })
-            .collect();
-        assert_eq!(engineer_heights.len(), 6);
-        assert!(engineer_heights.iter().all(|height| *height >= 4));
+        assert!(engineer_geometry_output.status.success());
+        let mut engineer_columns: HashMap<u32, Vec<u32>> = HashMap::new();
+        for line in String::from_utf8_lossy(&engineer_geometry_output.stdout).lines() {
+            let parts: Vec<_> = line.split_whitespace().collect();
+            if parts.len() != 3 || !parts[0].starts_with("eng-") {
+                continue;
+            }
+            let left: u32 = parts[1].parse().unwrap();
+            let height: u32 = parts[2].parse().unwrap();
+            engineer_columns.entry(left).or_default().push(height);
+        }
+        assert_eq!(engineer_columns.len(), 2);
+        assert!(engineer_columns.values().all(|heights| heights.len() == 3));
+        for heights in engineer_columns.values() {
+            assert!(heights.iter().all(|height| *height >= 4));
+            let min_height = heights.iter().min().copied().unwrap();
+            let max_height = heights.iter().max().copied().unwrap();
+            assert!(max_height - min_height <= 1);
+        }
 
         crate::tmux::kill_session(session).unwrap();
     }
