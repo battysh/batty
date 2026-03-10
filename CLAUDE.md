@@ -70,6 +70,18 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ```
 
+## Building & Installing
+
+After building, always re-sign the binary before running from `~/.cargo/bin`:
+
+```bash
+cargo build --release
+cp target/release/batty ~/.cargo/bin/batty
+codesign --force --sign - ~/.cargo/bin/batty
+```
+
+macOS AppleSystemPolicy (ASP) kills unsigned or stale-signed binaries. Copying over an existing binary invalidates the cached ad-hoc signature, causing ASP to SIGKILL it. `codesign --force --sign -` re-signs with a fresh ad-hoc signature.
+
 ## CLI Commands
 
 - `batty work <phase>`: run a phase with supervision

@@ -1,0 +1,52 @@
+name: my-project
+
+board:
+  rotation_threshold: 20
+
+standup:
+  interval_secs: 1200
+  output_lines: 30
+
+layout:
+  zones:
+    - name: architect
+      width_pct: 15
+    - name: managers
+      width_pct: 25
+      split: { horizontal: 3 }
+    - name: engineers
+      width_pct: 60
+      split: { horizontal: 15 }
+
+roles:
+  - name: human
+    role_type: user
+    channel: telegram
+    channel_config:
+      target: "<your-telegram-chat-id>"
+      provider: openclaw
+    talks_to: [architect]
+
+  - name: architect
+    role_type: architect
+    agent: claude
+    instances: 1
+    prompt: architect.md
+    talks_to: [human, manager]
+    nudge_interval_secs: 1800
+    owns: ["planning/**", "docs/**"]
+
+  - name: manager
+    role_type: manager
+    agent: claude
+    instances: 3
+    prompt: manager.md
+    talks_to: [architect, engineer]
+
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 5
+    prompt: engineer.md
+    talks_to: [manager]
+    use_worktrees: true

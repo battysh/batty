@@ -1,0 +1,1 @@
+Build a chess engine that can beat Stockfish at 1200 ELO at least 50% of the time. Do not use the internet other than download stockfish. Do not install any libraries/packages - whatever language you use for this, you implement it without any external code. Only package you need to instasll/use is stockfish for testing against.

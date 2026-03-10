@@ -325,10 +325,11 @@ mod tests {
     fn cli_reference_contains_core_commands() {
         let markdown = render_cli_reference().unwrap();
         assert!(markdown.contains("## `batty`"));
-        assert!(markdown.contains("## `batty work`"));
-        assert!(markdown.contains("## `batty resume`"));
-        assert!(markdown.contains("## `batty board`"));
-        assert!(markdown.contains("## `batty list`"));
+        assert!(markdown.contains("## `batty init`"));
+        assert!(markdown.contains("## `batty start`"));
+        assert!(markdown.contains("## `batty stop`"));
+        assert!(markdown.contains("## `batty status`"));
+        assert!(markdown.contains("## `batty send`"));
     }
 
     #[test]

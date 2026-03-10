@@ -1,0 +1,44 @@
+name: my-research-project
+
+board:
+  rotation_threshold: 30
+
+standup:
+  interval_secs: 1800
+  output_lines: 40
+
+layout:
+  zones:
+    - name: architect
+      width_pct: 20
+    - name: managers
+      width_pct: 30
+      split: { horizontal: 3 }
+    - name: engineers
+      width_pct: 50
+      split: { horizontal: 6 }
+
+roles:
+  - name: principal
+    role_type: architect
+    agent: claude
+    instances: 1
+    prompt: research_lead.md
+    talks_to: [sub-lead]
+    nudge_interval_secs: 1800
+    owns: ["docs/**", "planning/**"]
+
+  - name: sub-lead
+    role_type: manager
+    agent: claude
+    instances: 3
+    prompt: sub_lead.md
+    talks_to: [principal, researcher]
+
+  - name: researcher
+    role_type: engineer
+    agent: codex
+    instances: 2
+    prompt: researcher.md
+    talks_to: [sub-lead]
+    use_worktrees: true

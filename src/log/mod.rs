@@ -230,50 +230,6 @@ impl ExecutionLog {
     }
 }
 
-/// Convert a SupervisorEvent to a LogEvent.
-///
-/// Not all supervisor events have a 1:1 mapping — some are translated
-/// with best-effort field extraction.
-impl From<&crate::supervisor::SupervisorEvent> for LogEvent {
-    fn from(event: &crate::supervisor::SupervisorEvent) -> Self {
-        use crate::supervisor::SupervisorEvent;
-        match event {
-            SupervisorEvent::Output(line) => LogEvent::AgentOutput { line: line.clone() },
-            SupervisorEvent::PromptDetected(detected) => LogEvent::PromptDetected {
-                kind: format!("{:?}", detected.kind),
-                matched_text: detected.matched_text.clone(),
-            },
-            SupervisorEvent::PolicyDecision(decision) => {
-                let (decision_str, prompt_str) = match decision {
-                    crate::policy::Decision::Observe { prompt } => {
-                        ("observe".to_string(), prompt.clone())
-                    }
-                    crate::policy::Decision::Suggest { prompt, .. } => {
-                        ("suggest".to_string(), prompt.clone())
-                    }
-                    crate::policy::Decision::Act { prompt, .. } => {
-                        ("act".to_string(), prompt.clone())
-                    }
-                    crate::policy::Decision::Escalate { prompt } => {
-                        ("escalate".to_string(), prompt.clone())
-                    }
-                };
-                LogEvent::PolicyDecision {
-                    decision: decision_str,
-                    prompt: prompt_str,
-                }
-            }
-            SupervisorEvent::AutoResponse { prompt, response } => LogEvent::AutoResponse {
-                prompt: prompt.clone(),
-                response: response.clone(),
-            },
-            SupervisorEvent::SessionEnd(result) => LogEvent::SessionEnded {
-                result: result.clone(),
-            },
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,86 +491,6 @@ mod tests {
 
         let log = ExecutionLog::new(&log_path).unwrap();
         assert_eq!(log.path(), log_path);
-    }
-
-    #[test]
-    fn supervisor_event_conversion() {
-        use crate::supervisor::SupervisorEvent;
-
-        let events = vec![
-            SupervisorEvent::Output("hello".to_string()),
-            SupervisorEvent::AutoResponse {
-                prompt: "Continue?".to_string(),
-                response: "y".to_string(),
-            },
-            SupervisorEvent::SessionEnd("Completed".to_string()),
-        ];
-
-        for event in &events {
-            let log_event: LogEvent = event.into();
-            let entry = LogEntry {
-                timestamp: "0".to_string(),
-                event: log_event,
-            };
-            assert!(serde_json::to_string(&entry).is_ok());
-        }
-    }
-
-    #[test]
-    fn supervisor_prompt_detected_conversion() {
-        use crate::prompt::{DetectedPrompt, PromptKind};
-        use crate::supervisor::SupervisorEvent;
-
-        let event = SupervisorEvent::PromptDetected(DetectedPrompt {
-            kind: PromptKind::Permission {
-                detail: "Read".to_string(),
-            },
-            matched_text: "Allow tool Read?".to_string(),
-        });
-
-        let log_event: LogEvent = (&event).into();
-        let json = serde_json::to_string(&LogEntry {
-            timestamp: "0".to_string(),
-            event: log_event,
-        })
-        .unwrap();
-
-        assert!(json.contains("prompt_detected"));
-        assert!(json.contains("Permission"));
-        assert!(json.contains("Allow tool Read?"));
-    }
-
-    #[test]
-    fn supervisor_policy_decision_conversion() {
-        use crate::policy::Decision;
-        use crate::supervisor::SupervisorEvent;
-
-        let decisions = vec![
-            SupervisorEvent::PolicyDecision(Decision::Observe {
-                prompt: "test".to_string(),
-            }),
-            SupervisorEvent::PolicyDecision(Decision::Suggest {
-                prompt: "Allow?".to_string(),
-                response: "y".to_string(),
-            }),
-            SupervisorEvent::PolicyDecision(Decision::Act {
-                prompt: "Continue?".to_string(),
-                response: "y".to_string(),
-            }),
-            SupervisorEvent::PolicyDecision(Decision::Escalate {
-                prompt: "unknown".to_string(),
-            }),
-        ];
-
-        for event in &decisions {
-            let log_event: LogEvent = event.into();
-            let json = serde_json::to_string(&LogEntry {
-                timestamp: "0".to_string(),
-                event: log_event,
-            })
-            .unwrap();
-            assert!(json.contains("policy_decision"));
-        }
     }
 
     #[test]

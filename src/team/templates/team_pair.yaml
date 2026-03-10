@@ -1,0 +1,24 @@
+name: my-project
+
+board:
+  rotation_threshold: 20
+
+standup:
+  interval_secs: 1200
+  output_lines: 30
+
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+    instances: 1
+    prompt: architect.md
+    talks_to: [engineer]
+
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 1
+    prompt: engineer.md
+    talks_to: [architect]
+    use_worktrees: true

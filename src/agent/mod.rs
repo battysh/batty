@@ -70,6 +70,15 @@ pub trait AgentAdapter: Send + Sync {
     /// Some agents need a trailing newline, some don't. The adapter handles it.
     #[allow(dead_code)]
     fn format_input(&self, response: &str) -> String;
+
+    /// Return tmux send-keys sequence to reset agent context.
+    ///
+    /// - Codex: kill process + relaunch command
+    /// - Claude Code: `/clear` + new prompt
+    fn reset_context_keys(&self) -> Vec<(String, bool)> {
+        // Default: send /clear then Enter
+        vec![("/clear".to_string(), true)]
+    }
 }
 
 /// Look up an agent adapter by name.

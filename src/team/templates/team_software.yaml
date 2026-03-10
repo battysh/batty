@@ -1,0 +1,59 @@
+name: my-product
+
+board:
+  rotation_threshold: 25
+
+standup:
+  interval_secs: 900
+  output_lines: 30
+
+layout:
+  zones:
+    - name: architect
+      width_pct: 15
+    - name: managers
+      width_pct: 25
+      split: { horizontal: 2 }
+    - name: engineers
+      width_pct: 60
+      split: { horizontal: 8 }
+
+roles:
+  - name: human
+    role_type: user
+    channel: telegram
+    channel_config:
+      target: "<your-telegram-chat-id>"
+      provider: openclaw
+    talks_to: [tech-lead]
+
+  - name: tech-lead
+    role_type: architect
+    agent: claude
+    instances: 1
+    prompt: tech_lead.md
+    talks_to: [human, backend-mgr, frontend-mgr]
+    nudge_interval_secs: 1200
+    owns: ["docs/**", "planning/**"]
+
+  - name: backend-mgr
+    role_type: manager
+    agent: claude
+    instances: 1
+    prompt: eng_manager.md
+    talks_to: [tech-lead, developer]
+
+  - name: frontend-mgr
+    role_type: manager
+    agent: claude
+    instances: 1
+    prompt: eng_manager.md
+    talks_to: [tech-lead, developer]
+
+  - name: developer
+    role_type: engineer
+    agent: codex
+    instances: 4
+    prompt: developer.md
+    talks_to: [backend-mgr, frontend-mgr]
+    use_worktrees: true
