@@ -1,4 +1,5 @@
 <p align="center">
+  <img src="assets/batty-icon.png" alt="Batty" width="200">
   <h1 align="center">Batty</h1>
   <p align="center"><strong>Hierarchical agent teams for software development.</strong></p>
   <p align="center">
