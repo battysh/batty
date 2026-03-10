@@ -56,7 +56,7 @@ Each entry in `roles` defines one agent role.
 | `name` | string | required | Role name. Must be unique. Used in instance naming and message routing. |
 | `role_type` | enum | required | One of: `user`, `architect`, `manager`, `engineer`. |
 | `agent` | string | none | Agent program: `claude`, `codex`, etc. Required for non-user roles. |
-| `instances` | integer | `1` | Number of instances to spawn. Engineers are multiplicative across managers. |
+| `instances` | integer | `1` | Number of instances to spawn. Engineers are multiplicative across compatible managers. |
 | `prompt` | string | none | Prompt template filename (relative to `team_config/`). |
 | `talks_to` | array | `[]` | Role names this role can message. Empty = default hierarchy rules. |
 | `channel` | string | none | Communication channel for user roles (e.g., `telegram`). |
@@ -80,9 +80,39 @@ Each entry in `roles` defines one agent role.
 
 - **Single instance** (`instances: 1`): uses the role name directly (e.g., `architect`)
 - **Multiple instances** (`instances: 3`): appends index (e.g., `manager-1`, `manager-2`, `manager-3`)
-- **Engineers under managers**: multiplicative naming `eng-<mgr>-<eng>` (e.g., `eng-1-1`, `eng-2-3`)
+- **Engineers under managers**:
+  - single engineer role named `engineer`: legacy naming `eng-<mgr>-<eng>` (e.g., `eng-1-1`, `eng-2-3`)
+  - multiple or custom engineer roles: role-prefixed naming `<role>-<mgr>-<eng>` (e.g., `black-eng-1-1`)
 
-Total engineers = `manager.instances` x `engineer.instances`.
+By default, total engineers = `manager.instances` x `engineer.instances`.
+
+If an engineer role's `talks_to` lists specific manager role names, that engineer role is only assigned to those managers.
+This allows multiple specialized engineer role families, for example:
+
+```yaml
+roles:
+  - name: black-lead
+    role_type: manager
+    agent: codex
+
+  - name: red-lead
+    role_type: manager
+    agent: codex
+
+  - name: black-eng
+    role_type: engineer
+    agent: codex
+    instances: 3
+    talks_to: [black-lead]
+
+  - name: red-eng
+    role_type: engineer
+    agent: codex
+    instances: 3
+    talks_to: [red-lead]
+```
+
+In that setup, Batty resolves `3` `black-eng` instances under `black-lead` and `3` `red-eng` instances under `red-lead`, not `12` engineers across both leads.
 
 ### Communication Routing
 
