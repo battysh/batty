@@ -54,10 +54,10 @@ impl InboxMessage {
     }
 
     /// Create a new assign-type message.
-    pub fn new_assign(to: &str, task: &str) -> Self {
+    pub fn new_assign(from: &str, to: &str, task: &str) -> Self {
         Self {
             id: String::new(),
-            from: "manager".to_string(),
+            from: from.to_string(),
             to: to.to_string(),
             body: task.to_string(),
             msg_type: MessageType::Assign,
@@ -236,8 +236,9 @@ mod tests {
 
     #[test]
     fn inbox_message_assign_roundtrip() {
-        let msg = InboxMessage::new_assign("eng-1-1", "fix the auth bug");
+        let msg = InboxMessage::new_assign("black-lead", "eng-1-1", "fix the auth bug");
         assert_eq!(msg.msg_type, MessageType::Assign);
+        assert_eq!(msg.from, "black-lead");
         assert_eq!(msg.to, "eng-1-1");
         assert_eq!(msg.body, "fix the auth bug");
 

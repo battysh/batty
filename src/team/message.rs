@@ -21,6 +21,7 @@ pub enum QueuedCommand {
     },
     #[serde(rename = "assign")]
     Assign {
+        from: String,
         engineer: String,
         task: String,
     },
@@ -130,13 +131,19 @@ mod tests {
     #[test]
     fn assign_command_roundtrip() {
         let cmd = QueuedCommand::Assign {
+            from: "black-lead".into(),
             engineer: "eng-1-1".into(),
             task: "fix bug".into(),
         };
         let json = serde_json::to_string(&cmd).unwrap();
         let parsed: QueuedCommand = serde_json::from_str(&json).unwrap();
         match parsed {
-            QueuedCommand::Assign { engineer, task } => {
+            QueuedCommand::Assign {
+                from,
+                engineer,
+                task,
+            } => {
+                assert_eq!(from, "black-lead");
                 assert_eq!(engineer, "eng-1-1");
                 assert_eq!(task, "fix bug");
             }
@@ -155,6 +162,7 @@ mod tests {
             message: "hello".into(),
         }).unwrap();
         enqueue_command(&queue, &QueuedCommand::Assign {
+            from: "black-lead".into(),
             engineer: "eng-1".into(),
             task: "work".into(),
         }).unwrap();
@@ -179,7 +187,11 @@ mod tests {
     fn drain_skips_malformed_lines() {
         let tmp = tempfile::tempdir().unwrap();
         let queue = tmp.path().join("commands.jsonl");
-        std::fs::write(&queue, "not json\n{\"type\":\"assign\",\"engineer\":\"e1\",\"task\":\"t1\"}\n").unwrap();
+        std::fs::write(
+            &queue,
+            "not json\n{\"type\":\"assign\",\"from\":\"manager\",\"engineer\":\"e1\",\"task\":\"t1\"}\n",
+        )
+        .unwrap();
         let commands = drain_command_queue(&queue).unwrap();
         assert_eq!(commands.len(), 1);
     }

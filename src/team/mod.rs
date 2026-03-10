@@ -563,10 +563,26 @@ fn detect_sender() -> Option<String> {
 
 /// Assign a task to an engineer via their Maildir inbox.
 pub fn assign_task(project_root: &Path, engineer: &str, task: &str) -> Result<()> {
+    let from = detect_sender().unwrap_or_else(|| "human".to_string());
+
+    let config_path = team_config_path(project_root);
+    if config_path.exists() {
+        if let Ok(team_config) = config::TeamConfig::load(&config_path) {
+            let from_role = resolve_role_name(project_root, &from);
+            let to_role = resolve_role_name(project_root, engineer);
+            if !team_config.can_talk(&from_role, &to_role) {
+                bail!(
+                    "{from} ({from_role}) is not allowed to assign {engineer} ({to_role}). \
+                     Check talks_to in team.yaml."
+                );
+            }
+        }
+    }
+
     let root = inbox::inboxes_root(project_root);
-    let msg = inbox::InboxMessage::new_assign(engineer, task);
+    let msg = inbox::InboxMessage::new_assign(&from, engineer, task);
     let id = inbox::deliver_to_inbox(&root, &msg)?;
-    info!(engineer, task, id = %id, "assignment delivered to inbox");
+    info!(from, engineer, task, id = %id, "assignment delivered to inbox");
     Ok(())
 }
 
@@ -812,6 +828,7 @@ mod tests {
         let root = inbox::inboxes_root(tmp.path());
         let pending = inbox::pending_messages(&root, "eng-1-1").unwrap();
         assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "human");
         assert_eq!(pending[0].to, "eng-1-1");
         assert_eq!(pending[0].body, "fix bug");
         assert_eq!(pending[0].msg_type, inbox::MessageType::Assign);
