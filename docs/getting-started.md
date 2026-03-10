@@ -1,23 +1,24 @@
 # Getting Started
 
-Get Batty running in your project in under 5 minutes.
+Get a Batty agent team running in your project in under 5 minutes.
 
 ## Prerequisites
 
-- **Rust** toolchain (stable)
+- **Rust** toolchain (stable, >= 1.85)
 - **tmux** >= 3.1 (recommended >= 3.2)
+- **kanban-md** CLI: `cargo install kanban-md --locked`
 - A coding agent: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [Aider](https://aider.chat), or similar
-
-`kanban-md` is also required but `batty install` handles it automatically.
 
 ## Install
 
 ```sh
-# From the Batty repository
-cargo install --path .
+# From crates.io
+cargo install batty-cli
 
-# Or run directly without installing
-cargo run -- <command>
+# Or from source
+git clone https://github.com/battysh/batty.git
+cd batty
+cargo install --path .
 ```
 
 If `batty` is not found after install, add Cargo bin to your PATH:
@@ -27,133 +28,158 @@ echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-## Set Up Your Project
+## Initialize Your Team
 
 ```sh
-batty install
+cd my-project
+batty init
 ```
 
-This does three things:
+This scaffolds `.batty/team_config/` with:
 
-1. **Checks tools** -- Verifies `tmux` and `kanban-md` are available, attempts to install them if not
-1. **Installs steering files** -- Adds workflow rules that your agent loads automatically (`.claude/rules/` for Claude Code, `.agents/rules/` for Codex)
-1. **Installs skills** -- Adds kanban-md skills so your agent knows how to work with task boards
+- **team.yaml** -- Team hierarchy, roles, agents, layout, communication rules
+- **Prompt templates** -- `architect.md`, `manager.md`, `engineer.md` with role-specific instructions
+- **Kanban board** -- A kanban-md board for task tracking
 
-Batty never touches your existing `CLAUDE.md` or `AGENTS.md`.
+The default template (`simple`) creates: 1 architect + 1 manager + 3 engineers = 5 agents.
 
-To remove everything Batty installed:
+### Choose a Template
 
 ```sh
-batty remove
+batty init --template solo       # 1 engineer, no hierarchy
+batty init --template pair       # architect + 1 engineer
+batty init --template simple     # architect + manager + 3 engineers (default)
+batty init --template squad      # architect + manager + 5 engineers
+batty init --template large      # architect + 3 managers + 15 engineers + Telegram
+batty init --template research   # PI + 3 sub-leads + 6 researchers
+batty init --template software   # tech lead + 2 eng managers + 8 developers
 ```
 
-## Run Your First Phase
+## Configure Your Team
 
-```sh
-batty work my-phase
-```
-
-A tmux session opens with three areas:
-
-- **Executor pane** -- Your coding agent working through the board
-- **Orchestrator pane** -- Batty's log showing every auto-answer, escalation, and status change
-- **Status bar** -- Live progress: phase name, current task, tasks done, supervision state
-
-The agent picks tasks from the board, implements them, runs tests, and commits. Batty handles the prompts.
-
-## Phase Setup Requirements
-
-Before running `batty work`, make sure your board includes at least one task tagged `milestone`.
-Batty's completion contract requires a milestone-tagged task to exist and be `done` before a phase can pass completion.
-
-Example task frontmatter:
+Edit `.batty/team_config/team.yaml`:
 
 ```yaml
----
-id: 1
-title: Milestone exit task
-status: backlog
-priority: high
-tags: [milestone]
----
+name: my-project
+
+layout:
+  zones:
+    - name: architect
+      width_pct: 33
+    - name: managers
+      width_pct: 33
+    - name: engineers
+      width_pct: 34
+      split: { horizontal: 3 }
+
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+    instances: 1
+    prompt: architect.md
+    talks_to: [manager]
+
+  - name: manager
+    role_type: manager
+    agent: claude
+    instances: 1
+    prompt: manager.md
+    talks_to: [architect, engineer]
+
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 3
+    prompt: engineer.md
+    talks_to: [manager]
+    use_worktrees: true
 ```
 
-At phase completion, Batty also requires a root-level `phase-summary.md` review packet.
-
-## Essential Commands
+Validate before launching:
 
 ```sh
-batty work my-phase        # start supervised execution
-batty work all             # run all phases in sequence
-batty attach my-phase      # reattach to a running session
-batty resume my-phase      # resume supervision after crash
-batty board my-phase       # open the kanban board TUI
-batty list                 # list all boards with status (alias: board-list)
-batty merge phase-4 001    # merge a worktree run into main
-batty config               # show resolved configuration
+batty validate
 ```
 
-## Runtime Modes
+## Launch the Team
 
-| Flag               | Effect                                                     |
-| ------------------ | ---------------------------------------------------------- |
-| `--attach`         | Open the tmux session immediately instead of backgrounding |
-| `--agent codex`    | Override the default executor agent                        |
-| `--policy suggest` | Override the default policy tier                           |
-| `--worktree`       | Run in an isolated git worktree                            |
-| `--worktree --new` | Force a fresh worktree (don't resume existing)             |
-| `--parallel 3`     | Run with 3 parallel agents (DAG-aware scheduling)          |
-| `--dry-run`        | Show the composed launch context and exit                  |
-
-## Configuration
-
-Batty reads `.batty/config.toml`:
-
-```toml
-[defaults]
-agent = "claude"       # or "codex", "aider"
-policy = "act"         # observe | suggest | act | fully-auto
-
-[supervisor]
-enabled = true
-program = "claude"
-args = ["-p", "--output-format", "text"]
-timeout_secs = 60
-
-[detector]
-silence_timeout_secs = 3
-answer_cooldown_millis = 1000
-
-[policy.auto_answer]
-"Continue? [y/n]" = "y"
+```sh
+batty start --attach
 ```
 
-Full reference: [Configuration Reference](reference/config.md)
+A tmux session opens with each agent in its own pane. The background daemon:
 
-## Supervisor Hotkeys
+- Spawns each agent with its prompt template
+- Creates git worktrees for engineers (if `use_worktrees: true`)
+- Monitors agent output
+- Routes messages between roles
+- Runs periodic standups
+- Emits structured events to `events.jsonl`
 
-During an active tmux session:
+## Interact with Your Team
 
-| Hotkey  | Action                                                        |
-| ------- | ------------------------------------------------------------- |
-| `C-b P` | Pause supervision (Tier 1 and Tier 2 stop, you type manually) |
-| `C-b R` | Resume supervision                                            |
+Send the architect a project goal:
 
-While paused, human input still works -- you just take over from Batty.
-
-## Dangerous Mode (Opt-In)
-
-For environments where you want reduced agent safety prompts:
-
-```toml
-[dangerous_mode]
-enabled = true
+```sh
+batty send architect "Build a REST API for user management with JWT auth"
 ```
 
-When enabled, Batty adds the appropriate dangerous-mode flag for each agent (`--dangerously-skip-permissions` for Claude, `--dangerously-bypass-approvals-and-sandbox` for Codex). Keep this disabled unless you explicitly accept the risk.
+The architect plans, sends directives to the manager, who creates tasks and assigns them to engineers.
+
+### Essential Commands
+
+```sh
+batty start --attach           # start team and attach to tmux
+batty attach                   # reattach to running session
+batty stop                     # stop daemon and kill session
+
+batty send architect "msg"     # send message to a role
+batty assign eng-1-1 "task"    # assign task to an engineer
+batty inbox architect          # list messages for a member
+batty read architect abc123    # read a specific message
+batty ack architect abc123     # mark message as delivered
+
+batty status                   # show all members and states
+batty status --json            # machine-readable status
+batty board                    # open kanban board TUI
+batty config                   # show resolved configuration
+
+batty merge eng-1-1            # merge engineer's worktree into main
+```
+
+## Communication Model
+
+Agents communicate through Maildir-based inboxes in `.batty/inboxes/`. The `talks_to` field in team.yaml controls who can message whom:
+
+```
+Human -> Architect -> Manager -> Engineers
+                   <-         <-
+```
+
+- **Human** can message anyone (via `batty send` from outside tmux)
+- **Architect** talks to managers (strategic directives)
+- **Manager** talks to architect (status) and engineers (task assignments)
+- **Engineers** talk to their manager (progress, questions)
+
+Agents send messages with `batty send <role> "<message>"` and check their inbox with `batty inbox <name>`.
+
+## Shell Completions
+
+```sh
+# zsh
+batty completions zsh > "${HOME}/.zsh/completions/_batty"
+
+# bash
+batty completions bash > "${HOME}/.local/share/bash-completion/completions/batty"
+
+# fish
+batty completions fish > "${HOME}/.config/fish/completions/batty.fish"
+```
 
 ## Next Steps
 
-- [CLI Reference](reference/cli.md) -- Full command and flag documentation
-- [Architecture](architecture.md) -- How the three-layer supervision works
+- [CLI Reference](reference/cli.md) -- Full command documentation
+- [Configuration Reference](reference/config.md) -- All team.yaml options
+- [Architecture](architecture.md) -- How the daemon and message routing work
 - [Troubleshooting](troubleshooting.md) -- Common issues and fixes
