@@ -1,31 +1,28 @@
 # Batty
 
-**Supervised agent execution for software teams.**
+**Hierarchical agent teams for software development.**
 
-Batty reads your kanban board, launches a coding agent in tmux, supervises its work, auto-answers routine prompts, escalates real questions, gates on tests, and merges the result. You design the phases. Batty executes them.
+Define a team of AI agents in YAML -- architect, managers, engineers -- and Batty runs them in a coordinated tmux session. The daemon spawns agents, routes messages between roles, monitors output, manages worktrees, and keeps the kanban board moving.
 
 ## How It Works
 
-Three roles in one supervised tmux session:
+A YAML config defines your team hierarchy:
 
-- **Executor** -- Your coding agent (Claude Code, Codex, Aider) works through the board
-- **Supervisor** -- Watches the executor, answers questions it can't handle alone
-- **Director** -- Reviews completed phases and decides: merge, rework, or escalate
+- **Architect** -- Plans architecture, sends directives to managers
+- **Manager** -- Breaks work into tasks, assigns to engineers, reports progress up
+- **Engineers** -- Execute tasks in isolated worktrees, report back to their manager
 
-Two-tier prompt handling keeps things moving:
+Agents communicate through Maildir-based inboxes using `batty send` and `batty inbox`. A background daemon monitors all panes, delivers messages, runs periodic standups, and emits structured events.
 
-1. **Tier 1** -- Regex match on known prompts -> instant auto-answer (~80% of prompts)
-1. **Tier 2** -- Supervisor agent with full project context -> intelligent answer for the rest
-
-Everything is files. Config is TOML. Tasks are Markdown. Logs are JSONL. All git-versioned.
+Everything is files. Config is YAML. Messages are JSON. Events are JSONL. All git-versioned.
 
 ## Get Started
 
-1. [Getting Started](getting-started.md) -- Install, configure, run your first phase
+1. [Getting Started](getting-started.md) -- Install, configure, launch your first team
 1. [CLI Reference](reference/cli.md) -- Every command and flag
-1. [Configuration](reference/config.md) -- All config.toml options
+1. [Configuration](reference/config.md) -- Team config YAML reference
 
 ## Go Deeper
 
-- [Architecture](architecture.md) -- Module map, data flow, design decisions
+- [Architecture](architecture.md) -- Module map, data flow, daemon design
 - [Troubleshooting](troubleshooting.md) -- Common issues and fixes
