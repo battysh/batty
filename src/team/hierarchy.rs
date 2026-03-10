@@ -3,7 +3,8 @@
 //! With `instances: N`, the daemon creates named instances:
 //! - `architect-1` (just 1)
 //! - `manager-1`, `manager-2`, `manager-3`
-//! - Engineers partitioned across managers: `eng-1-1..eng-1-5` (under manager-1), etc.
+//! - Engineers partitioned across compatible managers: `eng-1-1..eng-1-5`
+//!   (under manager-1), etc.
 
 use anyhow::{Result, bail};
 
@@ -30,8 +31,13 @@ pub struct MemberInstance {
 
 /// Resolve the team hierarchy into a flat list of member instances.
 ///
-/// Engineer instances are multiplicative: each manager gets `engineer.instances`
-/// engineers assigned to it. Total engineers = manager.instances × engineer.instances.
+/// Engineer instances are multiplicative across compatible managers: each
+/// compatible manager gets `engineer.instances` engineers assigned to it.
+///
+/// Compatibility rule:
+/// - if an engineer role's `talks_to` lists specific manager role names, only
+///   those manager instances receive engineers from that role
+/// - otherwise, the engineer role is assigned across all managers
 pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
     let mut members = Vec::new();
 
@@ -89,7 +95,7 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
     }
 
     // Phase 3: Add manager instances
-    let mut manager_names = Vec::new();
+    let mut manager_instances = Vec::new();
     for role in &managers {
         for i in 1..=role.instances {
             let name = if role.instances == 1 {
@@ -97,7 +103,7 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
             } else {
                 format!("{}-{i}", role.name)
             };
-            manager_names.push(name.clone());
+            manager_instances.push((name.clone(), role.name.clone()));
 
             // Find architect to report to (first architect role, instance 1)
             let reports_to = config
@@ -124,9 +130,26 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
         }
     }
 
-    // Phase 4: Add engineer instances, partitioned across managers
+    let multiple_engineer_roles = engineers.len() > 1;
+
+    // Phase 4: Add engineer instances, partitioned across compatible managers
     for role in &engineers {
-        if manager_names.is_empty() {
+        let compatible_managers: Vec<_> = if manager_instances.is_empty() {
+            Vec::new()
+        } else if role.talks_to.is_empty() {
+            manager_instances.iter().collect()
+        } else {
+            manager_instances
+                .iter()
+                .filter(|(member_name, role_name)| {
+                    role.talks_to
+                        .iter()
+                        .any(|target| target == role_name || target == member_name)
+                })
+                .collect()
+        };
+
+        if compatible_managers.is_empty() {
             // Engineers without managers report to nobody (flat team)
             for i in 1..=role.instances {
                 let name = if role.instances == 1 {
@@ -145,10 +168,15 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
                 });
             }
         } else {
-            // Multiplicative: each manager gets `instances` engineers
-            for (mgr_idx, mgr_name) in manager_names.iter().enumerate() {
+            // Multiplicative: each compatible manager gets `instances` engineers
+            for (mgr_idx, (mgr_name, _mgr_role_name)) in compatible_managers.iter().enumerate() {
                 for eng_idx in 1..=role.instances {
-                    let name = format!("eng-{}-{eng_idx}", mgr_idx + 1);
+                    let name = engineer_instance_name(
+                        role.name.as_str(),
+                        multiple_engineer_roles,
+                        mgr_idx + 1,
+                        eng_idx,
+                    );
                     members.push(MemberInstance {
                         name,
                         role_name: role.name.clone(),
@@ -173,6 +201,19 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
     }
 
     Ok(members)
+}
+
+fn engineer_instance_name(
+    role_name: &str,
+    multiple_engineer_roles: bool,
+    manager_index: usize,
+    engineer_index: u32,
+) -> String {
+    if !multiple_engineer_roles && role_name == "engineer" {
+        format!("eng-{manager_index}-{engineer_index}")
+    } else {
+        format!("{role_name}-{manager_index}-{engineer_index}")
+    }
 }
 
 /// Count total panes needed (excludes user roles which have no pane).
@@ -376,5 +417,103 @@ roles:
         );
         let err = resolve_hierarchy(&config).unwrap_err().to_string();
         assert!(err.contains("no agent members"));
+    }
+
+    #[test]
+    fn engineer_roles_can_target_specific_manager_roles() {
+        let config = make_config(
+            r#"
+name: split-team
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: black-lead
+    role_type: manager
+    agent: claude
+    talks_to: [architect, black-eng]
+  - name: red-lead
+    role_type: manager
+    agent: claude
+    talks_to: [architect, red-eng]
+  - name: black-eng
+    role_type: engineer
+    agent: codex
+    instances: 3
+    talks_to: [black-lead]
+  - name: red-eng
+    role_type: engineer
+    agent: codex
+    instances: 3
+    talks_to: [red-lead]
+"#,
+        );
+
+        let members = resolve_hierarchy(&config).unwrap();
+        let engineers: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_type == RoleType::Engineer)
+            .collect();
+
+        assert_eq!(engineers.len(), 6);
+        assert_eq!(
+            engineers
+                .iter()
+                .filter(|m| m.role_name == "black-eng")
+                .count(),
+            3
+        );
+        assert_eq!(
+            engineers
+                .iter()
+                .filter(|m| m.role_name == "red-eng")
+                .count(),
+            3
+        );
+        assert!(engineers.iter().all(|m| {
+            if m.role_name == "black-eng" {
+                m.reports_to.as_deref() == Some("black-lead")
+            } else {
+                m.reports_to.as_deref() == Some("red-lead")
+            }
+        }));
+
+        let unique_names: std::collections::HashSet<_> =
+            engineers.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(unique_names.len(), engineers.len());
+        assert!(unique_names.contains("black-eng-1-1"));
+        assert!(unique_names.contains("red-eng-1-1"));
+    }
+
+    #[test]
+    fn engineer_role_without_matching_manager_talks_to_stays_flat() {
+        let config = make_config(
+            r#"
+name: unmatched
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: manager
+    role_type: manager
+    agent: claude
+  - name: specialist
+    role_type: engineer
+    agent: codex
+    instances: 2
+    talks_to: [architect]
+"#,
+        );
+
+        let members = resolve_hierarchy(&config).unwrap();
+        let engineers: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_type == RoleType::Engineer)
+            .collect();
+
+        assert_eq!(engineers.len(), 2);
+        assert!(engineers.iter().all(|m| m.reports_to.is_none()));
+        assert_eq!(engineers[0].name, "specialist-1");
+        assert_eq!(engineers[1].name, "specialist-2");
     }
 }

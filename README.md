@@ -164,6 +164,7 @@ roles:
 - **Daemon-managed** -- Background daemon monitors agents, delivers messages, runs standups, rotates the board.
 - **Kanban-driven** -- All tasks in markdown boards ([kanban-md](https://github.com/mlange-42/kanban-md)). Human-readable, git-versioned.
 - **Communication routing** -- `talks_to` rules enforce who can message whom. No chaotic crosstalk.
+- **Manager-aware engineer partitioning** -- engineer roles can target specific manager roles via `talks_to`, so multiple engineer families like `black-eng` and `red-eng` resolve cleanly.
 - **Built-in templates** -- From solo agent to 19-pane teams. Scaffold and customize.
 - **Everything is files** -- Config is YAML. Messages are JSON. Events are JSONL. All git-friendly.
 
