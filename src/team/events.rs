@@ -212,4 +212,68 @@ mod tests {
         assert!(lines[1].contains("task_assigned"));
         assert!(lines[2].contains("daemon_stopped"));
     }
+
+    #[test]
+    fn all_event_variants_serialize_with_correct_event_field() {
+        let variants: Vec<(&str, TeamEvent)> = vec![
+            ("daemon_started", TeamEvent::daemon_started()),
+            ("daemon_stopped", TeamEvent::daemon_stopped()),
+            ("task_assigned", TeamEvent::task_assigned("eng-1", "task")),
+            ("task_completed", TeamEvent::task_completed("eng-1")),
+            ("standup_generated", TeamEvent::standup_generated("manager")),
+            ("member_crashed", TeamEvent::member_crashed("eng-1", true)),
+            ("message_routed", TeamEvent::message_routed("a", "b")),
+            ("agent_spawned", TeamEvent::agent_spawned("eng-1")),
+        ];
+        for (expected_event, event) in &variants {
+            let json = serde_json::to_string(event).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed["event"].as_str().unwrap(), *expected_event);
+            assert!(parsed["ts"].as_u64().is_some());
+        }
+    }
+
+    #[test]
+    fn event_sink_appends_to_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("events.jsonl");
+
+        // Write one event and close the sink
+        {
+            let mut sink = EventSink::new(&path).unwrap();
+            sink.emit(TeamEvent::daemon_started()).unwrap();
+        }
+
+        // Open again and append another
+        {
+            let mut sink = EventSink::new(&path).unwrap();
+            sink.emit(TeamEvent::daemon_stopped()).unwrap();
+        }
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("daemon_started"));
+        assert!(lines[1].contains("daemon_stopped"));
+    }
+
+    #[test]
+    fn event_with_special_characters_in_task() {
+        let event = TeamEvent::task_assigned("eng-1", "fix: \"quotes\" & <angles> / \\ newline\n");
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let task_val = parsed["task"].as_str().unwrap();
+        assert!(task_val.contains("\"quotes\""));
+        assert!(task_val.contains("<angles>"));
+    }
+
+    #[test]
+    fn event_sink_creates_parent_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("deep").join("nested").join("events.jsonl");
+        let mut sink = EventSink::new(&path).unwrap();
+        sink.emit(TeamEvent::daemon_started()).unwrap();
+        assert!(path.exists());
+        assert_eq!(sink.path(), path);
+    }
 }
