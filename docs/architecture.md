@@ -28,7 +28,8 @@ batty start
   -> resolve hierarchy (instances, naming, reports_to)
   -> create tmux session with layout zones
   -> initialize Maildir inboxes for all members
-  -> spawn daemon as background process
+  -> check for resume marker (.batty/resume)
+  -> spawn daemon as background process (with --resume if marker found)
   -> daemon:
        -> discover pane IDs via @batty_role tags
        -> spawn agents in panes with prompt templates
@@ -77,6 +78,8 @@ The daemon runs as a detached background process (`batty daemon --project-root <
 - **Rotates the board** when completed task count hits the threshold
 - **Emits events** to `events.jsonl` for debugging and audit
 
+When started with `--resume`, the daemon launches agents with session continuation flags (`claude --continue`, `codex resume --last`) so prior context is preserved.
+
 PID is stored at `.batty/daemon.pid`. Logs go to `.batty/daemon.log`.
 
 ## Module Map
@@ -93,6 +96,7 @@ PID is stored at `.batty/daemon.pid`. Logs go to `.batty/daemon.log`.
 | `team/inbox.rs` | Maildir-based inbox: deliver, pending, mark_delivered, all_messages |
 | `team/message.rs` | Message formatting and prompt composition for injection |
 | `team/comms.rs` | Channel abstraction (tmux pane, Telegram, etc.) |
+| `team/telegram.rs` | Telegram bot integration and setup wizard |
 | `team/standup.rs` | Standup report generation from agent output |
 | `team/watcher.rs` | SessionWatcher: tmux output capture and state tracking |
 | `team/board.rs` | Kanban board rotation and task management |
@@ -131,6 +135,7 @@ PID is stored at `.batty/daemon.pid`. Logs go to `.batty/daemon.log`.
     ...
   daemon.pid               # daemon process ID
   daemon.log               # daemon stdout/stderr
+  resume                   # resume marker (written by stop, consumed by start)
 ```
 
 ## tmux Compatibility

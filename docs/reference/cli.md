@@ -27,6 +27,7 @@ Commands:
   ack          Acknowledge (mark delivered) a message in a member's inbox
   merge        Merge an engineer's worktree branch into main
   completions  Generate shell completions
+  telegram     Set up Telegram bot for human communication
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -343,6 +344,27 @@ Options:
   -h, --help
           Print help
 ```
+
+## `batty telegram`
+
+Set up Telegram bot for human communication
+
+```text
+Set up Telegram bot for human communication
+
+Usage: batty telegram [OPTIONS]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+Interactive wizard that configures Telegram integration for user roles.
+Writes `bot_token` and `allowed_user_ids` into `channel_config` in team.yaml.
+Can also be configured via `BATTY_TELEGRAM_BOT_TOKEN` env var.
 
 ## `batty validate`
 

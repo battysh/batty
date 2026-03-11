@@ -132,7 +132,8 @@ The architect plans, sends directives to the manager, who creates tasks and assi
 ```sh
 batty start --attach           # start team and attach to tmux
 batty attach                   # reattach to running session
-batty stop                     # stop daemon and kill session
+batty stop                     # stop daemon and kill session (resume marker saved)
+batty start                    # restart — agents resume previous sessions
 
 batty send architect "msg"     # send message to a role
 batty assign eng-1-1 "task"    # assign task to an engineer
@@ -163,6 +164,20 @@ Human -> Architect -> Manager -> Engineers
 - **Engineers** talk to their manager (progress, questions)
 
 Agents send messages with `batty send <role> "<message>"` and check their inbox with `batty inbox <name>`.
+
+## Session Resume
+
+When you run `batty stop`, Batty saves a resume marker. The next `batty start` detects it and launches agents with session continuation (`claude --continue`, `codex resume --last`). Agent context is preserved across stop/start cycles.
+
+## Telegram Integration
+
+For remote monitoring via Telegram, add a `user` role with `channel: telegram` to your team.yaml, then run:
+
+```sh
+batty telegram
+```
+
+The interactive wizard configures your bot token and chat ID. You can then send messages to the architect from your phone.
 
 ## Shell Completions
 

@@ -152,6 +152,7 @@ roles:
 | `batty merge <engineer>`         | Merge an engineer's worktree branch into main      |
 | `batty validate`                 | Validate team config without launching             |
 | `batty config [--json]`          | Show resolved team configuration                   |
+| `batty telegram`                 | Set up Telegram bot for human communication        |
 | `batty completions <shell>`      | Generate shell completion script (bash/zsh/fish)   |
 
 ## Highlights
@@ -166,6 +167,8 @@ roles:
 - **Communication routing** -- `talks_to` rules enforce who can message whom. No chaotic crosstalk.
 - **Manager-aware engineer partitioning** -- engineer roles can target specific manager roles via `talks_to`, so multiple engineer families like `black-eng` and `red-eng` resolve cleanly.
 - **Built-in templates** -- From solo agent to 19-pane teams. Scaffold and customize.
+- **Session resume** -- `batty stop` + `batty start` resumes agent sessions (`claude --continue`, `codex resume`). No lost context.
+- **Telegram bridge** -- Optional Telegram integration for human-in-the-loop. `batty telegram` walks you through setup.
 - **Everything is files** -- Config is YAML. Messages are JSON. Events are JSONL. All git-friendly.
 
 ## Philosophy

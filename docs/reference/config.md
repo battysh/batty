@@ -60,7 +60,7 @@ Each entry in `roles` defines one agent role.
 | `prompt` | string | none | Prompt template filename (relative to `team_config/`). |
 | `talks_to` | array | `[]` | Role names this role can message. Empty = default hierarchy rules. |
 | `channel` | string | none | Communication channel for user roles (e.g., `telegram`). |
-| `channel_config` | object | none | Channel-specific config (`target`, `provider`). |
+| `channel_config` | object | none | Channel-specific config (see Channel Config below). |
 | `nudge_interval_secs` | integer | none | How often to inject the nudge prompt (from `## Nudge` section of prompt template). |
 | `receives_standup` | boolean | none | Whether this role receives standup reports. |
 | `standup_interval_secs` | integer | none | Per-role standup interval override. |
@@ -113,6 +113,19 @@ roles:
 ```
 
 In that setup, Batty resolves `3` `black-eng` instances under `black-lead` and `3` `red-eng` instances under `red-lead`, not `12` engineers across both leads.
+
+### Channel Config
+
+For user roles with `channel: telegram`:
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `channel_config.target` | string | required | Telegram chat ID to send messages to. |
+| `channel_config.provider` | string | required | Provider for sending: `openclaw` or `native`. |
+| `channel_config.bot_token` | string | none | Telegram bot token (for native API). Can also be set via `BATTY_TELEGRAM_BOT_TOKEN` env var. |
+| `channel_config.allowed_user_ids` | array[integer] | `[]` | Telegram user IDs allowed to send messages (access control). |
+
+Run `batty telegram` to configure interactively.
 
 ### Communication Routing
 
