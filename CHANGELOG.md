@@ -2,6 +2,18 @@
 
 All notable changes to Batty are documented here.
 
+## 0.1.4 — 2026-03-11
+
+Patch release to finish the CI stabilization work from `0.1.3`.
+
+### Fixes
+
+- **Linux tmux compatibility** — switch percentage-based pane splits to the
+  portable `split-window -l <pct>%` form so layout tests pass on Ubuntu tmux as
+  well as macOS.
+- **Green cross-platform CI** — fixes the last failing `cargo test` path in the
+  Ubuntu GitHub Actions job without weakening the test matrix.
+
 ## 0.1.3 — 2026-03-11
 
 This release stabilizes the team-based Batty runtime and restores a clean

@@ -752,15 +752,9 @@ pub fn take_supervisor_hotkey_action(session: &str) -> Result<Option<String>> {
 /// with the given percentage of height.
 #[allow(dead_code)]
 pub fn split_window_vertical(session: &str, percent: u32) -> Result<()> {
+    let size = format!("{percent}%");
     let output = Command::new("tmux")
-        .args([
-            "split-window",
-            "-v",
-            "-p",
-            &percent.to_string(),
-            "-t",
-            session,
-        ])
+        .args(["split-window", "-v", "-l", &size, "-t", session])
         .output()
         .with_context(|| format!("failed to split window in session '{session}'"))?;
 
@@ -805,15 +799,9 @@ pub fn split_window_vertical_percent(
     percent: u32,
     command: &[String],
 ) -> Result<()> {
+    let size = format!("{percent}%");
     let mut cmd = Command::new("tmux");
-    cmd.args([
-        "split-window",
-        "-v",
-        "-p",
-        &percent.to_string(),
-        "-t",
-        session,
-    ]);
+    cmd.args(["split-window", "-v", "-l", &size, "-t", session]);
     for arg in command {
         cmd.arg(arg);
     }
@@ -915,15 +903,15 @@ pub fn list_pane_details(session: &str) -> Result<Vec<PaneDetails>> {
 ///
 /// `target_pane` is a tmux pane ID (e.g., `%0`). Returns the new pane's ID.
 pub fn split_window_horizontal(target_pane: &str, size_pct: u32) -> Result<String> {
-    let pct = format!("{size_pct}");
+    let size = format!("{size_pct}%");
     let output = Command::new("tmux")
         .args([
             "split-window",
             "-h",
             "-t",
             target_pane,
-            "-p",
-            &pct,
+            "-l",
+            &size,
             "-P",
             "-F",
             "#{pane_id}",
@@ -950,15 +938,15 @@ pub fn split_window_vertical_in_pane(
     size_pct: u32,
 ) -> Result<String> {
     // Pane IDs (%N) are globally unique in tmux — use them directly as targets
-    let pct = format!("{size_pct}");
+    let size = format!("{size_pct}%");
     let output = Command::new("tmux")
         .args([
             "split-window",
             "-v",
             "-t",
             pane_id,
-            "-p",
-            &pct,
+            "-l",
+            &size,
             "-P",
             "-F",
             "#{pane_id}",
