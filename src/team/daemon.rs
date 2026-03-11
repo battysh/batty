@@ -341,24 +341,33 @@ impl TeamDaemon {
             .emit(TeamEvent::task_completed(member_name))?;
 
         // Find member's manager and notify them
-        let member = self.config.members.iter().find(|m| m.name == member_name);
+        let manager_target = self
+            .config
+            .members
+            .iter()
+            .find(|m| m.name == member_name)
+            .and_then(|member| member.reports_to.clone())
+            .and_then(|mgr_name| {
+                self.config
+                    .pane_map
+                    .get(&mgr_name)
+                    .cloned()
+                    .map(|pane_id| (mgr_name, pane_id))
+            });
 
-        if let Some(member) = member {
-            if let Some(mgr_name) = &member.reports_to {
-                if let Some(mgr_pane) = self.config.pane_map.get(mgr_name) {
-                    // Get the last output from the completed member
-                    let output = self
-                        .watchers
-                        .get(member_name)
-                        .map(|w| w.last_lines(10))
-                        .unwrap_or_default();
+        if let Some((mgr_name, mgr_pane)) = manager_target {
+            // Get the last output from the completed member
+            let output = self
+                .watchers
+                .get(member_name)
+                .map(|w| w.last_lines(10))
+                .unwrap_or_default();
 
-                    let msg = format!("[{member_name}] completed task.\nLast output:\n{output}");
-                    message::inject_message(mgr_pane, member_name, &msg)?;
-                    self.event_sink
-                        .emit(TeamEvent::message_routed(member_name, mgr_name))?;
-                }
-            }
+            let msg = format!("[{member_name}] completed task.\nLast output:\n{output}");
+            message::inject_message(&mgr_pane, member_name, &msg)?;
+            self.mark_member_working(&mgr_name);
+            self.event_sink
+                .emit(TeamEvent::message_routed(member_name, &mgr_name))?;
         }
 
         // Mark as idle, deactivate watcher
@@ -369,6 +378,14 @@ impl TeamDaemon {
         }
 
         Ok(())
+    }
+
+    fn mark_member_working(&mut self, member_name: &str) {
+        self.states
+            .insert(member_name.to_string(), MemberState::Working);
+        if let Some(watcher) = self.watchers.get_mut(member_name) {
+            watcher.activate();
+        }
     }
 
     /// Handle a crashed member — restart if possible.
@@ -528,10 +545,7 @@ impl TeamDaemon {
             }
 
             // Re-activate watcher after delivering messages
-            if let Some(watcher) = self.watchers.get_mut(name) {
-                watcher.activate();
-            }
-            self.states.insert(name.clone(), MemberState::Working);
+            self.mark_member_working(name);
         }
 
         Ok(())
@@ -589,11 +603,7 @@ impl TeamDaemon {
         tmux::send_keys(&pane_id, &short_cmd, true)?;
 
         // Update state
-        self.states
-            .insert(engineer.to_string(), MemberState::Working);
-        if let Some(watcher) = self.watchers.get_mut(engineer) {
-            watcher.activate();
-        }
+        self.mark_member_working(engineer);
 
         self.event_sink
             .emit(TeamEvent::task_assigned(engineer, task))?;
@@ -1208,6 +1218,11 @@ pub fn merge_engineer_branch(project_root: &Path, engineer_name: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    use crate::team::config::{BoardConfig, StandupConfig};
+    use crate::team::events::EventSink;
+    use crate::team::watcher::WatcherState;
 
     #[test]
     fn launch_script_active_sends_prompt_as_user_message() {
@@ -1373,5 +1388,50 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let err = merge_engineer_branch(tmp.path(), "eng-1-1").unwrap_err();
         assert!(err.to_string().contains("no worktree found"));
+    }
+
+    #[test]
+    fn mark_member_working_updates_state_and_watcher() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut watchers = HashMap::new();
+        watchers.insert(
+            "architect".to_string(),
+            SessionWatcher::new("%0", "architect", 300, None),
+        );
+
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: Vec::new(),
+                pane_map: HashMap::new(),
+            },
+            watchers,
+            states: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        daemon.mark_member_working("architect");
+
+        assert_eq!(
+            daemon.states.get("architect"),
+            Some(&MemberState::Working)
+        );
+        assert_eq!(
+            daemon.watchers.get("architect").map(|watcher| watcher.state),
+            Some(WatcherState::Active)
+        );
     }
 }
