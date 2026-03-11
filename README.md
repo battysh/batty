@@ -142,13 +142,13 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 
 ## Built with Batty
 
-- [chess_test](https://github.com/Zedmor/chess_test): a chess engine built by a Batty team (architect + manager + engineers)
-
 <p align="center">
   <img src="assets/batty-team-session.jpeg" alt="Batty team session in tmux" width="1000">
 </p>
 
 This session shows Batty coordinating a live team in `~/mafia_solver`: the `architect` sets direction, `black-lead` and `red-lead` turn that into lane-specific work, and the `black-eng-*` / `red-eng-*` panes are individual engineer agents running in separate worktrees inside one shared `tmux` layout.
+
+- [chess_test](https://github.com/Zedmor/chess_test): a chess engine built by a Batty team (architect + manager + engineers)
 
 ## Docs and Links
 
