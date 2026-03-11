@@ -1,10 +1,49 @@
 //! Task-loop helpers extracted from the team daemon.
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use tracing::{debug, info, warn};
+
+pub(crate) struct MergeLock {
+    path: PathBuf,
+}
+
+impl MergeLock {
+    pub fn acquire(project_root: &Path) -> Result<Self> {
+        let path = project_root.join(".batty").join("merge.lock");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let start = std::time::Instant::now();
+        loop {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => return Ok(Self { path }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if start.elapsed() > std::time::Duration::from_secs(60) {
+                        bail!("merge lock timeout after 60s: {}", path.display());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                Err(e) => bail!("failed to acquire merge lock: {e}"),
+            }
+        }
+    }
+}
+
+impl Drop for MergeLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum MergeOutcome {
+    Success,
+    RebaseConflict(String),
+}
 
 fn priority_rank(p: &str) -> u32 {
     match p {
@@ -271,7 +310,7 @@ pub(crate) fn refresh_engineer_worktree(
 }
 
 /// Merge an engineer's worktree branch into main.
-pub fn merge_engineer_branch(project_root: &Path, engineer_name: &str) -> Result<()> {
+pub fn merge_engineer_branch(project_root: &Path, engineer_name: &str) -> Result<MergeOutcome> {
     let worktree_dir = project_root
         .join(".batty")
         .join("worktrees")
@@ -298,6 +337,22 @@ pub fn merge_engineer_branch(project_root: &Path, engineer_name: &str) -> Result
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
     info!(engineer = engineer_name, branch = %branch, "merging worktree branch");
 
+    let rebase = std::process::Command::new("git")
+        .args(["rebase", "main"])
+        .current_dir(&worktree_dir)
+        .output()
+        .context("failed to rebase engineer branch onto main")?;
+
+    if !rebase.status.success() {
+        let stderr = String::from_utf8_lossy(&rebase.stderr).trim().to_string();
+        let _ = std::process::Command::new("git")
+            .args(["rebase", "--abort"])
+            .current_dir(&worktree_dir)
+            .output();
+        warn!(engineer = engineer_name, branch = %branch, "rebase conflict during merge");
+        return Ok(MergeOutcome::RebaseConflict(stderr));
+    }
+
     let output = std::process::Command::new("git")
         .args(["merge", &branch, "--no-edit"])
         .current_dir(project_root)
@@ -310,7 +365,7 @@ pub fn merge_engineer_branch(project_root: &Path, engineer_name: &str) -> Result
     }
 
     println!("Merged branch '{branch}' from {engineer_name}");
-    Ok(())
+    Ok(MergeOutcome::Success)
 }
 
 #[cfg(test)]
@@ -392,6 +447,72 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let err = merge_engineer_branch(tmp.path(), "eng-1-1").unwrap_err();
         assert!(err.to_string().contains("no worktree found"));
+    }
+
+    #[test]
+    fn test_merge_lock_acquire_release() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+        let lock_path = tmp.path().join(".batty").join("merge.lock");
+
+        {
+            let lock = MergeLock::acquire(tmp.path()).unwrap();
+            assert!(lock_path.exists());
+            drop(lock);
+        }
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn test_merge_with_rebase_picks_up_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        std::fs::write(worktree_dir.join("feature.txt"), "engineer work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "feature.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "engineer feature"]);
+
+        std::fs::write(repo.join("other.txt"), "main work\n").unwrap();
+        git_ok(&repo, &["add", "other.txt"]);
+        git_ok(&repo, &["commit", "-m", "main advance"]);
+
+        let result = merge_engineer_branch(&repo, "eng-1").unwrap();
+        assert!(matches!(result, MergeOutcome::Success));
+
+        assert!(repo.join("feature.txt").exists());
+        assert!(repo.join("other.txt").exists());
+    }
+
+    #[test]
+    fn test_merge_rebase_conflict_returns_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-2");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        std::fs::write(repo.join("conflict.txt"), "original\n").unwrap();
+        git_ok(&repo, &["add", "conflict.txt"]);
+        git_ok(&repo, &["commit", "-m", "add conflict file"]);
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-2", &team_config_dir).unwrap();
+
+        std::fs::write(worktree_dir.join("conflict.txt"), "engineer version\n").unwrap();
+        git_ok(&worktree_dir, &["add", "conflict.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "engineer change"]);
+
+        std::fs::write(repo.join("conflict.txt"), "main version\n").unwrap();
+        git_ok(&repo, &["add", "conflict.txt"]);
+        git_ok(&repo, &["commit", "-m", "main change"]);
+
+        let result = merge_engineer_branch(&repo, "eng-2").unwrap();
+        assert!(matches!(result, MergeOutcome::RebaseConflict(_)));
+
+        let status = git(&worktree_dir, &["status", "--porcelain"]);
+        assert!(status.status.success());
     }
 
     #[test]
