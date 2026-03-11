@@ -1565,32 +1565,6 @@ mod tests {
     use crate::team::events::EventSink;
     use crate::team::watcher::WatcherState;
 
-    fn write_task_file(
-        dir: &Path,
-        id: u32,
-        title: &str,
-        status: &str,
-        priority: &str,
-        claimed_by: Option<&str>,
-        depends_on: &[u32],
-    ) {
-        let tasks_dir = dir.join("tasks");
-        std::fs::create_dir_all(&tasks_dir).unwrap();
-        let mut content =
-            format!("---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: {priority}\n");
-        if let Some(cb) = claimed_by {
-            content.push_str(&format!("claimed_by: {cb}\n"));
-        }
-        if !depends_on.is_empty() {
-            content.push_str("depends_on:\n");
-            for dep in depends_on {
-                content.push_str(&format!("    - {dep}\n"));
-            }
-        }
-        content.push_str("class: standard\n---\n\nTask description.\n");
-        std::fs::write(tasks_dir.join(format!("{id:03}-{title}.md")), content).unwrap();
-    }
-
     #[test]
     fn launch_script_active_sends_prompt_as_user_message() {
         let cmd = write_launch_script(
@@ -1888,7 +1862,13 @@ mod tests {
             .insert("eng-2".to_string(), MemberState::Working);
 
         let board_dir = tmp.path().join(".batty").join("team_config").join("board");
-        write_task_file(&board_dir, 1, "auto-task", "todo", "high", None, &[]);
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("001-auto-task.md"),
+            "---\nid: 1\ntitle: auto-task\nstatus: todo\npriority: high\nclass: standard\n---\n\nTask description.\n",
+        )
+        .unwrap();
 
         assert_eq!(daemon.idle_engineer_names(), vec!["eng-1".to_string()]);
         let task = next_unclaimed_task(&board_dir).unwrap().unwrap();
@@ -2088,15 +2068,6 @@ mod tests {
         daemon.active_tasks.insert("eng-1".into(), 42);
         daemon.handle_engineer_completion("eng-1").unwrap();
         assert_eq!(daemon.active_task_id("eng-1"), Some(42));
-    }
-
-    #[test]
-    fn test_task_escalated_event_serializes() {
-        let event = TeamEvent::task_escalated("eng-1-1", "42");
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains("\"event\":\"task_escalated\""));
-        assert!(json.contains("\"role\":\"eng-1-1\""));
-        assert!(json.contains("\"task\":\"42\""));
     }
 
     #[test]

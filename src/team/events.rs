@@ -282,6 +282,15 @@ mod tests {
     }
 
     #[test]
+    fn task_escalated_serializes_role_and_task() {
+        let event = TeamEvent::task_escalated("eng-1-1", "42");
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"task_escalated\""));
+        assert!(json.contains("\"role\":\"eng-1-1\""));
+        assert!(json.contains("\"task\":\"42\""));
+    }
+
+    #[test]
     fn event_sink_creates_parent_directories() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("deep").join("nested").join("events.jsonl");
