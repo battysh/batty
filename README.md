@@ -3,7 +3,7 @@
   <h1 align="center">Batty</h1>
   <p align="center"><strong>Hierarchical agent teams for software development.</strong></p>
   <p align="center">
-    Define a team of AI agents in YAML. Batty spawns them in tmux, routes messages between roles, manages worktrees, and keeps everyone working. You stay in control.
+    Define a team of AI agents in YAML. Batty runs them in tmux, routes work and messages between roles, manages engineer worktrees, and keeps the team moving while you stay in control.
   </p>
 </p>
 
@@ -22,34 +22,49 @@
 
 ---
 
-## The Problem
-
-You have powerful coding agents -- Claude Code, Codex, Aider. They can write code, run tests, commit. But one agent hits a wall fast. It can't plan and execute at the same time. It can't coordinate parallel work. It can't review its own output.
-
-You need a team. An architect to plan, a manager to break work into tasks, engineers to execute in parallel. Each in their own tmux pane, communicating through structured messages, working on isolated git worktrees.
-
-**Batty is the runtime for agent teams.** Define your org chart in YAML. Batty handles the rest -- spawning agents, routing messages, managing worktrees, running standups, and keeping the board moving.
+Batty is a tmux-native runtime for AI coding teams. Instead of one agent doing everything badly, you define roles like architect, manager, and engineers; Batty launches them, isolates engineer work in git worktrees, routes messages, tracks the board, and gives you a structured way to run parallel agent workflows without losing control or context.
 
 ## Quick Start
 
 ```sh
-# Install
 cargo install batty-cli
-
-# Initialize a team in your project
-cd my-project
-batty init
-
-# Edit the team config
-$EDITOR .batty/team_config/team.yaml
-
-# Launch the team
+cd my-project && batty init
 batty start --attach
+batty send architect "Build a REST API with JWT auth"
 ```
 
-That's it. A tmux session opens with your agents running in separate panes. The daemon routes messages between them.
+That gets you from zero to a live team session. For the full walkthrough, templates, and configuration details, see the [Getting Started guide](docs/getting-started.md).
 
-### From Source
+## Quick Demo
+
+```text
+You
+  |
+  | batty send architect "Build a chess engine"
+  v
+Architect (Claude Code)
+  | plans the approach
+  v
+Manager (Claude Code)
+  | creates tasks, assigns work
+  v
+Engineers (Codex / Claude / Aider)
+  eng-1-1   eng-1-2   eng-1-3   eng-1-4
+   |          |          |          |
+   +---- isolated git worktrees ----+
+```
+
+Batty keeps each role in its own tmux pane, watches for idle/completed states, delivers inbox messages, auto-dispatches board tasks, runs standups, and merges engineer branches back when they pass tests.
+
+## Install
+
+From crates.io:
+
+```sh
+cargo install batty-cli
+```
+
+From source:
 
 ```sh
 git clone https://github.com/battysh/batty.git
@@ -59,153 +74,89 @@ cargo install --path .
 
 ## How It Works
 
-```
-You (human)
-  |
-  |  batty send architect "Build a chess engine"
-  v
-Architect (Claude Code)          -- plans architecture, sends directives
-  |
-  |  batty send manager "Phase 1: board representation..."
-  v
-Manager (Claude Code)            -- creates tasks on the board, assigns work
-  |
-  |  batty assign eng-1-1 "implement Board struct"
-  v
-Engineers (Codex x4)             -- execute tasks in parallel worktrees
-  eng-1-1, eng-1-2, eng-1-3, eng-1-4
+```text
+team.yaml
+   |
+   v
+batty start
+   |
+   +--> tmux session per team
+   +--> role prompts loaded into each pane
+   +--> engineer worktrees created when enabled
+   +--> daemon loop watches output, inboxes, board, retries, standups
+   |
+   v
+batty send / assign / board / status / merge
 ```
 
-Everything runs in tmux. Each agent gets its own pane. A background daemon polls for messages, monitors agent output, triggers standups, and rotates the kanban board. Communication happens through Maildir-based inboxes -- agents send messages with `batty send` and receive them via `batty inbox`.
+Batty does not embed a model. It orchestrates external agent CLIs, keeps state in files, and uses tmux plus git worktrees as the runtime boundary.
 
-## Team Configuration
+## Built-in Templates
 
-Teams are defined in `.batty/team_config/team.yaml`:
+`batty init --template <name>` scaffolds a ready-to-run team:
 
-```yaml
-name: my-project
-
-layout:
-  zones:
-    - name: architect
-      width_pct: 33
-    - name: managers
-      width_pct: 33
-    - name: engineers
-      width_pct: 34
-      split: { horizontal: 3 }
-
-roles:
-  - name: human
-    role_type: user
-    channel: telegram
-    channel_config:
-      target: "<your-telegram-chat-id>"
-      provider: openclaw
-    talks_to: [architect]
-
-  - name: architect
-    role_type: architect
-    agent: claude
-    instances: 1
-    prompt: architect.md
-    talks_to: [human, manager]
-
-  - name: manager
-    role_type: manager
-    agent: claude
-    instances: 1
-    prompt: manager.md
-    talks_to: [architect, engineer]
-
-  - name: engineer
-    role_type: engineer
-    agent: codex
-    instances: 3
-    prompt: engineer.md
-    talks_to: [manager]
-    use_worktrees: true
-```
-
-### Built-in Templates
-
-`batty init --template <name>` scaffolds ready-to-use configs:
-
-| Template     | Agents | Description                                              |
-|--------------|--------|----------------------------------------------------------|
-| `solo`       | 1      | Single engineer, no hierarchy                            |
-| `pair`       | 2      | Architect + 1 engineer                                   |
-| `simple`     | 6      | Human + architect + manager + 3 engineers (default)      |
-| `squad`      | 7      | Architect + manager + 5 engineers with layout            |
-| `large`      | 19     | Architect + 3 managers + 15 engineers + Telegram bridge  |
-| `research`   | 10     | PI + 3 sub-leads + 6 researchers                         |
-| `software`   | 11     | Tech lead + 2 eng managers + 8 developers                |
-| `batty`      | 6      | Batty self-development team                              |
-
-## CLI Reference
-
-| Command                          | What it does                                      |
-|----------------------------------|---------------------------------------------------|
-| `batty init [--template NAME]`   | Scaffold team config and prompt templates          |
-| `batty start [--attach]`         | Start the team daemon and tmux session             |
-| `batty stop`                     | Stop the daemon and kill the tmux session          |
-| `batty attach`                   | Attach to the running tmux session                 |
-| `batty status [--json]`          | Show all team members and their states             |
-| `batty send <role> <message>`    | Send a message to an agent                         |
-| `batty assign <engineer> <task>` | Assign a task to an engineer                       |
-| `batty inbox <member>`           | List inbox messages for a team member              |
-| `batty read <member> <id>`       | Read a specific inbox message                      |
-| `batty ack <member> <id>`        | Acknowledge (mark delivered) a message             |
-| `batty board`                    | Open the kanban board TUI                          |
-| `batty merge <engineer>`         | Merge an engineer's worktree branch into main      |
-| `batty validate`                 | Validate team config without launching             |
-| `batty config [--json]`          | Show resolved team configuration                   |
-| `batty telegram`                 | Set up Telegram bot for human communication        |
-| `batty completions <shell>`      | Generate shell completion script (bash/zsh/fish)   |
+| Template | Agents | Description |
+|---|---:|---|
+| `solo` | 1 | Single engineer, no hierarchy |
+| `pair` | 2 | Architect + 1 engineer |
+| `simple` | 6 | Human + architect + manager + 3 engineers |
+| `squad` | 7 | Architect + manager + 5 engineers |
+| `large` | 19 | Human + architect + 3 managers + 15 engineers |
+| `research` | 10 | PI + 3 sub-leads + 6 researchers |
+| `software` | 11 | Human + tech lead + 2 eng managers + 8 developers |
+| `batty` | 6 | Batty's own self-development team |
 
 ## Highlights
 
-- **Hierarchical teams** -- Architect plans, manager coordinates, engineers execute. Communication flows through defined channels.
-- **Agent-agnostic** -- Works with Claude Code, Codex, or any CLI agent. Mix and match per role.
-- **tmux-native** -- Sessions survive disconnect. Detach, go to lunch, reattach with `batty attach`.
-- **Maildir messaging** -- Structured message passing between agents. Atomic delivery, FIFO ordering, delivered/pending tracking.
-- **Worktree isolation** -- Engineers work in separate git worktrees. No conflicts. Clean merge when done.
-- **Daemon-managed** -- Background daemon monitors agents, delivers messages, runs standups, rotates the board.
-- **Kanban-driven** -- All tasks in markdown boards ([kanban-md](https://github.com/mlange-42/kanban-md)). Human-readable, git-versioned.
-- **Communication routing** -- `talks_to` rules enforce who can message whom. No chaotic crosstalk.
-- **Manager-aware engineer partitioning** -- engineer roles can target specific manager roles via `talks_to`, so multiple engineer families like `black-eng` and `red-eng` resolve cleanly.
-- **Built-in templates** -- From solo agent to 19-pane teams. Scaffold and customize.
-- **Session resume** -- `batty stop` + `batty start` resumes agent sessions (`claude --continue`, `codex resume`). No lost context.
-- **Telegram bridge** -- Optional Telegram integration for human-in-the-loop. `batty telegram` walks you through setup.
-- **Everything is files** -- Config is YAML. Messages are JSON. Events are JSONL. All git-friendly.
+- Hierarchical agent teams instead of one overloaded coding agent
+- tmux-native runtime with persistent panes and session resume
+- Agent-agnostic role assignment: Claude Code, Codex, Aider, or similar
+- Maildir inbox routing with explicit `talks_to` communication rules
+- Git worktree isolation for engineers and merge-safe parallel execution
+- Kanban-driven task loop with auto-dispatch, retry tracking, and test gating
+- YAML config, Markdown boards, JSON/JSONL logs: everything stays file-based
 
-## Philosophy
+## CLI Quick Reference
 
-- **Compose, don't monolith.** tmux for runtime. kanban-md for tasks. Your agents for coding. Batty only builds the orchestration layer.
-- **Markdown as backend.** All state is human-readable, git-versioned files. No databases.
-- **Agents are processes, not features.** Batty doesn't embed AI. It manages AI processes -- spawning, monitoring, messaging, coordinating.
-- **Structure enables autonomy.** Clear roles, defined communication channels, and isolated worktrees let agents work independently without stepping on each other.
+| Command | Purpose |
+|---|---|
+| `batty init [--template NAME]` | Scaffold `.batty/team_config/` |
+| `batty start [--attach]` | Launch the daemon and tmux session |
+| `batty stop` / `batty attach` | Stop or reattach to the team session |
+| `batty send <role> <message>` | Send a message to a role |
+| `batty assign <engineer> <task>` | Directly assign work to an engineer |
+| `batty inbox <member>` / `read` / `ack` | Inspect and manage inbox messages |
+| `batty board` | Open the kanban board |
+| `batty status [--json]` | Show current team state |
+| `batty merge <engineer>` | Merge an engineer worktree branch |
+| `batty validate` / `config` | Validate and inspect team config |
+| `batty telegram` | Configure Telegram for human communication |
+| `batty completions <shell>` | Generate shell completions |
 
 ## Requirements
 
-- **Rust** toolchain (stable, >= 1.85)
-- **tmux** >= 3.1 (recommended >= 3.2)
-- **kanban-md** CLI (`cargo install kanban-md --locked`)
-- A coding agent: Claude Code, Codex, Aider, or similar
+- Rust toolchain, stable `>= 1.85`
+- `tmux >= 3.1` (recommended `>= 3.2`)
+- `kanban-md` CLI: `cargo install kanban-md --locked`
+- At least one coding agent CLI such as Claude Code, Codex, or Aider
 
 ## Built with Batty
 
-- **[chess_test](https://github.com/Zedmor/chess_test)** -- A chess engine built entirely by a Batty agent team (architect + manager + 4 engineers).
+- [chess_test](https://github.com/Zedmor/chess_test): a chess engine built by a Batty team (architect + manager + engineers)
 
 <p align="center">
   <img src="examples/chess-team-session.png" alt="Batty team session building a chess engine" width="800">
 </p>
 
-## Links
+## Docs and Links
 
-- **GitHub:** [github.com/battysh/batty](https://github.com/battysh/batty)
-- **Docs:** [battysh.github.io/batty](https://battysh.github.io/batty/)
-- **kanban-md:** [github.com/mlange-42/kanban-md](https://github.com/mlange-42/kanban-md)
+- [Getting Started](docs/getting-started.md)
+- [CLI Reference](docs/reference/cli.md)
+- [Configuration Reference](docs/reference/config.md)
+- [Architecture](docs/architecture.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Full docs site](https://battysh.github.io/batty/)
+- [GitHub](https://github.com/battysh/batty)
 
 ## License
 
