@@ -181,7 +181,10 @@ fn main() -> Result<()> {
                     bail!("kanban-md tui failed");
                 }
             } else {
-                bail!("no board found at {}; run `batty init` first", board_dir.display());
+                bail!(
+                    "no board found at {}; run `batty init` first",
+                    board_dir.display()
+                );
             }
         }
 
@@ -202,9 +205,12 @@ fn main() -> Result<()> {
             team::merge_worktree(&root, &engineer)?;
         }
 
-        Command::Daemon { project_root } => {
+        Command::Daemon {
+            project_root,
+            resume,
+        } => {
             let root = std::path::PathBuf::from(project_root);
-            team::run_daemon(&root)?;
+            team::run_daemon(&root, resume)?;
         }
 
         Command::Completions { shell } => {
@@ -215,6 +221,10 @@ fn main() -> Result<()> {
                 cli::CompletionShell::Fish => clap_complete::Shell::Fish,
             };
             clap_complete::generate(shell, &mut Cli::command(), "batty", &mut std::io::stdout());
+        }
+
+        Command::Telegram => {
+            team::setup_telegram(&root)?;
         }
     }
 

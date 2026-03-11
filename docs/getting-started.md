@@ -41,14 +41,14 @@ This scaffolds `.batty/team_config/` with:
 - **Prompt templates** -- `architect.md`, `manager.md`, `engineer.md` with role-specific instructions
 - **Kanban board** -- A kanban-md board for task tracking
 
-The default template (`simple`) creates: 1 architect + 1 manager + 3 engineers = 5 agents.
+The default template (`simple`) creates: 1 human + 1 architect + 1 manager + 3 engineers = 6 agents.
 
 ### Choose a Template
 
 ```sh
 batty init --template solo       # 1 engineer, no hierarchy
 batty init --template pair       # architect + 1 engineer
-batty init --template simple     # architect + manager + 3 engineers (default)
+batty init --template simple     # human + architect + manager + 3 engineers (default)
 batty init --template squad      # architect + manager + 5 engineers
 batty init --template large      # architect + 3 managers + 15 engineers + Telegram
 batty init --template research   # PI + 3 sub-leads + 6 researchers
@@ -73,12 +73,20 @@ layout:
       split: { horizontal: 3 }
 
 roles:
+  - name: human
+    role_type: user
+    channel: telegram
+    channel_config:
+      target: "<your-telegram-chat-id>"
+      provider: openclaw
+    talks_to: [architect]
+
   - name: architect
     role_type: architect
     agent: claude
     instances: 1
     prompt: architect.md
-    talks_to: [manager]
+    talks_to: [human, manager]
 
   - name: manager
     role_type: manager
@@ -101,6 +109,8 @@ Validate before launching:
 ```sh
 batty validate
 ```
+
+If you add a `human` role, the ACL must be symmetric: `human.talks_to` must include the architect or lead, and that role's `talks_to` must include `human`. A Telegram channel config only defines transport.
 
 ## Launch the Team
 

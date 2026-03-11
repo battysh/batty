@@ -137,6 +137,8 @@ If `talks_to` is configured, only listed roles are allowed. If empty, default hi
 
 The `human` sender (CLI user outside tmux) can always message any role.
 
+For a user-channel role such as `human`, reply permissions are still controlled by `talks_to`. Example: if `human.talks_to: [architect]`, then the architect must also include `human` in its own `talks_to` list to reply over Telegram.
+
 ## Default Template (simple)
 
 ```yaml
@@ -160,12 +162,20 @@ layout:
       split: { horizontal: 3 }
 
 roles:
+  - name: human
+    role_type: user
+    channel: telegram
+    channel_config:
+      target: "<your-telegram-chat-id>"
+      provider: openclaw
+    talks_to: [architect]
+
   - name: architect
     role_type: architect
     agent: claude
     instances: 1
     prompt: architect.md
-    talks_to: [manager]
+    talks_to: [human, manager]
     nudge_interval_secs: 900
 
   - name: manager

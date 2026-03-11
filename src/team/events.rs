@@ -35,35 +35,107 @@ impl TeamEvent {
     }
 
     pub fn daemon_started() -> Self {
-        Self { event: "daemon_started".into(), role: None, task: None, recipient: None, from: None, to: None, restart: None, ts: Self::now() }
+        Self {
+            event: "daemon_started".into(),
+            role: None,
+            task: None,
+            recipient: None,
+            from: None,
+            to: None,
+            restart: None,
+            ts: Self::now(),
+        }
     }
 
     pub fn daemon_stopped() -> Self {
-        Self { event: "daemon_stopped".into(), role: None, task: None, recipient: None, from: None, to: None, restart: None, ts: Self::now() }
+        Self {
+            event: "daemon_stopped".into(),
+            role: None,
+            task: None,
+            recipient: None,
+            from: None,
+            to: None,
+            restart: None,
+            ts: Self::now(),
+        }
     }
 
     pub fn task_assigned(role: &str, task: &str) -> Self {
-        Self { event: "task_assigned".into(), role: Some(role.into()), task: Some(task.into()), recipient: None, from: None, to: None, restart: None, ts: Self::now() }
+        Self {
+            event: "task_assigned".into(),
+            role: Some(role.into()),
+            task: Some(task.into()),
+            recipient: None,
+            from: None,
+            to: None,
+            restart: None,
+            ts: Self::now(),
+        }
     }
 
     pub fn task_completed(role: &str) -> Self {
-        Self { event: "task_completed".into(), role: Some(role.into()), task: None, recipient: None, from: None, to: None, restart: None, ts: Self::now() }
+        Self {
+            event: "task_completed".into(),
+            role: Some(role.into()),
+            task: None,
+            recipient: None,
+            from: None,
+            to: None,
+            restart: None,
+            ts: Self::now(),
+        }
     }
 
     pub fn standup_generated(recipient: &str) -> Self {
-        Self { event: "standup_generated".into(), role: None, task: None, recipient: Some(recipient.into()), from: None, to: None, restart: None, ts: Self::now() }
+        Self {
+            event: "standup_generated".into(),
+            role: None,
+            task: None,
+            recipient: Some(recipient.into()),
+            from: None,
+            to: None,
+            restart: None,
+            ts: Self::now(),
+        }
     }
 
     pub fn member_crashed(role: &str, restart: bool) -> Self {
-        Self { event: "member_crashed".into(), role: Some(role.into()), task: None, recipient: None, from: None, to: None, restart: Some(restart), ts: Self::now() }
+        Self {
+            event: "member_crashed".into(),
+            role: Some(role.into()),
+            task: None,
+            recipient: None,
+            from: None,
+            to: None,
+            restart: Some(restart),
+            ts: Self::now(),
+        }
     }
 
     pub fn message_routed(from: &str, to: &str) -> Self {
-        Self { event: "message_routed".into(), role: None, task: None, recipient: None, from: Some(from.into()), to: Some(to.into()), restart: None, ts: Self::now() }
+        Self {
+            event: "message_routed".into(),
+            role: None,
+            task: None,
+            recipient: None,
+            from: Some(from.into()),
+            to: Some(to.into()),
+            restart: None,
+            ts: Self::now(),
+        }
     }
 
     pub fn agent_spawned(role: &str) -> Self {
-        Self { event: "agent_spawned".into(), role: Some(role.into()), task: None, recipient: None, from: None, to: None, restart: None, ts: Self::now() }
+        Self {
+            event: "agent_spawned".into(),
+            role: Some(role.into()),
+            task: None,
+            recipient: None,
+            from: None,
+            to: None,
+            restart: None,
+            ts: Self::now(),
+        }
     }
 }
 
@@ -129,7 +201,8 @@ mod tests {
         let path = tmp.path().join("events.jsonl");
         let mut sink = EventSink::new(&path).unwrap();
         sink.emit(TeamEvent::daemon_started()).unwrap();
-        sink.emit(TeamEvent::task_assigned("eng-1", "fix bug")).unwrap();
+        sink.emit(TeamEvent::task_assigned("eng-1", "fix bug"))
+            .unwrap();
         sink.emit(TeamEvent::daemon_stopped()).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();

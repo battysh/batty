@@ -52,6 +52,9 @@ uuid = { version = "1", features = ["v4"] }
 # Maildir-based inbox messaging
 maildir = "0.6"
 
+# HTTP client (blocking) — Telegram Bot API
+ureq = { version = "2", features = ["json"] }
+
 # Pattern matching
 regex = "1"
 

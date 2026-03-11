@@ -84,11 +84,7 @@ mod tests {
     use super::*;
     use crate::team::config::RoleType;
 
-    fn make_member(
-        name: &str,
-        role_type: RoleType,
-        reports_to: Option<&str>,
-    ) -> MemberInstance {
+    fn make_member(name: &str, role_type: RoleType, reports_to: Option<&str>) -> MemberInstance {
         MemberInstance {
             name: name.to_string(),
             role_name: name.to_string(),
@@ -116,8 +112,7 @@ mod tests {
 
         // Manager standup should only show engineers, not architect
         let manager = &members[1];
-        let report =
-            generate_standup_for(manager, &members, &watchers, &states, 5);
+        let report = generate_standup_for(manager, &members, &watchers, &states, 5);
         assert!(report.contains("[eng-1-1] status: working"));
         assert!(report.contains("[eng-1-2] status: idle"));
         assert!(!report.contains("[architect]"));
@@ -135,8 +130,7 @@ mod tests {
         let states = HashMap::new();
 
         let architect = &members[0];
-        let report =
-            generate_standup_for(architect, &members, &watchers, &states, 5);
+        let report = generate_standup_for(architect, &members, &watchers, &states, 5);
         assert!(report.contains("[manager]"));
         assert!(!report.contains("[eng-1-1]"));
     }
@@ -151,8 +145,7 @@ mod tests {
         let states = HashMap::new();
 
         let eng = &members[1];
-        let report =
-            generate_standup_for(eng, &members, &watchers, &states, 5);
+        let report = generate_standup_for(eng, &members, &watchers, &states, 5);
         assert!(report.contains("no direct reports"));
     }
 
@@ -167,13 +160,8 @@ mod tests {
             reports_to: None,
             use_worktrees: false,
         }];
-        let report = generate_standup_for(
-            &members[0],
-            &members,
-            &HashMap::new(),
-            &HashMap::new(),
-            5,
-        );
+        let report =
+            generate_standup_for(&members[0], &members, &HashMap::new(), &HashMap::new(), 5);
         assert!(!report.contains("[human]"));
     }
 
@@ -187,13 +175,7 @@ mod tests {
         states.insert("eng-1".to_string(), MemberState::Crashed);
 
         let manager = &members[0];
-        let report = generate_standup_for(
-            manager,
-            &members,
-            &HashMap::new(),
-            &states,
-            5,
-        );
+        let report = generate_standup_for(manager, &members, &HashMap::new(), &states, 5);
         assert!(report.contains("CRASHED"));
     }
 }
