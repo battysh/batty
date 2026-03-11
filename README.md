@@ -148,6 +148,8 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
   <img src="assets/batty-team-session.jpeg" alt="Batty team session in tmux" width="1000">
 </p>
 
+This session shows Batty coordinating a live team in `~/mafia_solver`: the `architect` sets direction, `black-lead` and `red-lead` turn that into lane-specific work, and the `black-eng-*` / `red-eng-*` panes are individual engineer agents running in separate worktrees inside one shared `tmux` layout.
+
 ## Docs and Links
 
 - [Getting Started](docs/getting-started.md)
