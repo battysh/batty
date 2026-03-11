@@ -145,7 +145,7 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 - [chess_test](https://github.com/Zedmor/chess_test): a chess engine built by a Batty team (architect + manager + engineers)
 
 <p align="center">
-  <img src="examples/chess-team-session.png" alt="Batty team session building a chess engine" width="800">
+  <img src="assets/batty-team-session.jpeg" alt="Batty team session in tmux" width="1000">
 </p>
 
 ## Docs and Links
