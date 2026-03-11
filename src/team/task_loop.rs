@@ -365,7 +365,51 @@ pub fn merge_engineer_branch(project_root: &Path, engineer_name: &str) -> Result
     }
 
     println!("Merged branch '{branch}' from {engineer_name}");
+
+    // Reset worktree to main tip so it's ready for the next task.
+    if let Err(e) = reset_engineer_worktree(project_root, engineer_name) {
+        warn!(
+            engineer = engineer_name,
+            error = %e,
+            "worktree reset failed after merge"
+        );
+    }
+
     Ok(MergeOutcome::Success)
+}
+
+pub(crate) fn reset_engineer_worktree(project_root: &Path, engineer_name: &str) -> Result<()> {
+    let worktree_dir = project_root
+        .join(".batty")
+        .join("worktrees")
+        .join(engineer_name);
+
+    if !worktree_dir.exists() {
+        return Ok(());
+    }
+
+    let output = std::process::Command::new("git")
+        .args(["reset", "--hard", "main"])
+        .current_dir(&worktree_dir)
+        .output()
+        .context("failed to reset engineer worktree to main")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!(
+            engineer = engineer_name,
+            error = %stderr,
+            "failed to reset worktree after merge"
+        );
+        return Ok(());
+    }
+
+    info!(
+        engineer = engineer_name,
+        worktree = %worktree_dir.display(),
+        "reset worktree to main after merge"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -485,6 +529,55 @@ mod tests {
 
         assert!(repo.join("feature.txt").exists());
         assert!(repo.join("other.txt").exists());
+    }
+
+    #[test]
+    fn test_reset_worktree_after_merge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        std::fs::write(worktree_dir.join("feature.txt"), "work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "feature.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "engineer work"]);
+
+        let result = merge_engineer_branch(&repo, "eng-1").unwrap();
+        assert!(matches!(result, MergeOutcome::Success));
+
+        let main_head = git_stdout(&repo, &["rev-parse", "HEAD"]);
+        let wt_head = git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
+        assert_eq!(main_head, wt_head);
+    }
+
+    #[test]
+    fn test_reset_worktree_leaves_clean_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        std::fs::write(worktree_dir.join("new.txt"), "content\n").unwrap();
+        git_ok(&worktree_dir, &["add", "new.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "add file"]);
+
+        let result = merge_engineer_branch(&repo, "eng-1").unwrap();
+        assert!(matches!(result, MergeOutcome::Success));
+
+        let status = git_stdout(&worktree_dir, &["status", "--porcelain"]);
+        let tracked_changes: Vec<&str> = status
+            .lines()
+            .filter(|line| !line.starts_with("?? .batty/"))
+            .collect();
+        assert!(
+            tracked_changes.is_empty(),
+            "worktree has tracked changes: {:?}",
+            tracked_changes
+        );
     }
 
     #[test]
