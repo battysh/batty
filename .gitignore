@@ -23,3 +23,7 @@ site/
 # Batty runtime (managed by batty install)
 .batty/logs/
 .batty/worktrees/
+.batty/daemon.log
+.batty/inboxes/
+.batty/resume
+.batty/team_config/events.jsonl
