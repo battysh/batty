@@ -19,7 +19,7 @@ nav:
   - Getting Started: getting-started.md
   - Reference:
       - CLI Reference: reference/cli.md
-      - Configuration: reference/config.md
+      - Runtime Config: reference/config.md
       - Modules: reference/modules.md
   - Architecture: architecture.md
   - Troubleshooting: troubleshooting.md

@@ -20,7 +20,8 @@ Everything is files. Config is YAML. Messages are JSON. Events are JSONL. All gi
 
 1. [Getting Started](getting-started.md) -- Install, configure, launch your first team
 1. [CLI Reference](reference/cli.md) -- Every command and flag
-1. [Configuration](reference/config.md) -- Team config YAML reference
+1. [Runtime Config](reference/config.md) -- Optional `.batty/config.toml` defaults
+1. [Module Reference](reference/modules.md) -- Source map for contributors and maintainers
 
 ## Go Deeper
 

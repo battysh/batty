@@ -4,71 +4,68 @@ Contributor-facing map of Batty source modules.
 
 ## Module Index
 
-| Path                      | Purpose                                                                                                              |
-| ------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `src/main.rs`             | CLI entrypoint and top-level command dispatch.                                                                       |
-| `src/cli.rs`              | clap command/flag definitions (`work`, `attach`, `resume`, `config`, `install`, `remove`, `board`, `merge`, `list`). |
-| `src/paths.rs`            | Canonical path helpers for `.batty/` assets and boards.                                                              |
-| `src/work.rs`             | `batty work`/`resume` orchestration pipeline and launch-context composition.                                         |
-| `src/orchestrator.rs`     | Core supervision loop (event polling, detector loop, policy/tier decisions, status updates).                         |
-| `src/tmux.rs`             | tmux command wrapper (session, pane, status-bar, capability helpers).                                                |
-| `src/events.rs`           | Pipe-pane stream handling and structured event buffering.                                                            |
-| `src/detector.rs`         | Prompt detection state machine (silence windows + pattern matching).                                                 |
-| `src/tier2.rs`            | Tier 2 supervisor integration, context snapshots, and answer extraction.                                             |
-| `src/completion.rs`       | Phase completion-signal detection and completion decision logic.                                                     |
-| `src/worktree.rs`         | Phase run worktree lifecycle and cleanup decisions.                                                                  |
-| `src/install.rs`          | Install/remove asset workflows and prerequisite checks.                                                              |
-| `src/config/mod.rs`       | `.batty/config.toml` schema, defaults, and load/validation flow.                                                     |
-| `src/policy/mod.rs`       | Policy engine (`observe`/`suggest`/`act`) and decision evaluation.                                                   |
-| `src/prompt/mod.rs`       | Prompt kinds/patterns and ANSI-safe matching helpers.                                                                |
-| `src/log/mod.rs`          | JSONL execution log types and writer APIs.                                                                           |
-| `src/task/mod.rs`         | kanban task parsing, board metadata, and task selection helpers.                                                     |
-| `src/supervisor/mod.rs`   | Supervisor runtime helpers and process integration logic.                                                            |
-| `src/dod/mod.rs`          | Definition-of-done gate execution and result handling.                                                               |
-| `src/agent/mod.rs`        | `AgentAdapter` trait, adapter registry, and spawn contract.                                                          |
-| `src/agent/claude.rs`     | Claude adapter implementation and prompt pattern wiring.                                                             |
-| `src/agent/codex.rs`      | Codex adapter implementation and launch prompt wrapping.                                                             |
-| `src/sequencer.rs`        | Multi-phase sequencing and ordering for `batty work all`.                                                            |
-| `src/review.rs`           | AI director review decisions (merge / rework / escalate).                                                            |
-| `src/dag.rs`              | Task dependency DAG construction, topological sort, cycle detection.                                                 |
-| `src/scheduler.rs`        | Parallel DAG-aware task scheduler with agent slot management.                                                        |
-| `src/merge_queue.rs`      | Serialized merge queue for parallel worktree results.                                                                |
-| `src/shell_completion.rs` | Shell completion script generation (bash/zsh/fish).                                                                  |
-| `src/bin/docsgen.rs`      | Docs generator for `docs/reference/*.md` and config docs.                                                            |
+| Path | Purpose |
+| --- | --- |
+| `src/main.rs` | CLI entrypoint, project-root resolution, and top-level command dispatch. |
+| `src/cli.rs` | clap command and flag definitions for the team-mode CLI. |
+| `src/team/mod.rs` | Team lifecycle: init, start, stop, attach, validate, send, merge. |
+| `src/team/config.rs` | `.batty/team_config/team.yaml` parsing, defaults, and validation. |
+| `src/team/hierarchy.rs` | Role expansion, instance naming, and reporting relationships. |
+| `src/team/layout.rs` | tmux pane layout builder for team zones and manager/engineer groupings. |
+| `src/team/daemon.rs` | Background runtime loop: spawn agents, poll state, route messages. |
+| `src/team/inbox.rs` | Maildir inbox storage for inter-role messages. |
+| `src/team/message.rs` | Message types and prompt composition for pane injection. |
+| `src/team/comms.rs` | Outbound channel abstraction for user roles, including Telegram delivery. |
+| `src/team/telegram.rs` | Telegram Bot API client and setup wizard behind `batty telegram`. |
+| `src/team/standup.rs` | Standup report generation from current member state. |
+| `src/team/board.rs` | Board rotation and archive helpers for the shared kanban board. |
+| `src/team/task_loop.rs` | Task claiming, refresh, tests, and merge handoff logic for engineers. |
+| `src/team/events.rs` | Structured team runtime event sink. |
+| `src/team/watcher.rs` | tmux-pane watcher and idle/completion detection. |
+| `src/team/templates/` | Built-in team templates and role prompt scaffolds. |
+| `src/tmux.rs` | tmux command wrapper for sessions, panes, layout, and capability probes. |
+| `src/agent/mod.rs` | `AgentAdapter` trait, registry, and shared spawn contract. |
+| `src/agent/claude.rs` | Claude Code adapter implementation. |
+| `src/agent/codex.rs` | Codex CLI adapter implementation. |
+| `src/prompt/mod.rs` | Prompt detection patterns and ANSI-safe matching helpers. |
+| `src/worktree.rs` | Git worktree creation, reuse, sync, and cleanup helpers. |
+| `src/task/mod.rs` | Task parsing utilities for kanban-backed work items. |
+| `src/events.rs` | Event extraction from captured agent output. |
+| `src/log/mod.rs` | Structured JSONL logging primitives. |
+| `src/paths.rs` | Shared filesystem path helpers under `.batty/`. |
+| `src/config/mod.rs` | Optional `.batty/config.toml` runtime defaults loader. |
+| `src/bin/docsgen.rs` | Generator for `docs/reference/cli.md` and `docs/reference/config.md`. |
 
 ## Key Traits and Types
 
-| Type                                        | Location              | Why it matters                                                                           |
-| ------------------------------------------- | --------------------- | ---------------------------------------------------------------------------------------- |
-| `AgentAdapter` trait                        | `src/agent/mod.rs`    | Adapter contract for any executor CLI (spawn config, prompt patterns, input formatting). |
-| `SpawnConfig`                               | `src/agent/mod.rs`    | Normalized process spawn description used by orchestration.                              |
-| `PromptDetector` + `DetectorEvent`          | `src/detector.rs`     | State machine that turns output/silence into actionable prompt events.                   |
-| `PromptPatterns` + `PromptKind`             | `src/prompt/mod.rs`   | Regex-based prompt classification for Tier 1/Tier 2 routing.                             |
-| `PolicyEngine` + `Decision`                 | `src/policy/mod.rs`   | Maps detected prompts to observe/suggest/act/escalate behavior.                          |
-| `OrchestratorConfig` + `OrchestratorResult` | `src/orchestrator.rs` | Main runtime configuration and session exit outcomes.                                    |
-| `StatusBar` + `StatusIndicator`             | `src/orchestrator.rs` | tmux status rendering for live supervision feedback.                                     |
-| `Tier2Config` + `Tier2Result`               | `src/tier2.rs`        | Supervisor escalation contract and result envelope.                                      |
-| `EventBuffer` + `PipeWatcher`               | `src/events.rs`       | Pipe-pane event ingestion and streaming extraction.                                      |
-| `ProjectConfig`                             | `src/config/mod.rs`   | Full project config model loaded from `.batty/config.toml`.                              |
-| `Task`                                      | `src/task/mod.rs`     | Parsed board task model used during execution/reporting.                                 |
-| `ExecutionLog` + `LogEntry`                 | `src/log/mod.rs`      | Structured JSONL event persistence API.                                                  |
-| `PhaseWorktree`                             | `src/worktree.rs`     | Run-scoped worktree metadata used by `work/resume`.                                      |
-| `CompletionDecision`                        | `src/completion.rs`   | Final completion signal used to stop a phase cleanly.                                    |
-| `TaskDag`                                   | `src/dag.rs`          | Dependency graph for task ordering and ready-set computation.                            |
-| `ParallelScheduler`                         | `src/scheduler.rs`    | DAG-aware scheduler that dispatches tasks to agent slots.                                |
-| `MergeQueue`                                | `src/merge_queue.rs`  | FIFO queue that serializes worktree merges after parallel runs.                          |
-| `ReviewDecision`                            | `src/review.rs`       | Director review outcome (merge / rework / escalate).                                     |
+| Type | Location | Why it matters |
+| --- | --- | --- |
+| `AgentAdapter` | `src/agent/mod.rs` | Contract every supported agent CLI implements. |
+| `SpawnConfig` | `src/agent/mod.rs` | Normalized launch description used by the daemon. |
+| `TeamConfig` | `src/team/config.rs` | Top-level team definition loaded from `team.yaml`. |
+| `RoleDef` | `src/team/config.rs` | Per-role config: prompts, instances, routing, worktree settings. |
+| `ResolvedMember` | `src/team/hierarchy.rs` | Concrete runtime member after role expansion and manager assignment. |
+| `LayoutPlan` | `src/team/layout.rs` | Pane arrangement plan before tmux split commands are applied. |
+| `TeamDaemon` | `src/team/daemon.rs` | Main runtime coordinator for panes, inboxes, standups, and board loop. |
+| `InboxMessage` | `src/team/inbox.rs` | On-disk message unit exchanged between Batty roles. |
+| `ChannelConfig` | `src/team/config.rs` | Delivery config for user-facing channels such as Telegram. |
+| `TelegramBot` | `src/team/telegram.rs` | Native Telegram Bot API client used for polling and outbound messages. |
+| `SessionWatcher` | `src/team/watcher.rs` | Tracks activity, prompts, and completion signals in a tmux pane. |
+| `Task` | `src/task/mod.rs` | Parsed task metadata from the shared board. |
+| `PhaseWorktree` | `src/worktree.rs` | Worktree metadata used for engineer isolation and merge flow. |
+| `LogEntry` | `src/log/mod.rs` | Structured JSONL runtime event persisted for debugging and audits. |
+| `PipeWatcher` | `src/events.rs` | Incremental output reader that extracts structured events from pane logs. |
 
-## Test Coverage Snapshot
+## Contributor Notes
 
-- Current test inventory: `370` tests (`cargo test -- --list`).
-- Core modules include colocated `#[cfg(test)]` suites (detector, orchestrator, tmux, work, config, policy, agent adapters, docsgen, etc.).
-- Tests emphasize:
-  - prompt-detection transitions and fallback behavior
-  - policy decisions and auto-answer routing
-  - tmux command/capability handling
-  - config parsing/default behavior
-  - worktree/install/remove safety paths
+- Most modules carry colocated `#[cfg(test)]` suites; the main risk areas are
+  tmux behavior, layout portability, worktree safety, inbox routing, and
+  Telegram parsing.
+- Docs reference pages are partially generated. Regenerate them with
+  `./scripts/generate-docs.sh` before committing doc-affecting CLI or config changes.
+- The current public runtime is team-oriented. If you find references to the
+  older phase-oriented `batty work` flow, treat them as stale unless the code
+  clearly still supports that path.
 
 ## Adding a New Agent Adapter
 
@@ -77,9 +74,10 @@ Contributor-facing map of Batty source modules.
 1. If needed, override `instruction_candidates` and `wrap_launch_prompt` for agent-specific context handling.
 1. Register the adapter in `adapter_from_name` in `src/agent/mod.rs`.
 1. Add unit tests in the adapter module for:
-   - program/args composition
+   - program and args composition
    - prompt pattern detection
    - input formatting behavior
-1. Validate integration path with:
+1. Validate with:
    - `cargo test`
-   - `batty work <phase> --agent <name>` (or config default override).
+   - `batty init`
+   - `batty start --attach`

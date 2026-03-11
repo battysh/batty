@@ -47,7 +47,7 @@ fn render_cli_reference() -> Result<String> {
     let root_name = root.get_name().to_string();
     render_command_markdown(&root, &[root_name], &mut out)?;
 
-    Ok(out)
+    Ok(format!("{}\n", out.trim_end()))
 }
 
 fn render_command_markdown(
@@ -116,7 +116,7 @@ fn render_config_reference() -> String {
     writeln!(&mut out).expect("write to string");
     writeln!(
         &mut out,
-        "Project configuration is read from `.batty/config.toml`."
+        "Optional runtime defaults are read from `.batty/config.toml` when the file is present. Team topology and day-to-day runtime settings live in `.batty/team_config/team.yaml`."
     )
     .expect("write to string");
     writeln!(&mut out).expect("write to string");
@@ -131,7 +131,7 @@ fn render_config_reference() -> String {
             "defaults.agent",
             "string",
             defaults.defaults.agent.clone(),
-            "Default executor agent used by `batty work` when `--agent` is not set.",
+            "Default agent name for runtime paths that consult `.batty/config.toml`.",
         ),
         (
             "defaults.policy",
@@ -183,7 +183,7 @@ fn render_config_reference() -> String {
             "supervisor.trace_io",
             "boolean",
             defaults.supervisor.trace_io.to_string(),
-            "Log supervisor prompts and responses in orchestrator logs.",
+            "Log supervisor prompts and responses for debugging.",
         ),
         (
             "detector.silence_timeout_secs",
@@ -219,7 +219,7 @@ fn render_config_reference() -> String {
             "policy.auto_answer",
             "table[string -> string]",
             "{}".to_string(),
-            "Prompt-to-answer overrides used by the policy engine.",
+            "Prompt-to-answer overrides for runtime paths that use this config.",
         ),
     ];
 
@@ -305,7 +305,7 @@ fn render_config_reference() -> String {
     writeln!(&mut out, "\"Continue? [y/n]\" = \"y\"").expect("write to string");
     writeln!(&mut out, "```").expect("write to string");
 
-    out
+    format!("{}\n", out.trim_end())
 }
 
 fn policy_name(policy: config::Policy) -> &'static str {

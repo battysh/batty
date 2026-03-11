@@ -54,7 +54,7 @@ impl TmuxCapabilities {
     pub fn remediation_message(&self) -> String {
         format!(
             "tmux capability check failed (detected '{}'). Batty requires working `pipe-pane` support. \
-Install or upgrade tmux (recommended >= 3.2) and re-run `batty work` or `batty resume`.",
+Install or upgrade tmux (recommended >= 3.2) and re-run `batty start`.",
             self.version_raw
         )
     }

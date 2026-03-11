@@ -111,6 +111,25 @@ batty merge eng-1-1                    # attempt merge
 
 If conflicts occur, resolve them manually in the worktree directory, then complete the merge.
 
+## Telegram messages are not arriving
+
+**Cause:** The bot token, allowed user ID, or Telegram chat bootstrap step is incomplete.
+
+Check these in order:
+
+1. Confirm the `user` role in `.batty/team_config/team.yaml` has `channel: telegram`
+   and a `channel_config` block.
+1. If you rely on `BATTY_TELEGRAM_BOT_TOKEN`, verify it is exported in the shell
+   that launches `batty start`.
+1. DM the bot first and send `/start`; Telegram will not let bots initiate a new chat.
+1. Re-run `batty telegram` if you need to refresh the token or allowed user ID.
+1. Restart Batty after changes:
+
+```sh
+batty stop
+batty start
+```
+
 ## Daemon dies unexpectedly
 
 **Cause:** Check the daemon log for errors.

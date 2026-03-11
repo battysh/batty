@@ -27,6 +27,7 @@ Batty is a tmux-native runtime for AI coding teams. Instead of one agent doing e
 ## Quick Start
 
 ```sh
+cargo install kanban-md --locked
 cargo install batty-cli
 cd my-project && batty init
 batty start --attach
@@ -61,6 +62,7 @@ Batty keeps each role in its own tmux pane, watches for idle/completed states, d
 From crates.io:
 
 ```sh
+cargo install kanban-md --locked
 cargo install batty-cli
 ```
 
@@ -140,6 +142,49 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 - `kanban-md` CLI: `cargo install kanban-md --locked`
 - At least one coding agent CLI such as Claude Code, Codex, or Aider
 
+## Telegram Integration
+
+Batty can expose a human endpoint over Telegram through a `user` role. This is
+useful when you want the team to keep running in tmux while you send direction
+or receive updates from your phone.
+
+The fastest path is:
+
+```sh
+batty init --template simple
+batty telegram
+batty stop && batty start
+```
+
+`batty telegram` guides you through:
+
+- creating or reusing a bot token from `@BotFather`
+- discovering your numeric Telegram user ID
+- sending a verification message
+- updating `.batty/team_config/team.yaml` with the Telegram channel config
+
+After setup, the `user` role in `team.yaml` will look like this:
+
+```yaml
+- name: human
+  role_type: user
+  channel: telegram
+  talks_to: [architect]
+  channel_config:
+    provider: telegram
+    target: "123456789"
+    bot_token: "<telegram-bot-token>"
+    allowed_user_ids: [123456789]
+```
+
+Notes:
+
+- You must DM the bot first in Telegram before it can send you messages.
+- `bot_token` can also come from `BATTY_TELEGRAM_BOT_TOKEN` instead of being
+  stored in `team.yaml`.
+- The built-in `simple`, `large`, `software`, and `batty` templates already
+  include a Telegram-ready `user` role.
+
 ## Built with Batty
 
 <p align="center">
@@ -154,7 +199,8 @@ This session shows Batty coordinating a live team in `~/mafia_solver`: the `arch
 
 - [Getting Started](docs/getting-started.md)
 - [CLI Reference](docs/reference/cli.md)
-- [Configuration Reference](docs/reference/config.md)
+- [Runtime Config Reference](docs/reference/config.md)
+- [Module Reference](docs/reference/modules.md)
 - [Architecture](docs/architecture.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Full docs site](https://battysh.github.io/batty/)

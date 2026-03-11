@@ -41,11 +41,12 @@ batty init
 Example output:
 
 ```text
-Initialized team config (4 files):
+Initialized team config (5 files):
   /path/to/my-project/.batty/team_config/team.yaml
   /path/to/my-project/.batty/team_config/architect.md
   /path/to/my-project/.batty/team_config/manager.md
   /path/to/my-project/.batty/team_config/engineer.md
+  /path/to/my-project/.batty/team_config/board
 
 Edit .batty/team_config/team.yaml to configure your team.
 Then run: batty start
@@ -56,6 +57,10 @@ If you want a different scaffold, use `batty init --template solo|pair|simple|sq
 ## Configure
 
 Edit `.batty/team_config/team.yaml`. Start with `name`, `layout`, `roles`, and `use_worktrees`.
+
+Batty also has an optional `.batty/config.toml` for lower-level runtime defaults,
+but team topology, layout, routing, standups, and channel integration all live
+in `team.yaml`.
 
 ```yaml
 name: my-project
@@ -202,13 +207,46 @@ Run `batty attach` to connect.
 
 ## Telegram
 
-If you want a human endpoint over Telegram, add a `user` role with `channel: telegram`, then run:
+If you want a human endpoint over Telegram, use a template that includes a
+`user` role, or add one manually, then run:
 
 ```sh
 batty telegram
 ```
 
+The setup wizard will:
+
+1. Validate your bot token with the Telegram Bot API
+2. Ask for your numeric Telegram user ID
+3. Optionally send a test message
+4. Update `.batty/team_config/team.yaml`
+
+Typical resulting config:
+
+```yaml
+- name: human
+  role_type: user
+  channel: telegram
+  talks_to: [architect]
+  channel_config:
+    provider: telegram
+    target: "123456789"
+    bot_token: "<telegram-bot-token>"
+    allowed_user_ids: [123456789]
+```
+
+If you do not want the token stored in `team.yaml`, set
+`BATTY_TELEGRAM_BOT_TOKEN` in the environment and remove `bot_token` from the
+file.
+
+Restart the daemon after setup:
+
+```sh
+batty stop
+batty start
+```
+
 ## Next Steps
 
-- [Configuration Reference](reference/config.md)
+- [Runtime Config Reference](reference/config.md)
 - [CLI Reference](reference/cli.md)
