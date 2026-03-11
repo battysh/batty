@@ -55,17 +55,17 @@ Fixed build, hardened existing code, synced documentation.
 
 ---
 
-## Next: Autonomous Task Loop
+## Autonomous Task Loop (Done)
 
-Close the end-to-end loop: board task → assign → engineer works → test → report → next task.
+End-to-end loop: board task → assign → engineer works → test → report → next task.
 
-- **Board-driven dispatch** — manager reads kanban board, assigns tasks to idle engineers automatically
-- **Task completion detection** — recognize when an engineer has finished a task (tests pass, code committed)
-- **Test gating** — run `cargo test` (or configured test command) before accepting engineer output
-- **Progress reporting** — automatic status updates from engineer → manager → architect
-- **Failure handling** — reassign failed tasks, escalate persistent failures to manager
+- **Board-driven dispatch** — daemon auto-assigns unclaimed tasks to idle engineers, 10s rate limit, hierarchy-scoped
+- **Task completion detection** — idle-after-working triggers test gating for engineers with active tasks
+- **Test gating** — `cargo test` in engineer worktree; pass → mark done + merge, fail → retry (max 2) → escalate
+- **Progress reporting** — structured summaries flow engineer → manager → architect on completion and escalation
+- **Failure handling** — 2 retries then escalation to manager, task blocked on board, architect notified
 
-**Success criteria:** Given a populated kanban board, the team works through tasks without human intervention. Each completed task passes tests before being marked done.
+**Exit:** 357 tests passing. Given a populated board, the team works through tasks autonomously with test gating and progress reporting.
 
 ---
 
