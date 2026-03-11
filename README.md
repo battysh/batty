@@ -96,12 +96,20 @@ layout:
       split: { horizontal: 3 }
 
 roles:
+  - name: human
+    role_type: user
+    channel: telegram
+    channel_config:
+      target: "<your-telegram-chat-id>"
+      provider: openclaw
+    talks_to: [architect]
+
   - name: architect
     role_type: architect
     agent: claude
     instances: 1
     prompt: architect.md
-    talks_to: [manager]
+    talks_to: [human, manager]
 
   - name: manager
     role_type: manager
@@ -127,7 +135,7 @@ roles:
 |--------------|--------|----------------------------------------------------------|
 | `solo`       | 1      | Single engineer, no hierarchy                            |
 | `pair`       | 2      | Architect + 1 engineer                                   |
-| `simple`     | 5      | Architect + manager + 3 engineers (default)              |
+| `simple`     | 6      | Human + architect + manager + 3 engineers (default)      |
 | `squad`      | 7      | Architect + manager + 5 engineers with layout            |
 | `large`      | 19     | Architect + 3 managers + 15 engineers + Telegram bridge  |
 | `research`   | 10     | PI + 3 sub-leads + 6 researchers                         |

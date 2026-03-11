@@ -108,12 +108,18 @@ pub enum Command {
         shell: CompletionShell,
     },
 
+    /// Set up Telegram bot for human communication
+    Telegram,
+
     /// Internal: run the daemon loop (spawned by `batty start`)
     #[command(hide = true)]
     Daemon {
         /// Project root directory
         #[arg(long)]
         project_root: String,
+        /// Resume agent sessions from a previous run
+        #[arg(long)]
+        resume: bool,
     },
 }
 
@@ -302,6 +308,12 @@ mod tests {
             }
             other => panic!("expected ack command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn telegram_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "telegram"]);
+        assert!(matches!(cli.command, Command::Telegram));
     }
 
     #[test]

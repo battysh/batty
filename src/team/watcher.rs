@@ -173,6 +173,11 @@ impl SessionWatcher {
 /// Check if the captured pane output shows an idle prompt.
 ///
 /// This covers Claude's `❯` prompt, a shell prompt, and Codex's `›` composer.
+///
+/// Claude Code always renders `❯` at the bottom of the screen — even while
+/// actively working.  The reliable differentiator is the status bar at the
+/// very bottom: when Claude is processing, it appends `· esc to interrupt`.
+/// If we detect that indicator we return `false` immediately.
 fn is_at_agent_prompt(capture: &str) -> bool {
     let trimmed: Vec<&str> = capture
         .lines()
@@ -180,6 +185,13 @@ fn is_at_agent_prompt(capture: &str) -> bool {
         .filter(|l| !l.trim().is_empty())
         .take(5)
         .collect();
+
+    // Claude Code shows "esc to interrupt" in the bottom status bar while working
+    for line in &trimmed {
+        if line.contains("esc to interrupt") {
+            return false;
+        }
+    }
 
     for line in &trimmed {
         let l = line.trim();
@@ -406,7 +418,8 @@ mod tests {
 
     #[test]
     fn detects_codex_prompt() {
-        let capture = "› Improve documentation in @filename\n\n  gpt-5.4 high · 84% left · ~/repo\n";
+        let capture =
+            "› Improve documentation in @filename\n\n  gpt-5.4 high · 84% left · ~/repo\n";
         assert!(is_at_agent_prompt(capture));
     }
 
@@ -414,6 +427,33 @@ mod tests {
     fn no_prompt_when_working() {
         let capture = "⏺ Bash(python -m pytest)\n  ⎿  running tests...\n";
         assert!(!is_at_agent_prompt(capture));
+    }
+
+    #[test]
+    fn claude_working_not_idle_despite_prompt_visible() {
+        // Claude Code always renders ❯ at the bottom — but shows
+        // "esc to interrupt" in the status bar while processing.
+        let capture = concat!(
+            "✻ Slithering… (4m 12s)\n",
+            "  ⎿  Tip: Use /btw to ask a quick side question\n",
+            "────────────────────────────\n",
+            "❯ \n",
+            "────────────────────────────\n",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt\n",
+        );
+        assert!(!is_at_agent_prompt(capture));
+    }
+
+    #[test]
+    fn claude_idle_detected_without_esc_to_interrupt() {
+        let capture = concat!(
+            "⏺ Done.\n",
+            "────────────────────────────\n",
+            "❯ \n",
+            "────────────────────────────\n",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
+        );
+        assert!(is_at_agent_prompt(capture));
     }
 
     #[test]
@@ -443,7 +483,12 @@ mod tests {
         let session_dir = sessions_root.join("2026").join("03").join("10");
         std::fs::create_dir_all(&session_dir).unwrap();
 
-        let wanted_cwd = tmp.path().join("repo").join(".batty").join("codex-context").join("architect");
+        let wanted_cwd = tmp
+            .path()
+            .join("repo")
+            .join(".batty")
+            .join("codex-context")
+            .join("architect");
         let other_cwd = tmp.path().join("repo");
         let wanted_file = session_dir.join("wanted.jsonl");
         let other_file = session_dir.join("other.jsonl");
@@ -502,7 +547,12 @@ mod tests {
         let session_dir = sessions_root.join("2026").join("03").join("10");
         std::fs::create_dir_all(&session_dir).unwrap();
 
-        let cwd = tmp.path().join("repo").join(".batty").join("codex-context").join("eng-1");
+        let cwd = tmp
+            .path()
+            .join("repo")
+            .join(".batty")
+            .join("codex-context")
+            .join("eng-1");
         let session_file = session_dir.join("session.jsonl");
         std::fs::write(
             &session_file,
@@ -529,11 +579,10 @@ mod tests {
             }
         }
 
-        assert!(!poll_codex_session_file(
-            tracker.session_file.as_ref().unwrap(),
-            &mut tracker.offset
-        )
-        .unwrap());
+        assert!(
+            !poll_codex_session_file(tracker.session_file.as_ref().unwrap(), &mut tracker.offset)
+                .unwrap()
+        );
 
         let mut handle = std::fs::OpenOptions::new()
             .append(true)
@@ -546,10 +595,9 @@ mod tests {
         .unwrap();
         handle.flush().unwrap();
 
-        assert!(poll_codex_session_file(
-            tracker.session_file.as_ref().unwrap(),
-            &mut tracker.offset
-        )
-        .unwrap());
+        assert!(
+            poll_codex_session_file(tracker.session_file.as_ref().unwrap(), &mut tracker.offset)
+                .unwrap()
+        );
     }
 }

@@ -2,143 +2,93 @@
 
 ## Thesis
 
-Developers need a workflow model for building with agents: structured phases, supervised execution, quality gates, audit trails. Batty implements this model on top of tmux.
+Developers need a way to run teams of AI agents that coordinate, communicate, and ship code autonomously. Batty implements this as a hierarchical agent command system on top of tmux.
 
 ## Principles
 
 - tmux is the runtime. Not a stopgap — the permanent architecture.
 - Compose, don't monolith. tmux + kanban-md + BYO agents.
-- Ship fast. Validate with real users before adding complexity.
+- Ship fast. Validate with real projects before adding complexity.
 - Markdown as backend. Files in, files out, git tracks everything.
+- Hierarchy creates focus. Architect thinks, manager coordinates, engineers build.
 
 ---
 
-## Phase 1: Core Agent Runner (Done)
+## Historical: Phase-Based System (Complete)
 
-`batty work <phase>` — Rust CLI that reads a kanban board, spawns an agent in a PTY, supervises the session. Policy engine, prompt detection, test gates, execution logging.
+The original Batty was a phase-based execution system (`batty work <phase>`) with supervisor/executor/director layers. Phases 1 through 4 shipped sequentially, covering: core agent runner, tmux supervisor, prompt detection, test gates, worktree isolation, runtime hardening, DAG scheduling, parallel execution, and merge queues.
 
-All 11 tasks done. Current project test inventory is 370 tests.
-
----
-
-## Phase 2: tmux-based Intelligent Supervisor (Done)
-
-`batty work phase-1` launches a tmux session. Executor in main pane, orchestrator log in bottom pane, status in tmux status bar.
-
-- **tmux session lifecycle** — create, attach, pipe-pane, send-keys, reconnect
-- **Event extraction** — read piped output, extract structured events via regex
-- **Prompt detection** — silence + pattern heuristic = executor is asking something
-- **Tier 1 auto-answer** — regex match → send-keys (instant, ~70-80% of prompts)
-- **Tier 2 supervisor agent** — API call with project context → send-keys (on-demand, stateless)
-- **tmux status bar** — phase/task/progress/supervisor state
-- **Orchestrator log pane** — bottom split, tail -f on event log
-- **Stuck detection** — looping/stalled/crashed → nudge or escalate
-- **Human override** — human types in tmux, supervisor steps back
-
-**Exit:** Executor works through board. Routine prompts auto-answered. Real questions answered by supervisor. Status bar + orchestrator pane show everything. Session survives disconnect.
+This system was fully replaced by the team-based architecture in a ground-up rewrite. The phase-based code is gone; the lessons remain.
 
 ---
 
-## Phase 2.4: Supervision Harness Validation (Done)
+## Team Architecture: Foundation (Done)
 
-Make supervisor behavior provable before runtime hardening.
+Ground-up rewrite to hierarchical agent teams.
 
-- **Deterministic harness contract** — scenario matrix with expected supervisor outcomes
-- **Real tmux invariants** — executor pane targeting and persistent UI checks
-- **Mock matrix in tmux** — deterministic executor/supervisor fixtures
-- **Real supervisor with mocked executor** — Claude + Codex integration checks
-- **Real supervisor+executor smoke runs** — opt-in end-to-end validation paths
-- **Prompt catalog + runbook** — stable prompts, env flags, and pass/fail criteria
+- **YAML-defined org chart** — architect, managers, engineers with configurable instances
+- **CLI rewrite** — `init`, `start`, `stop`, `attach`, `status`, `send`, `inbox`, `assign`, `validate`, `config`, `merge`, `completions`
+- **tmux layout builder** — automatic pane creation and zone-based grouping
+- **Daemon** — background process for message routing, pane monitoring, status tracking
+- **Watcher system** — per-agent status detection (idle, working, waiting) via pane output analysis
+- **Message routing** — inbox-based delivery via tmux paste-buffer injection
+- **Event logging** — all team events persisted to JSONL
+- **Prompt templates** — role-specific system prompts bundled via `include_str!()`
+- **Telegram bridge** — remote monitoring and message relay via Telegram bot
+- **Dogfood** — Batty's own development runs on Batty teams
 
-**Exit:** Harness suite passes in real tmux, with documented real-agent integration and smoke tests.
-
----
-
-## Phase 2.5: Runtime Hardening + Dogfood (Done)
-
-Run Batty on its own hardening phase and close the reliability gaps that block day-to-day use.
-
-- **Worktree isolation first** — every phase run uses a worktree before AI review exists
-- **Prompt composition** — deterministic launch context: `CLAUDE.md` + `PHASE.md` + board state + config
-- **Completion detection contract** — define exactly when a phase is complete
-- **Mid-phase recovery** — Batty reconnects and resumes supervision after process crash
-- **tmux capability checks** — detect version/features and degrade gracefully
-- **Dogfood gate** — Batty executes phase-2.5 end-to-end and merges with review
-
-**Exit:** We complete a real Batty development phase using Batty itself.
+**Exit:** Team spawns, communicates, and operates on real projects. Telegram bridge enables remote oversight.
 
 ---
 
-## Phase 2.6: Backlog Rollover from 2.5 (Done)
+## Current: Stabilization (In Progress)
 
-Close out the rolled-over reliability and developer-experience work from 2.5.
+Fix broken build, harden what exists, sync documentation.
 
-- **Dogfood completion** — Batty executes phase-2.6 against its own board
-- **Install workflow** — `batty install` for Claude/Codex steering + skills
-- **Config output polish** — improved `batty config` output (including JSON mode)
-- **Build hygiene** — compiler warning cleanup
-- **Lint workflow** — `make lint` / `make lint-fix` and CI checks
+- **Build fix** — resolve test compilation errors from `write_launch_script` parameter mismatch
+- **Documentation sync** — update README, CLAUDE.md, and planning docs to match team architecture
+- **Test coverage** — ensure all team modules have adequate unit tests
+- **Template hardening** — battle-test prompt templates against real multi-agent sessions
 
-**Exit:** Remaining 2.5 backlog items are merged and stable.
-
----
-
-## Phase 2.7: Minor Improvements (Done)
-
-Ship low-risk quality and workflow improvements after hardening.
-
-- **Supervisor hotkeys** — pause/resume control in tmux sessions
-- **Dangerous-mode wrappers** — safer command execution boundaries
-- **Tier 2 context snapshots** — persisted supervisor context for debugging/audit
-- **Secret redaction guardrail** — redact likely secret-bearing lines before persistence
-- **Docs pipeline improvements** — generated docs and consistency cleanups
-
-**Exit:** Minor improvements are merged without regressions in core workflows.
+**Exit:** Clean build, all tests pass, docs match reality.
 
 ---
 
-## Phase 3A: Sequencer + Human Review Gate (Done)
+## Next: Autonomous Task Loop
 
-Separate phase chaining from AI evaluation so we can ship useful automation earlier.
+Close the end-to-end loop: board task → assign → engineer works → test → report → next task.
 
-- **`batty work all`** — phase sequencer, runs phases in order
-- **Phase summary + review packet** — standardized artifacts for human review
-- **Human review gate** — merge / rework / escalate decisions without director agent
-- **Rework loop** — rerun phase with reviewer feedback
-- **Merge + cleanup** — merge, test, clean worktree
-- **Phase ordering and dependency handling** — deterministic sequencing from board metadata
+- **Board-driven dispatch** — manager reads kanban board, assigns tasks to idle engineers automatically
+- **Task completion detection** — recognize when an engineer has finished a task (tests pass, code committed)
+- **Test gating** — run `cargo test` (or configured test command) before accepting engineer output
+- **Progress reporting** — automatic status updates from engineer → manager → architect
+- **Failure handling** — reassign failed tasks, escalate persistent failures to manager
 
-**Exit:** `batty work all` runs multiple phases safely with human review and rework loop.
-
----
-
-## Phase 3B: AI Director Review (Done)
-
-Add automated review once the human-gated sequencer is stable.
-
-- **Director review agent** — diff + summary + logs → merge / rework / escalate
-- **Director decision policy** — explicit autonomy tier and escalation rules
-- **Director rework orchestration** — automatic re-run after rework decision
-- **Audit trail** — all director decisions logged and reviewable
-
-**Exit:** Director can reliably review and route decisions with human override.
+**Success criteria:** Given a populated kanban board, the team works through tasks without human intervention. Each completed task passes tests before being marked done.
 
 ---
 
-## Phase 4: Parallel DAG Scheduler, Merge Queue, Ship (Done)
+## Future: Merge and Ship
 
-`batty work <phase> --parallel N` — DAG-aware parallel agent execution.
+Orchestrate code integration from multiple engineers working in parallel.
 
-- **Task dependency DAG** — topological sort with cycle detection from task frontmatter
-- **Parallel agent spawner** — per-agent worktrees, tmux windows, slot management
-- **DAG scheduler** — dispatches ready tasks to idle agents as dependencies complete
-- **Merge serialization queue** — FIFO merge with rebase, conflict detection, retry
-- **Parallel status bar** — multi-agent progress in tmux status line
-- **Shell completions** — bash/zsh/fish via `batty completions`
-- **`batty merge` command** — orchestrated worktree merge back into main
-- **Board sync** — uncommitted kanban changes propagated into worktrees
+- **Worktree isolation** — each engineer works in a dedicated git worktree
+- **Merge queue** — serialized merges from engineer branches into main
+- **Conflict resolution** — detect merge conflicts, reassign to engineer for resolution
+- **Branch cleanup** — automatic worktree teardown after successful merge
 
-**Exit:** Parallel execution works end-to-end with DAG scheduling and serialized merges. Phase 5 (polish) consolidated here — completions, README, and `cargo install batty-cli` are shipped.
+**Success criteria:** Multiple engineers work in parallel on different tasks. Their code merges cleanly into main via an automated queue.
+
+---
+
+## Future: Intelligence Layer
+
+Make the team smarter over time.
+
+- **Standup summaries** — periodic team status digests sent to architect and user
+- **Retrospectives** — post-project analysis of what worked and what didn't
+- **Prompt evolution** — templates improve based on observed failure patterns
+- **Cross-project learning** — reusable team configurations for different project types
 
 ---
 
@@ -148,30 +98,16 @@ Add automated review once the human-gated sequencer is stable.
 |---|---|
 | Core | Rust (clap + tokio) |
 | Runtime | tmux |
-| Tasks | kanban-md |
-| Config | TOML |
+| Config | YAML (team) + TOML (project) |
+| Tasks | Markdown kanban board |
 | Logs | JSON lines |
+| Comms | Telegram (optional) |
 
 ---
 
 ## Risks
 
-1. **Prompt detection** — parsing raw PTY output. Mitigated by two-tier architecture (regex + supervisor agent).
-2. **Unsafe automation** — mitigated by policy tiers (observe → suggest → act) and audit logs.
-3. **tmux compatibility** — tmux behavior differs by version. Mitigated by capability detection and compatibility paths.
-4. **Adoption gap** — claims about speed and orchestration must be measured. Mitigated by explicit dogfood and user benchmarks.
-
----
-
-## Scope Cutting
-
-All planned phases are complete. Phase 5 was consolidated into Phase 4.
-
-Original cut priority (preserved for reference):
-
-1. Phase 5 (polish) — shipped as part of Phase 4.
-2. Phase 4 (parallel) — done.
-3. Phase 3B (AI director) — done.
-4. Phase 3A rework automation — done.
-5. Phase 2 supervisor depth — done.
-6. Phase 1 — **never cut.**
+1. **Agent reliability** — coding agents produce inconsistent output. Mitigated by test gating and manager review.
+2. **Message delivery** — tmux paste injection can fail if pane is in wrong state. Mitigated by daemon retry and status checking.
+3. **Context limits** — long-running agents hit context windows. Mitigated by focused task scoping and fresh agent sessions per task.
+4. **Coordination overhead** — multi-agent communication adds latency. Mitigated by keeping the hierarchy shallow and messages concise.

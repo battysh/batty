@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use tracing::{debug, info};
 
 use super::config::{LayoutConfig, RoleType};
@@ -140,7 +140,10 @@ fn split_zone_subgroups<'a>(zone_members: &'a [&MemberInstance]) -> Vec<Vec<&'a 
     let mut groups: Vec<(String, Vec<&MemberInstance>)> = Vec::new();
     for member in zone_members {
         let parent = member.reports_to.clone().unwrap_or_default();
-        if let Some((_, grouped)) = groups.iter_mut().find(|(reports_to, _)| *reports_to == parent) {
+        if let Some((_, grouped)) = groups
+            .iter_mut()
+            .find(|(reports_to, _)| *reports_to == parent)
+        {
             grouped.push(*member);
         } else {
             groups.push((parent, vec![*member]));
@@ -159,8 +162,7 @@ fn split_subgroup_columns(
 
     for subgroup_idx in 1..subgroups.len() {
         let right_weight: usize = subgroups[subgroup_idx..].iter().map(Vec::len).sum();
-        let split_pct =
-            ((right_weight as f64 / remaining_weight as f64) * 100.0).round() as u32;
+        let split_pct = ((right_weight as f64 / remaining_weight as f64) * 100.0).round() as u32;
         let split_pct = split_pct.max(10).min(90);
         let split_from = panes.last().unwrap();
         let pane_id = tmux::split_window_horizontal(split_from, split_pct)?;

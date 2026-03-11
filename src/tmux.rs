@@ -586,13 +586,11 @@ pub fn list_sessions_with_prefix(prefix: &str) -> Vec<String> {
         .output();
 
     match output {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .filter(|name| name.starts_with(prefix))
-                .map(|s| s.to_string())
-                .collect()
-        }
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|name| name.starts_with(prefix))
+            .map(|s| s.to_string())
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -1006,7 +1004,12 @@ pub fn load_buffer(content: &str) -> Result<()> {
         .with_context(|| format!("failed to write buffer file {}", tmp.display()))?;
 
     let output = Command::new("tmux")
-        .args(["load-buffer", "-b", BATTY_BUFFER_NAME, &tmp.to_string_lossy()])
+        .args([
+            "load-buffer",
+            "-b",
+            BATTY_BUFFER_NAME,
+            &tmp.to_string_lossy(),
+        ])
         .output()
         .context("failed to run tmux load-buffer")?;
 

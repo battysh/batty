@@ -99,6 +99,13 @@ pub struct RoleDef {
 pub struct ChannelConfig {
     pub target: String,
     pub provider: String,
+    /// Telegram bot token for native API (optional; falls back to provider CLI).
+    /// Can also be set via `BATTY_TELEGRAM_BOT_TOKEN` env var.
+    #[serde(default)]
+    pub bot_token: Option<String>,
+    /// Telegram user IDs allowed to send messages (access control).
+    #[serde(default)]
+    pub allowed_user_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

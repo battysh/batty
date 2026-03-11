@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tracing::{debug, info, warn};
 
 use super::board;
@@ -32,14 +32,21 @@ pub struct DaemonConfig {
     pub pane_map: HashMap<String, String>,
 }
 
-/// A scheduled nudge for a member: text to inject on a timer.
+/// A scheduled nudge for a member: text to inject after sustained idleness.
+///
+/// The countdown starts when the member transitions from working to idle.
+/// If the member starts working again before the timer fires, the countdown
+/// resets. The nudge only fires once per idle period — the member must go
+/// through working→idle again to start a new countdown.
 struct NudgeSchedule {
     /// The nudge text extracted from the `## Nudge` section of the prompt .md.
     text: String,
-    /// How often to inject it.
+    /// How long the member must stay idle before the nudge fires.
     interval: Duration,
-    /// When it was last injected.
-    last_fired: Instant,
+    /// When the member last became idle (`None` if currently working).
+    idle_since: Option<Instant>,
+    /// Whether the nudge has already fired for the current idle period.
+    fired_this_idle: bool,
 }
 
 /// The running team daemon.
@@ -49,6 +56,7 @@ pub struct TeamDaemon {
     states: HashMap<String, MemberState>,
     channels: HashMap<String, Box<dyn Channel>>,
     nudges: HashMap<String, NudgeSchedule>,
+    telegram_bot: Option<super::telegram::TelegramBot>,
     event_sink: EventSink,
     last_standup: HashMap<String, Instant>,
     last_board_rotation: Instant,
@@ -94,6 +102,15 @@ impl TeamDaemon {
             }
         }
 
+        // Create Telegram bot for inbound polling (if configured)
+        let telegram_bot = config
+            .team_config
+            .roles
+            .iter()
+            .find(|r| r.role_type == RoleType::User && r.channel.as_deref() == Some("telegram"))
+            .and_then(|r| r.channel_config.as_ref())
+            .and_then(super::telegram::TelegramBot::from_config);
+
         let states = HashMap::new();
 
         // Build nudge schedules from role configs + prompt files
@@ -125,7 +142,9 @@ impl TeamDaemon {
                             NudgeSchedule {
                                 text: nudge_text.clone(),
                                 interval: Duration::from_secs(interval_secs),
-                                last_fired: Instant::now(),
+                                // All roles start idle, so begin the countdown
+                                idle_since: Some(Instant::now()),
+                                fired_this_idle: false,
                             },
                         );
                     }
@@ -139,6 +158,7 @@ impl TeamDaemon {
             states,
             channels,
             nudges,
+            telegram_bot,
             event_sink,
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
@@ -147,12 +167,15 @@ impl TeamDaemon {
     }
 
     /// Run the daemon loop. Blocks until the session is killed or an error occurs.
-    pub fn run(&mut self) -> Result<()> {
+    ///
+    /// If `resume` is true, agents are launched with session-resume flags
+    /// (`claude --continue` / `codex resume --last`) instead of fresh starts.
+    pub fn run(&mut self, resume: bool) -> Result<()> {
         self.event_sink.emit(TeamEvent::daemon_started())?;
-        info!(session = %self.config.session, "daemon started");
+        info!(session = %self.config.session, resume, "daemon started");
 
         // Spawn agents in all panes
-        self.spawn_all_agents()?;
+        self.spawn_all_agents(resume)?;
 
         // Main polling loop
         loop {
@@ -164,6 +187,8 @@ impl TeamDaemon {
             self.poll_watchers()?;
             self.drain_legacy_command_queue()?;
             self.deliver_inbox_messages()?;
+            self.poll_telegram()?;
+            self.deliver_user_inbox()?;
             self.maybe_fire_nudges()?;
             self.maybe_generate_standup()?;
             self.maybe_rotate_board()?;
@@ -178,7 +203,7 @@ impl TeamDaemon {
     }
 
     /// Spawn the correct agent in each member's pane.
-    fn spawn_all_agents(&mut self) -> Result<()> {
+    fn spawn_all_agents(&mut self, resume: bool) -> Result<()> {
         let team_config_dir = self.config.project_root.join(".batty").join("team_config");
 
         // Ensure inboxes exist for all members
@@ -238,9 +263,10 @@ impl TeamDaemon {
                 &work_dir,
                 &self.config.project_root,
                 idle,
+                resume,
             )?;
 
-            debug!(member = %member.name, agent = agent_name, idle, "spawning agent");
+            debug!(member = %member.name, agent = agent_name, idle, resume, "spawning agent");
             tmux::send_keys(pane_id, &short_cmd, true)?;
 
             let initial_state = if idle {
@@ -313,6 +339,9 @@ impl TeamDaemon {
                     if prev_state != Some(member_state) {
                         self.states.insert(name.clone(), member_state);
 
+                        // Update nudge countdown on state transitions
+                        self.update_nudge_for_state(name, member_state);
+
                         match member_state {
                             MemberState::Completed => {
                                 info!(member = %name, "detected completion");
@@ -370,12 +399,13 @@ impl TeamDaemon {
                 .emit(TeamEvent::message_routed(member_name, &mgr_name))?;
         }
 
-        // Mark as idle, deactivate watcher
+        // Mark as idle, deactivate watcher, start nudge countdown
         self.states
             .insert(member_name.to_string(), MemberState::Idle);
         if let Some(watcher) = self.watchers.get_mut(member_name) {
             watcher.deactivate();
         }
+        self.update_nudge_for_state(member_name, MemberState::Idle);
 
         Ok(())
     }
@@ -386,6 +416,7 @@ impl TeamDaemon {
         if let Some(watcher) = self.watchers.get_mut(member_name) {
             watcher.activate();
         }
+        self.update_nudge_for_state(member_name, MemberState::Working);
     }
 
     /// Handle a crashed member — restart if possible.
@@ -403,12 +434,13 @@ impl TeamDaemon {
         self.event_sink
             .emit(TeamEvent::member_crashed(member_name, true))?;
 
-        // Reset to idle — will be reassigned
+        // Reset to idle — will be reassigned, start nudge countdown
         self.states
             .insert(member_name.to_string(), MemberState::Idle);
         if let Some(watcher) = self.watchers.get_mut(member_name) {
             watcher.deactivate();
         }
+        self.update_nudge_for_state(member_name, MemberState::Idle);
 
         Ok(())
     }
@@ -589,7 +621,7 @@ impl TeamDaemon {
         let role_context =
             member.map(|m| strip_nudge_section(&self.load_prompt(m, &team_config_dir)));
 
-        // Wait for agent to reset, then launch with new task
+        // Wait for agent to reset, then launch with new task (never resume for assignments)
         std::thread::sleep(Duration::from_secs(1));
         let short_cmd = write_launch_script(
             engineer,
@@ -598,6 +630,7 @@ impl TeamDaemon {
             role_context.as_deref(),
             &work_dir,
             &self.config.project_root,
+            false,
             false,
         )?;
         tmux::send_keys(&pane_id, &short_cmd, true)?;
@@ -637,13 +670,21 @@ impl TeamDaemon {
             };
 
             let nudge_str = if let Some(schedule) = self.nudges.get(&member.name) {
-                let elapsed = schedule.last_fired.elapsed();
-                if elapsed < schedule.interval {
-                    let remaining = schedule.interval - elapsed;
-                    let mins = remaining.as_secs() / 60;
-                    let secs = remaining.as_secs() % 60;
-                    format!(" #[fg=magenta]nudge {mins}:{secs:02}#[default]")
+                if schedule.fired_this_idle {
+                    // Already fired this idle period — no countdown
+                    String::new()
+                } else if let Some(idle_since) = schedule.idle_since {
+                    let elapsed = idle_since.elapsed();
+                    if elapsed < schedule.interval {
+                        let remaining = schedule.interval - elapsed;
+                        let mins = remaining.as_secs() / 60;
+                        let secs = remaining.as_secs() % 60;
+                        format!(" #[fg=magenta]nudge {mins}:{secs:02}#[default]")
+                    } else {
+                        " #[fg=magenta]nudge now#[default]".to_string()
+                    }
                 } else {
+                    // Working — no countdown shown
                     String::new()
                 }
             } else {
@@ -694,25 +735,62 @@ impl TeamDaemon {
         }
     }
 
-    /// Fire any nudges whose interval has elapsed.
+    /// Update the nudge countdown when a member's state changes.
+    ///
+    /// - Transition to idle/completed: start the countdown.
+    /// - Transition to working: clear the countdown (member is active).
+    fn update_nudge_for_state(&mut self, member_name: &str, new_state: MemberState) {
+        if let Some(schedule) = self.nudges.get_mut(member_name) {
+            match new_state {
+                MemberState::Idle | MemberState::Completed => {
+                    if schedule.idle_since.is_none() {
+                        schedule.idle_since = Some(Instant::now());
+                        schedule.fired_this_idle = false;
+                    }
+                }
+                MemberState::Working => {
+                    schedule.idle_since = None;
+                    schedule.fired_this_idle = false;
+                }
+                MemberState::Crashed => {
+                    // Treat crash like idle — the agent is stuck
+                    if schedule.idle_since.is_none() {
+                        schedule.idle_since = Some(Instant::now());
+                        schedule.fired_this_idle = false;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Fire nudges for members that have been idle long enough.
+    ///
+    /// The nudge only fires once per idle period. The member must transition
+    /// back to working and then to idle again before a new nudge can fire.
     fn maybe_fire_nudges(&mut self) -> Result<()> {
         let member_names: Vec<String> = self.nudges.keys().cloned().collect();
 
         for name in member_names {
             let fire = {
                 let schedule = &self.nudges[&name];
-                schedule.last_fired.elapsed() >= schedule.interval
+                if schedule.fired_this_idle {
+                    false
+                } else if let Some(idle_since) = schedule.idle_since {
+                    idle_since.elapsed() >= schedule.interval
+                } else {
+                    false // currently working — no nudge
+                }
             };
 
             if fire {
                 if let Some(pane_id) = self.config.pane_map.get(&name) {
                     let text = self.nudges[&name].text.clone();
-                    info!(member = %name, "firing nudge");
+                    info!(member = %name, "firing nudge (idle timeout)");
                     message::inject_message(pane_id, "daemon", &text)?;
                     self.event_sink
                         .emit(TeamEvent::message_routed("daemon", &name))?;
                 }
-                self.nudges.get_mut(&name).unwrap().last_fired = Instant::now();
+                self.nudges.get_mut(&name).unwrap().fired_this_idle = true;
             }
         }
 
@@ -839,6 +917,117 @@ impl TeamDaemon {
         Ok(())
     }
 
+    /// Poll Telegram for inbound messages from the human user.
+    /// Routes them as inbox messages from:human to the user role's talks_to targets.
+    fn poll_telegram(&mut self) -> Result<()> {
+        let Some(bot) = &mut self.telegram_bot else {
+            return Ok(());
+        };
+
+        let messages = match bot.poll_updates() {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                debug!(error = %e, "telegram poll failed");
+                return Ok(());
+            }
+        };
+
+        if messages.is_empty() {
+            return Ok(());
+        }
+
+        let root = inbox::inboxes_root(&self.config.project_root);
+
+        // Find the user role's talks_to targets
+        let targets: Vec<String> = self
+            .config
+            .team_config
+            .roles
+            .iter()
+            .find(|r| r.role_type == RoleType::User)
+            .map(|r| r.talks_to.clone())
+            .unwrap_or_default();
+
+        for msg in messages {
+            info!(
+                from_user = msg.from_user_id,
+                text_len = msg.text.len(),
+                "telegram inbound"
+            );
+
+            // Route to each talks_to target (typically just "architect")
+            for target in &targets {
+                let inbox_msg = inbox::InboxMessage::new_send("human", target, &msg.text);
+                if let Err(e) = inbox::deliver_to_inbox(&root, &inbox_msg) {
+                    warn!(to = %target, error = %e, "failed to deliver telegram message to inbox");
+                }
+            }
+
+            self.event_sink
+                .emit(TeamEvent::message_routed("human", "telegram"))?;
+        }
+
+        Ok(())
+    }
+
+    /// Deliver pending messages in user-role inboxes via their channel.
+    /// This handles outbound messages from agents TO the human user.
+    fn deliver_user_inbox(&mut self) -> Result<()> {
+        let root = inbox::inboxes_root(&self.config.project_root);
+
+        // Find user roles (they have channels, not panes)
+        let user_roles: Vec<String> = self
+            .config
+            .team_config
+            .roles
+            .iter()
+            .filter(|r| r.role_type == RoleType::User)
+            .map(|r| r.name.clone())
+            .collect();
+
+        for user_name in &user_roles {
+            let messages = match inbox::pending_messages(&root, user_name) {
+                Ok(msgs) => msgs,
+                Err(e) => {
+                    debug!(user = %user_name, error = %e, "failed to read user inbox");
+                    continue;
+                }
+            };
+
+            if messages.is_empty() {
+                continue;
+            }
+
+            let channel = match self.channels.get(user_name) {
+                Some(ch) => ch,
+                None => {
+                    debug!(user = %user_name, "no channel for user role");
+                    continue;
+                }
+            };
+
+            for msg in &messages {
+                info!(from = %msg.from, to = %user_name, id = %msg.id, "delivering to user channel");
+
+                let formatted = format!("--- Message from {} ---\n{}", msg.from, msg.body);
+                if let Err(e) = channel.send(&formatted) {
+                    warn!(to = %user_name, error = %e, "failed to send via channel");
+                    // Don't mark as delivered on failure — retry next cycle
+                    continue;
+                }
+
+                if let Err(e) = inbox::mark_delivered(&root, user_name, &msg.id) {
+                    warn!(user = %user_name, id = %msg.id, error = %e, "failed to mark delivered");
+                }
+
+                self.event_sink
+                    .emit(TeamEvent::message_routed(&msg.from, user_name))?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Resolve a member instance name to its role definition name.
     fn resolve_role_name(&self, member_name: &str) -> String {
         if member_name == "human" || member_name == "daemon" {
@@ -881,11 +1070,7 @@ fn extract_nudge_section(prompt_path: &Path) -> Option<String> {
     }
 
     let text = lines.join("\n").trim().to_string();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    if text.is_empty() { None } else { Some(text) }
 }
 
 /// Strip the `## Nudge` section from prompt text so it's not sent to the agent.
@@ -931,6 +1116,7 @@ fn write_launch_script(
     work_dir: &Path,
     project_root: &Path,
     idle: bool,
+    resume: bool,
 ) -> Result<String> {
     let script_path = std::env::temp_dir().join(format!("batty-launch-{member_name}.sh"));
     let escaped_prompt = prompt.replace('\'', "'\\''");
@@ -942,15 +1128,23 @@ fn write_launch_script(
 
     let agent_cmd = match agent_name {
         "codex" | "codex-cli" => {
-            let prefix = "exec codex --dangerously-bypass-approvals-and-sandbox";
-            if idle {
-                prefix.to_string()
+            if resume {
+                // Resume the most recent Codex session in this working directory
+                "exec codex resume --last --dangerously-bypass-approvals-and-sandbox".to_string()
             } else {
-                format!("{prefix} '{escaped_prompt}'")
+                let prefix = "exec codex --dangerously-bypass-approvals-and-sandbox";
+                if idle {
+                    prefix.to_string()
+                } else {
+                    format!("{prefix} '{escaped_prompt}'")
+                }
             }
         }
         _ => {
-            if idle {
+            if resume {
+                // Resume the most recent Claude session in this working directory
+                "exec claude --dangerously-skip-permissions --continue".to_string()
+            } else if idle {
                 format!(
                     "exec claude --dangerously-skip-permissions --append-system-prompt '{escaped_prompt}'"
                 )
@@ -1220,7 +1414,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use crate::team::config::{BoardConfig, StandupConfig};
+    use crate::team::config::{BoardConfig, ChannelConfig, RoleDef, StandupConfig};
     use crate::team::events::EventSink;
     use crate::team::watcher::WatcherState;
 
@@ -1233,6 +1427,7 @@ mod tests {
             None,
             Path::new("/project"),
             Path::new("/project"),
+            false,
             false,
         )
         .unwrap();
@@ -1253,6 +1448,7 @@ mod tests {
             Path::new("/project"),
             Path::new("/project"),
             true,
+            false,
         )
         .unwrap();
         assert!(cmd.contains("batty-launch-mgr-1.sh"));
@@ -1276,6 +1472,7 @@ mod tests {
             &work_dir,
             tmp.path(),
             true,
+            false,
         )
         .unwrap();
         let script_path = std::env::temp_dir().join("batty-launch-eng-1.sh");
@@ -1305,6 +1502,7 @@ mod tests {
             &work_dir,
             tmp.path(),
             false,
+            false,
         )
         .unwrap();
         assert!(cmd.contains("batty-launch-codex-active-test.sh"));
@@ -1316,8 +1514,10 @@ mod tests {
             .join("codex-active-test");
         let agents_path = context_dir.join("AGENTS.md");
         assert!(content.contains(&format!("cd '{}'", context_dir.display())));
-        assert!(content
-            .contains("exec codex --dangerously-bypass-approvals-and-sandbox 'work the task'"));
+        assert!(
+            content
+                .contains("exec codex --dangerously-bypass-approvals-and-sandbox 'work the task'")
+        );
         let agents = std::fs::read_to_string(&agents_path).unwrap();
         assert!(agents.contains("role context"));
     }
@@ -1336,6 +1536,7 @@ mod tests {
             None,
             Path::new("/tmp"),
             Path::new("/tmp"),
+            false,
             false,
         )
         .unwrap();
@@ -1417,6 +1618,7 @@ mod tests {
             states: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
+            telegram_bot: None,
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
@@ -1425,13 +1627,89 @@ mod tests {
 
         daemon.mark_member_working("architect");
 
+        assert_eq!(daemon.states.get("architect"), Some(&MemberState::Working));
         assert_eq!(
-            daemon.states.get("architect"),
-            Some(&MemberState::Working)
-        );
-        assert_eq!(
-            daemon.watchers.get("architect").map(|watcher| watcher.state),
+            daemon
+                .watchers
+                .get("architect")
+                .map(|watcher| watcher.state),
             Some(WatcherState::Active)
+        );
+    }
+
+    /// Helper: build a minimal DaemonConfig with the given roles.
+    fn daemon_config_with_roles(tmp: &tempfile::TempDir, roles: Vec<RoleDef>) -> DaemonConfig {
+        DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                layout: None,
+                roles,
+            },
+            session: "test".to_string(),
+            members: Vec::new(),
+            pane_map: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn daemon_creates_telegram_bot_when_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roles = vec![RoleDef {
+            name: "user".to_string(),
+            role_type: RoleType::User,
+            agent: None,
+            instances: 1,
+            prompt: None,
+            talks_to: vec!["architect".to_string()],
+            channel: Some("telegram".to_string()),
+            channel_config: Some(ChannelConfig {
+                target: "12345".to_string(),
+                provider: "telegram".to_string(),
+                bot_token: Some("test-token-123".to_string()),
+                allowed_user_ids: vec![42],
+            }),
+            nudge_interval_secs: None,
+            receives_standup: None,
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            use_worktrees: false,
+        }];
+
+        let config = daemon_config_with_roles(&tmp, roles);
+        let daemon = TeamDaemon::new(config).unwrap();
+        assert!(
+            daemon.telegram_bot.is_some(),
+            "telegram_bot should be Some when user role has bot_token"
+        );
+    }
+
+    #[test]
+    fn daemon_no_telegram_bot_without_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roles = vec![RoleDef {
+            name: "user".to_string(),
+            role_type: RoleType::User,
+            agent: None,
+            instances: 1,
+            prompt: None,
+            talks_to: vec!["architect".to_string()],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: None,
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            use_worktrees: false,
+        }];
+
+        let config = daemon_config_with_roles(&tmp, roles);
+        let daemon = TeamDaemon::new(config).unwrap();
+        assert!(
+            daemon.telegram_bot.is_none(),
+            "telegram_bot should be None when no bot_token configured"
         );
     }
 }

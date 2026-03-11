@@ -11,11 +11,7 @@ use tracing::info;
 /// Done items are lines under the `## Done` section. When the count exceeds
 /// the threshold, the oldest items (first in the list) are moved to the
 /// archive file.
-pub fn rotate_done_items(
-    kanban_path: &Path,
-    archive_path: &Path,
-    threshold: u32,
-) -> Result<u32> {
+pub fn rotate_done_items(kanban_path: &Path, archive_path: &Path, threshold: u32) -> Result<u32> {
     let content = std::fs::read_to_string(kanban_path)
         .with_context(|| format!("failed to read {}", kanban_path.display()))?;
 
@@ -114,7 +110,8 @@ mod tests {
 
     #[test]
     fn split_done_section_basic() {
-        let content = "# Board\n\n## Backlog\n\n## In Progress\n\n## Done\n- item 1\n- item 2\n- item 3\n";
+        let content =
+            "# Board\n\n## Backlog\n\n## In Progress\n\n## Done\n- item 1\n- item 2\n- item 3\n";
         let (before, items, after) = split_done_section(content);
         assert!(before.contains("## In Progress"));
         assert_eq!(items.len(), 3);

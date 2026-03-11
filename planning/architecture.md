@@ -2,77 +2,93 @@
 
 ## Overview
 
-Three execution roles, one tmux session, kanban board as command center.
+Hierarchical agent team running in a single tmux session. A YAML-defined org chart (architect, managers, engineers) with daemon-managed communication, status monitoring, and task routing.
 
 ```
-┌── tmux session: batty-phase-1 ───────────────────────┐
-│  Executor pane (Claude Code / Codex / Aider)         │
-│  Works through phase board. Commits per task.        │
-├──────────────────────────────────────────────────────┤
-│  Orchestrator pane (batty events)                    │
-│  Auto-answers, supervisor decisions, task progress    │
-├──────────────────────────────────────────────────────┤
-│  [batty] phase-1 | task #7 | 6/11 | ✓ supervising   │ ← status bar
-└──────────────────────────────────────────────────────┘
-
-Batty process (alongside tmux):
-  pipe-pane → event extraction → prompt detection
-  Tier 1: regex → send-keys (instant)
-  Tier 2: supervisor API call → send-keys (on-demand)
+┌── tmux session: batty ─────────────────────────────────────────┐
+│  ┌─ Architect ──────┐  ┌─ Manager ──────────────────────────┐  │
+│  │  Strategic pane   │  │  Tactical pane                     │  │
+│  │  Owns roadmap +   │  │  Owns kanban board, assigns tasks, │  │
+│  │  architecture     │  │  supervises engineers               │  │
+│  └──────────────────┘  └────────────────────────────────────┘  │
+│  ┌─ Engineer 1 ─────┐  ┌─ Engineer 2 ─┐  ┌─ Engineer 3 ─┐    │
+│  │  Coding agent     │  │  Coding agent │  │  Coding agent │    │
+│  │  (Claude/Codex)   │  │              │  │              │    │
+│  └──────────────────┘  └──────────────┘  └──────────────┘    │
+├──────────────────────────────────────────────────────────────────┤
+│  batty daemon (background): message routing, pane monitoring,   │
+│  status tracking, Telegram bridge, event logging                │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-## Three Layers
+## Three Roles
 
-**Director** — Strategy. Reviews completed phases → merge / rework / escalate. Picks next phase. Never writes code.
-In early rollout this role can be handled by a human reviewer.
+**Architect** — Strategy. Defines what to build and why. Owns `planning/architecture.md` and `planning/roadmap.md`. Sends directives to managers. Never writes code, never manages tasks directly.
 
-**Supervisor** — Tactics. Watches executor's terminal, answers questions using project context. Escalates when it can't decide. Never writes code.
+**Manager** — Tactics. Owns the kanban board. Breaks directives into tasks, assigns them to engineers, supervises progress, gates on quality. Sends status updates to architect.
 
-**Executor** — Labor. BYO agent (Claude, Codex, Aider). Works through the phase board in a tmux pane. Doesn't know Batty exists.
+**Engineer** — Labor. BYO coding agent (Claude Code, Codex, Aider). Receives task assignments, writes code, runs tests. Reports completion to manager.
 
-Human sits above all three. See everything, type anytime, override anything.
+**User** — Routing endpoint. Receives messages from any role. No tmux pane — communicates via `batty inbox` and Telegram.
 
-## Data Flow
+Human sits above all roles. Can `batty attach` to see everything, type in any pane, override anything.
+
+## Communication
+
+All inter-role communication flows through the daemon's message bus:
 
 ```
-.batty/kanban/phase-1/             ← phase board
-    ↓
-batty work phase-1
-    ↓
-tmux session created
-  executor in main pane
-  pipe-pane captures output
-  orchestrator pane shows events
-    ↓
-executor works through tasks
-  batty auto-answers prompts (send-keys)
-  batty updates status bar
-    ↓
-review gate (human first, director later)
-  → merge / rework / escalate
-    ↓
-merge to main, clean up
+batty send <role> "<message>"     → delivers to role's tmux pane
+batty inbox <role>                → reads role's received messages
 ```
 
-All state is Markdown files. No databases. Git tracks everything.
+Messages are injected into target panes via tmux `load-buffer` + `paste-buffer`. The daemon polls inboxes and delivers pending messages. Telegram bridge allows remote monitoring and communication.
 
-## Progressive Autonomy
+## Daemon
 
-| Mode | Human involvement |
-|---|---|
-| `batty work phase-1` | Watch one phase, answer questions |
-| `batty work all` | Watch sequential phases, intervene when needed |
-| `batty work all --parallel 3` | Multiple phases, focus on exceptions |
-| Future: `fully-auto` | Director runs overnight, review in the morning |
+The daemon (`batty start`) is the system's nervous system:
 
-Each level earned by demonstrating reliability at the previous level. Policy tiers (observe → suggest → act) gate the transition.
+- **Pane monitoring** — watches each agent's tmux pane for status changes
+- **Message routing** — delivers messages between roles via tmux paste
+- **Status tracking** — detects idle, working, waiting states per agent
+- **Event logging** — all events persisted to `.batty/team_config/events.jsonl`
+- **Telegram bridge** — optional remote monitoring and message relay
+
+## Data Model
+
+```
+.batty/
+  team_config/
+    team.yaml              ← org chart: roles, instances, hierarchy
+    batty_architect.md     ← architect prompt template
+    batty_manager.md       ← manager prompt template
+    batty_engineer.md      ← engineer prompt template
+    events.jsonl           ← event log
+    kanban.md              ← team kanban board
+  inboxes/                 ← per-role message queues
+  daemon.pid               ← daemon process ID
+  daemon.log               ← daemon output
+```
+
+All state is files. No databases. Git tracks everything that matters.
+
+## Layout
+
+The tmux layout builder creates zones for each role tier:
+
+- Architect gets a dedicated pane
+- Each manager gets a pane, with their engineers grouped below
+- Engineer panes are partitioned by their managing manager
+- Pane IDs (`%N`) are globally unique and used as direct tmux targets
 
 ## Key Design Decisions
 
-**Why tmux?** Output capture (pipe-pane), input injection (send-keys), status bar, panes, session persistence — all for free. No custom terminal code.
+**Why tmux?** Output capture (pipe-pane), input injection (send-keys/paste-buffer), status bar, panes, session persistence — all for free. No custom terminal code.
 
-**Why worktrees?** Executor might produce bad work. Reviewer might reject it. Worktree keeps main clean until approved.
+**Why YAML org chart?** One file defines the entire team topology. Easy to version, easy to change, easy to reason about.
 
-**Why two-tier prompt handling?** Regex handles ~70-80% of prompts instantly (zero cost). Supervisor agent handles the rest with project context (one API call per question).
+**Why daemon?** Continuous background monitoring enables reactive behaviors (status tracking, message delivery, Telegram relay) without blocking the CLI.
 
-**Why separate director and supervisor?** Doing work and evaluating work are different skills. Splitting them prevents evaluation bias.
+**Why inbox-based messaging?** Decouples sender from receiver. Messages queue up and deliver when the target agent is ready. Prevents message loss during agent restarts.
+
+**Why separate architect/manager/engineer?** Strategy, tactics, and execution are different skills. Splitting them prevents scope creep and evaluation bias. Each role has a focused prompt template.

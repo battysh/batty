@@ -90,8 +90,9 @@ pub fn drain_command_queue(queue_path: &Path) -> Result<Vec<QueuedCommand>> {
 
     // Truncate the file after reading
     if !commands.is_empty() {
-        std::fs::write(queue_path, "")
-            .with_context(|| format!("failed to truncate command queue: {}", queue_path.display()))?;
+        std::fs::write(queue_path, "").with_context(|| {
+            format!("failed to truncate command queue: {}", queue_path.display())
+        })?;
     }
 
     Ok(commands)
@@ -156,16 +157,24 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let queue = tmp.path().join("commands.jsonl");
 
-        enqueue_command(&queue, &QueuedCommand::Send {
-            from: "human".into(),
-            to: "arch".into(),
-            message: "hello".into(),
-        }).unwrap();
-        enqueue_command(&queue, &QueuedCommand::Assign {
-            from: "black-lead".into(),
-            engineer: "eng-1".into(),
-            task: "work".into(),
-        }).unwrap();
+        enqueue_command(
+            &queue,
+            &QueuedCommand::Send {
+                from: "human".into(),
+                to: "arch".into(),
+                message: "hello".into(),
+            },
+        )
+        .unwrap();
+        enqueue_command(
+            &queue,
+            &QueuedCommand::Assign {
+                from: "black-lead".into(),
+                engineer: "eng-1".into(),
+                task: "work".into(),
+            },
+        )
+        .unwrap();
 
         let commands = drain_command_queue(&queue).unwrap();
         assert_eq!(commands.len(), 2);

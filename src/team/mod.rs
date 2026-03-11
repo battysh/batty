@@ -14,6 +14,7 @@ pub mod inbox;
 pub mod layout;
 pub mod message;
 pub mod standup;
+pub mod telegram;
 pub mod watcher;
 
 use std::path::{Path, PathBuf};
@@ -71,7 +72,10 @@ pub fn init_team(project_root: &Path, template: &str) -> Result<Vec<PathBuf>> {
     // Install prompt .md files matching the template's roles
     let prompt_files: &[(&str, &str)] = match template {
         "research" => &[
-            ("research_lead.md", include_str!("templates/research_lead.md")),
+            (
+                "research_lead.md",
+                include_str!("templates/research_lead.md"),
+            ),
             ("sub_lead.md", include_str!("templates/sub_lead.md")),
             ("researcher.md", include_str!("templates/researcher.md")),
         ],
@@ -81,9 +85,18 @@ pub fn init_team(project_root: &Path, template: &str) -> Result<Vec<PathBuf>> {
             ("developer.md", include_str!("templates/developer.md")),
         ],
         "batty" => &[
-            ("batty_architect.md", include_str!("templates/batty_architect.md")),
-            ("batty_manager.md", include_str!("templates/batty_manager.md")),
-            ("batty_engineer.md", include_str!("templates/batty_engineer.md")),
+            (
+                "batty_architect.md",
+                include_str!("templates/batty_architect.md"),
+            ),
+            (
+                "batty_manager.md",
+                include_str!("templates/batty_manager.md"),
+            ),
+            (
+                "batty_engineer.md",
+                include_str!("templates/batty_engineer.md"),
+            ),
         ],
         _ => &[
             ("architect.md", include_str!("templates/architect.md")),
@@ -151,7 +164,7 @@ fn daemon_log_path(project_root: &Path) -> PathBuf {
 ///
 /// The daemon runs in its own process group with stdio redirected to a log
 /// file, so it survives terminal closure. PID is saved to `.batty/daemon.pid`.
-fn spawn_daemon(project_root: &Path) -> Result<u32> {
+fn spawn_daemon(project_root: &Path, resume: bool) -> Result<u32> {
     use std::fs::File;
     use std::process::{Command, Stdio};
 
@@ -177,7 +190,11 @@ fn spawn_daemon(project_root: &Path) -> Result<u32> {
         .to_string();
 
     let mut cmd = Command::new(exe);
-    cmd.args(["daemon", "--project-root", &root_str])
+    let mut args = vec!["daemon", "--project-root", &root_str];
+    if resume {
+        args.push("--resume");
+    }
+    cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(log_file)
         .stderr(log_err);
@@ -252,10 +269,19 @@ pub fn start_team(project_root: &Path, attach: bool) -> Result<String> {
         inbox::init_inbox(&inboxes, &member.name)?;
     }
 
-    info!(session = %session, members = members.len(), "team session started");
+    // Check for resume marker (left by a prior `batty stop`)
+    let marker = resume_marker_path(project_root);
+    let resume = marker.exists();
+    if resume {
+        // Consume the marker — it's a one-shot flag
+        std::fs::remove_file(&marker).ok();
+        info!("resuming agent sessions from previous run");
+    }
+
+    info!(session = %session, members = members.len(), resume, "team session started");
 
     // Spawn daemon as a detached background process
-    let pid = spawn_daemon(project_root)?;
+    let pid = spawn_daemon(project_root, resume)?;
     info!(pid, "daemon process launched");
 
     // Give daemon a moment to start spawning agents
@@ -271,7 +297,7 @@ pub fn start_team(project_root: &Path, attach: bool) -> Result<String> {
 /// Run the daemon loop directly (called by the hidden `batty daemon` subcommand).
 ///
 /// This is the entry point for the daemonized background process.
-pub fn run_daemon(project_root: &Path) -> Result<()> {
+pub fn run_daemon(project_root: &Path, resume: bool) -> Result<()> {
     let config_path = team_config_path(project_root);
     if !config_path.exists() {
         bail!(
@@ -314,7 +340,7 @@ pub fn run_daemon(project_root: &Path) -> Result<()> {
     };
 
     let mut d = daemon::TeamDaemon::new(daemon_config)?;
-    d.run()
+    d.run(resume)
 }
 
 /// Find the tmux pane ID tagged with `@batty_role=<member_name>` in a session.
@@ -344,8 +370,20 @@ fn find_pane_for_member(session: &str, member_name: &str) -> Option<String> {
     None
 }
 
+/// Path to the resume marker file. Presence indicates agents have prior sessions.
+fn resume_marker_path(project_root: &Path) -> PathBuf {
+    project_root.join(".batty").join("resume")
+}
+
 /// Stop a running team session and clean up any orphaned `batty-` sessions.
 pub fn stop_team(project_root: &Path) -> Result<()> {
+    // Write resume marker before tearing down — agents have sessions to continue
+    let marker = resume_marker_path(project_root);
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&marker, "").ok();
+
     // Kill the daemon process first
     kill_daemon(project_root);
 
@@ -357,28 +395,18 @@ pub fn stop_team(project_root: &Path) -> Result<()> {
         None
     };
 
-    // Kill the primary session
-    if let Some(session) = &primary_session {
-        if tmux::session_exists(session) {
+    // Kill only the session belonging to this project
+    match &primary_session {
+        Some(session) if tmux::session_exists(session) => {
             tmux::kill_session(session)?;
             info!(session = %session, "team session stopped");
-        } else {
+        }
+        Some(session) => {
             info!(session = %session, "no running session to stop");
         }
-    }
-
-    // Also kill any orphaned batty-* sessions (stale test runs, old phases, etc.)
-    let orphans = tmux::list_sessions_with_prefix("batty-");
-    for orphan in &orphans {
-        if primary_session.as_deref() == Some(orphan.as_str()) {
-            continue; // already handled above
+        None => {
+            bail!("no team config found at {}", config_path.display());
         }
-        tmux::kill_session(orphan)?;
-        info!(session = %orphan, "killed orphaned batty session");
-    }
-
-    if primary_session.is_none() && orphans.is_empty() {
-        bail!("no team config found and no batty sessions running");
     }
 
     Ok(())
@@ -672,6 +700,11 @@ pub fn merge_worktree(project_root: &Path, engineer: &str) -> Result<()> {
     daemon::merge_engineer_branch(project_root, engineer)
 }
 
+/// Run the interactive Telegram setup wizard.
+pub fn setup_telegram(project_root: &Path) -> Result<()> {
+    telegram::setup_telegram(project_root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,7 +800,11 @@ mod tests {
         assert!(content.contains("sub-lead"));
         assert!(content.contains("researcher"));
         // Research-specific .md files installed
-        assert!(team_config_dir(tmp.path()).join("research_lead.md").exists());
+        assert!(
+            team_config_dir(tmp.path())
+                .join("research_lead.md")
+                .exists()
+        );
         assert!(team_config_dir(tmp.path()).join("sub_lead.md").exists());
         assert!(team_config_dir(tmp.path()).join("researcher.md").exists());
         // Generic files NOT installed
@@ -802,9 +839,21 @@ mod tests {
         assert!(content.contains("instances: 4"));
         assert!(content.contains("batty_architect.md"));
         // Batty-specific .md files installed
-        assert!(team_config_dir(tmp.path()).join("batty_architect.md").exists());
-        assert!(team_config_dir(tmp.path()).join("batty_manager.md").exists());
-        assert!(team_config_dir(tmp.path()).join("batty_engineer.md").exists());
+        assert!(
+            team_config_dir(tmp.path())
+                .join("batty_architect.md")
+                .exists()
+        );
+        assert!(
+            team_config_dir(tmp.path())
+                .join("batty_manager.md")
+                .exists()
+        );
+        assert!(
+            team_config_dir(tmp.path())
+                .join("batty_engineer.md")
+                .exists()
+        );
     }
 
     #[test]
@@ -815,7 +864,10 @@ mod tests {
         let root = inbox::inboxes_root(tmp.path());
         let pending = inbox::pending_messages(&root, "architect").unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].from, "human");
+        // detect_sender() returns the tmux pane role if running inside a batty
+        // session, or "human" otherwise. Accept either.
+        let expected_from = detect_sender().unwrap_or_else(|| "human".to_string());
+        assert_eq!(pending[0].from, expected_from);
         assert_eq!(pending[0].to, "architect");
         assert_eq!(pending[0].body, "hello");
     }
@@ -828,7 +880,8 @@ mod tests {
         let root = inbox::inboxes_root(tmp.path());
         let pending = inbox::pending_messages(&root, "eng-1-1").unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].from, "human");
+        let expected_from = detect_sender().unwrap_or_else(|| "human".to_string());
+        assert_eq!(pending[0].from, expected_from);
         assert_eq!(pending[0].to, "eng-1-1");
         assert_eq!(pending[0].body, "fix bug");
         assert_eq!(pending[0].msg_type, inbox::MessageType::Assign);
