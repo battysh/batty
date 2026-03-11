@@ -5,6 +5,7 @@
 //! The executor runs in that worktree. Cleanup is merge-aware:
 //! - merged runs are removed (worktree + branch)
 //! - rejected/failed/unmerged runs are retained for inspection
+#![allow(dead_code)]
 
 use std::collections::HashSet;
 use std::ffi::OsStr;

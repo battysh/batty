@@ -5,6 +5,7 @@
 //! test executions, and completion status. Each line is a self-contained
 //! JSON object with a timestamp, making logs easy to grep, stream, and
 //! post-process.
+#![cfg_attr(not(test), allow(dead_code))]
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};

@@ -14,6 +14,7 @@ use super::config::ChannelConfig;
 #[derive(Debug, Clone)]
 pub struct InboundMessage {
     pub from_user_id: i64,
+    #[allow(dead_code)] // Retained for future reply routing and audits.
     pub chat_id: i64,
     pub text: String,
 }
@@ -52,6 +53,7 @@ impl TelegramBot {
     /// Check whether a Telegram user ID is in the allowed list.
     ///
     /// An empty `allowed_user_ids` list denies everyone.
+    #[allow(dead_code)] // Used by tests and future inbound access checks.
     pub fn is_authorized(&self, user_id: i64) -> bool {
         self.allowed_user_ids.contains(&user_id)
     }
@@ -329,6 +331,7 @@ fn prompt_yes_no(msg: &str, default_yes: bool) -> Result<bool> {
 
 /// Parse a getMe API response and extract the bot username.
 /// Exposed for testing.
+#[allow(dead_code)] // Used by tests and setup flows; outbound-only runtime does not call it yet.
 pub fn parse_get_me_response(json: &serde_json::Value) -> Option<String> {
     if json["ok"].as_bool() != Some(true) {
         return None;
@@ -390,8 +393,7 @@ fn update_team_yaml(path: &Path, bot_token: &str, user_id: i64) -> Result<()> {
                 serde_yaml::Value::String("openclaw".into()),
             );
             // allowed_user_ids as a sequence of integers
-            let mut ids = serde_yaml::Sequence::new();
-            ids.push(serde_yaml::Value::Number(serde_yaml::Number::from(user_id)));
+            let ids = vec![serde_yaml::Value::Number(serde_yaml::Number::from(user_id))];
             mapping.insert(
                 serde_yaml::Value::String("allowed_user_ids".into()),
                 serde_yaml::Value::Sequence(ids),
@@ -411,13 +413,11 @@ fn update_team_yaml(path: &Path, bot_token: &str, user_id: i64) -> Result<()> {
             serde_yaml::Value::String(bot_token.into()),
         );
         cc.insert("provider".into(), "openclaw".into());
-        let mut ids = serde_yaml::Sequence::new();
-        ids.push(serde_yaml::Value::Number(serde_yaml::Number::from(user_id)));
+        let ids = vec![serde_yaml::Value::Number(serde_yaml::Number::from(user_id))];
         cc.insert("allowed_user_ids".into(), serde_yaml::Value::Sequence(ids));
         new_role.insert("channel_config".into(), serde_yaml::Value::Mapping(cc));
 
-        let mut talks_to = serde_yaml::Sequence::new();
-        talks_to.push("architect".into());
+        let talks_to = vec!["architect".into()];
         new_role.insert("talks_to".into(), serde_yaml::Value::Sequence(talks_to));
 
         roles.push(serde_yaml::Value::Mapping(new_role));

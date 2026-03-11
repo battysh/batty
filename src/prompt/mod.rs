@@ -14,6 +14,7 @@
 //!
 //! **Aider** uses a traditional line-oriented interface (`prompt_toolkit`),
 //! making it the most amenable to PTY pattern matching.
+#![cfg_attr(not(test), allow(dead_code))]
 
 use regex::Regex;
 

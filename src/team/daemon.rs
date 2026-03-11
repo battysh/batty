@@ -125,15 +125,12 @@ impl TeamDaemon {
         let mut nudges = HashMap::new();
         for role in &config.team_config.roles {
             if let Some(interval_secs) = role.nudge_interval_secs {
-                let prompt_file = role
-                    .prompt
-                    .as_deref()
-                    .unwrap_or_else(|| match role.role_type {
-                        RoleType::Architect => "architect.md",
-                        RoleType::Manager => "manager.md",
-                        RoleType::Engineer => "engineer.md",
-                        RoleType::User => "architect.md",
-                    });
+                let prompt_file = role.prompt.as_deref().unwrap_or(match role.role_type {
+                    RoleType::Architect => "architect.md",
+                    RoleType::Manager => "manager.md",
+                    RoleType::Engineer => "engineer.md",
+                    RoleType::User => "architect.md",
+                });
                 let prompt_path = team_config_dir.join(prompt_file);
                 if let Some(nudge_text) = extract_nudge_section(&prompt_path) {
                     // Apply nudge to all instances of this role
@@ -302,15 +299,12 @@ impl TeamDaemon {
 
     /// Load the prompt template for a member, substituting role-specific info.
     fn load_prompt(&self, member: &MemberInstance, config_dir: &Path) -> String {
-        let prompt_file = member
-            .prompt
-            .as_deref()
-            .unwrap_or_else(|| match member.role_type {
-                RoleType::Architect => "architect.md",
-                RoleType::Manager => "manager.md",
-                RoleType::Engineer => "engineer.md",
-                RoleType::User => "architect.md", // shouldn't happen
-            });
+        let prompt_file = member.prompt.as_deref().unwrap_or(match member.role_type {
+            RoleType::Architect => "architect.md",
+            RoleType::Manager => "manager.md",
+            RoleType::Engineer => "engineer.md",
+            RoleType::User => "architect.md", // shouldn't happen
+        });
 
         let path = config_dir.join(prompt_file);
         match std::fs::read_to_string(&path) {
@@ -1463,6 +1457,7 @@ fn strip_nudge_section(prompt: &str) -> String {
 /// agent launches with no initial user message (sits at the `>` prompt waiting
 /// for the daemon to inject work). If false, the prompt is sent as the first
 /// user message so the agent starts working immediately.
+#[allow(clippy::too_many_arguments)]
 fn write_launch_script(
     member_name: &str,
     agent_name: &str,

@@ -30,6 +30,7 @@ pub enum WatcherState {
 
 pub struct SessionWatcher {
     pub pane_id: String,
+    #[allow(dead_code)] // Useful for diagnostics; currently the map key is used instead.
     pub member_name: String,
     pub state: WatcherState,
     last_output_hash: u64,
@@ -132,6 +133,7 @@ impl SessionWatcher {
     }
 
     /// Get the last captured pane output.
+    #[allow(dead_code)] // Standup/reporting helpers can read the full capture directly when needed.
     pub fn last_output(&self) -> &str {
         &self.last_capture
     }
@@ -231,8 +233,6 @@ fn next_state_after_capture(
 
     if prompt_visible {
         WatcherState::Idle
-    } else if unchanged_capture {
-        WatcherState::Active
     } else {
         WatcherState::Active
     }

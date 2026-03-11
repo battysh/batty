@@ -6,7 +6,6 @@ use std::path::Path;
 
 #[path = "../cli.rs"]
 mod cli;
-#[allow(dead_code)]
 #[path = "../config/mod.rs"]
 mod config;
 

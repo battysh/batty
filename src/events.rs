@@ -4,6 +4,7 @@
 //! known agent output patterns, and produces structured events. A rolling event
 //! buffer provides a compact summary of the executor's recent activity for the
 //! supervisor's context window.
+#![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};

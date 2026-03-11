@@ -15,6 +15,7 @@ pub trait Channel: Send + Sync {
     /// Send a text message to the channel destination.
     fn send(&self, message: &str) -> Result<()>;
     /// Channel type identifier (e.g., "telegram").
+    #[allow(dead_code)] // Reserved for diagnostics and provider-specific routing.
     fn channel_type(&self) -> &str;
 }
 

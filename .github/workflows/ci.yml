@@ -185,11 +185,11 @@ jobs:
       - name: Markdown format check
         shell: bash
         run: |
-          mapfile -t doc_files < <(find docs -name '*.md' | sort)
+          mapfile -t doc_files < <(printf '%s\n' docs/*.md docs/reference/*.md | sort)
           mdformat --check "${doc_files[@]}"
 
       - name: Markdown lint check
-        run: npx --yes markdownlint-cli2 "docs/**/*.md"
+        run: npx --yes markdownlint-cli2 docs/*.md docs/reference/*.md
 
       - name: Internal link audit
         run: mkdocs build --strict

@@ -626,8 +626,8 @@ pub fn list_inbox(project_root: &Path, member: &str) -> Result<()> {
     }
 
     println!(
-        "{:<8} {:<12} {:<12} {:<8} {}",
-        "STATUS", "FROM", "TYPE", "ID", "BODY"
+        "{:<8} {:<12} {:<12} {:<8} BODY",
+        "STATUS", "FROM", "TYPE", "ID"
     );
     println!("{}", "-".repeat(72));
     for (msg, delivered) in &messages {
