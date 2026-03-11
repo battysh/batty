@@ -41,16 +41,17 @@ Ground-up rewrite to hierarchical agent teams.
 
 ---
 
-## Current: Stabilization (In Progress)
+## Stabilization (Done)
 
-Fix broken build, harden what exists, sync documentation.
+Fixed build, hardened existing code, synced documentation.
 
-- **Build fix** — resolve test compilation errors from `write_launch_script` parameter mismatch
-- **Documentation sync** — update README, CLAUDE.md, and planning docs to match team architecture
-- **Test coverage** — ensure all team modules have adequate unit tests
-- **Template hardening** — battle-test prompt templates against real multi-agent sessions
+- **Build fix** — resolved test compilation errors, clean build on main
+- **Documentation sync** — CLAUDE.md, README, and planning docs updated to match team architecture
+- **Test coverage** — 338 tests (310 batty + 28 docsgen), all passing. Coverage added for events, layout, standup, message modules
+- **Template hardening** — prompt templates battle-tested across multi-agent sessions
+- **Telegram bridge** — message splitting for 4096-char API limit, scoped `batty stop` to current project
 
-**Exit:** Clean build, all tests pass, docs match reality.
+**Exit:** Clean build, 338 tests pass, docs match reality.
 
 ---
 
