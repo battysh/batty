@@ -1291,6 +1291,41 @@ fn resolve_binary(name: &str) -> String {
         .unwrap_or_else(|| name.to_string())
 }
 
+fn priority_rank(p: &str) -> u32 {
+    match p {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        "low" => 3,
+        _ => 4,
+    }
+}
+
+fn next_unclaimed_task(board_dir: &Path) -> Result<Option<crate::task::Task>> {
+    let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
+    let task_status_by_id: HashMap<u32, String> = tasks
+        .iter()
+        .map(|task| (task.id, task.status.clone()))
+        .collect();
+
+    let mut available: Vec<crate::task::Task> = tasks
+        .into_iter()
+        .filter(|task| matches!(task.status.as_str(), "backlog" | "todo"))
+        .filter(|task| task.claimed_by.is_none())
+        .filter(|task| task.blocked.is_none())
+        .filter(|task| {
+            task.depends_on.iter().all(|dep_id| {
+                task_status_by_id
+                    .get(dep_id)
+                    .is_none_or(|status| status == "done")
+            })
+        })
+        .collect();
+
+    available.sort_by_key(|task| (priority_rank(&task.priority), task.id));
+    Ok(available.into_iter().next())
+}
+
 /// Set up a git worktree for an engineer with symlinked shared config.
 fn setup_engineer_worktree(
     project_root: &Path,
@@ -1572,6 +1607,32 @@ mod tests {
         repo.to_path_buf()
     }
 
+    fn write_task_file(
+        dir: &Path,
+        id: u32,
+        title: &str,
+        status: &str,
+        priority: &str,
+        claimed_by: Option<&str>,
+        depends_on: &[u32],
+    ) {
+        let tasks_dir = dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let mut content =
+            format!("---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: {priority}\n");
+        if let Some(cb) = claimed_by {
+            content.push_str(&format!("claimed_by: {cb}\n"));
+        }
+        if !depends_on.is_empty() {
+            content.push_str("depends_on:\n");
+            for dep in depends_on {
+                content.push_str(&format!("    - {dep}\n"));
+            }
+        }
+        content.push_str("class: standard\n---\n\nTask description.\n");
+        std::fs::write(tasks_dir.join(format!("{id:03}-{title}.md")), content).unwrap();
+    }
+
     #[test]
     fn launch_script_active_sends_prompt_as_user_message() {
         let cmd = write_launch_script(
@@ -1839,6 +1900,65 @@ mod tests {
         let after = git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
         assert_eq!(before, after);
         assert!(worktree_dir.exists());
+    }
+
+    #[test]
+    fn test_next_unclaimed_task_picks_highest_priority() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_file(tmp.path(), 1, "low-task", "todo", "low", None, &[]);
+        write_task_file(tmp.path(), 2, "high-task", "todo", "high", None, &[]);
+        write_task_file(
+            tmp.path(),
+            3,
+            "critical-task",
+            "todo",
+            "critical",
+            None,
+            &[],
+        );
+
+        let task = next_unclaimed_task(tmp.path()).unwrap().unwrap();
+        assert_eq!(task.id, 3);
+        assert_eq!(task.title, "critical-task");
+    }
+
+    #[test]
+    fn test_next_unclaimed_task_skips_claimed() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_file(
+            tmp.path(),
+            1,
+            "claimed-task",
+            "todo",
+            "critical",
+            Some("eng-1-1"),
+            &[],
+        );
+        write_task_file(tmp.path(), 2, "open-task", "todo", "low", None, &[]);
+
+        let task = next_unclaimed_task(tmp.path()).unwrap().unwrap();
+        assert_eq!(task.id, 2);
+        assert_eq!(task.title, "open-task");
+    }
+
+    #[test]
+    fn test_next_unclaimed_task_skips_blocked_dependency() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_file(tmp.path(), 1, "first-task", "backlog", "medium", None, &[]);
+        write_task_file(tmp.path(), 2, "second-task", "todo", "critical", None, &[1]);
+
+        let task = next_unclaimed_task(tmp.path()).unwrap().unwrap();
+        assert_eq!(task.id, 1);
+        assert_eq!(task.title, "first-task");
+    }
+
+    #[test]
+    fn test_next_unclaimed_task_returns_none_when_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("tasks")).unwrap();
+
+        let task = next_unclaimed_task(tmp.path()).unwrap();
+        assert!(task.is_none());
     }
 
     #[test]
