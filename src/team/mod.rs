@@ -371,6 +371,171 @@ fn find_pane_for_member(session: &str, member_name: &str) -> Option<String> {
     None
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeMemberStatus {
+    state: String,
+    signal: Option<String>,
+    label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TeamStatusRow {
+    name: String,
+    role: String,
+    role_type: String,
+    agent: Option<String>,
+    reports_to: Option<String>,
+    state: String,
+    signal: Option<String>,
+    runtime_label: Option<String>,
+}
+
+fn list_runtime_member_statuses(
+    session: &str,
+) -> Result<std::collections::HashMap<String, RuntimeMemberStatus>> {
+    let output = std::process::Command::new("tmux")
+        .args([
+            "list-panes",
+            "-t",
+            session,
+            "-F",
+            "#{pane_id}\t#{@batty_role}\t#{@batty_status}\t#{pane_dead}",
+        ])
+        .output()
+        .with_context(|| format!("failed to list panes for session '{session}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux list-panes runtime status failed: {stderr}");
+    }
+
+    let mut statuses = std::collections::HashMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut parts = line.splitn(4, '\t');
+        let Some(_pane_id) = parts.next() else {
+            continue;
+        };
+        let Some(member_name) = parts.next() else {
+            continue;
+        };
+        let Some(raw_status) = parts.next() else {
+            continue;
+        };
+        let Some(pane_dead) = parts.next() else {
+            continue;
+        };
+        if member_name.trim().is_empty() {
+            continue;
+        }
+
+        statuses.insert(
+            member_name.to_string(),
+            summarize_runtime_member_status(raw_status, pane_dead == "1"),
+        );
+    }
+
+    Ok(statuses)
+}
+
+fn summarize_runtime_member_status(raw_status: &str, pane_dead: bool) -> RuntimeMemberStatus {
+    if pane_dead {
+        return RuntimeMemberStatus {
+            state: "crashed".to_string(),
+            signal: None,
+            label: Some("crashed".to_string()),
+        };
+    }
+
+    let label = strip_tmux_style(raw_status);
+    let normalized = label.to_ascii_lowercase();
+    let has_nudge = normalized.contains("nudge");
+    let has_standup = normalized.contains("standup");
+
+    let state = if normalized.contains("crashed") {
+        "crashed"
+    } else if normalized.contains("working") {
+        "working"
+    } else if normalized.contains("done") || normalized.contains("completed") {
+        "done"
+    } else if normalized.contains("idle") {
+        "idle"
+    } else if label.is_empty() {
+        "starting"
+    } else {
+        "unknown"
+    };
+
+    let signal = match (has_nudge, has_standup) {
+        (true, true) => Some("waiting for nudge, standup".to_string()),
+        (true, false) => Some("waiting for nudge".to_string()),
+        (false, true) => Some("standup".to_string()),
+        (false, false) => None,
+    };
+
+    RuntimeMemberStatus {
+        state: state.to_string(),
+        signal,
+        label: (!label.is_empty()).then_some(label),
+    }
+}
+
+fn strip_tmux_style(input: &str) -> String {
+    let mut output = String::new();
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '#' && chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if next == ']' {
+                    break;
+                }
+            }
+            continue;
+        }
+        output.push(ch);
+    }
+
+    output.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn build_team_status_rows(
+    members: &[hierarchy::MemberInstance],
+    session_running: bool,
+    runtime_statuses: &std::collections::HashMap<String, RuntimeMemberStatus>,
+) -> Vec<TeamStatusRow> {
+    members
+        .iter()
+        .map(|member| {
+            let runtime = runtime_statuses.get(&member.name);
+            let (state, signal, runtime_label) = if member.role_type == config::RoleType::User {
+                ("user".to_string(), None, None)
+            } else if !session_running {
+                ("stopped".to_string(), None, None)
+            } else if let Some(runtime) = runtime {
+                (
+                    runtime.state.clone(),
+                    runtime.signal.clone(),
+                    runtime.label.clone(),
+                )
+            } else {
+                ("starting".to_string(), None, None)
+            };
+
+            TeamStatusRow {
+                name: member.name.clone(),
+                role: member.role_name.clone(),
+                role_type: format!("{:?}", member.role_type),
+                agent: member.agent.clone(),
+                reports_to: member.reports_to.clone(),
+                state,
+                signal,
+                runtime_label,
+            }
+        })
+        .collect()
+}
+
 /// Path to the resume marker file. Presence indicates agents have prior sessions.
 fn resume_marker_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("resume")
@@ -457,19 +622,34 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
     let members = hierarchy::resolve_hierarchy(&team_config)?;
     let session = format!("batty-{}", team_config.name);
     let session_running = tmux::session_exists(&session);
+    let runtime_statuses = if session_running {
+        match list_runtime_member_statuses(&session) {
+            Ok(statuses) => statuses,
+            Err(error) => {
+                warn!(session = %session, error = %error, "failed to read live runtime statuses");
+                std::collections::HashMap::new()
+            }
+        }
+    } else {
+        std::collections::HashMap::new()
+    };
+    let rows = build_team_status_rows(&members, session_running, &runtime_statuses);
 
     if json {
         let status = serde_json::json!({
             "team": team_config.name,
             "session": session,
             "running": session_running,
-            "members": members.iter().map(|m| {
+            "members": rows.iter().map(|row| {
                 serde_json::json!({
-                    "name": m.name,
-                    "role": m.role_name,
-                    "role_type": format!("{:?}", m.role_type),
-                    "agent": m.agent,
-                    "reports_to": m.reports_to,
+                    "name": row.name,
+                    "role": row.role,
+                    "role_type": row.role_type,
+                    "agent": row.agent,
+                    "reports_to": row.reports_to,
+                    "state": row.state,
+                    "signal": row.signal,
+                    "runtime_label": row.runtime_label,
                 })
             }).collect::<Vec<_>>(),
         });
@@ -487,17 +667,19 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
         );
         println!();
         println!(
-            "{:<20} {:<12} {:<10} {:<20}",
-            "MEMBER", "ROLE", "AGENT", "REPORTS TO"
+            "{:<20} {:<12} {:<10} {:<12} {:<24} {:<20}",
+            "MEMBER", "ROLE", "AGENT", "STATE", "SIGNAL", "REPORTS TO"
         );
-        println!("{}", "-".repeat(62));
-        for m in &members {
+        println!("{}", "-".repeat(104));
+        for row in &rows {
             println!(
-                "{:<20} {:<12} {:<10} {:<20}",
-                m.name,
-                m.role_name,
-                m.agent.as_deref().unwrap_or("-"),
-                m.reports_to.as_deref().unwrap_or("-"),
+                "{:<20} {:<12} {:<10} {:<12} {:<24} {:<20}",
+                row.name,
+                row.role,
+                row.agent.as_deref().unwrap_or("-"),
+                row.state,
+                row.signal.as_deref().unwrap_or("-"),
+                row.reports_to.as_deref().unwrap_or("-"),
             );
         }
     }
@@ -714,6 +896,8 @@ pub fn setup_telegram(project_root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::team::config::RoleType;
+    use serial_test::serial;
 
     #[test]
     fn team_config_dir_is_under_batty() {
@@ -891,5 +1075,120 @@ mod tests {
         assert_eq!(pending[0].to, "eng-1-1");
         assert_eq!(pending[0].body, "fix bug");
         assert_eq!(pending[0].msg_type, inbox::MessageType::Assign);
+    }
+
+    fn make_member(name: &str, role_name: &str, role_type: RoleType) -> hierarchy::MemberInstance {
+        hierarchy::MemberInstance {
+            name: name.to_string(),
+            role_name: role_name.to_string(),
+            role_type,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        }
+    }
+
+    #[test]
+    fn strip_tmux_style_removes_formatting_sequences() {
+        let raw = "#[fg=yellow]idle#[default] #[fg=magenta]nudge 1:05#[default]";
+        assert_eq!(strip_tmux_style(raw), "idle nudge 1:05");
+    }
+
+    #[test]
+    fn summarize_runtime_member_status_extracts_state_and_signal() {
+        let summary = summarize_runtime_member_status(
+            "#[fg=cyan]working#[default] #[fg=blue]standup 4:12#[default]",
+            false,
+        );
+
+        assert_eq!(summary.state, "working");
+        assert_eq!(summary.signal.as_deref(), Some("standup"));
+        assert_eq!(summary.label.as_deref(), Some("working standup 4:12"));
+    }
+
+    #[test]
+    fn summarize_runtime_member_status_marks_nudge_and_standup_together() {
+        let summary = summarize_runtime_member_status(
+            "#[fg=yellow]idle#[default] #[fg=magenta]nudge now#[default] #[fg=blue]standup 0:10#[default]",
+            false,
+        );
+
+        assert_eq!(summary.state, "idle");
+        assert_eq!(
+            summary.signal.as_deref(),
+            Some("waiting for nudge, standup")
+        );
+    }
+
+    #[test]
+    fn build_team_status_rows_defaults_by_session_state() {
+        let architect = make_member("architect", "architect", RoleType::Architect);
+        let human = hierarchy::MemberInstance {
+            name: "human".to_string(),
+            role_name: "human".to_string(),
+            role_type: RoleType::User,
+            agent: None,
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+
+        let rows = build_team_status_rows(&[architect.clone(), human], false, &Default::default());
+        assert_eq!(rows[0].state, "stopped");
+        assert_eq!(rows[1].state, "user");
+
+        let runtime = std::collections::HashMap::from([(
+            architect.name.clone(),
+            RuntimeMemberStatus {
+                state: "working".to_string(),
+                signal: Some("standup".to_string()),
+                label: Some("working standup 2:00".to_string()),
+            },
+        )]);
+        let rows = build_team_status_rows(&[architect], true, &runtime);
+        assert_eq!(rows[0].state, "working");
+        assert_eq!(rows[0].signal.as_deref(), Some("standup"));
+        assert_eq!(
+            rows[0].runtime_label.as_deref(),
+            Some("working standup 2:00")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn list_runtime_member_statuses_reads_tmux_role_and_status_options() {
+        let session = "batty-test-team-status-runtime";
+        let _ = crate::tmux::kill_session(session);
+
+        crate::tmux::create_session(session, "sleep", &["20".to_string()], "/tmp").unwrap();
+        let pane_id = crate::tmux::pane_id(session).unwrap();
+
+        let role_output = std::process::Command::new("tmux")
+            .args(["set-option", "-p", "-t", &pane_id, "@batty_role", "eng-1"])
+            .output()
+            .unwrap();
+        assert!(role_output.status.success());
+
+        let status_output = std::process::Command::new("tmux")
+            .args([
+                "set-option",
+                "-p",
+                "-t",
+                &pane_id,
+                "@batty_status",
+                "#[fg=yellow]idle#[default] #[fg=magenta]nudge 0:30#[default]",
+            ])
+            .output()
+            .unwrap();
+        assert!(status_output.status.success());
+
+        let statuses = list_runtime_member_statuses(session).unwrap();
+        let eng = statuses.get("eng-1").unwrap();
+        assert_eq!(eng.state, "idle");
+        assert_eq!(eng.signal.as_deref(), Some("waiting for nudge"));
+        assert_eq!(eng.label.as_deref(), Some("idle nudge 0:30"));
+
+        crate::tmux::kill_session(session).unwrap();
     }
 }
