@@ -69,16 +69,16 @@ End-to-end loop: board task → assign → engineer works → test → report �
 
 ---
 
-## Future: Merge and Ship
+## Merge and Ship (Done)
 
-Orchestrate code integration from multiple engineers working in parallel.
+Orchestrated code integration from multiple engineers working in parallel.
 
-- **Worktree isolation** — each engineer works in a dedicated git worktree
-- **Merge queue** — serialized merges from engineer branches into main
-- **Conflict resolution** — detect merge conflicts, reassign to engineer for resolution
-- **Branch cleanup** — automatic worktree teardown after successful merge
+- **Worktree isolation** — each engineer works in a dedicated git worktree, refreshed before each assignment
+- **Merge queue** — file-based lock serializes merges, rebase-before-merge ensures branches are current
+- **Conflict resolution** — rebase conflicts detected and sent back to engineer via retry mechanism (max 2 retries, then escalate)
+- **Branch cleanup** — `git reset --hard main` after successful merge leaves worktree clean and ready for next task
 
-**Success criteria:** Multiple engineers work in parallel on different tasks. Their code merges cleanly into main via an automated queue.
+**Exit:** 362 tests passing. Engineers work in parallel, merges serialize safely, conflicts retry automatically, worktrees reset after each merge.
 
 ---
 
