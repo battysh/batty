@@ -698,7 +698,12 @@ pub fn ack_message(project_root: &Path, member: &str, id: &str) -> Result<()> {
 
 /// Merge an engineer's worktree branch.
 pub fn merge_worktree(project_root: &Path, engineer: &str) -> Result<()> {
-    daemon::merge_engineer_branch(project_root, engineer)
+    match daemon::merge_engineer_branch(project_root, engineer)? {
+        task_loop::MergeOutcome::Success => Ok(()),
+        task_loop::MergeOutcome::RebaseConflict(stderr) => {
+            bail!("merge blocked by rebase conflict: {stderr}")
+        }
+    }
 }
 
 /// Run the interactive Telegram setup wizard.

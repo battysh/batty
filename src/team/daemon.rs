@@ -21,8 +21,8 @@ use super::message;
 use super::standup::{self, MemberState};
 pub use super::task_loop::merge_engineer_branch;
 use super::task_loop::{
-    next_unclaimed_task, read_task_title, refresh_engineer_worktree, run_tests_in_worktree,
-    setup_engineer_worktree,
+    MergeLock, MergeOutcome, next_unclaimed_task, read_task_title, refresh_engineer_worktree,
+    run_tests_in_worktree, setup_engineer_worktree,
 };
 use super::watcher::{SessionWatcher, WatcherState};
 use crate::agent;
@@ -436,65 +436,141 @@ impl TeamDaemon {
         let (tests_passed, output_truncated) = run_tests_in_worktree(&worktree_dir)?;
         if tests_passed {
             let task_title = read_task_title(&board_dir, task_id);
-            let output = std::process::Command::new("kanban-md")
-                .args([
-                    "move",
-                    &task_id.to_string(),
-                    "done",
-                    "--claim",
-                    engineer,
-                    "--dir",
-                    &board_dir_str,
-                ])
-                .output()
-                .context("failed to mark task done after passing tests")?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                bail!("kanban-md move failed: {stderr}");
-            }
+            let _lock = MergeLock::acquire(&self.config.project_root)
+                .context("failed to acquire merge lock")?;
 
-            if let Err(e) = merge_engineer_branch(&self.config.project_root, engineer) {
-                warn!(engineer, error = %e, "engineer merge failed after passing tests");
-            }
+            match merge_engineer_branch(&self.config.project_root, engineer)? {
+                MergeOutcome::Success => {
+                    drop(_lock);
 
-            self.clear_active_task(engineer);
+                    let output = std::process::Command::new("kanban-md")
+                        .args([
+                            "move",
+                            &task_id.to_string(),
+                            "done",
+                            "--claim",
+                            engineer,
+                            "--dir",
+                            &board_dir_str,
+                        ])
+                        .output()
+                        .context("failed to mark task done after passing tests")?;
+                    if !output.status.success() {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        bail!("kanban-md move failed: {stderr}");
+                    }
 
-            let manager_target = self
-                .config
-                .members
-                .iter()
-                .find(|m| m.name == engineer)
-                .and_then(|member| member.reports_to.clone())
-                .and_then(|mgr_name| {
-                    self.config
-                        .pane_map
-                        .get(&mgr_name)
-                        .cloned()
-                        .map(|pane_id| (mgr_name, pane_id))
-                });
-            if let Some((ref mgr_name, ref mgr_pane)) = manager_target {
-                let msg = format!(
-                    "[{engineer}] Task #{task_id} completed.\nTitle: {task_title}\nTests: passed\nMerge: success"
-                );
-                message::inject_message(mgr_pane, engineer, &msg)?;
-                self.mark_member_working(mgr_name);
-                self.event_sink
-                    .emit(TeamEvent::message_routed(engineer, mgr_name))?;
-            }
+                    let manager_target = self
+                        .config
+                        .members
+                        .iter()
+                        .find(|m| m.name == engineer)
+                        .and_then(|member| member.reports_to.clone())
+                        .and_then(|mgr_name| {
+                            self.config
+                                .pane_map
+                                .get(&mgr_name)
+                                .cloned()
+                                .map(|pane_id| (mgr_name, pane_id))
+                        });
+                    if let Some((ref mgr_name, ref mgr_pane)) = manager_target {
+                        let msg = format!(
+                            "[{engineer}] Task #{task_id} completed.\nTitle: {task_title}\nTests: passed\nMerge: success"
+                        );
+                        message::inject_message(mgr_pane, engineer, &msg)?;
+                        self.mark_member_working(mgr_name);
+                        self.event_sink
+                            .emit(TeamEvent::message_routed(engineer, mgr_name))?;
+                    }
 
-            if let Some((ref mgr_name, _)) = manager_target {
-                let rollup = format!(
-                    "Rollup: Task #{task_id} completed by {engineer}. Tests passed, merged to main."
-                );
-                self.notify_reports_to(mgr_name, &rollup)?;
-            }
+                    if let Some((ref mgr_name, _)) = manager_target {
+                        let rollup = format!(
+                            "Rollup: Task #{task_id} completed by {engineer}. Tests passed, merged to main."
+                        );
+                        self.notify_reports_to(mgr_name, &rollup)?;
+                    }
 
-            self.event_sink.emit(TeamEvent::task_completed(engineer))?;
-            self.states.insert(engineer.to_string(), MemberState::Idle);
-            if let Some(watcher) = self.watchers.get_mut(engineer) {
-                watcher.deactivate();
+                    self.clear_active_task(engineer);
+                    self.event_sink.emit(TeamEvent::task_completed(engineer))?;
+                    self.states.insert(engineer.to_string(), MemberState::Idle);
+                    if let Some(watcher) = self.watchers.get_mut(engineer) {
+                        watcher.deactivate();
+                    }
+                    self.update_nudge_for_state(engineer, MemberState::Idle);
+                }
+                MergeOutcome::RebaseConflict(conflict_info) => {
+                    drop(_lock);
+
+                    let attempt = self.increment_retry(engineer);
+                    if attempt <= 2 {
+                        let Some(pane_id) = self.config.pane_map.get(engineer).cloned() else {
+                            bail!("no pane found for engineer '{engineer}'");
+                        };
+                        let msg = format!(
+                            "Merge conflict during rebase onto main (attempt {attempt}/2). Fix the conflicts in your worktree and try again:\n{conflict_info}"
+                        );
+                        message::inject_message(&pane_id, "batty", &msg)?;
+                        self.mark_member_working(engineer);
+                        info!(engineer, attempt, "rebase conflict, sending back for retry");
+                    } else {
+                        let manager_target = self
+                            .config
+                            .members
+                            .iter()
+                            .find(|m| m.name == engineer)
+                            .and_then(|member| member.reports_to.clone())
+                            .and_then(|mgr_name| {
+                                self.config
+                                    .pane_map
+                                    .get(&mgr_name)
+                                    .cloned()
+                                    .map(|pane_id| (mgr_name, pane_id))
+                            });
+                        if let Some((ref mgr_name, ref mgr_pane)) = manager_target {
+                            let msg = format!(
+                                "[{engineer}] task #{task_id} has unresolvable merge conflicts after 2 retries. Escalating.\n{conflict_info}"
+                            );
+                            message::inject_message(mgr_pane, engineer, &msg)?;
+                            self.mark_member_working(mgr_name);
+                            self.event_sink
+                                .emit(TeamEvent::message_routed(engineer, mgr_name))?;
+                        }
+
+                        self.event_sink
+                            .emit(TeamEvent::task_escalated(engineer, &task_id.to_string()))?;
+
+                        if let Some((ref mgr_name, _)) = manager_target {
+                            let escalation = format!(
+                                "ESCALATION: Task #{task_id} assigned to {engineer} has unresolvable merge conflicts. Task blocked on board."
+                            );
+                            self.notify_reports_to(mgr_name, &escalation)?;
+                        }
+
+                        let output = std::process::Command::new("kanban-md")
+                            .args([
+                                "edit",
+                                &task_id.to_string(),
+                                "--block",
+                                "merge conflicts after 2 retries",
+                                "--dir",
+                                &board_dir_str,
+                            ])
+                            .output()
+                            .context("failed to block task after merge conflict retries")?;
+                        if !output.status.success() {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            bail!("kanban-md edit failed: {stderr}");
+                        }
+
+                        self.clear_active_task(engineer);
+                        self.states.insert(engineer.to_string(), MemberState::Idle);
+                        if let Some(watcher) = self.watchers.get_mut(engineer) {
+                            watcher.deactivate();
+                        }
+                        self.update_nudge_for_state(engineer, MemberState::Idle);
+                    }
+                }
             }
-            self.update_nudge_for_state(engineer, MemberState::Idle);
             return Ok(());
         }
 
