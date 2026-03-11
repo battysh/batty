@@ -12,6 +12,8 @@ pub struct Task {
     pub title: String,
     pub status: String,
     pub priority: String,
+    pub claimed_by: Option<String>,
+    pub blocked: Option<String>,
     pub tags: Vec<String>,
     pub depends_on: Vec<u32>,
     pub description: String,
@@ -38,6 +40,10 @@ struct Frontmatter {
     status: String,
     #[serde(default)]
     priority: String,
+    #[serde(default)]
+    claimed_by: Option<String>,
+    #[serde(default)]
+    blocked: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
     #[serde(default)]
@@ -73,6 +79,8 @@ impl Task {
             title: fm.title,
             status: fm.status,
             priority: fm.priority,
+            claimed_by: fm.claimed_by,
+            blocked: fm.blocked,
             tags: fm.tags,
             depends_on: fm.depends_on,
             description,
@@ -188,6 +196,8 @@ Read task files from kanban/phase-N/tasks/ directory.
         assert_eq!(task.title, "kanban-md task file reader");
         assert_eq!(task.status, "backlog");
         assert_eq!(task.priority, "critical");
+        assert!(task.claimed_by.is_none());
+        assert!(task.blocked.is_none());
         assert_eq!(task.tags, vec!["core"]);
         assert_eq!(task.depends_on, vec![1]);
         assert!(task.description.contains("Read task files"));
@@ -287,7 +297,28 @@ Just a description.
         assert_eq!(task.id, 99);
         assert_eq!(task.status, "backlog");
         assert!(task.priority.is_empty());
+        assert!(task.claimed_by.is_none());
+        assert!(task.blocked.is_none());
         assert!(task.tags.is_empty());
+    }
+
+    #[test]
+    fn parse_task_with_claimed_by_and_blocked() {
+        let content = r#"---
+id: 17
+title: assigned task
+status: todo
+priority: high
+claimed_by: eng-1-1
+blocked: waiting-on-review
+class: standard
+---
+
+Task description.
+"#;
+        let task = Task::parse(content).unwrap();
+        assert_eq!(task.claimed_by.as_deref(), Some("eng-1-1"));
+        assert_eq!(task.blocked.as_deref(), Some("waiting-on-review"));
     }
 
     #[test]
