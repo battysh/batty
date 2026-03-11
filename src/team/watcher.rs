@@ -93,28 +93,23 @@ impl SessionWatcher {
         let capture = tmux::capture_pane(&self.pane_id).unwrap_or_default();
         let hash = simple_hash(&capture);
         let prompt_visible = is_at_agent_prompt(&capture);
+        let codex_managed = self.codex.is_some();
         let codex_completed = self.poll_codex_session().unwrap_or(false);
+        let stale = self.last_change.elapsed() > self.stale_threshold;
 
         if hash != self.last_output_hash {
             self.last_output_hash = hash;
             self.last_change = Instant::now();
             self.last_capture = capture;
-            self.state = if codex_completed {
-                WatcherState::Completed
-            } else if prompt_visible {
-                WatcherState::Idle
-            } else {
-                WatcherState::Active
-            };
+            self.state =
+                next_state_after_capture(codex_managed, prompt_visible, codex_completed, false);
         } else {
             self.last_capture = capture;
-            if codex_completed {
-                self.state = WatcherState::Completed;
-            } else if prompt_visible {
-                self.state = WatcherState::Idle;
-            } else if self.last_change.elapsed() > self.stale_threshold {
-                self.state = WatcherState::Stale;
-            }
+            self.state = if stale {
+                WatcherState::Stale
+            } else {
+                next_state_after_capture(codex_managed, prompt_visible, codex_completed, true)
+            };
         }
 
         Ok(self.state)
@@ -125,6 +120,10 @@ impl SessionWatcher {
         self.state = WatcherState::Active;
         self.last_change = Instant::now();
         self.last_output_hash = 0;
+        if let Some(codex) = self.codex.as_mut() {
+            codex.session_file = None;
+            codex.offset = 0;
+        }
     }
 
     /// Mark this watcher as idle.
@@ -151,6 +150,10 @@ impl SessionWatcher {
 
         if codex.session_file.is_none() {
             codex.session_file = discover_codex_session_file(&codex.sessions_root, &codex.cwd)?;
+            if let Some(session_file) = codex.session_file.as_ref() {
+                codex.offset = current_file_len(session_file)?;
+            }
+            return Ok(false);
         }
 
         let Some(session_file) = codex.session_file.clone() else {
@@ -196,6 +199,29 @@ fn is_at_agent_prompt(capture: &str) -> bool {
     false
 }
 
+fn next_state_after_capture(
+    codex_managed: bool,
+    prompt_visible: bool,
+    codex_completed: bool,
+    unchanged_capture: bool,
+) -> WatcherState {
+    if codex_completed {
+        return WatcherState::Completed;
+    }
+
+    if codex_managed {
+        return WatcherState::Active;
+    }
+
+    if prompt_visible {
+        WatcherState::Idle
+    } else if unchanged_capture {
+        WatcherState::Active
+    } else {
+        WatcherState::Active
+    }
+}
+
 fn simple_hash(s: &str) -> u64 {
     // FNV-1a style hash, good enough for change detection
     let mut hash: u64 = 0xcbf29ce484222325;
@@ -212,6 +238,10 @@ fn default_codex_sessions_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
         .join(".codex")
         .join("sessions")
+}
+
+fn current_file_len(path: &Path) -> Result<u64> {
+    Ok(fs::metadata(path)?.len())
 }
 
 fn discover_codex_session_file(sessions_root: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
@@ -383,6 +413,22 @@ mod tests {
     }
 
     #[test]
+    fn codex_prompt_keeps_active_state_until_completion_event() {
+        assert_eq!(
+            next_state_after_capture(true, true, false, false),
+            WatcherState::Active
+        );
+        assert_eq!(
+            next_state_after_capture(true, true, false, true),
+            WatcherState::Active
+        );
+        assert_eq!(
+            next_state_after_capture(true, true, true, true),
+            WatcherState::Completed
+        );
+    }
+
+    #[test]
     fn discovers_codex_session_by_exact_cwd() {
         let tmp = tempfile::tempdir().unwrap();
         let sessions_root = tmp.path().join("sessions");
@@ -439,5 +485,63 @@ mod tests {
 
         assert!(poll_codex_session_file(&session_file, &mut offset).unwrap());
         assert!(!poll_codex_session_file(&session_file, &mut offset).unwrap());
+    }
+
+    #[test]
+    fn codex_existing_session_ignores_historical_task_complete_when_binding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions_root = tmp.path().join("sessions");
+        let session_dir = sessions_root.join("2026").join("03").join("10");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let cwd = tmp.path().join("repo").join(".batty").join("codex-context").join("eng-1");
+        let session_file = session_dir.join("session.jsonl");
+        std::fs::write(
+            &session_file,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"{}\"}}}}\n\
+                 {{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_complete\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+
+        let mut tracker = CodexSessionTracker {
+            sessions_root,
+            cwd,
+            session_file: None,
+            offset: 0,
+        };
+
+        if tracker.session_file.is_none() {
+            tracker.session_file =
+                discover_codex_session_file(&tracker.sessions_root, &tracker.cwd).unwrap();
+            if let Some(found) = tracker.session_file.as_ref() {
+                tracker.offset = current_file_len(found).unwrap();
+            }
+        }
+
+        assert!(!poll_codex_session_file(
+            tracker.session_file.as_ref().unwrap(),
+            &mut tracker.offset
+        )
+        .unwrap());
+
+        let mut handle = std::fs::OpenOptions::new()
+            .append(true)
+            .open(tracker.session_file.as_ref().unwrap())
+            .unwrap();
+        writeln!(
+            handle,
+            "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_complete\"}}}}"
+        )
+        .unwrap();
+        handle.flush().unwrap();
+
+        assert!(poll_codex_session_file(
+            tracker.session_file.as_ref().unwrap(),
+            &mut tracker.offset
+        )
+        .unwrap());
     }
 }
