@@ -618,6 +618,20 @@ impl TeamDaemon {
         };
 
         let team_config_dir = self.config.project_root.join(".batty").join("team_config");
+        if use_worktrees
+            && let Err(e) = refresh_engineer_worktree(
+                &self.config.project_root,
+                &work_dir,
+                engineer,
+                &team_config_dir,
+            )
+        {
+            warn!(
+                engineer,
+                error = %e,
+                "worktree refresh failed, proceeding with existing"
+            );
+        }
         let role_context =
             member.map(|m| strip_nudge_section(&self.load_prompt(m, &team_config_dir)));
 
@@ -1364,6 +1378,102 @@ fn setup_engineer_worktree(
     Ok(worktree_dir.to_path_buf())
 }
 
+fn refresh_engineer_worktree(
+    project_root: &Path,
+    worktree_dir: &Path,
+    branch_name: &str,
+    team_config_dir: &Path,
+) -> Result<()> {
+    if !worktree_dir.exists() {
+        return Ok(());
+    }
+
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(worktree_dir)
+        .output()
+        .context("failed to inspect worktree status")?;
+    if !status.status.success() {
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        bail!("git status --porcelain failed: {stderr}");
+    }
+
+    let dirty = String::from_utf8_lossy(&status.stdout)
+        .lines()
+        .any(|line| !line.starts_with("?? .batty/"));
+    if dirty {
+        warn!(
+            worktree = %worktree_dir.display(),
+            branch = branch_name,
+            "skipping worktree refresh because worktree is dirty"
+        );
+        return Ok(());
+    }
+
+    let up_to_date = std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", "main", branch_name])
+        .current_dir(project_root)
+        .output()
+        .context("failed to compare worktree branch with main")?;
+    if up_to_date.status.success() {
+        return Ok(());
+    }
+
+    let rebase = std::process::Command::new("git")
+        .args(["rebase", "main"])
+        .current_dir(worktree_dir)
+        .output()
+        .context("failed to rebase engineer worktree")?;
+    if rebase.status.success() {
+        info!(
+            worktree = %worktree_dir.display(),
+            branch = branch_name,
+            "refreshed engineer worktree"
+        );
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&rebase.stderr).trim().to_string();
+    let _ = std::process::Command::new("git")
+        .args(["rebase", "--abort"])
+        .current_dir(worktree_dir)
+        .output();
+
+    let remove = std::process::Command::new("git")
+        .args([
+            "worktree",
+            "remove",
+            "--force",
+            &worktree_dir.to_string_lossy(),
+        ])
+        .current_dir(project_root)
+        .output()
+        .context("failed to remove conflicted worktree")?;
+    if !remove.status.success() {
+        let remove_stderr = String::from_utf8_lossy(&remove.stderr);
+        bail!("git worktree remove --force failed after rebase error '{stderr}': {remove_stderr}");
+    }
+
+    let delete = std::process::Command::new("git")
+        .args(["branch", "-D", branch_name])
+        .current_dir(project_root)
+        .output()
+        .context("failed to delete conflicted worktree branch")?;
+    if !delete.status.success() {
+        let delete_stderr = String::from_utf8_lossy(&delete.stderr);
+        bail!("git branch -D failed after rebase error '{stderr}': {delete_stderr}");
+    }
+
+    warn!(
+        worktree = %worktree_dir.display(),
+        branch = branch_name,
+        rebase_error = %stderr,
+        "recreating engineer worktree after rebase conflict"
+    );
+    setup_engineer_worktree(project_root, worktree_dir, branch_name, team_config_dir)?;
+    Ok(())
+}
+
 /// Merge an engineer's worktree branch into main.
 pub fn merge_engineer_branch(project_root: &Path, engineer_name: &str) -> Result<()> {
     let worktree_dir = project_root
@@ -1413,10 +1523,54 @@ pub fn merge_engineer_branch(project_root: &Path, engineer_name: &str) -> Result
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::process::{Command, Output};
 
     use crate::team::config::{BoardConfig, ChannelConfig, RoleDef, StandupConfig};
     use crate::team::events::EventSink;
     use crate::team::watcher::WatcherState;
+
+    fn git(dir: &Path, args: &[&str]) -> Output {
+        Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap_or_else(|e| panic!("git {:?} failed to run: {e}", args))
+    }
+
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let output = git(dir, args);
+        assert!(
+            output.status.success(),
+            "git {:?} failed: stdout={} stderr={}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_stdout(dir: &Path, args: &[&str]) -> String {
+        let output = git(dir, args);
+        assert!(
+            output.status.success(),
+            "git {:?} failed: stdout={} stderr={}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn init_git_repo(tmp: &tempfile::TempDir) -> PathBuf {
+        let repo = tmp.path();
+        git_ok(repo, &["init", "-b", "main"]);
+        git_ok(repo, &["config", "user.email", "batty-test@example.com"]);
+        git_ok(repo, &["config", "user.name", "Batty Test"]);
+        std::fs::create_dir_all(repo.join(".batty").join("team_config")).unwrap();
+        std::fs::write(repo.join("README.md"), "initial\n").unwrap();
+        git_ok(repo, &["add", "README.md", ".batty/team_config"]);
+        git_ok(repo, &["commit", "-m", "initial"]);
+        repo.to_path_buf()
+    }
 
     #[test]
     fn launch_script_active_sends_prompt_as_user_message() {
@@ -1589,6 +1743,102 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let err = merge_engineer_branch(tmp.path(), "eng-1-1").unwrap_err();
         assert!(err.to_string().contains("no worktree found"));
+    }
+
+    #[test]
+    fn test_refresh_worktree_rebases_behind_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        std::fs::write(repo.join("main.txt"), "new main content\n").unwrap();
+        git_ok(&repo, &["add", "main.txt"]);
+        git_ok(&repo, &["commit", "-m", "advance main"]);
+
+        refresh_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        assert!(worktree_dir.join("main.txt").exists());
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "main"]),
+            git_stdout(&worktree_dir, &["rev-parse", "HEAD"])
+        );
+    }
+
+    #[test]
+    fn test_refresh_worktree_recreates_on_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-2");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        std::fs::write(repo.join("file.txt"), "A\n").unwrap();
+        git_ok(&repo, &["add", "file.txt"]);
+        git_ok(&repo, &["commit", "-m", "add file"]);
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-2", &team_config_dir).unwrap();
+
+        std::fs::write(worktree_dir.join("file.txt"), "B\n").unwrap();
+        git_ok(&worktree_dir, &["add", "file.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "engineer change"]);
+
+        std::fs::write(repo.join("file.txt"), "C\n").unwrap();
+        git_ok(&repo, &["add", "file.txt"]);
+        git_ok(&repo, &["commit", "-m", "main change"]);
+
+        refresh_engineer_worktree(&repo, &worktree_dir, "eng-2", &team_config_dir).unwrap();
+
+        assert!(worktree_dir.exists());
+        assert_eq!(
+            std::fs::read_to_string(worktree_dir.join("file.txt")).unwrap(),
+            "C\n"
+        );
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "main"]),
+            git_stdout(&worktree_dir, &["rev-parse", "HEAD"])
+        );
+    }
+
+    #[test]
+    fn test_refresh_worktree_skips_dirty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-3");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-3", &team_config_dir).unwrap();
+        std::fs::write(worktree_dir.join("scratch.txt"), "uncommitted\n").unwrap();
+
+        std::fs::write(repo.join("main.txt"), "new main content\n").unwrap();
+        git_ok(&repo, &["add", "main.txt"]);
+        git_ok(&repo, &["commit", "-m", "advance main"]);
+
+        refresh_engineer_worktree(&repo, &worktree_dir, "eng-3", &team_config_dir).unwrap();
+
+        assert!(!worktree_dir.join("main.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(worktree_dir.join("scratch.txt")).unwrap(),
+            "uncommitted\n"
+        );
+    }
+
+    #[test]
+    fn test_refresh_worktree_noop_when_current() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-4");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-4", &team_config_dir).unwrap();
+        let before = git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
+
+        refresh_engineer_worktree(&repo, &worktree_dir, "eng-4", &team_config_dir).unwrap();
+
+        let after = git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
+        assert_eq!(before, after);
+        assert!(worktree_dir.exists());
     }
 
     #[test]
