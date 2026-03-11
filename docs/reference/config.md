@@ -6,27 +6,27 @@ This reference is generated from Rust config defaults.
 
 ## Location
 
-Project configuration is read from `.batty/config.toml`.
+Optional runtime defaults are read from `.batty/config.toml` when the file is present. Team topology and day-to-day runtime settings live in `.batty/team_config/team.yaml`.
 
 ## Fields
 
-| Key                                 | Type                               | Default                       | Description                                                            |
-| ----------------------------------- | ---------------------------------- | ----------------------------- | ---------------------------------------------------------------------- |
-| `defaults.agent`                    | string                             | `claude`                      | Default executor agent used by `batty work` when `--agent` is not set. |
-| `defaults.policy`                   | enum (`observe`, `suggest`, `act`) | `observe`                     | Default policy tier for prompt handling.                               |
-| `defaults.dod`                      | string or null                     | `(none)`                      | Definition of done command run after task completion.                  |
-| `defaults.max_retries`              | integer                            | `3`                           | Maximum retries for failed DoD commands.                               |
-| `supervisor.enabled`                | boolean                            | `true`                        | Enable Tier 2 supervisor escalation.                                   |
-| `supervisor.program`                | string                             | `claude`                      | Program used for supervisor calls.                                     |
-| `supervisor.args`                   | array[string]                      | `[-p, --output-format, text]` | Arguments passed to the supervisor program.                            |
-| `supervisor.timeout_secs`           | integer                            | `60`                          | Supervisor command timeout in seconds.                                 |
-| `supervisor.trace_io`               | boolean                            | `true`                        | Log supervisor prompts and responses in orchestrator logs.             |
-| `detector.silence_timeout_secs`     | integer                            | `3`                           | Silence threshold before unknown-request fallback triggers.            |
-| `detector.answer_cooldown_millis`   | integer                            | `1000`                        | Minimum delay between automatic answers.                               |
-| `detector.unknown_request_fallback` | boolean                            | `true`                        | Escalate unresolved output to supervisor when no known prompt matches. |
-| `detector.idle_input_fallback`      | boolean                            | `true`                        | Allow idle-output input prompts to trigger response handling.          |
-| `dangerous_mode.enabled`            | boolean                            | `false`                       | Enable dangerous-mode flags for supported agent wrappers.              |
-| `policy.auto_answer`                | table[string -> string]            | `{}`                          | Prompt-to-answer overrides used by the policy engine.                  |
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `defaults.agent` | string | `claude` | Default agent name for runtime paths that consult `.batty/config.toml`. |
+| `defaults.policy` | enum (`observe`, `suggest`, `act`) | `observe` | Default policy tier for prompt handling. |
+| `defaults.dod` | string or null | `(none)` | Definition of done command run after task completion. |
+| `defaults.max_retries` | integer | `3` | Maximum retries for failed DoD commands. |
+| `supervisor.enabled` | boolean | `true` | Enable Tier 2 supervisor escalation. |
+| `supervisor.program` | string | `claude` | Program used for supervisor calls. |
+| `supervisor.args` | array[string] | `[-p, --output-format, text]` | Arguments passed to the supervisor program. |
+| `supervisor.timeout_secs` | integer | `60` | Supervisor command timeout in seconds. |
+| `supervisor.trace_io` | boolean | `true` | Log supervisor prompts and responses for debugging. |
+| `detector.silence_timeout_secs` | integer | `3` | Silence threshold before unknown-request fallback triggers. |
+| `detector.answer_cooldown_millis` | integer | `1000` | Minimum delay between automatic answers. |
+| `detector.unknown_request_fallback` | boolean | `true` | Escalate unresolved output to supervisor when no known prompt matches. |
+| `detector.idle_input_fallback` | boolean | `true` | Allow idle-output input prompts to trigger response handling. |
+| `dangerous_mode.enabled` | boolean | `false` | Enable dangerous-mode flags for supported agent wrappers. |
+| `policy.auto_answer` | table[string -> string] | `{}` | Prompt-to-answer overrides for runtime paths that use this config. |
 
 ## Default Template
 
