@@ -18,12 +18,20 @@ layout:
       split: { horizontal: 3 }
 
 roles:
+  - name: human
+    role_type: user
+    channel: telegram
+    channel_config:
+      target: "<your-telegram-chat-id>"
+      provider: openclaw
+    talks_to: [architect]
+
   - name: architect
     role_type: architect
     agent: claude
     instances: 1
     prompt: architect.md
-    talks_to: [manager]
+    talks_to: [human, manager]
     nudge_interval_secs: 900
 
   - name: manager
