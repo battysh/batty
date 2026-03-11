@@ -60,6 +60,7 @@ pub struct TeamDaemon {
     event_sink: EventSink,
     last_standup: HashMap<String, Instant>,
     last_board_rotation: Instant,
+    last_auto_dispatch: Instant,
     poll_interval: Duration,
 }
 
@@ -162,6 +163,7 @@ impl TeamDaemon {
             event_sink,
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
             poll_interval: Duration::from_secs(5),
         })
     }
@@ -187,6 +189,7 @@ impl TeamDaemon {
             self.poll_watchers()?;
             self.drain_legacy_command_queue()?;
             self.deliver_inbox_messages()?;
+            self.maybe_auto_dispatch()?;
             self.poll_telegram()?;
             self.deliver_user_inbox()?;
             self.maybe_fire_nudges()?;
@@ -655,6 +658,73 @@ impl TeamDaemon {
         self.event_sink
             .emit(TeamEvent::task_assigned(engineer, task))?;
 
+        Ok(())
+    }
+
+    fn idle_engineer_names(&self) -> Vec<String> {
+        self.config
+            .members
+            .iter()
+            .filter(|member| member.role_type == RoleType::Engineer)
+            .filter(|member| self.states.get(&member.name) == Some(&MemberState::Idle))
+            .map(|member| member.name.clone())
+            .collect()
+    }
+
+    fn auto_dispatch(&mut self) -> Result<()> {
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let board_dir_str = board_dir.to_string_lossy().to_string();
+
+        for engineer_name in self.idle_engineer_names() {
+            let Some(task) = next_unclaimed_task(&board_dir)? else {
+                break;
+            };
+
+            let output = std::process::Command::new("kanban-md")
+                .args([
+                    "pick",
+                    "--claim",
+                    &engineer_name,
+                    "--move",
+                    "in-progress",
+                    "--dir",
+                    &board_dir_str,
+                ])
+                .output()
+                .context("failed to run kanban-md pick for auto-dispatch")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                bail!("kanban-md pick failed: {stderr}");
+            }
+
+            let assignment_message =
+                format!("Task #{}: {}\n\n{}", task.id, task.title, task.description);
+            self.assign_task(&engineer_name, &assignment_message)?;
+            info!(
+                engineer = %engineer_name,
+                task_id = task.id,
+                task_title = %task.title,
+                "auto-dispatched task"
+            );
+        }
+
+        Ok(())
+    }
+
+    fn maybe_auto_dispatch(&mut self) -> Result<()> {
+        if self.last_auto_dispatch.elapsed() < Duration::from_secs(10) {
+            return Ok(());
+        }
+
+        if let Err(e) = self.auto_dispatch() {
+            warn!(error = %e, "auto-dispatch failed");
+        }
+        self.last_auto_dispatch = Instant::now();
         Ok(())
     }
 
@@ -1962,6 +2032,178 @@ mod tests {
     }
 
     #[test]
+    fn test_auto_dispatch_filters_idle_engineers_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roles = vec![
+            RoleDef {
+                name: "architect".to_string(),
+                role_type: RoleType::Architect,
+                agent: Some("claude".to_string()),
+                instances: 1,
+                prompt: None,
+                talks_to: vec![],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                use_worktrees: false,
+            },
+            RoleDef {
+                name: "manager".to_string(),
+                role_type: RoleType::Manager,
+                agent: Some("claude".to_string()),
+                instances: 1,
+                prompt: None,
+                talks_to: vec![],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                use_worktrees: false,
+            },
+            RoleDef {
+                name: "eng-1".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("claude".to_string()),
+                instances: 1,
+                prompt: None,
+                talks_to: vec![],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                use_worktrees: false,
+            },
+            RoleDef {
+                name: "eng-2".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("claude".to_string()),
+                instances: 1,
+                prompt: None,
+                talks_to: vec![],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                use_worktrees: false,
+            },
+        ];
+        let members = vec![
+            MemberInstance {
+                name: "architect".to_string(),
+                role_name: "architect".to_string(),
+                role_type: RoleType::Architect,
+                agent: Some("claude".to_string()),
+                prompt: None,
+                reports_to: None,
+                use_worktrees: false,
+            },
+            MemberInstance {
+                name: "manager".to_string(),
+                role_name: "manager".to_string(),
+                role_type: RoleType::Manager,
+                agent: Some("claude".to_string()),
+                prompt: None,
+                reports_to: Some("architect".to_string()),
+                use_worktrees: false,
+            },
+            MemberInstance {
+                name: "eng-1".to_string(),
+                role_name: "eng-1".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("claude".to_string()),
+                prompt: None,
+                reports_to: Some("manager".to_string()),
+                use_worktrees: false,
+            },
+            MemberInstance {
+                name: "eng-2".to_string(),
+                role_name: "eng-2".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("claude".to_string()),
+                prompt: None,
+                reports_to: Some("manager".to_string()),
+                use_worktrees: false,
+            },
+        ];
+
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                layout: None,
+                roles,
+            },
+            session: "test".to_string(),
+            members,
+            pane_map: HashMap::new(),
+        })
+        .unwrap();
+
+        daemon
+            .states
+            .insert("architect".to_string(), MemberState::Idle);
+        daemon
+            .states
+            .insert("manager".to_string(), MemberState::Idle);
+        daemon.states.insert("eng-1".to_string(), MemberState::Idle);
+        daemon
+            .states
+            .insert("eng-2".to_string(), MemberState::Working);
+
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        write_task_file(&board_dir, 1, "auto-task", "todo", "high", None, &[]);
+
+        assert_eq!(daemon.idle_engineer_names(), vec!["eng-1".to_string()]);
+        let task = next_unclaimed_task(&board_dir).unwrap().unwrap();
+        assert_eq!(task.id, 1);
+    }
+
+    #[test]
+    fn test_maybe_auto_dispatch_respects_rate_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: Vec::new(),
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let before = daemon.last_auto_dispatch;
+        daemon.maybe_auto_dispatch().unwrap();
+        assert_eq!(daemon.last_auto_dispatch, before);
+    }
+
+    #[test]
     fn mark_member_working_updates_state_and_watcher() {
         let tmp = tempfile::tempdir().unwrap();
         let mut watchers = HashMap::new();
@@ -1992,6 +2234,7 @@ mod tests {
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
             poll_interval: Duration::from_secs(5),
         };
 
