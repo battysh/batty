@@ -373,6 +373,15 @@ impl TeamDaemon {
 
     /// Handle a member completing their task.
     fn handle_completion(&mut self, member_name: &str) -> Result<()> {
+        let is_engineer = self
+            .config
+            .members
+            .iter()
+            .any(|m| m.name == member_name && m.role_type == RoleType::Engineer);
+        if is_engineer && self.active_task_id(member_name).is_some() {
+            return self.handle_engineer_completion(member_name);
+        }
+
         self.event_sink
             .emit(TeamEvent::task_completed(member_name))?;
 
@@ -414,6 +423,148 @@ impl TeamDaemon {
         }
         self.update_nudge_for_state(member_name, MemberState::Idle);
 
+        Ok(())
+    }
+
+    fn handle_engineer_completion(&mut self, engineer: &str) -> Result<()> {
+        let Some(task_id) = self.active_task_id(engineer) else {
+            return Ok(());
+        };
+
+        let member = self.config.members.iter().find(|m| m.name == engineer);
+        if !member.map(|m| m.use_worktrees).unwrap_or(false) {
+            return Ok(());
+        }
+
+        let worktree_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("worktrees")
+            .join(engineer);
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let board_dir_str = board_dir.to_string_lossy().to_string();
+
+        let (tests_passed, output_truncated) = run_tests_in_worktree(&worktree_dir)?;
+        if tests_passed {
+            let output = std::process::Command::new("kanban-md")
+                .args([
+                    "move",
+                    &task_id.to_string(),
+                    "done",
+                    "--claim",
+                    engineer,
+                    "--dir",
+                    &board_dir_str,
+                ])
+                .output()
+                .context("failed to mark task done after passing tests")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                bail!("kanban-md move failed: {stderr}");
+            }
+
+            if let Err(e) = merge_engineer_branch(&self.config.project_root, engineer) {
+                warn!(engineer, error = %e, "engineer merge failed after passing tests");
+            }
+
+            self.clear_active_task(engineer);
+
+            let manager_target = self
+                .config
+                .members
+                .iter()
+                .find(|m| m.name == engineer)
+                .and_then(|member| member.reports_to.clone())
+                .and_then(|mgr_name| {
+                    self.config
+                        .pane_map
+                        .get(&mgr_name)
+                        .cloned()
+                        .map(|pane_id| (mgr_name, pane_id))
+                });
+            if let Some((mgr_name, mgr_pane)) = manager_target {
+                let msg = format!("[{engineer}] task #{task_id} passed tests and merged.");
+                message::inject_message(&mgr_pane, engineer, &msg)?;
+                self.mark_member_working(&mgr_name);
+                self.event_sink
+                    .emit(TeamEvent::message_routed(engineer, &mgr_name))?;
+            }
+
+            self.event_sink.emit(TeamEvent::task_completed(engineer))?;
+            self.states.insert(engineer.to_string(), MemberState::Idle);
+            if let Some(watcher) = self.watchers.get_mut(engineer) {
+                watcher.deactivate();
+            }
+            self.update_nudge_for_state(engineer, MemberState::Idle);
+            return Ok(());
+        }
+
+        let attempt = self.increment_retry(engineer);
+        if attempt <= 2 {
+            let Some(pane_id) = self.config.pane_map.get(engineer).cloned() else {
+                bail!("no pane found for engineer '{engineer}'");
+            };
+            let msg = format!(
+                "Tests failed (attempt {attempt}/2). Fix the failures and try again:\n{output_truncated}"
+            );
+            message::inject_message(&pane_id, "batty", &msg)?;
+            self.mark_member_working(engineer);
+            info!(engineer, attempt, "test failure, sending back for retry");
+            return Ok(());
+        }
+
+        let manager_target = self
+            .config
+            .members
+            .iter()
+            .find(|m| m.name == engineer)
+            .and_then(|member| member.reports_to.clone())
+            .and_then(|mgr_name| {
+                self.config
+                    .pane_map
+                    .get(&mgr_name)
+                    .cloned()
+                    .map(|pane_id| (mgr_name, pane_id))
+            });
+        if let Some((mgr_name, mgr_pane)) = manager_target {
+            let msg = format!(
+                "[{engineer}] task #{task_id} failed tests after 2 retries. Escalating.\nLast output:\n{output_truncated}"
+            );
+            message::inject_message(&mgr_pane, engineer, &msg)?;
+            self.mark_member_working(&mgr_name);
+            self.event_sink
+                .emit(TeamEvent::message_routed(engineer, &mgr_name))?;
+        }
+
+        let output = std::process::Command::new("kanban-md")
+            .args([
+                "edit",
+                &task_id.to_string(),
+                "--block",
+                "tests failed after 2 retries",
+                "--dir",
+                &board_dir_str,
+            ])
+            .output()
+            .context("failed to block task after max retries")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("kanban-md edit failed: {stderr}");
+        }
+
+        self.clear_active_task(engineer);
+        self.states.insert(engineer.to_string(), MemberState::Idle);
+        if let Some(watcher) = self.watchers.get_mut(engineer) {
+            watcher.deactivate();
+        }
+        self.update_nudge_for_state(engineer, MemberState::Idle);
+        info!(engineer, task_id, "escalated to manager after max retries");
         Ok(())
     }
 
@@ -1417,6 +1568,32 @@ fn next_unclaimed_task(board_dir: &Path) -> Result<Option<crate::task::Task>> {
     Ok(available.into_iter().next())
 }
 
+fn run_tests_in_worktree(worktree_dir: &Path) -> Result<(bool, String)> {
+    let output = std::process::Command::new("cargo")
+        .arg("test")
+        .current_dir(worktree_dir)
+        .output()
+        .context("failed to run cargo test in worktree")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut combined = String::new();
+    combined.push_str(&stdout);
+    if !stdout.is_empty() && !stderr.is_empty() && !stdout.ends_with('\n') {
+        combined.push('\n');
+    }
+    combined.push_str(&stderr);
+
+    let lines: Vec<&str> = combined.lines().collect();
+    let trimmed = if lines.len() > 50 {
+        lines[lines.len() - 50..].join("\n")
+    } else {
+        combined
+    };
+
+    Ok((output.status.success(), trimmed))
+}
+
 /// Set up a git worktree for an engineer with symlinked shared config.
 fn setup_engineer_worktree(
     project_root: &Path,
@@ -2268,6 +2445,45 @@ mod tests {
     }
 
     #[test]
+    fn test_retry_count_triggers_escalation_at_threshold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: Vec::new(),
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        daemon.active_tasks.insert("eng-1".into(), 42);
+        assert_eq!(daemon.increment_retry("eng-1"), 1);
+        assert_eq!(daemon.increment_retry("eng-1"), 2);
+        assert_eq!(daemon.increment_retry("eng-1"), 3);
+        daemon.clear_active_task("eng-1");
+        assert_eq!(daemon.active_task_id("eng-1"), None);
+    }
+
+    #[test]
     fn test_active_task_id_returns_none_for_unassigned() {
         let tmp = tempfile::tempdir().unwrap();
         let daemon = TeamDaemon {
@@ -2299,6 +2515,81 @@ mod tests {
         };
 
         assert_eq!(daemon.active_task_id("eng-1"), None);
+    }
+
+    #[test]
+    fn test_handle_completion_routes_engineers_with_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng-1".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![engineer],
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        daemon.active_tasks.insert("eng-1".into(), 42);
+        daemon.handle_engineer_completion("eng-1").unwrap();
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+    }
+
+    #[test]
+    fn test_run_tests_in_worktree_returns_pass_fail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree = tmp.path();
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        std::fs::write(
+            worktree.join("Cargo.toml"),
+            "[package]\nname = \"batty-testcrate\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            worktree.join("src").join("lib.rs"),
+            "#[cfg(test)]\nmod tests {\n    #[test]\n    fn passes() {\n        assert_eq!(2 + 2, 4);\n    }\n}\n",
+        )
+        .unwrap();
+        let (passed, output) = run_tests_in_worktree(worktree).unwrap();
+        assert!(passed);
+        assert!(output.contains("test result: ok"));
+
+        std::fs::write(
+            worktree.join("src").join("lib.rs"),
+            "#[cfg(test)]\nmod tests {\n    #[test]\n    fn fails() {\n        assert_eq!(2 + 2, 5);\n    }\n}\n",
+        )
+        .unwrap();
+        let (passed, output) = run_tests_in_worktree(worktree).unwrap();
+        assert!(!passed);
+        assert!(output.contains("FAILED"));
     }
 
     #[test]
