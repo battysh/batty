@@ -178,4 +178,60 @@ mod tests {
         let report = generate_standup_for(manager, &members, &HashMap::new(), &states, 5);
         assert!(report.contains("CRASHED"));
     }
+
+    #[test]
+    fn test_generate_standup_for_formats_various_member_states() {
+        let members = vec![
+            make_member("manager", RoleType::Manager, None),
+            make_member("eng-idle", RoleType::Engineer, Some("manager")),
+            make_member("eng-working", RoleType::Engineer, Some("manager")),
+            make_member("eng-done", RoleType::Engineer, Some("manager")),
+            make_member("eng-crashed", RoleType::Engineer, Some("manager")),
+        ];
+        let mut states = HashMap::new();
+        states.insert("eng-working".to_string(), MemberState::Working);
+        states.insert("eng-done".to_string(), MemberState::Completed);
+        states.insert("eng-crashed".to_string(), MemberState::Crashed);
+
+        let report = generate_standup_for(&members[0], &members, &HashMap::new(), &states, 5);
+
+        assert!(report.contains("=== STANDUP for manager ==="));
+        assert!(report.contains("[eng-idle] status: idle"));
+        assert!(report.contains("[eng-working] status: working"));
+        assert!(report.contains("[eng-done] status: completed"));
+        assert!(report.contains("[eng-crashed] status: CRASHED"));
+        assert!(report.contains("=== END STANDUP ==="));
+    }
+
+    #[test]
+    fn test_generate_standup_for_empty_members_returns_no_direct_reports() {
+        let recipient = make_member("manager", RoleType::Manager, None);
+        let report = generate_standup_for(&recipient, &[], &HashMap::new(), &HashMap::new(), 5);
+
+        assert!(report.contains("=== STANDUP for manager ==="));
+        assert!(report.contains("(no direct reports)"));
+        assert!(report.contains("=== END STANDUP ==="));
+    }
+
+    #[test]
+    fn test_generate_standup_for_all_same_status_lists_each_direct_report() {
+        let members = vec![
+            make_member("manager", RoleType::Manager, None),
+            make_member("eng-1", RoleType::Engineer, Some("manager")),
+            make_member("eng-2", RoleType::Engineer, Some("manager")),
+            make_member("eng-3", RoleType::Engineer, Some("manager")),
+        ];
+        let states = HashMap::from([
+            ("eng-1".to_string(), MemberState::Working),
+            ("eng-2".to_string(), MemberState::Working),
+            ("eng-3".to_string(), MemberState::Working),
+        ]);
+
+        let report = generate_standup_for(&members[0], &members, &HashMap::new(), &states, 5);
+
+        assert_eq!(report.matches("status: working").count(), 3);
+        assert!(report.contains("[eng-1] status: working"));
+        assert!(report.contains("[eng-2] status: working"));
+        assert!(report.contains("[eng-3] status: working"));
+    }
 }

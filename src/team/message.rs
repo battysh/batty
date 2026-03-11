@@ -109,6 +109,7 @@ pub fn command_queue_path(project_root: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn send_command_roundtrip() {
@@ -203,5 +204,88 @@ mod tests {
         .unwrap();
         let commands = drain_command_queue(&queue).unwrap();
         assert_eq!(commands.len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn test_inject_message_empty_message_writes_message_wrapper_to_pane() {
+        let session = "batty-test-message-empty";
+        let _ = crate::tmux::kill_session(session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("message-empty.log");
+
+        crate::tmux::create_session(session, "cat", &[], "/tmp").unwrap();
+        crate::tmux::setup_pipe_pane(session, &log_path).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        inject_message(session, "manager", "").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+
+        let content = std::fs::read_to_string(&log_path).unwrap_or_default();
+        assert!(content.contains("--- Message from manager ---"));
+        assert!(content.contains("--- end message ---"));
+        assert!(content.contains("batty send manager"));
+
+        crate::tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn test_inject_message_long_special_message_preserves_content() {
+        let session = "batty-test-message-special";
+        let _ = crate::tmux::kill_session(session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("message-special.log");
+        let repeated = "x".repeat(600);
+        let long_message = format!(
+            "symbols: !@#$%^&*()[]{{}}<>?/\\\\|~`'\" {}\nline-2",
+            repeated
+        );
+
+        crate::tmux::create_session(session, "cat", &[], "/tmp").unwrap();
+        crate::tmux::setup_pipe_pane(session, &log_path).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        inject_message(session, "architect", &long_message).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+
+        let content = std::fs::read_to_string(&log_path).unwrap_or_default();
+        assert!(content.contains("--- Message from architect ---"));
+        assert!(content.contains("symbols: !@#$%^&*()[]{}<>?/\\\\|~`'\""));
+        assert!(content.contains(&"x".repeat(200)));
+        assert!(content.contains("line-2"));
+        assert!(content.contains("batty send architect"));
+
+        crate::tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn test_drain_command_queue_skips_unknown_and_incomplete_commands() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue = tmp.path().join("commands.jsonl");
+        std::fs::write(
+            &queue,
+            concat!(
+                "{\"type\":\"noop\",\"from\":\"manager\"}\n",
+                "{\"type\":\"send\",\"from\":\"manager\",\"message\":\"missing recipient\"}\n",
+                "{\"type\":\"assign\",\"from\":\"manager\",\"engineer\":\"eng-1\"}\n",
+                "{\"type\":\"send\",\"from\":\"manager\",\"to\":\"architect\",\"message\":\"valid\"}\n",
+            ),
+        )
+        .unwrap();
+
+        let commands = drain_command_queue(&queue).unwrap();
+
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            QueuedCommand::Send { from, to, message } => {
+                assert_eq!(from, "manager");
+                assert_eq!(to, "architect");
+                assert_eq!(message, "valid");
+            }
+            other => panic!("expected valid send command, got {other:?}"),
+        }
     }
 }
