@@ -1,210 +1,165 @@
 # Getting Started
 
-Get a Batty agent team running in your project in under 5 minutes.
-
+Use this guide to install Batty, create a team config, launch a tmux session, send the first directive, and stop or resume the team.
 ## Prerequisites
-
-- **Rust** toolchain (stable, >= 1.85)
-- **tmux** >= 3.1 (recommended >= 3.2)
-- **kanban-md** CLI: `cargo install kanban-md --locked`
-- A coding agent: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [Aider](https://aider.chat), or similar
-
-## Install
-
+- Rust 1.85+
+- `tmux`
+- `kanban-md`
+- At least one agent CLI on your `PATH` (`claude`, `codex`, or similar)
 ```sh
-# From crates.io
+cargo install kanban-md --locked
+```
+## Install
+Install Batty from crates.io:
+```sh
 cargo install batty-cli
-
-# Or from source
+```
+Or build from source:
+```sh
 git clone https://github.com/battysh/batty.git
 cd batty
 cargo install --path .
 ```
-
-If `batty` is not found after install, add Cargo bin to your PATH:
-
-```sh
-echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-```
-
-## Initialize Your Team
-
+## Initialize
+Run `batty init` from the repository you want Batty to manage.
 ```sh
 cd my-project
 batty init
 ```
+Example output:
+```text
+Initialized team config (4 files):
+  /path/to/my-project/.batty/team_config/team.yaml
+  /path/to/my-project/.batty/team_config/architect.md
+  /path/to/my-project/.batty/team_config/manager.md
+  /path/to/my-project/.batty/team_config/engineer.md
 
-This scaffolds `.batty/team_config/` with:
-
-- **team.yaml** -- Team hierarchy, roles, agents, layout, communication rules
-- **Prompt templates** -- `architect.md`, `manager.md`, `engineer.md` with role-specific instructions
-- **Kanban board** -- A kanban-md board for task tracking
-
-The default template (`simple`) creates: 1 human + 1 architect + 1 manager + 3 engineers = 6 agents.
-
-### Choose a Template
-
-```sh
-batty init --template solo       # 1 engineer, no hierarchy
-batty init --template pair       # architect + 1 engineer
-batty init --template simple     # human + architect + manager + 3 engineers (default)
-batty init --template squad      # architect + manager + 5 engineers
-batty init --template large      # architect + 3 managers + 15 engineers + Telegram
-batty init --template research   # PI + 3 sub-leads + 6 researchers
-batty init --template software   # tech lead + 2 eng managers + 8 developers
+Edit .batty/team_config/team.yaml to configure your team.
+Then run: batty start
 ```
-
-## Configure Your Team
-
-Edit `.batty/team_config/team.yaml`:
+If you want a different scaffold, use `batty init --template solo|pair|simple|squad|large|research|software|batty`.
+## Configure
+Edit `.batty/team_config/team.yaml`. Start with `name`, `layout`, `roles`, and `use_worktrees`.
 
 ```yaml
 name: my-project
-
 layout:
   zones:
     - name: architect
-      width_pct: 33
-    - name: managers
-      width_pct: 33
+      width_pct: 30
     - name: engineers
-      width_pct: 34
+      width_pct: 70
       split: { horizontal: 3 }
-
 roles:
-  - name: human
-    role_type: user
-    channel: telegram
-    channel_config:
-      target: "<your-telegram-chat-id>"
-      provider: openclaw
-    talks_to: [architect]
-
   - name: architect
     role_type: architect
     agent: claude
-    instances: 1
     prompt: architect.md
-    talks_to: [human, manager]
-
   - name: manager
     role_type: manager
     agent: claude
-    instances: 1
     prompt: manager.md
-    talks_to: [architect, engineer]
-
   - name: engineer
     role_type: engineer
     agent: codex
     instances: 3
     prompt: engineer.md
-    talks_to: [manager]
     use_worktrees: true
 ```
-
-Validate before launching:
-
+Validate before you start:
 ```sh
 batty validate
 ```
-
-If you add a `human` role, the ACL must be symmetric: `human.talks_to` must include the architect or lead, and that role's `talks_to` must include `human`. A Telegram channel config only defines transport.
-
-## Launch the Team
-
+Example output:
+```text
+Config: /path/to/my-project/.batty/team_config/team.yaml
+Team: my-project
+Roles: 3
+Total members: 5
+Valid.
+```
+## Launch
+Start the daemon and attach to tmux immediately:
 ```sh
 batty start --attach
 ```
+`batty start --attach` opens tmux instead of printing a summary. Expect something like:
 
-A tmux session opens with each agent in its own pane. The background daemon:
+```text
+┌ architect ─────────────┬ manager ───────────────┬ eng-1-1 ───────────────┐
+│ role prompt loaded     │ role prompt loaded     │ codex/claude starting  │
+│ waiting for directive  │ waiting for architect  │ waiting for assignment  │
+├────────────────────────┼────────────────────────┼ eng-1-2 ───────────────┤
+│                        │                        │ waiting for assignment  │
+├────────────────────────┼────────────────────────┼ eng-1-3 ───────────────┤
+│                        │                        │ waiting for assignment  │
+└────────────────────────┴────────────────────────┴─────────────────────────┘
+```
+## Send A Directive
+From another shell, send the architect the first goal:
+```sh
+batty send architect "Implement a small JSON API with auth and tests."
+```
+Example output:
+```text
+Message queued for architect.
+```
+## Monitor
+Check the team without attaching:
+```sh
+batty status
+```
+Example output:
+```text
+Team: my-project
+Session: batty-my-project (running)
 
-- Spawns each agent with its prompt template
-- Creates git worktrees for engineers (if `use_worktrees: true`)
-- Monitors agent output
-- Routes messages between roles
-- Runs periodic standups
-- Emits structured events to `events.jsonl`
-
-## Interact with Your Team
-
-Send the architect a project goal:
+MEMBER               ROLE         AGENT      REPORTS TO
+--------------------------------------------------------------
+architect            architect    claude     -
+manager              manager      claude     architect
+eng-1-1              engineer     codex      manager
+eng-1-2              engineer     codex      manager
+eng-1-3              engineer     codex      manager
+```
+Use these while the team runs:
 
 ```sh
-batty send architect "Build a REST API for user management with JWT auth"
+batty attach
+batty inbox architect
+batty board
 ```
+If a member has queued messages, `batty inbox architect` looks like:
 
-The architect plans, sends directives to the manager, who creates tasks and assigns them to engineers.
-
-### Essential Commands
+```text
+STATUS   FROM         TYPE         ID       BODY
+------------------------------------------------------------------------
+pending  human        send         a1b2c3d4 Implement a small JSON API with auth...
+```
+## Stop And Resume
+Stop the daemon and tmux session:
+```sh
+batty stop
+```
+Example output:
+```text
+Team session stopped.
+```
+The next `batty start` resumes agent sessions from the last stop:
 
 ```sh
-batty start --attach           # start team and attach to tmux
-batty attach                   # reattach to running session
-batty stop                     # stop daemon and kill session (resume marker saved)
-batty start                    # restart — agents resume previous sessions
-
-batty send architect "msg"     # send message to a role
-batty assign eng-1-1 "task"    # assign task to an engineer
-batty inbox architect          # list messages for a member
-batty read architect abc123    # read a specific message
-batty ack architect abc123     # mark message as delivered
-
-batty status                   # show all members and states
-batty status --json            # machine-readable status
-batty board                    # open kanban board TUI
-batty config                   # show resolved configuration
-
-batty merge eng-1-1            # merge engineer's worktree into main
+batty start
 ```
-
-## Communication Model
-
-Agents communicate through Maildir-based inboxes in `.batty/inboxes/`. The `talks_to` field in team.yaml controls who can message whom:
-
+Example output:
+```text
+Team session started: batty-my-project
+Run `batty attach` to connect.
 ```
-Human -> Architect -> Manager -> Engineers
-                   <-         <-
-```
-
-- **Human** can message anyone (via `batty send` from outside tmux)
-- **Architect** talks to managers (strategic directives)
-- **Manager** talks to architect (status) and engineers (task assignments)
-- **Engineers** talk to their manager (progress, questions)
-
-Agents send messages with `batty send <role> "<message>"` and check their inbox with `batty inbox <name>`.
-
-## Session Resume
-
-When you run `batty stop`, Batty saves a resume marker. The next `batty start` detects it and launches agents with session continuation (`claude --continue`, `codex resume --last`). Agent context is preserved across stop/start cycles.
-
-## Telegram Integration
-
-For remote monitoring via Telegram, add a `user` role with `channel: telegram` to your team.yaml, then run:
-
+## Telegram
+If you want a human endpoint over Telegram, add a `user` role with `channel: telegram`, then run:
 ```sh
 batty telegram
 ```
-
-The interactive wizard configures your bot token and chat ID. You can then send messages to the architect from your phone.
-
-## Shell Completions
-
-```sh
-# zsh
-batty completions zsh > "${HOME}/.zsh/completions/_batty"
-
-# bash
-batty completions bash > "${HOME}/.local/share/bash-completion/completions/batty"
-
-# fish
-batty completions fish > "${HOME}/.config/fish/completions/batty.fish"
-```
-
 ## Next Steps
-
-- [CLI Reference](reference/cli.md) -- Full command documentation
-- [Configuration Reference](reference/config.md) -- All team.yaml options
-- [Architecture](architecture.md) -- How the daemon and message routing work
-- [Troubleshooting](troubleshooting.md) -- Common issues and fixes
+- [Configuration Reference](reference/config.md)
+- [CLI Reference](reference/cli.md)
