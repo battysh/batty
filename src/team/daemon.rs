@@ -54,6 +54,8 @@ pub struct TeamDaemon {
     config: DaemonConfig,
     watchers: HashMap<String, SessionWatcher>,
     states: HashMap<String, MemberState>,
+    active_tasks: HashMap<String, u32>,
+    retry_counts: HashMap<String, u32>,
     channels: HashMap<String, Box<dyn Channel>>,
     nudges: HashMap<String, NudgeSchedule>,
     telegram_bot: Option<super::telegram::TelegramBot>,
@@ -157,6 +159,8 @@ impl TeamDaemon {
             config,
             watchers,
             states,
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
             channels,
             nudges,
             telegram_bot,
@@ -420,6 +424,21 @@ impl TeamDaemon {
             watcher.activate();
         }
         self.update_nudge_for_state(member_name, MemberState::Working);
+    }
+
+    fn active_task_id(&self, engineer: &str) -> Option<u32> {
+        self.active_tasks.get(engineer).copied()
+    }
+
+    fn increment_retry(&mut self, engineer: &str) -> u32 {
+        let count = self.retry_counts.entry(engineer.to_string()).or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    fn clear_active_task(&mut self, engineer: &str) {
+        self.active_tasks.remove(engineer);
+        self.retry_counts.remove(engineer);
     }
 
     /// Handle a crashed member — restart if possible.
@@ -705,6 +724,8 @@ impl TeamDaemon {
             let assignment_message =
                 format!("Task #{}: {}\n\n{}", task.id, task.title, task.description);
             self.assign_task(&engineer_name, &assignment_message)?;
+            self.active_tasks.insert(engineer_name.clone(), task.id);
+            self.retry_counts.remove(&engineer_name);
             info!(
                 engineer = %engineer_name,
                 task_id = task.id,
@@ -2188,6 +2209,8 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -2201,6 +2224,81 @@ mod tests {
         let before = daemon.last_auto_dispatch;
         daemon.maybe_auto_dispatch().unwrap();
         assert_eq!(daemon.last_auto_dispatch, before);
+    }
+
+    #[test]
+    fn test_retry_count_increments_and_resets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: Vec::new(),
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        daemon.active_tasks.insert("eng-1".into(), 42);
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+        assert_eq!(daemon.active_task_id("eng-2"), None);
+        assert_eq!(daemon.increment_retry("eng-1"), 1);
+        assert_eq!(daemon.increment_retry("eng-1"), 2);
+        daemon.clear_active_task("eng-1");
+        assert_eq!(daemon.active_task_id("eng-1"), None);
+        assert_eq!(daemon.increment_retry("eng-1"), 1);
+    }
+
+    #[test]
+    fn test_active_task_id_returns_none_for_unassigned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: Vec::new(),
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        assert_eq!(daemon.active_task_id("eng-1"), None);
     }
 
     #[test]
@@ -2228,6 +2326,8 @@ mod tests {
             },
             watchers,
             states: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
