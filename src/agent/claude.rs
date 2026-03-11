@@ -9,6 +9,7 @@
 //!
 //! The supervisor decides which mode to use. The adapter provides spawn
 //! configs and prompt patterns for both.
+#![cfg_attr(not(test), allow(dead_code))]
 
 use std::path::Path;
 

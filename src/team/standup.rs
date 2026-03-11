@@ -4,7 +4,6 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use super::config::RoleType;
 use super::hierarchy::MemberInstance;
 use super::watcher::SessionWatcher;
 use crate::tmux;
@@ -76,6 +75,7 @@ pub enum MemberState {
     Idle,
     Working,
     Completed,
+    #[allow(dead_code)] // Reported in tests and reserved for future crash surfacing.
     Crashed,
 }
 

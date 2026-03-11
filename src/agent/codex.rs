@@ -2,6 +2,7 @@
 //!
 //! Runs Codex in interactive mode by default, passing the composed task prompt
 //! as the initial user prompt argument.
+#![cfg_attr(not(test), allow(dead_code))]
 
 use std::path::Path;
 

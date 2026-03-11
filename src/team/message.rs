@@ -51,6 +51,7 @@ pub fn inject_message(pane_id: &str, from: &str, message: &str) -> Result<()> {
 }
 
 /// Write a command to the queue file.
+#[allow(dead_code)] // Legacy queue path retained for compatibility and tests.
 pub fn enqueue_command(queue_path: &Path, cmd: &QueuedCommand) -> Result<()> {
     if let Some(parent) = queue_path.parent() {
         std::fs::create_dir_all(parent)?;

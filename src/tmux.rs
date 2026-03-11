@@ -3,6 +3,7 @@
 //! Wraps tmux CLI commands for session lifecycle, output capture via pipe-pane,
 //! input injection via send-keys, and pane management. This replaces the
 //! portable-pty direct approach from Phase 1 with tmux-based supervision.
+#![allow(dead_code)]
 
 use std::path::Path;
 use std::process::{Command, Output};

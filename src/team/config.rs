@@ -90,6 +90,7 @@ pub struct RoleDef {
     #[serde(default)]
     pub standup_interval_secs: Option<u64>,
     #[serde(default)]
+    #[allow(dead_code)] // Parsed for future ownership semantics but not yet enforced.
     pub owns: Vec<String>,
     #[serde(default)]
     pub use_worktrees: bool,

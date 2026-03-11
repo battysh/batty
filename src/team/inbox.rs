@@ -199,6 +199,7 @@ pub fn all_messages(inboxes_root: &Path, member: &str) -> Result<Vec<(InboxMessa
 }
 
 /// Delete a message from a member's inbox (from either new/ or cur/).
+#[allow(dead_code)] // Exercised in tests; runtime deletion flow is not wired yet.
 pub fn delete_message(inboxes_root: &Path, member: &str, id: &str) -> Result<()> {
     let md = member_maildir(inboxes_root, member);
     md.delete(id)

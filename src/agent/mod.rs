@@ -8,6 +8,7 @@
 //!
 //! The supervisor uses this trait to control agents without knowing their
 //! specific CLI conventions.
+#![cfg_attr(not(test), allow(dead_code))]
 
 pub mod claude;
 pub mod codex;

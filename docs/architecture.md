@@ -60,9 +60,9 @@ Communication is gated by `talks_to` rules in team.yaml. Unauthorized messages a
 
 ### Message Types
 
-| Type | Usage |
-| --- | --- |
-| `send` | General message between roles |
+| Type     | Usage                          |
+| -------- | ------------------------------ |
+| `send`   | General message between roles  |
 | `assign` | Task assignment to an engineer |
 
 ## Daemon
@@ -84,35 +84,35 @@ PID is stored at `.batty/daemon.pid`. Logs go to `.batty/daemon.log`.
 
 ## Module Map
 
-| Module | Responsibility |
-| --- | --- |
-| `main.rs` | CLI entrypoint, command dispatch |
-| `cli.rs` | clap command/option definitions |
-| `team/mod.rs` | Team lifecycle: init, start, stop, attach, status, send, assign, merge |
-| `team/config.rs` | TeamConfig, RoleDef, LayoutConfig parsed from YAML |
-| `team/hierarchy.rs` | Instance resolution: naming, manager-engineer partitioning |
-| `team/layout.rs` | tmux layout builder (zones to panes) |
-| `team/daemon.rs` | Core daemon: agent spawning, polling loop, message delivery |
-| `team/inbox.rs` | Maildir-based inbox: deliver, pending, mark_delivered, all_messages |
-| `team/message.rs` | Message formatting and prompt composition for injection |
-| `team/comms.rs` | Channel abstraction (tmux pane, Telegram, etc.) |
-| `team/telegram.rs` | Telegram bot integration and setup wizard |
-| `team/standup.rs` | Standup report generation from agent output |
-| `team/watcher.rs` | SessionWatcher: tmux output capture and state tracking |
-| `team/board.rs` | Kanban board rotation and task management |
-| `team/events.rs` | Structured event sink (JSONL) |
-| `team/templates/` | Built-in team.yaml templates and prompt .md files |
-| `tmux.rs` | tmux command wrapper (session, window, pane, split, send-keys) |
-| `agent/mod.rs` | AgentAdapter trait + registry |
-| `agent/codex.rs` | Codex adapter |
-| `worktree.rs` | Git worktree create/cleanup |
-| `log/mod.rs` | JSONL execution logs |
-| `paths.rs` | `.batty/` path resolution |
-| `config.rs` | Legacy config loading |
-| `prompt/` | Prompt template utilities |
-| `task/` | kanban-md task parsing |
-| `events.rs` | Event types |
-| `bin/docsgen.rs` | Documentation generator |
+| Module              | Responsibility                                                         |
+| ------------------- | ---------------------------------------------------------------------- |
+| `main.rs`           | CLI entrypoint, command dispatch                                       |
+| `cli.rs`            | clap command/option definitions                                        |
+| `team/mod.rs`       | Team lifecycle: init, start, stop, attach, status, send, assign, merge |
+| `team/config.rs`    | TeamConfig, RoleDef, LayoutConfig parsed from YAML                     |
+| `team/hierarchy.rs` | Instance resolution: naming, manager-engineer partitioning             |
+| `team/layout.rs`    | tmux layout builder (zones to panes)                                   |
+| `team/daemon.rs`    | Core daemon: agent spawning, polling loop, message delivery            |
+| `team/inbox.rs`     | Maildir-based inbox: deliver, pending, mark_delivered, all_messages    |
+| `team/message.rs`   | Message formatting and prompt composition for injection                |
+| `team/comms.rs`     | Channel abstraction (tmux pane, Telegram, etc.)                        |
+| `team/telegram.rs`  | Telegram bot integration and setup wizard                              |
+| `team/standup.rs`   | Standup report generation from agent output                            |
+| `team/watcher.rs`   | SessionWatcher: tmux output capture and state tracking                 |
+| `team/board.rs`     | Kanban board rotation and task management                              |
+| `team/events.rs`    | Structured event sink (JSONL)                                          |
+| `team/templates/`   | Built-in team.yaml templates and prompt .md files                      |
+| `tmux.rs`           | tmux command wrapper (session, window, pane, split, send-keys)         |
+| `agent/mod.rs`      | AgentAdapter trait + registry                                          |
+| `agent/codex.rs`    | Codex adapter                                                          |
+| `worktree.rs`       | Git worktree create/cleanup                                            |
+| `log/mod.rs`        | JSONL execution logs                                                   |
+| `paths.rs`          | `.batty/` path resolution                                              |
+| `config.rs`         | Legacy config loading                                                  |
+| `prompt/`           | Prompt template utilities                                              |
+| `task/`             | kanban-md task parsing                                                 |
+| `events.rs`         | Event types                                                            |
+| `bin/docsgen.rs`    | Documentation generator                                                |
 
 ## File Layout
 
@@ -140,8 +140,8 @@ PID is stored at `.batty/daemon.pid`. Logs go to `.batty/daemon.log`.
 
 ## tmux Compatibility
 
-| tmux version | Status |
-| --- | --- |
-| >= 3.2 | Full feature path (recommended) |
-| 3.1.x | Supported with fallbacks |
-| < 3.1 | Not supported (fails fast) |
+| tmux version | Status                          |
+| ------------ | ------------------------------- |
+| >= 3.2       | Full feature path (recommended) |
+| 3.1.x        | Supported with fallbacks        |
+| < 3.1        | Not supported (fails fast)      |

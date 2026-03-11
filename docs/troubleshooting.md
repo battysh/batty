@@ -60,13 +60,13 @@ cat .batty/daemon.pid                  # get PID
 ps aux | grep batty                    # verify process is running
 ```
 
-2. Check the inbox directly:
+1. Check the inbox directly:
 
 ```sh
 batty inbox <member>                   # list all messages
 ```
 
-3. Check daemon logs:
+1. Check daemon logs:
 
 ```sh
 tail -50 .batty/daemon.log
@@ -77,8 +77,8 @@ tail -50 .batty/daemon.log
 **Cause:** The agent may have exited or be waiting for input.
 
 1. Attach and check: `batty attach`, then navigate to the agent's pane
-2. Check daemon logs for spawn errors: `tail .batty/daemon.log`
-3. Verify the agent binary is available: `which claude` or `which codex`
+1. Check daemon logs for spawn errors: `tail .batty/daemon.log`
+1. Verify the agent binary is available: `which claude` or `which codex`
 
 ## `batty send` rejected: not allowed to message
 
@@ -86,8 +86,8 @@ tail -50 .batty/daemon.log
 
 Check team.yaml and adjust `talks_to` for the sender's role. The default hierarchy is:
 
-- Architect <-> Manager
-- Manager <-> Engineer
+- Architect \<-> Manager
+- Manager \<-> Engineer
 
 The human (CLI user) can always message any role.
 

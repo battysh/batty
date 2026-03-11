@@ -89,7 +89,7 @@ pub fn build_layout(
     for (i, (_width_pct, _zone_members)) in zones.iter().enumerate().skip(1) {
         let right_side: u32 = zones[i..].iter().map(|(p, _)| *p).sum();
         let split_pct = ((right_side as f64 / remaining_pct as f64) * 100.0).round() as u32;
-        let split_pct = split_pct.max(10).min(90);
+        let split_pct = split_pct.clamp(10, 90);
         let split_from = zone_panes.last().unwrap();
         let pane_id = tmux::split_window_horizontal(split_from, split_pct)?;
         zone_panes.push(pane_id);
@@ -124,9 +124,7 @@ pub fn build_layout(
 }
 
 fn split_off_current_member_pct(total_slots: usize) -> u32 {
-    (((1.0 / total_slots as f64) * 100.0).round() as u32)
-        .max(10)
-        .min(90)
+    (((1.0 / total_slots as f64) * 100.0).round() as u32).clamp(10, 90)
 }
 
 fn split_zone_subgroups<'a>(zone_members: &'a [&MemberInstance]) -> Vec<Vec<&'a MemberInstance>> {
@@ -163,7 +161,7 @@ fn split_subgroup_columns(
     for subgroup_idx in 1..subgroups.len() {
         let right_weight: usize = subgroups[subgroup_idx..].iter().map(Vec::len).sum();
         let split_pct = ((right_weight as f64 / remaining_weight as f64) * 100.0).round() as u32;
-        let split_pct = split_pct.max(10).min(90);
+        let split_pct = split_pct.clamp(10, 90);
         let split_from = panes.last().unwrap();
         let pane_id = tmux::split_window_horizontal(split_from, split_pct)?;
         panes.push(pane_id);

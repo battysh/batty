@@ -96,10 +96,27 @@ jobs:
           cd ..
         shell: bash
 
+      - name: Extract release notes from changelog
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          version="${VERSION#v}"
+          awk -v version="$version" '
+            $0 ~ "^## " version " — " { in_section=1; next }
+            in_section && /^## / { exit }
+            in_section { print }
+          ' CHANGELOG.md > release-notes.md
+
+          if [ ! -s release-notes.md ]; then
+            echo "No release notes found in CHANGELOG.md for ${version}" >&2
+            exit 1
+          fi
+        shell: bash
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: release-notes.md
           files: |
             artifacts/batty-*.tar.gz
             artifacts/batty-*.tar.gz.sha256
