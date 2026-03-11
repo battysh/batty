@@ -210,7 +210,11 @@ fn next_state_after_capture(
     }
 
     if codex_managed {
-        return WatcherState::Active;
+        return if prompt_visible && unchanged_capture {
+            WatcherState::Idle
+        } else {
+            WatcherState::Active
+        };
     }
 
     if prompt_visible {
@@ -420,6 +424,10 @@ mod tests {
         );
         assert_eq!(
             next_state_after_capture(true, true, false, true),
+            WatcherState::Idle
+        );
+        assert_eq!(
+            next_state_after_capture(true, false, false, true),
             WatcherState::Active
         );
         assert_eq!(
