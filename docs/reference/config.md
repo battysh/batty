@@ -1,33 +1,27 @@
 # Configuration Reference
 
-Team configuration is defined in `.batty/team_config/team.yaml`.
+Team configuration lives in `.batty/team_config/team.yaml`.
 
-## Top-Level Fields
+## Top Level
 
-| Key | Type | Required | Description |
+| Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `name` | string | yes | Team name. Used as tmux session name (`batty-<name>`). |
-| `board` | object | no | Kanban board settings. |
-| `standup` | object | no | Periodic standup configuration. |
-| `layout` | object | no | tmux pane layout zones. |
-| `roles` | array | yes | Role definitions (at least one non-user role required). |
+| `name` | string | none | Team/session name; must be non-empty. |
+| `board.rotation_threshold` | integer | `20` | Rotate completed board items after this many done tasks. |
+| `standup.interval_secs` | integer | `1200` | Default standup cadence in seconds. |
+| `standup.output_lines` | integer | `30` | Recent output lines included in standup context. |
+| `layout.zones` | array | none | Optional tmux column layout; zone widths must total `<= 100`. |
+| `roles` | array | none | Role definitions; at least one non-`user` role is required. |
 
-## Board Settings
+## Layout Fields
 
-| Key | Type | Default | Description |
+| Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `board.rotation_threshold` | integer | `20` | Number of completed tasks before board rotation triggers. |
+| `layout.zones[].name` | string | none | Zone label; names containing `architect`, `manager`, or `engineer` map members by role type. |
+| `layout.zones[].width_pct` | integer | none | Zone width percentage. |
+| `layout.zones[].split.horizontal` | integer | none | Max members assigned directly into that zone before overflow falls through. |
 
-## Standup Settings
-
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `standup.interval_secs` | integer | `1200` | How often the daemon runs standups (seconds). |
-| `standup.output_lines` | integer | `30` | Number of recent output lines captured per agent for standup context. |
-
-## Layout
-
-The layout defines how tmux panes are arranged in zones (vertical columns).
+Example:
 
 ```yaml
 layout:
@@ -35,161 +29,104 @@ layout:
     - name: architect
       width_pct: 20
     - name: managers
-      width_pct: 20
+      width_pct: 25
     - name: engineers
-      width_pct: 60
-      split: { horizontal: 4 }
+      width_pct: 55
+      split:
+        horizontal: 6
 ```
 
-| Key | Type | Description |
-| --- | --- | --- |
-| `layout.zones[].name` | string | Zone identifier. |
-| `layout.zones[].width_pct` | integer | Percentage of terminal width (all zones must sum to <= 100). |
-| `layout.zones[].split.horizontal` | integer | Number of horizontal splits within the zone. |
+## Role Fields
 
-## Role Definition
-
-Each entry in `roles` defines one agent role.
-
-| Key | Type | Default | Description |
+| Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `name` | string | required | Role name. Must be unique. Used in instance naming and message routing. |
-| `role_type` | enum | required | One of: `user`, `architect`, `manager`, `engineer`. |
-| `agent` | string | none | Agent program: `claude`, `codex`, etc. Required for non-user roles. |
-| `instances` | integer | `1` | Number of instances to spawn. Engineers are multiplicative across compatible managers. |
-| `prompt` | string | none | Prompt template filename (relative to `team_config/`). |
-| `talks_to` | array | `[]` | Role names this role can message. Empty = default hierarchy rules. |
-| `channel` | string | none | Communication channel for user roles (e.g., `telegram`). |
-| `channel_config` | object | none | Channel-specific config (see Channel Config below). |
-| `nudge_interval_secs` | integer | none | How often to inject the nudge prompt (from `## Nudge` section of prompt template). |
-| `receives_standup` | boolean | none | Whether this role receives standup reports. |
-| `standup_interval_secs` | integer | none | Per-role standup interval override. |
-| `owns` | array | `[]` | Glob patterns for files this role owns (informational). |
-| `use_worktrees` | boolean | `false` | Create isolated git worktrees for each instance. |
+| `roles[].name` | string | none | Unique role name used for routing and instance names. |
+| `roles[].role_type` | enum | none | One of `user`, `architect`, `manager`, `engineer`. |
+| `roles[].agent` | string | none | Required for non-user roles; omitted for `user`. |
+| `roles[].instances` | integer | `1` | Must be greater than `0`. |
+| `roles[].prompt` | string | none | Prompt filename relative to `.batty/team_config/`. |
+| `roles[].talks_to` | array[string] | `[]` | Explicit routing allowlist; empty uses default hierarchy. |
+| `roles[].channel` | string | none | User-channel type; current documented value is `telegram`. |
+| `roles[].channel_config` | object | none | Channel settings; see Telegram fields below. |
+| `roles[].nudge_interval_secs` | integer | none | Periodic nudge interval for prompt templates with a `## Nudge` section. |
+| `roles[].receives_standup` | boolean | none | Opt role into standup delivery. |
+| `roles[].standup_interval_secs` | integer | none | Per-role standup override in seconds. |
+| `roles[].owns` | array[string] | `[]` | Informational ownership globs. |
+| `roles[].use_worktrees` | boolean | `false` | Use isolated git worktrees for that role's instances. |
 
-### Role Types
+## Instance Naming
 
-| Type | Description |
+| Scenario | Result |
 | --- | --- |
-| `user` | Human endpoint. No tmux pane. Uses a channel (e.g., Telegram) for communication. Cannot have `agent`. |
-| `architect` | Top of hierarchy. Plans architecture, sends directives to managers. |
-| `manager` | Middle layer. Creates tasks, assigns work to engineers, reports up to architect. |
-| `engineer` | Execution layer. Implements tasks, works in worktrees. |
+| Single architect/manager role with `instances: 1` | Uses the role name, for example `architect` or `manager`. |
+| Architect/manager role with `instances: N` | Uses `<role>-1` through `<role>-N`. |
+| Single engineer role named `engineer` under managers | Uses legacy names like `eng-1-1`, `eng-1-2`, `eng-2-1`. |
+| Custom or multiple engineer roles | Uses `<role>-<manager-index>-<engineer-index>`, for example `frontend-1-2`. |
+| Engineer role with empty `talks_to` | Multiplies across all manager instances. |
+| Engineer role with `talks_to: [manager-role]` | Only attaches to compatible manager roles or instances. |
+| Engineers with no managers | Use flat names like `engineer`, `engineer-2`, `researcher-1`. |
 
-### Instance Naming
+Default routing, when `talks_to` is empty, is `user <-> architect <-> manager <-> engineer`. The CLI sender `human` can always send to any role.
 
-- **Single instance** (`instances: 1`): uses the role name directly (e.g., `architect`)
-- **Multiple instances** (`instances: 3`): appends index (e.g., `manager-1`, `manager-2`, `manager-3`)
-- **Engineers under managers**:
-  - single engineer role named `engineer`: legacy naming `eng-<mgr>-<eng>` (e.g., `eng-1-1`, `eng-2-3`)
-  - multiple or custom engineer roles: role-prefixed naming `<role>-<mgr>-<eng>` (e.g., `black-eng-1-1`)
+## Telegram Channel Fields
 
-By default, total engineers = `manager.instances` x `engineer.instances`.
+Use these only on a `user` role with `channel: telegram`.
 
-If an engineer role's `talks_to` lists specific manager role names, that engineer role is only assigned to those managers.
-This allows multiple specialized engineer role families, for example:
-
-```yaml
-roles:
-  - name: black-lead
-    role_type: manager
-    agent: codex
-
-  - name: red-lead
-    role_type: manager
-    agent: codex
-
-  - name: black-eng
-    role_type: engineer
-    agent: codex
-    instances: 3
-    talks_to: [black-lead]
-
-  - name: red-eng
-    role_type: engineer
-    agent: codex
-    instances: 3
-    talks_to: [red-lead]
-```
-
-In that setup, Batty resolves `3` `black-eng` instances under `black-lead` and `3` `red-eng` instances under `red-lead`, not `12` engineers across both leads.
-
-### Channel Config
-
-For user roles with `channel: telegram`:
-
-| Key | Type | Default | Description |
+| Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `channel_config.target` | string | required | Telegram chat ID to send messages to. |
-| `channel_config.provider` | string | required | Provider for sending: `openclaw` or `native`. |
-| `channel_config.bot_token` | string | none | Telegram bot token (for native API). Can also be set via `BATTY_TELEGRAM_BOT_TOKEN` env var. |
-| `channel_config.allowed_user_ids` | array[integer] | `[]` | Telegram user IDs allowed to send messages (access control). |
+| `roles[].channel_config.target` | string | none | Chat ID used when Batty sends outbound messages. |
+| `roles[].channel_config.provider` | string | none | Provider name, typically `native` or `openclaw`. |
+| `roles[].channel_config.bot_token` | string | none | Native Bot API token; if omitted, Batty also checks `BATTY_TELEGRAM_BOT_TOKEN`. |
+| `roles[].channel_config.allowed_user_ids` | array[integer] | `[]` | Allowed inbound Telegram user IDs; empty denies all inbound messages. |
 
-Run `batty telegram` to configure interactively.
-
-### Communication Routing
-
-If `talks_to` is configured, only listed roles are allowed. If empty, default hierarchy applies:
-
-- User <-> Architect
-- Architect <-> Manager
-- Manager <-> Engineer
-
-The `human` sender (CLI user outside tmux) can always message any role.
-
-For a user-channel role such as `human`, reply permissions are still controlled by `talks_to`. Example: if `human.talks_to: [architect]`, then the architect must also include `human` in its own `talks_to` list to reply over Telegram.
-
-## Default Template (simple)
+## Complete Example
 
 ```yaml
 name: my-project
-
 board:
   rotation_threshold: 20
-
 standup:
-  interval_secs: 600
+  interval_secs: 900
   output_lines: 40
-
 layout:
   zones:
     - name: architect
-      width_pct: 33
+      width_pct: 20
     - name: managers
-      width_pct: 33
+      width_pct: 25
     - name: engineers
-      width_pct: 34
-      split: { horizontal: 3 }
-
+      width_pct: 55
+      split:
+        horizontal: 6
 roles:
   - name: human
     role_type: user
     channel: telegram
     channel_config:
-      target: "<your-telegram-chat-id>"
-      provider: openclaw
+      target: "123456789"
+      provider: native
+      bot_token: "123456:ABCDEF"
+      allowed_user_ids: [123456789]
     talks_to: [architect]
-
   - name: architect
     role_type: architect
     agent: claude
-    instances: 1
     prompt: architect.md
-    talks_to: [human, manager]
-    nudge_interval_secs: 900
-
+    receives_standup: true
   - name: manager
     role_type: manager
     agent: claude
-    instances: 1
     prompt: manager.md
+    instances: 2
     talks_to: [architect, engineer]
-
   - name: engineer
     role_type: engineer
-    agent: claude
-    instances: 3
+    agent: codex
     prompt: engineer.md
+    instances: 3
     talks_to: [manager]
+    nudge_interval_secs: 900
+    standup_interval_secs: 1800
+    owns: ["src/**", "tests/**"]
     use_worktrees: true
 ```
