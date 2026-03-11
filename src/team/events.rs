@@ -73,6 +73,19 @@ impl TeamEvent {
         }
     }
 
+    pub fn task_escalated(role: &str, task: &str) -> Self {
+        Self {
+            event: "task_escalated".into(),
+            role: Some(role.into()),
+            task: Some(task.into()),
+            recipient: None,
+            from: None,
+            to: None,
+            restart: None,
+            ts: Self::now(),
+        }
+    }
+
     pub fn task_completed(role: &str) -> Self {
         Self {
             event: "task_completed".into(),
@@ -219,6 +232,7 @@ mod tests {
             ("daemon_started", TeamEvent::daemon_started()),
             ("daemon_stopped", TeamEvent::daemon_stopped()),
             ("task_assigned", TeamEvent::task_assigned("eng-1", "task")),
+            ("task_escalated", TeamEvent::task_escalated("eng-1", "task")),
             ("task_completed", TeamEvent::task_completed("eng-1")),
             ("standup_generated", TeamEvent::standup_generated("manager")),
             ("member_crashed", TeamEvent::member_crashed("eng-1", true)),

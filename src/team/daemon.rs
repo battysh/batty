@@ -452,6 +452,7 @@ impl TeamDaemon {
 
         let (tests_passed, output_truncated) = run_tests_in_worktree(&worktree_dir)?;
         if tests_passed {
+            let task_title = read_task_title(&board_dir, task_id);
             let output = std::process::Command::new("kanban-md")
                 .args([
                     "move",
@@ -488,12 +489,21 @@ impl TeamDaemon {
                         .cloned()
                         .map(|pane_id| (mgr_name, pane_id))
                 });
-            if let Some((mgr_name, mgr_pane)) = manager_target {
-                let msg = format!("[{engineer}] task #{task_id} passed tests and merged.");
-                message::inject_message(&mgr_pane, engineer, &msg)?;
-                self.mark_member_working(&mgr_name);
+            if let Some((ref mgr_name, ref mgr_pane)) = manager_target {
+                let msg = format!(
+                    "[{engineer}] Task #{task_id} completed.\nTitle: {task_title}\nTests: passed\nMerge: success"
+                );
+                message::inject_message(mgr_pane, engineer, &msg)?;
+                self.mark_member_working(mgr_name);
                 self.event_sink
-                    .emit(TeamEvent::message_routed(engineer, &mgr_name))?;
+                    .emit(TeamEvent::message_routed(engineer, mgr_name))?;
+            }
+
+            if let Some((ref mgr_name, _)) = manager_target {
+                let rollup = format!(
+                    "Rollup: Task #{task_id} completed by {engineer}. Tests passed, merged to main."
+                );
+                self.notify_reports_to(mgr_name, &rollup)?;
             }
 
             self.event_sink.emit(TeamEvent::task_completed(engineer))?;
@@ -532,14 +542,24 @@ impl TeamDaemon {
                     .cloned()
                     .map(|pane_id| (mgr_name, pane_id))
             });
-        if let Some((mgr_name, mgr_pane)) = manager_target {
+        if let Some((ref mgr_name, ref mgr_pane)) = manager_target {
             let msg = format!(
                 "[{engineer}] task #{task_id} failed tests after 2 retries. Escalating.\nLast output:\n{output_truncated}"
             );
-            message::inject_message(&mgr_pane, engineer, &msg)?;
-            self.mark_member_working(&mgr_name);
+            message::inject_message(mgr_pane, engineer, &msg)?;
+            self.mark_member_working(mgr_name);
             self.event_sink
-                .emit(TeamEvent::message_routed(engineer, &mgr_name))?;
+                .emit(TeamEvent::message_routed(engineer, mgr_name))?;
+        }
+
+        self.event_sink
+            .emit(TeamEvent::task_escalated(engineer, &task_id.to_string()))?;
+
+        if let Some((ref mgr_name, _)) = manager_target {
+            let escalation = format!(
+                "ESCALATION: Task #{task_id} assigned to {engineer} failed tests after 2 retries. Task blocked on board."
+            );
+            self.notify_reports_to(mgr_name, &escalation)?;
         }
 
         let output = std::process::Command::new("kanban-md")
@@ -590,6 +610,26 @@ impl TeamDaemon {
     fn clear_active_task(&mut self, engineer: &str) {
         self.active_tasks.remove(engineer);
         self.retry_counts.remove(engineer);
+    }
+
+    fn notify_reports_to(&mut self, from_role: &str, msg: &str) -> Result<()> {
+        let parent = self
+            .config
+            .members
+            .iter()
+            .find(|m| m.name == from_role)
+            .and_then(|m| m.reports_to.clone());
+        let Some(parent_name) = parent else {
+            return Ok(());
+        };
+        let Some(parent_pane) = self.config.pane_map.get(&parent_name).cloned() else {
+            return Ok(());
+        };
+        message::inject_message(&parent_pane, from_role, msg)?;
+        self.mark_member_working(&parent_name);
+        self.event_sink
+            .emit(TeamEvent::message_routed(from_role, &parent_name))?;
+        Ok(())
     }
 
     /// Handle a crashed member — restart if possible.
@@ -1594,6 +1634,31 @@ fn run_tests_in_worktree(worktree_dir: &Path) -> Result<(bool, String)> {
     Ok((output.status.success(), trimmed))
 }
 
+fn read_task_title(board_dir: &Path, task_id: u32) -> String {
+    let tasks_dir = board_dir.join("tasks");
+    let prefix = format!("{task_id:03}-");
+    if let Ok(entries) = std::fs::read_dir(&tasks_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&prefix)
+                && name.ends_with(".md")
+                && let Ok(content) = std::fs::read_to_string(entry.path())
+            {
+                for line in content.lines() {
+                    if line.starts_with("title:") {
+                        return line
+                            .trim_start_matches("title:")
+                            .trim()
+                            .trim_matches(|c| c == '"' || c == '\'')
+                            .to_string();
+                    }
+                }
+            }
+        }
+    }
+    format!("Task #{task_id}")
+}
+
 /// Set up a git worktree for an engineer with symlinked shared config.
 fn setup_engineer_worktree(
     project_root: &Path,
@@ -2590,6 +2655,36 @@ mod tests {
         let (passed, output) = run_tests_in_worktree(worktree).unwrap();
         assert!(!passed);
         assert!(output.contains("FAILED"));
+    }
+
+    #[test]
+    fn test_task_escalated_event_serializes() {
+        let event = TeamEvent::task_escalated("eng-1-1", "42");
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"task_escalated\""));
+        assert!(json.contains("\"role\":\"eng-1-1\""));
+        assert!(json.contains("\"task\":\"42\""));
+    }
+
+    #[test]
+    fn test_read_task_title_from_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("042-my-cool-task.md"),
+            "---\ntitle: My Cool Task\nstatus: in-progress\npriority: high\n---\nBody here\n",
+        )
+        .unwrap();
+        let title = read_task_title(tmp.path(), 42);
+        assert_eq!(title, "My Cool Task");
+    }
+
+    #[test]
+    fn test_read_task_title_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let title = read_task_title(tmp.path(), 99);
+        assert_eq!(title, "Task #99");
     }
 
     #[test]
