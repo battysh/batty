@@ -14,6 +14,7 @@ pub mod inbox;
 pub mod layout;
 pub mod message;
 pub mod standup;
+pub mod task_loop;
 pub mod telegram;
 pub mod watcher;
 
