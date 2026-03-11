@@ -507,4 +507,97 @@ roles:
 
         crate::tmux::kill_session(session).unwrap();
     }
+
+    #[test]
+    fn auto_zones_single_role_type_produces_one_zone() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 4
+"#,
+        );
+        let pane_members: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_type != RoleType::User)
+            .collect();
+        let zones = build_zones_auto(&pane_members);
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].1.len(), 4);
+    }
+
+    #[test]
+    fn split_zone_subgroups_groups_engineers_by_manager() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: manager
+    role_type: manager
+    agent: claude
+    instances: 2
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 2
+    talks_to: [manager]
+"#,
+        );
+        let engineers: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_type == RoleType::Engineer)
+            .collect();
+        let subgroups = split_zone_subgroups(&engineers);
+        assert_eq!(subgroups.len(), 2);
+        assert_eq!(subgroups[0].len(), 2);
+        assert_eq!(subgroups[1].len(), 2);
+        // Each subgroup should share the same reports_to
+        for group in &subgroups {
+            let parent = group[0].reports_to.as_ref().unwrap();
+            assert!(
+                group
+                    .iter()
+                    .all(|m| m.reports_to.as_ref().unwrap() == parent)
+            );
+        }
+    }
+
+    #[test]
+    fn config_zones_unplaced_members_go_to_last_zone() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: manager
+    role_type: manager
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 2
+"#,
+        );
+        // Only define one zone — everything else should end up there
+        let layout = LayoutConfig {
+            zones: vec![super::super::config::ZoneDef {
+                name: "architect".to_string(),
+                width_pct: 100,
+                split: None,
+            }],
+        };
+        let pane_members: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_type != RoleType::User)
+            .collect();
+        let zones = build_zones_from_config(&layout, &pane_members);
+        // Architect zone gets architect + leftover manager/engineers
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].1.len(), 4); // 1 arch + 1 mgr + 2 eng
+    }
 }

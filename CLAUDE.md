@@ -63,6 +63,7 @@ thiserror = "2"
 ctrlc = "3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ureq = { version = "2", features = ["json"] }
 ```
 
 ## Building & Installing
