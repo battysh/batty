@@ -2,6 +2,21 @@
 
 All notable changes to Batty are documented here.
 
+## 0.1.5 — 2026-03-11
+
+Follow-up release to finish the `0.1.4` stabilization work and restore a fully
+green delivery pipeline.
+
+### Fixes
+
+- **Patch coverage on inline Rust tests** — update the CI coverage job to run
+  `cargo tarpaulin --include-tests` so Codecov measures `#[cfg(test)]` modules
+  inside `src/` correctly, including the Ubuntu layout regression test added in
+  `0.1.4`.
+- **Cross-platform layout test stability** — keep the Linux-compatible tmux
+  layout assertion that tolerates the small pane-height rounding difference seen
+  on Ubuntu runners once borders and status lines are enabled.
+
 ## 0.1.4 — 2026-03-11
 
 Patch release to finish the CI stabilization work from `0.1.3`.

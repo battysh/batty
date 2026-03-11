@@ -137,7 +137,7 @@ jobs:
 
       - name: Generate coverage
         run: >-
-          cargo tarpaulin --out xml --output-dir coverage/ --skip-clean
+          cargo tarpaulin --out xml --output-dir coverage/ --skip-clean --include-tests
           --
           --skip tmux::tests::create_session
           --skip tmux::tests::create_window
