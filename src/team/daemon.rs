@@ -826,20 +826,34 @@ impl TeamDaemon {
     /// Deliver inbox messages to agents that are at their prompt.
     ///
     /// For each member with a pane, check their `new/` inbox. If the agent's
-    /// watcher state is Idle or Completed, inject the message via tmux and
-    /// move it to `cur/`. If the agent is busy, messages stay in `new/` and
-    /// survive daemon restarts.
+    /// watcher state is Idle, Completed, or Stale, inject the message via
+    /// tmux and move it to `cur/`. If the agent is actively working,
+    /// messages stay in `new/` and survive daemon restarts.
+    ///
+    /// Stale agents are included because they have produced no new output
+    /// for longer than the stale threshold — they are almost certainly
+    /// sitting at an idle prompt that the watcher failed to classify,
+    /// and blocking message delivery indefinitely is worse than
+    /// interrupting a genuinely slow operation.
     fn deliver_inbox_messages(&mut self) -> Result<()> {
         let root = inbox::inboxes_root(&self.config.project_root);
 
         let member_names: Vec<String> = self.config.pane_map.keys().cloned().collect();
 
         for name in &member_names {
-            // Only deliver to idle/completed agents
+            // Deliver to idle, completed, or stale agents. Stale agents
+            // haven't produced output in a while and are likely sitting at
+            // an undetected prompt — delivering unblocks stuck message
+            // queues that would otherwise require manual tmux injection.
             let is_ready = self
                 .watchers
                 .get(name)
-                .map(|w| matches!(w.state, WatcherState::Idle | WatcherState::Completed))
+                .map(|w| {
+                    matches!(
+                        w.state,
+                        WatcherState::Idle | WatcherState::Completed | WatcherState::Stale
+                    )
+                })
                 .unwrap_or(true);
 
             if !is_ready {
