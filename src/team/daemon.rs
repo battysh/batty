@@ -388,25 +388,32 @@ impl TeamDaemon {
 
         for name in &member_names {
             let prev_state = self.states.get(name).copied();
-            let watcher = self.watchers.get_mut(name).unwrap();
-
-            match watcher.poll() {
-                Ok(new_state) => {
-                    let member_state = match new_state {
-                        WatcherState::Active => MemberState::Working,
-                        WatcherState::Idle => MemberState::Idle,
-                    };
-
-                    if prev_state != Some(member_state) {
-                        self.states.insert(name.clone(), member_state);
-
-                        // Update automation countdowns on state transitions.
-                        self.update_automation_timers_for_state(name, member_state);
+            let (new_state, completion_observed) = {
+                let watcher = self.watchers.get_mut(name).unwrap();
+                match watcher.poll() {
+                    Ok(new_state) => (new_state, watcher.take_completion_event()),
+                    Err(e) => {
+                        warn!(member = %name, error = %e, "watcher poll failed");
+                        continue;
                     }
                 }
-                Err(e) => {
-                    warn!(member = %name, error = %e, "watcher poll failed");
-                }
+            };
+
+            let member_state = match new_state {
+                WatcherState::Active => MemberState::Working,
+                WatcherState::Idle => MemberState::Idle,
+            };
+
+            if prev_state != Some(member_state) {
+                self.states.insert(name.clone(), member_state);
+
+                // Update automation countdowns on state transitions.
+                self.update_automation_timers_for_state(name, member_state);
+            }
+
+            if completion_observed && self.active_task_id(name).is_some() {
+                info!(member = %name, "detected task completion");
+                self.handle_engineer_completion(name)?;
             }
         }
 
