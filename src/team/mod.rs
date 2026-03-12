@@ -448,7 +448,8 @@ fn summarize_runtime_member_status(raw_status: &str, pane_dead: bool) -> Runtime
 
     let label = strip_tmux_style(raw_status);
     let normalized = label.to_ascii_lowercase();
-    let has_nudge = normalized.contains("nudge");
+    let has_nudge_sent = normalized.contains("nudge sent");
+    let has_waiting_nudge = normalized.contains("nudge") && !has_nudge_sent;
     let has_standup = normalized.contains("standup");
 
     let state = if normalized.contains("crashed") {
@@ -465,11 +466,14 @@ fn summarize_runtime_member_status(raw_status: &str, pane_dead: bool) -> Runtime
         "unknown"
     };
 
-    let signal = match (has_nudge, has_standup) {
-        (true, true) => Some("waiting for nudge, standup".to_string()),
-        (true, false) => Some("waiting for nudge".to_string()),
-        (false, true) => Some("standup".to_string()),
-        (false, false) => None,
+    let signal = match (has_waiting_nudge, has_nudge_sent, has_standup) {
+        (true, false, true) => Some("waiting for nudge, standup".to_string()),
+        (true, false, false) => Some("waiting for nudge".to_string()),
+        (false, true, true) => Some("nudged, standup".to_string()),
+        (false, true, false) => Some("nudged".to_string()),
+        (false, false, true) => Some("standup".to_string()),
+        (false, false, false) => None,
+        (true, true, _) => Some("nudged".to_string()),
     };
 
     RuntimeMemberStatus {
@@ -1119,6 +1123,18 @@ mod tests {
             summary.signal.as_deref(),
             Some("waiting for nudge, standup")
         );
+    }
+
+    #[test]
+    fn summarize_runtime_member_status_distinguishes_sent_nudge() {
+        let summary = summarize_runtime_member_status(
+            "#[fg=yellow]idle#[default] #[fg=magenta]nudge sent#[default]",
+            false,
+        );
+
+        assert_eq!(summary.state, "idle");
+        assert_eq!(summary.signal.as_deref(), Some("nudged"));
+        assert_eq!(summary.label.as_deref(), Some("idle nudge sent"));
     }
 
     #[test]

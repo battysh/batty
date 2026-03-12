@@ -5,10 +5,12 @@
 //! roles, generates periodic standups, and emits structured events.
 
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use super::board;
@@ -69,6 +71,12 @@ pub struct TeamDaemon {
     last_board_rotation: Instant,
     last_auto_dispatch: Instant,
     poll_interval: Duration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct LaunchIdentity {
+    agent: String,
+    prompt: String,
 }
 
 impl TeamDaemon {
@@ -214,6 +222,8 @@ impl TeamDaemon {
     /// Spawn the correct agent in each member's pane.
     fn spawn_all_agents(&mut self, resume: bool) -> Result<()> {
         let team_config_dir = self.config.project_root.join(".batty").join("team_config");
+        let previous_launch_state = load_launch_state(&self.config.project_root);
+        let mut next_launch_state = HashMap::new();
 
         // Ensure inboxes exist for all members
         let inboxes = inbox::inboxes_root(&self.config.project_root);
@@ -258,11 +268,21 @@ impl TeamDaemon {
             };
 
             // Build launch script (strip ## Nudge section — that's daemon-only).
-            // All roles start idle so their role prompt is loaded as persistent
-            // context instead of being interpreted as an immediate shell task.
+            // Fresh launches start idle so their role prompt is loaded as
+            // persistent context instead of being interpreted as an immediate
+            // shell task. Resumed launches start active so the watcher can
+            // immediately reclassify the restored session from live pane output.
             let agent_name = member.agent.as_deref().unwrap_or("claude");
             let prompt_text = strip_nudge_section(&self.load_prompt(member, &team_config_dir));
             let idle = role_starts_idle();
+            let normalized_agent = canonical_agent_name(agent_name);
+            let member_resume = should_resume_member(
+                resume,
+                &previous_launch_state,
+                &member.name,
+                &normalized_agent,
+                &prompt_text,
+            );
 
             let short_cmd = write_launch_script(
                 &member.name,
@@ -272,19 +292,29 @@ impl TeamDaemon {
                 &work_dir,
                 &self.config.project_root,
                 idle,
-                resume,
+                member_resume,
             )?;
 
-            debug!(member = %member.name, agent = agent_name, idle, resume, "spawning agent");
+            debug!(
+                member = %member.name,
+                agent = agent_name,
+                idle,
+                resume_requested = resume,
+                member_resume,
+                "spawning agent"
+            );
             tmux::send_keys(pane_id, &short_cmd, true)?;
+            next_launch_state.insert(
+                member.name.clone(),
+                LaunchIdentity {
+                    agent: normalized_agent,
+                    prompt: prompt_text.clone(),
+                },
+            );
 
-            let initial_state = if idle {
-                MemberState::Idle
-            } else {
-                MemberState::Working
-            };
+            let initial_state = initial_member_state(idle, member_resume);
             self.states.insert(member.name.clone(), initial_state);
-            if !idle {
+            if should_activate_watcher_on_spawn(idle, member_resume) {
                 if let Some(watcher) = self.watchers.get_mut(&member.name) {
                     watcher.activate();
                 }
@@ -293,6 +323,8 @@ impl TeamDaemon {
             self.event_sink
                 .emit(TeamEvent::agent_spawned(&member.name))?;
         }
+
+        save_launch_state(&self.config.project_root, &next_launch_state)?;
 
         Ok(())
     }
@@ -1018,27 +1050,7 @@ impl TeamDaemon {
                 MemberState::Crashed => "#[fg=red,bold]CRASHED#[default]",
             };
 
-            let nudge_str = if let Some(schedule) = self.nudges.get(&member.name) {
-                if schedule.fired_this_idle {
-                    // Already fired this idle period — no countdown
-                    String::new()
-                } else if let Some(idle_since) = schedule.idle_since {
-                    let elapsed = idle_since.elapsed();
-                    if elapsed < schedule.interval {
-                        let remaining = schedule.interval - elapsed;
-                        let mins = remaining.as_secs() / 60;
-                        let secs = remaining.as_secs() % 60;
-                        format!(" #[fg=magenta]nudge {mins}:{secs:02}#[default]")
-                    } else {
-                        " #[fg=magenta]nudge now#[default]".to_string()
-                    }
-                } else {
-                    // Working — no countdown shown
-                    String::new()
-                }
-            } else {
-                String::new()
-            };
+            let nudge_str = format_nudge_status(self.nudges.get(&member.name));
 
             // Standup timer for roles that receive standups
             let role_def = self
@@ -1446,6 +1458,31 @@ fn strip_nudge_section(prompt: &str) -> String {
     lines.join("\n").trim_end().to_string()
 }
 
+fn format_nudge_status(schedule: Option<&NudgeSchedule>) -> String {
+    let Some(schedule) = schedule else {
+        return String::new();
+    };
+
+    if schedule.fired_this_idle {
+        return " #[fg=magenta]nudge sent#[default]".to_string();
+    }
+
+    let Some(idle_since) = schedule.idle_since else {
+        // Working — no countdown shown
+        return String::new();
+    };
+
+    let elapsed = idle_since.elapsed();
+    if elapsed < schedule.interval {
+        let remaining = schedule.interval - elapsed;
+        let mins = remaining.as_secs() / 60;
+        let secs = remaining.as_secs() % 60;
+        format!(" #[fg=magenta]nudge {mins}:{secs:02}#[default]")
+    } else {
+        " #[fg=magenta]nudge now#[default]".to_string()
+    }
+}
+
 /// Write a launch script to a temp file and return the short command to execute it.
 ///
 /// This avoids pasting huge prompt strings via tmux paste-buffer, which garbles
@@ -1587,6 +1624,84 @@ fn prepare_codex_context(
 
 fn role_starts_idle() -> bool {
     true
+}
+
+fn initial_member_state(idle: bool, resume: bool) -> MemberState {
+    if idle && !resume {
+        MemberState::Idle
+    } else {
+        MemberState::Working
+    }
+}
+
+fn should_activate_watcher_on_spawn(idle: bool, resume: bool) -> bool {
+    !idle || resume
+}
+
+fn canonical_agent_name(agent_name: &str) -> String {
+    agent::adapter_from_name(agent_name)
+        .map(|adapter| adapter.name().to_string())
+        .unwrap_or_else(|| agent_name.to_string())
+}
+
+fn launch_state_path(project_root: &Path) -> PathBuf {
+    project_root.join(".batty").join("launch-state.json")
+}
+
+fn load_launch_state(project_root: &Path) -> HashMap<String, LaunchIdentity> {
+    let path = launch_state_path(project_root);
+    let Ok(content) = fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+
+    match serde_json::from_str(&content) {
+        Ok(state) => state,
+        Err(error) => {
+            warn!(path = %path.display(), error = %error, "failed to parse launch state, ignoring");
+            HashMap::new()
+        }
+    }
+}
+
+fn save_launch_state(project_root: &Path, state: &HashMap<String, LaunchIdentity>) -> Result<()> {
+    let path = launch_state_path(project_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let content =
+        serde_json::to_string_pretty(state).context("failed to serialize launch state")?;
+    fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn should_resume_member(
+    resume_requested: bool,
+    previous_state: &HashMap<String, LaunchIdentity>,
+    member_name: &str,
+    current_agent: &str,
+    current_prompt: &str,
+) -> bool {
+    if !resume_requested {
+        return false;
+    }
+
+    let Some(previous) = previous_state.get(member_name) else {
+        return true;
+    };
+
+    if previous.agent == current_agent && previous.prompt == current_prompt {
+        return true;
+    }
+
+    info!(
+        member = member_name,
+        previous_agent = %previous.agent,
+        current_agent,
+        prompt_changed = previous.prompt != current_prompt,
+        "launch identity changed, forcing fresh start instead of resume"
+    );
+    false
 }
 
 fn member_codex_cwd(project_root: &Path, member: &MemberInstance) -> Option<PathBuf> {
@@ -1746,6 +1861,18 @@ mod tests {
     }
 
     #[test]
+    fn resumed_idle_member_starts_working() {
+        assert_eq!(initial_member_state(true, true), MemberState::Working);
+        assert!(should_activate_watcher_on_spawn(true, true));
+    }
+
+    #[test]
+    fn fresh_idle_member_stays_idle_until_assigned() {
+        assert_eq!(initial_member_state(true, false), MemberState::Idle);
+        assert!(!should_activate_watcher_on_spawn(true, false));
+    }
+
+    #[test]
     fn launch_script_escapes_single_quotes() {
         write_launch_script(
             "eng-2",
@@ -1800,6 +1927,107 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), "# Engineer\n\n## Workflow\n\n- code\n").unwrap();
         assert!(extract_nudge_section(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn format_nudge_status_marks_sent_after_fire() {
+        let schedule = NudgeSchedule {
+            text: "check in".to_string(),
+            interval: Duration::from_secs(600),
+            idle_since: Some(Instant::now() - Duration::from_secs(601)),
+            fired_this_idle: true,
+        };
+
+        assert_eq!(
+            format_nudge_status(Some(&schedule)),
+            " #[fg=magenta]nudge sent#[default]"
+        );
+    }
+
+    #[test]
+    fn canonical_agent_name_normalizes_aliases() {
+        assert_eq!(canonical_agent_name("claude"), "claude-code");
+        assert_eq!(canonical_agent_name("claude-code"), "claude-code");
+        assert_eq!(canonical_agent_name("codex"), "codex-cli");
+        assert_eq!(canonical_agent_name("codex-cli"), "codex-cli");
+    }
+
+    #[test]
+    fn launch_state_round_trip_preserves_agent_and_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = HashMap::new();
+        state.insert(
+            "architect".to_string(),
+            LaunchIdentity {
+                agent: "claude-code".to_string(),
+                prompt: "role prompt".to_string(),
+            },
+        );
+
+        save_launch_state(tmp.path(), &state).unwrap();
+
+        let loaded = load_launch_state(tmp.path());
+        assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn should_resume_member_rejects_agent_change() {
+        let mut previous = HashMap::new();
+        previous.insert(
+            "architect".to_string(),
+            LaunchIdentity {
+                agent: "codex-cli".to_string(),
+                prompt: "same prompt".to_string(),
+            },
+        );
+
+        assert!(!should_resume_member(
+            true,
+            &previous,
+            "architect",
+            "claude-code",
+            "same prompt",
+        ));
+    }
+
+    #[test]
+    fn should_resume_member_rejects_prompt_change() {
+        let mut previous = HashMap::new();
+        previous.insert(
+            "architect".to_string(),
+            LaunchIdentity {
+                agent: "claude-code".to_string(),
+                prompt: "old prompt".to_string(),
+            },
+        );
+
+        assert!(!should_resume_member(
+            true,
+            &previous,
+            "architect",
+            "claude-code",
+            "new prompt",
+        ));
+    }
+
+    #[test]
+    fn should_resume_member_accepts_matching_launch_identity() {
+        let mut previous = HashMap::new();
+        previous.insert(
+            "architect".to_string(),
+            LaunchIdentity {
+                agent: "claude-code".to_string(),
+                prompt: "same prompt".to_string(),
+            },
+        );
+
+        assert!(should_resume_member(
+            true,
+            &previous,
+            "architect",
+            "claude-code",
+            "same prompt",
+        ));
     }
 
     #[test]
