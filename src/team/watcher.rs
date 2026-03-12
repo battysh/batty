@@ -195,6 +195,15 @@ fn is_at_agent_prompt(capture: &str) -> bool {
         }
     }
 
+    // Claude can also land in an interrupt-resolution UI after a blocked tool call
+    // or nested interactive flow. That still represents an active task, not an idle
+    // prompt waiting for a fresh assignment.
+    if capture.contains("What should Claude do instead?")
+        || capture.contains("Conversation interrupted")
+    {
+        return false;
+    }
+
     for line in &trimmed {
         let l = line.trim();
         // Claude Code idle prompt
@@ -454,6 +463,19 @@ mod tests {
             "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
         );
         assert!(is_at_agent_prompt(capture));
+    }
+
+    #[test]
+    fn claude_interrupted_prompt_not_idle() {
+        let capture = concat!(
+            "■ Conversation interrupted - tell the model what to do differently.\n",
+            "  Something went wrong? Hit `/feedback` to report the issue.\n",
+            "\n",
+            "Interrupted · What should Claude do instead?\n",
+            "❯ \n",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
+        );
+        assert!(!is_at_agent_prompt(capture));
     }
 
     #[test]
