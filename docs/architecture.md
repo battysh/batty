@@ -70,8 +70,12 @@ Communication is gated by `talks_to` rules in team.yaml. Unauthorized messages a
 The daemon runs as a detached background process (`batty daemon --project-root <path>`), spawned by `batty start`. It:
 
 - **Spawns agents** in their assigned tmux panes with composed prompts
-- **Creates worktrees** for engineers with `use_worktrees: true`
+- **Maintains engineer worktrees** with `use_worktrees: true`, keeping one
+  stable worktree path per engineer and switching assignments onto fresh task
+  branches from `main`
 - **Delivers messages** by polling Maildir inboxes and injecting into panes
+- **Records assignment outcomes** so callers can see whether delivery launched
+  successfully or failed
 - **Monitors output** via `SessionWatcher` (tmux `capture-pane`)
 - **Runs standups** on configurable intervals per role
 - **Nudges agents** by re-injecting prompt sections on a timer

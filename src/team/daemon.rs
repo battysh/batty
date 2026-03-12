@@ -24,10 +24,12 @@ use super::message;
 use super::standup::{self, MemberState};
 pub use super::task_loop::merge_engineer_branch;
 use super::task_loop::{
-    MergeLock, MergeOutcome, next_unclaimed_task, read_task_title, refresh_engineer_worktree,
-    run_tests_in_worktree, setup_engineer_worktree,
+    MergeLock, MergeOutcome, engineer_base_branch_name, next_unclaimed_task,
+    prepare_engineer_assignment_worktree, read_task_title, run_tests_in_worktree,
+    setup_engineer_worktree,
 };
 use super::watcher::{SessionTrackerConfig, SessionWatcher, WatcherState};
+use super::{AssignmentDeliveryResult, AssignmentResultStatus, now_unix, store_assignment_result};
 use crate::agent;
 use crate::tmux;
 
@@ -82,6 +84,12 @@ struct LaunchIdentity {
     agent: String,
     prompt: String,
     session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AssignmentLaunch {
+    branch: Option<String>,
+    work_dir: PathBuf,
 }
 
 impl TeamDaemon {
@@ -261,10 +269,11 @@ impl TeamDaemon {
                     .join(".batty")
                     .join("worktrees")
                     .join(&member.name);
+                let branch_name = engineer_base_branch_name(&member.name);
                 match setup_engineer_worktree(
                     &self.config.project_root,
                     &wt_dir,
-                    &member.name,
+                    &branch_name,
                     &team_config_dir,
                 ) {
                     Ok(path) => path,
@@ -294,10 +303,14 @@ impl TeamDaemon {
                 &prompt_text,
             );
             let previous_identity = previous_launch_state.get(&member.name);
+            let claude_session_available = previous_identity
+                .and_then(|identity| identity.session_id.as_deref())
+                .is_none_or(claude_session_id_exists);
             let (member_resume, session_id) = resolve_member_launch_session(
                 &normalized_agent,
                 previous_identity,
                 requested_resume,
+                claude_session_available,
                 previous_identity
                     .and_then(|identity| identity.session_id.as_deref())
                     .is_some_and(|session_id| duplicate_claude_session_ids.contains(session_id)),
@@ -682,6 +695,127 @@ impl TeamDaemon {
         self.retry_counts.remove(engineer);
     }
 
+    fn queue_daemon_message(&mut self, recipient: &str, body: &str) -> Result<()> {
+        if let Some(channel) = self.channels.get(recipient) {
+            channel.send(body)?;
+            self.event_sink
+                .emit(TeamEvent::message_routed("daemon", recipient))?;
+            return Ok(());
+        }
+
+        let known_recipient = self.config.pane_map.contains_key(recipient)
+            || self
+                .config
+                .members
+                .iter()
+                .any(|member| member.name == recipient);
+        if !known_recipient {
+            debug!(recipient, "skipping daemon reply for unknown recipient");
+            return Ok(());
+        }
+
+        let root = inbox::inboxes_root(&self.config.project_root);
+        let msg = inbox::InboxMessage::new_send("daemon", recipient, body);
+        inbox::deliver_to_inbox(&root, &msg)?;
+        self.event_sink
+            .emit(TeamEvent::message_routed("daemon", recipient))?;
+        Ok(())
+    }
+
+    fn notify_assignment_sender_success(
+        &mut self,
+        sender: &str,
+        engineer: &str,
+        msg_id: &str,
+        task: &str,
+        launch: &AssignmentLaunch,
+    ) {
+        let mut body = format!(
+            "Assignment delivered.\nEngineer: {engineer}\nMessage ID: {msg_id}\nTask: {}",
+            summarize_assignment(task)
+        );
+        if let Some(branch) = launch.branch.as_deref() {
+            body.push_str(&format!("\nBranch: {branch}"));
+        }
+        body.push_str(&format!("\nWorktree: {}", launch.work_dir.display()));
+
+        if let Err(error) = self.queue_daemon_message(sender, &body) {
+            warn!(to = sender, error = %error, "failed to notify assignment sender");
+        }
+    }
+
+    fn record_assignment_success(
+        &self,
+        engineer: &str,
+        msg_id: &str,
+        task: &str,
+        launch: &AssignmentLaunch,
+    ) {
+        let result = AssignmentDeliveryResult {
+            message_id: msg_id.to_string(),
+            status: AssignmentResultStatus::Delivered,
+            engineer: engineer.to_string(),
+            task_summary: summarize_assignment(task),
+            branch: launch.branch.clone(),
+            work_dir: Some(launch.work_dir.display().to_string()),
+            detail: "assignment launched".to_string(),
+            ts: now_unix(),
+        };
+        if let Err(error) = store_assignment_result(&self.config.project_root, &result) {
+            warn!(id = msg_id, error = %error, "failed to record assignment success");
+        }
+    }
+
+    fn notify_assignment_sender_failure(
+        &mut self,
+        sender: &str,
+        engineer: &str,
+        msg_id: &str,
+        task: &str,
+        error: &anyhow::Error,
+    ) {
+        let body = format!(
+            "Assignment failed.\nEngineer: {engineer}\nMessage ID: {msg_id}\nTask: {}\nReason: {error}",
+            summarize_assignment(task)
+        );
+
+        if let Err(notify_error) = self.queue_daemon_message(sender, &body) {
+            warn!(
+                to = sender,
+                error = %notify_error,
+                "failed to notify assignment sender of failure"
+            );
+        }
+    }
+
+    fn record_assignment_failure(
+        &self,
+        engineer: &str,
+        msg_id: &str,
+        task: &str,
+        error: &anyhow::Error,
+    ) {
+        let work_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("worktrees")
+            .join(engineer);
+        let result = AssignmentDeliveryResult {
+            message_id: msg_id.to_string(),
+            status: AssignmentResultStatus::Failed,
+            engineer: engineer.to_string(),
+            task_summary: summarize_assignment(task),
+            branch: None,
+            work_dir: Some(work_dir.display().to_string()),
+            detail: error.to_string(),
+            ts: now_unix(),
+        };
+        if let Err(store_error) = store_assignment_result(&self.config.project_root, &result) {
+            warn!(id = msg_id, error = %store_error, "failed to record assignment failure");
+        }
+    }
+
     fn notify_reports_to(&mut self, from_role: &str, msg: &str) -> Result<()> {
         let parent = self
             .config
@@ -795,6 +929,7 @@ impl TeamDaemon {
                 continue;
             };
 
+            let mut delivered_any = false;
             for msg in &messages {
                 // Enforce routing rules: resolve sender/recipient role names
                 let from_role = self.resolve_role_name(&msg.from);
@@ -809,38 +944,87 @@ impl TeamDaemon {
                     continue;
                 }
 
-                match msg.msg_type {
+                let delivery_result = match msg.msg_type {
                     inbox::MessageType::Send => {
                         info!(from = %msg.from, to = %name, id = %msg.id, "delivering inbox message");
-                        message::inject_message(&pane_id, &msg.from, &msg.body)?;
+                        message::inject_message(&pane_id, &msg.from, &msg.body)
                     }
                     inbox::MessageType::Assign => {
                         info!(to = %name, id = %msg.id, "delivering inbox assignment");
-                        self.assign_task(name, &msg.body)?;
+                        self.assign_task(name, &msg.body).map(|launch| {
+                            self.record_assignment_success(name, &msg.id, &msg.body, &launch);
+                            self.notify_assignment_sender_success(
+                                &msg.from, name, &msg.id, &msg.body, &launch,
+                            );
+                        })
+                    }
+                };
+
+                let mut mark_delivered = false;
+                match delivery_result {
+                    Ok(()) => {
+                        delivered_any = true;
+                        mark_delivered = true;
+                    }
+                    Err(error) => {
+                        warn!(
+                            from = %msg.from,
+                            to = %name,
+                            id = %msg.id,
+                            error = %error,
+                            "failed to deliver inbox message"
+                        );
+                        if matches!(msg.msg_type, inbox::MessageType::Assign) {
+                            mark_delivered = true;
+                            self.record_assignment_failure(name, &msg.id, &msg.body, &error);
+                            self.notify_assignment_sender_failure(
+                                &msg.from, name, &msg.id, &msg.body, &error,
+                            );
+                        }
                     }
                 }
 
-                // Mark as delivered (move new/ → cur/)
-                if let Err(e) = inbox::mark_delivered(&root, name, &msg.id) {
-                    warn!(member = %name, id = %msg.id, error = %e, "failed to mark delivered");
+                if !mark_delivered {
+                    continue;
                 }
 
-                self.event_sink
-                    .emit(TeamEvent::message_routed(&msg.from, name))?;
+                // Mark as delivered (move new/ → cur/)
+                if let Err(error) = inbox::mark_delivered(&root, name, &msg.id) {
+                    warn!(
+                        member = %name,
+                        id = %msg.id,
+                        error = %error,
+                        "failed to mark delivered"
+                    );
+                } else {
+                    self.event_sink
+                        .emit(TeamEvent::message_routed(&msg.from, name))?;
+                }
 
                 // Small delay between multiple messages
                 std::thread::sleep(Duration::from_secs(1));
             }
 
             // Re-activate watcher after delivering messages
-            self.mark_member_working(name);
+            if delivered_any {
+                self.mark_member_working(name);
+            }
         }
 
         Ok(())
     }
 
     /// Assign a task to an engineer: reset context, inject new prompt.
-    fn assign_task(&mut self, engineer: &str, task: &str) -> Result<()> {
+    fn assign_task(&mut self, engineer: &str, task: &str) -> Result<AssignmentLaunch> {
+        self.assign_task_with_task_id(engineer, task, None)
+    }
+
+    fn assign_task_with_task_id(
+        &mut self,
+        engineer: &str,
+        task: &str,
+        task_id: Option<u32>,
+    ) -> Result<AssignmentLaunch> {
         info!(engineer, task, "assigning task");
 
         let Some(pane_id) = self.config.pane_map.get(engineer).cloned() else {
@@ -852,7 +1036,28 @@ impl TeamDaemon {
 
         let agent_name = member.and_then(|m| m.agent.as_deref()).unwrap_or("claude");
 
-        // Reset agent context
+        let team_config_dir = self.config.project_root.join(".batty").join("team_config");
+        let use_worktrees = member.map(|m| m.use_worktrees).unwrap_or(false);
+        let task_branch = use_worktrees.then(|| engineer_task_branch_name(engineer, task, task_id));
+        let work_dir = if let Some(task_branch) = task_branch.as_deref() {
+            let work_dir = self
+                .config
+                .project_root
+                .join(".batty")
+                .join("worktrees")
+                .join(engineer);
+            prepare_engineer_assignment_worktree(
+                &self.config.project_root,
+                &work_dir,
+                engineer,
+                task_branch,
+                &team_config_dir,
+            )?
+        } else {
+            self.config.project_root.clone()
+        };
+
+        // Reset agent context after the new worktree branch is ready.
         let adapter = agent::adapter_from_name(agent_name);
         if let Some(adapter) = &adapter {
             for (keys, enter) in adapter.reset_context_keys() {
@@ -861,33 +1066,6 @@ impl TeamDaemon {
             }
         }
 
-        // Determine work directory
-        let use_worktrees = member.map(|m| m.use_worktrees).unwrap_or(false);
-        let work_dir = if use_worktrees {
-            self.config
-                .project_root
-                .join(".batty")
-                .join("worktrees")
-                .join(engineer)
-        } else {
-            self.config.project_root.clone()
-        };
-
-        let team_config_dir = self.config.project_root.join(".batty").join("team_config");
-        if use_worktrees
-            && let Err(e) = refresh_engineer_worktree(
-                &self.config.project_root,
-                &work_dir,
-                engineer,
-                &team_config_dir,
-            )
-        {
-            warn!(
-                engineer,
-                error = %e,
-                "worktree refresh failed, proceeding with existing"
-            );
-        }
         let role_context =
             member.map(|m| strip_nudge_section(&self.load_prompt(m, &team_config_dir)));
         let normalized_agent = canonical_agent_name(agent_name);
@@ -920,7 +1098,10 @@ impl TeamDaemon {
         self.event_sink
             .emit(TeamEvent::task_assigned(engineer, task))?;
 
-        Ok(())
+        Ok(AssignmentLaunch {
+            branch: task_branch,
+            work_dir,
+        })
     }
 
     fn idle_engineer_names(&self) -> Vec<String> {
@@ -966,7 +1147,7 @@ impl TeamDaemon {
 
             let assignment_message =
                 format!("Task #{}: {}\n\n{}", task.id, task.title, task.description);
-            self.assign_task(&engineer_name, &assignment_message)?;
+            self.assign_task_with_task_id(&engineer_name, &assignment_message, Some(task.id))?;
             self.active_tasks.insert(engineer_name.clone(), task.id);
             self.retry_counts.remove(&engineer_name);
             info!(
@@ -1747,10 +1928,111 @@ fn new_member_session_id(agent_name: &str) -> Option<String> {
     (agent_name == "claude-code").then(|| Uuid::new_v4().to_string())
 }
 
+fn summarize_assignment(task: &str) -> String {
+    let summary = task
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("task")
+        .trim();
+    if summary.len() <= 120 {
+        summary.to_string()
+    } else {
+        format!("{}...", &summary[..117])
+    }
+}
+
+fn engineer_task_branch_name(engineer: &str, task: &str, explicit_task_id: Option<u32>) -> String {
+    let suffix = explicit_task_id
+        .or_else(|| parse_assignment_task_id(task))
+        .map(|task_id| format!("task-{task_id}"))
+        .unwrap_or_else(|| {
+            let slug = slugify_task_branch(task);
+            let unique = Uuid::new_v4().simple().to_string();
+            format!("task-{slug}-{}", &unique[..8])
+        });
+    format!("{engineer}/{suffix}")
+}
+
+fn parse_assignment_task_id(task: &str) -> Option<u32> {
+    let mut candidates = Vec::new();
+    if let Some(first_line) = task.lines().find(|line| !line.trim().is_empty()) {
+        candidates.push(first_line);
+    }
+    candidates.push(task.trim());
+    for candidate in candidates {
+        for marker in ["Task #", "task #", "#"] {
+            let Some(start) = candidate.find(marker) else {
+                continue;
+            };
+            let digits: String = candidate[start + marker.len()..]
+                .chars()
+                .take_while(|ch| ch.is_ascii_digit())
+                .collect();
+            if !digits.is_empty() {
+                return digits.parse().ok();
+            }
+        }
+    }
+    None
+}
+
+fn slugify_task_branch(task: &str) -> String {
+    let source = task
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("task");
+    let mut slug = String::new();
+    let mut last_was_dash = false;
+    for ch in source.chars() {
+        let lower = ch.to_ascii_lowercase();
+        if lower.is_ascii_alphanumeric() {
+            slug.push(lower);
+            last_was_dash = false;
+        } else if !last_was_dash && !slug.is_empty() {
+            slug.push('-');
+            last_was_dash = true;
+        }
+        if slug.len() >= 24 {
+            break;
+        }
+    }
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        "task".to_string()
+    } else {
+        slug
+    }
+}
+
+fn default_claude_projects_root() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+        .join(".claude")
+        .join("projects")
+}
+
+fn claude_session_id_exists(session_id: &str) -> bool {
+    claude_session_id_exists_in(&default_claude_projects_root(), session_id)
+}
+
+fn claude_session_id_exists_in(projects_root: &Path, session_id: &str) -> bool {
+    let session_file = format!("{session_id}.jsonl");
+    let Ok(entries) = fs::read_dir(projects_root) else {
+        return false;
+    };
+
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        path.is_dir() && path.join(&session_file).exists()
+    })
+}
+
 fn resolve_member_launch_session(
     agent_name: &str,
     previous_identity: Option<&LaunchIdentity>,
     resume_requested: bool,
+    claude_session_available: bool,
     duplicate_session_id: bool,
 ) -> (bool, Option<String>) {
     let Some(session_id) = new_member_session_id(agent_name) else {
@@ -1768,6 +2050,9 @@ fn resolve_member_launch_session(
     if let Some(previous_session_id) =
         previous_identity.and_then(|identity| identity.session_id.clone())
     {
+        if !claude_session_available {
+            return (false, Some(session_id));
+        }
         return (true, Some(previous_session_id));
     }
 
@@ -1870,10 +2155,27 @@ fn resolve_binary(name: &str) -> String {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
+    use crate::team::comms::Channel;
     use crate::team::config::{BoardConfig, ChannelConfig, RoleDef, StandupConfig};
     use crate::team::events::EventSink;
     use crate::team::watcher::WatcherState;
+
+    struct RecordingChannel {
+        messages: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Channel for RecordingChannel {
+        fn send(&self, message: &str) -> Result<()> {
+            self.messages.lock().unwrap().push(message.to_string());
+            Ok(())
+        }
+
+        fn channel_type(&self) -> &str {
+            "test"
+        }
+    }
 
     #[test]
     fn launch_script_active_sends_prompt_as_user_message() {
@@ -2003,6 +2305,36 @@ mod tests {
     fn fresh_idle_member_stays_idle_until_assigned() {
         assert_eq!(initial_member_state(true, false), MemberState::Idle);
         assert!(!should_activate_watcher_on_spawn(true, false));
+    }
+
+    #[test]
+    fn engineer_task_branch_name_uses_explicit_task_id() {
+        assert_eq!(
+            engineer_task_branch_name("eng-1-3", "freeform task body", Some(123)),
+            "eng-1-3/task-123"
+        );
+    }
+
+    #[test]
+    fn engineer_task_branch_name_extracts_task_id_from_assignment_text() {
+        assert_eq!(
+            engineer_task_branch_name("eng-1-3", "Task #456: fix move generation", None),
+            "eng-1-3/task-456"
+        );
+    }
+
+    #[test]
+    fn engineer_task_branch_name_falls_back_to_slugged_branch() {
+        let branch = engineer_task_branch_name("eng-1-3", "Fix castling rights sync", None);
+        assert!(branch.starts_with("eng-1-3/task-fix-castling-rights-sy"));
+    }
+
+    #[test]
+    fn summarize_assignment_uses_first_non_empty_line() {
+        assert_eq!(
+            summarize_assignment("\n\nTask #9: fix move ordering\n\nDetails below"),
+            "Task #9: fix move ordering"
+        );
     }
 
     #[test]
@@ -2223,7 +2555,7 @@ mod tests {
         };
 
         let (resume, session_id) =
-            resolve_member_launch_session("claude-code", Some(&previous), true, false);
+            resolve_member_launch_session("claude-code", Some(&previous), true, true, false);
 
         assert!(resume);
         assert_eq!(
@@ -2241,7 +2573,7 @@ mod tests {
         };
 
         let (resume, session_id) =
-            resolve_member_launch_session("claude-code", Some(&previous), true, false);
+            resolve_member_launch_session("claude-code", Some(&previous), true, true, false);
 
         assert!(!resume);
         assert!(session_id.is_some());
@@ -2256,7 +2588,7 @@ mod tests {
         };
 
         let (resume, session_id) =
-            resolve_member_launch_session("claude-code", Some(&previous), true, true);
+            resolve_member_launch_session("claude-code", Some(&previous), true, true, true);
 
         assert!(!resume);
         assert!(session_id.is_some());
@@ -2264,6 +2596,47 @@ mod tests {
             session_id.as_deref(),
             Some("11111111-1111-4111-8111-111111111111")
         );
+    }
+
+    #[test]
+    fn resolve_member_launch_session_starts_fresh_when_saved_claude_session_is_missing() {
+        let previous = LaunchIdentity {
+            agent: "claude-code".to_string(),
+            prompt: "same prompt".to_string(),
+            session_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+        };
+
+        let (resume, session_id) =
+            resolve_member_launch_session("claude-code", Some(&previous), true, false, false);
+
+        assert!(!resume);
+        assert!(session_id.is_some());
+        assert_ne!(
+            session_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+    }
+
+    #[test]
+    fn claude_session_id_exists_in_finds_exact_session_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects_root = tmp.path();
+        let project_dir = projects_root.join("project-a");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join("11111111-1111-4111-8111-111111111111.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+
+        assert!(claude_session_id_exists_in(
+            projects_root,
+            "11111111-1111-4111-8111-111111111111"
+        ));
+        assert!(!claude_session_id_exists_in(
+            projects_root,
+            "22222222-2222-4222-8222-222222222222"
+        ));
     }
 
     #[test]
@@ -2290,6 +2663,157 @@ mod tests {
                     .join("worktrees")
                     .join("eng-1-1")
         ));
+    }
+
+    #[test]
+    fn queue_daemon_message_routes_to_channel_for_user_roles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: Vec::new(),
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        daemon.channels.insert(
+            "human".to_string(),
+            Box::new(RecordingChannel {
+                messages: Arc::clone(&sent),
+            }),
+        );
+
+        daemon
+            .queue_daemon_message("human", "Assignment delivered.")
+            .unwrap();
+
+        assert_eq!(sent.lock().unwrap().as_slice(), ["Assignment delivered."]);
+    }
+
+    #[test]
+    fn deliver_inbox_messages_reports_failed_assignment_without_crashing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roles = vec![
+            RoleDef {
+                name: "manager".to_string(),
+                role_type: RoleType::Manager,
+                agent: Some("claude".to_string()),
+                instances: 1,
+                prompt: None,
+                talks_to: vec![],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                use_worktrees: false,
+            },
+            RoleDef {
+                name: "eng-1".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("claude".to_string()),
+                instances: 1,
+                prompt: None,
+                talks_to: vec![],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                use_worktrees: false,
+            },
+        ];
+        let members = vec![
+            MemberInstance {
+                name: "manager".to_string(),
+                role_name: "manager".to_string(),
+                role_type: RoleType::Manager,
+                agent: Some("claude".to_string()),
+                prompt: None,
+                reports_to: None,
+                use_worktrees: false,
+            },
+            MemberInstance {
+                name: "eng-1".to_string(),
+                role_name: "eng-1".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("claude".to_string()),
+                prompt: None,
+                reports_to: Some("manager".to_string()),
+                use_worktrees: false,
+            },
+        ];
+
+        let mut pane_map = HashMap::new();
+        pane_map.insert("eng-1".to_string(), "%999".to_string());
+
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                layout: None,
+                roles,
+            },
+            session: "test".to_string(),
+            members,
+            pane_map,
+        })
+        .unwrap();
+
+        let root = inbox::inboxes_root(tmp.path());
+        let assign = inbox::InboxMessage::new_assign("manager", "eng-1", "Task #13: fix it");
+        let id = inbox::deliver_to_inbox(&root, &assign).unwrap();
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        let engineer_pending = inbox::pending_messages(&root, "eng-1").unwrap();
+        assert!(engineer_pending.is_empty());
+
+        let engineer_all = inbox::all_messages(&root, "eng-1").unwrap();
+        assert!(
+            engineer_all
+                .iter()
+                .any(|(msg, delivered)| msg.id == id && *delivered)
+        );
+
+        let manager_pending = inbox::pending_messages(&root, "manager").unwrap();
+        assert_eq!(manager_pending.len(), 1);
+        assert_eq!(manager_pending[0].from, "daemon");
+        assert!(manager_pending[0].body.contains("Assignment failed."));
+        assert!(manager_pending[0].body.contains("Engineer: eng-1"));
+        assert!(manager_pending[0].body.contains("Message ID:"));
+        let result = crate::team::load_assignment_result(tmp.path(), &id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.status, AssignmentResultStatus::Failed);
+        assert_eq!(result.engineer, "eng-1");
+        assert_eq!(daemon.states.get("eng-1"), None);
     }
 
     #[test]

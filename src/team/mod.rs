@@ -19,8 +19,10 @@ pub mod telegram;
 pub mod watcher;
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::tmux;
@@ -30,6 +32,25 @@ pub const TEAM_CONFIG_DIR: &str = "team_config";
 /// Team config filename.
 pub const TEAM_CONFIG_FILE: &str = "team.yaml";
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssignmentResultStatus {
+    Delivered,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AssignmentDeliveryResult {
+    pub message_id: String,
+    pub status: AssignmentResultStatus,
+    pub engineer: String,
+    pub task_summary: String,
+    pub branch: Option<String>,
+    pub work_dir: Option<String>,
+    pub detail: String,
+    pub ts: u64,
+}
+
 /// Resolve the team config directory for a project root.
 pub fn team_config_dir(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join(TEAM_CONFIG_DIR)
@@ -38,6 +59,96 @@ pub fn team_config_dir(project_root: &Path) -> PathBuf {
 /// Resolve the path to team.yaml.
 pub fn team_config_path(project_root: &Path) -> PathBuf {
     team_config_dir(project_root).join(TEAM_CONFIG_FILE)
+}
+
+fn assignment_results_dir(project_root: &Path) -> PathBuf {
+    project_root.join(".batty").join("assignment_results")
+}
+
+fn assignment_result_path(project_root: &Path, message_id: &str) -> PathBuf {
+    assignment_results_dir(project_root).join(format!("{message_id}.json"))
+}
+
+pub(crate) fn store_assignment_result(
+    project_root: &Path,
+    result: &AssignmentDeliveryResult,
+) -> Result<()> {
+    let path = assignment_result_path(project_root, &result.message_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_vec_pretty(result)?;
+    std::fs::write(&path, content)
+        .with_context(|| format!("failed to write assignment result {}", path.display()))?;
+    Ok(())
+}
+
+pub fn load_assignment_result(
+    project_root: &Path,
+    message_id: &str,
+) -> Result<Option<AssignmentDeliveryResult>> {
+    let path = assignment_result_path(project_root, message_id);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let data = std::fs::read(&path)
+        .with_context(|| format!("failed to read assignment result {}", path.display()))?;
+    let result = serde_json::from_slice(&data)
+        .with_context(|| format!("failed to parse assignment result {}", path.display()))?;
+    Ok(Some(result))
+}
+
+pub fn wait_for_assignment_result(
+    project_root: &Path,
+    message_id: &str,
+    timeout: Duration,
+) -> Result<Option<AssignmentDeliveryResult>> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(result) = load_assignment_result(project_root, message_id)? {
+            return Ok(Some(result));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+pub fn format_assignment_result(result: &AssignmentDeliveryResult) -> String {
+    let mut text = match result.status {
+        AssignmentResultStatus::Delivered => {
+            format!(
+                "Assignment delivered: {} -> {}",
+                result.message_id, result.engineer
+            )
+        }
+        AssignmentResultStatus::Failed => {
+            format!(
+                "Assignment failed: {} -> {}",
+                result.message_id, result.engineer
+            )
+        }
+    };
+
+    text.push_str(&format!("\nTask: {}", result.task_summary));
+    if let Some(branch) = result.branch.as_deref() {
+        text.push_str(&format!("\nBranch: {branch}"));
+    }
+    if let Some(work_dir) = result.work_dir.as_deref() {
+        text.push_str(&format!("\nWorktree: {work_dir}"));
+    }
+    if !result.detail.is_empty() {
+        text.push_str(&format!("\nDetail: {}", result.detail));
+    }
+    text
+}
+
+pub(crate) fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// Scaffold `.batty/team_config/` with default team.yaml and prompt templates.
@@ -784,7 +895,7 @@ fn detect_sender() -> Option<String> {
 }
 
 /// Assign a task to an engineer via their Maildir inbox.
-pub fn assign_task(project_root: &Path, engineer: &str, task: &str) -> Result<()> {
+pub fn assign_task(project_root: &Path, engineer: &str, task: &str) -> Result<String> {
     let from = detect_sender().unwrap_or_else(|| "human".to_string());
 
     let config_path = team_config_path(project_root);
@@ -805,7 +916,7 @@ pub fn assign_task(project_root: &Path, engineer: &str, task: &str) -> Result<()
     let msg = inbox::InboxMessage::new_assign(&from, engineer, task);
     let id = inbox::deliver_to_inbox(&root, &msg)?;
     info!(from, engineer, task, id = %id, "assignment delivered to inbox");
-    Ok(())
+    Ok(id)
 }
 
 /// List inbox messages for a member.
@@ -1076,7 +1187,8 @@ mod tests {
     #[test]
     fn assign_task_delivers_to_inbox() {
         let tmp = tempfile::tempdir().unwrap();
-        assign_task(tmp.path(), "eng-1-1", "fix bug").unwrap();
+        let id = assign_task(tmp.path(), "eng-1-1", "fix bug").unwrap();
+        assert!(!id.is_empty());
 
         let root = inbox::inboxes_root(tmp.path());
         let pending = inbox::pending_messages(&root, "eng-1-1").unwrap();
@@ -1086,6 +1198,40 @@ mod tests {
         assert_eq!(pending[0].to, "eng-1-1");
         assert_eq!(pending[0].body, "fix bug");
         assert_eq!(pending[0].msg_type, inbox::MessageType::Assign);
+    }
+
+    #[test]
+    fn assignment_result_round_trip_and_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = AssignmentDeliveryResult {
+            message_id: "msg-1".to_string(),
+            status: AssignmentResultStatus::Delivered,
+            engineer: "eng-1-1".to_string(),
+            task_summary: "Say Hello".to_string(),
+            branch: Some("eng-1-1/task-1".to_string()),
+            work_dir: Some("/tmp/worktree".to_string()),
+            detail: "assignment launched".to_string(),
+            ts: now_unix(),
+        };
+
+        store_assignment_result(tmp.path(), &result).unwrap();
+        let loaded = load_assignment_result(tmp.path(), "msg-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded, result);
+
+        let formatted = format_assignment_result(&loaded);
+        assert!(formatted.contains("Assignment delivered: msg-1 -> eng-1-1"));
+        assert!(formatted.contains("Branch: eng-1-1/task-1"));
+        assert!(formatted.contains("Worktree: /tmp/worktree"));
+    }
+
+    #[test]
+    fn wait_for_assignment_result_returns_none_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result =
+            wait_for_assignment_result(tmp.path(), "missing", Duration::from_millis(10)).unwrap();
+        assert!(result.is_none());
     }
 
     fn make_member(name: &str, role_name: &str, role_type: RoleType) -> hierarchy::MemberInstance {

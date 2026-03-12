@@ -124,7 +124,7 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 - tmux-native runtime with persistent panes and session resume
 - Agent-agnostic role assignment: Claude Code, Codex, Aider, or similar
 - Maildir inbox routing with explicit `talks_to` communication rules
-- Git worktree isolation for engineers and merge-safe parallel execution
+- Stable per-engineer worktrees with fresh task branches on each assignment
 - Kanban-driven task loop with auto-dispatch, retry tracking, and test gating
 - YAML config, Markdown boards, JSON/JSONL logs: everything stays file-based
 
@@ -136,7 +136,7 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 | `batty start [--attach]` | Launch the daemon and tmux session |
 | `batty stop` / `batty attach` | Stop or reattach to the team session |
 | `batty send <role> <message>` | Send a message to a role |
-| `batty assign <engineer> <task>` | Directly assign work to an engineer |
+| `batty assign <engineer> <task>` | Queue work for an engineer and report delivery result |
 | `batty inbox <member>` / `read` / `ack` | Inspect and manage inbox messages |
 | `batty board` | Open the kanban board |
 | `batty status [--json]` | Show current team state |
@@ -151,6 +151,22 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 - `tmux >= 3.1` (recommended `>= 3.2`)
 - `kanban-md` CLI: `cargo install kanban-md --locked`
 - At least one coding agent CLI such as Claude Code, Codex, or Aider
+
+## Engineer Worktrees
+
+When `use_worktrees: true` is enabled for engineers, Batty keeps one stable
+worktree directory per engineer under `.batty/worktrees/<engineer>`.
+
+Each new `batty assign` does not create a new worktree. Instead it:
+
+- reuses that engineer's existing worktree path
+- resets the engineer slot onto current `main`
+- creates a fresh task branch such as `eng-1-2/task-123` or
+  `eng-1-2/task-say-hello-1633ae2d`
+- launches the engineer in that branch
+
+After merge, Batty resets the engineer back to the base branch
+`eng-main/<engineer>` so the next assignment starts clean.
 
 ## Telegram Integration
 
