@@ -151,7 +151,7 @@ pub(crate) fn setup_engineer_worktree(
                 "-b",
                 branch_name,
                 &worktree_dir.to_string_lossy(),
-                "HEAD",
+                "main",
             ])
             .current_dir(project_root)
             .output()
@@ -183,36 +183,67 @@ pub(crate) fn setup_engineer_worktree(
         info!(worktree = %worktree_dir.display(), branch = branch_name, "created engineer worktree");
     }
 
-    let wt_batty_dir = worktree_dir.join(".batty");
-    std::fs::create_dir_all(&wt_batty_dir).ok();
-    let wt_config_link = wt_batty_dir.join("team_config");
+    ensure_engineer_worktree_links(worktree_dir, team_config_dir)?;
 
-    if !wt_config_link.exists() {
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(team_config_dir, &wt_config_link).with_context(|| {
-            format!(
-                "failed to symlink {} -> {}",
-                wt_config_link.display(),
-                team_config_dir.display()
-            )
-        })?;
+    Ok(worktree_dir.to_path_buf())
+}
 
-        #[cfg(not(unix))]
-        {
-            warn!("symlinks not supported on this platform, copying config instead");
-            let _ = std::fs::create_dir_all(&wt_config_link);
-        }
+pub(crate) fn prepare_engineer_assignment_worktree(
+    project_root: &Path,
+    worktree_dir: &Path,
+    engineer_name: &str,
+    task_branch: &str,
+    team_config_dir: &Path,
+) -> Result<PathBuf> {
+    let base_branch = engineer_base_branch_name(engineer_name);
+    setup_engineer_worktree(project_root, worktree_dir, &base_branch, team_config_dir)?;
+    maybe_migrate_legacy_engineer_worktree(
+        project_root,
+        worktree_dir,
+        engineer_name,
+        &base_branch,
+    )?;
+    ensure_task_branch_namespace_available(project_root, engineer_name)?;
 
-        debug!(
-            link = %wt_config_link.display(),
-            target = %team_config_dir.display(),
-            "symlinked team config into worktree"
+    if worktree_has_user_changes(worktree_dir)? {
+        bail!(
+            "engineer worktree '{}' at {} has uncommitted changes",
+            engineer_name,
+            worktree_dir.display()
         );
+    }
+
+    let previous_branch = current_worktree_branch(worktree_dir)?;
+    if previous_branch != base_branch
+        && previous_branch != engineer_name
+        && previous_branch != task_branch
+        && !branch_is_merged_into(project_root, &previous_branch, "main")?
+    {
+        bail!(
+            "engineer worktree '{}' is on unmerged branch '{}'",
+            engineer_name,
+            previous_branch
+        );
+    }
+
+    checkout_worktree_branch_from_main(worktree_dir, &base_branch)?;
+
+    checkout_worktree_branch_from_main(worktree_dir, task_branch)?;
+    ensure_engineer_worktree_links(worktree_dir, team_config_dir)?;
+
+    if previous_branch != base_branch
+        && previous_branch != task_branch
+        && (previous_branch == engineer_name
+            || previous_branch.starts_with(&format!("{engineer_name}/")))
+        && branch_is_merged_into(project_root, &previous_branch, "main")?
+    {
+        delete_branch(project_root, &previous_branch)?;
     }
 
     Ok(worktree_dir.to_path_buf())
 }
 
+#[allow(dead_code)] // Retained for existing tests and as a lower-level helper.
 pub(crate) fn refresh_engineer_worktree(
     project_root: &Path,
     worktree_dir: &Path,
@@ -223,20 +254,7 @@ pub(crate) fn refresh_engineer_worktree(
         return Ok(());
     }
 
-    let status = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(worktree_dir)
-        .output()
-        .context("failed to inspect worktree status")?;
-    if !status.status.success() {
-        let stderr = String::from_utf8_lossy(&status.stderr);
-        bail!("git status --porcelain failed: {stderr}");
-    }
-
-    let dirty = String::from_utf8_lossy(&status.stdout)
-        .lines()
-        .any(|line| !line.starts_with("?? .batty/"));
-    if dirty {
+    if worktree_has_user_changes(worktree_dir)? {
         warn!(
             worktree = %worktree_dir.display(),
             branch = branch_name,
@@ -388,27 +406,284 @@ pub(crate) fn reset_engineer_worktree(project_root: &Path, engineer_name: &str) 
         return Ok(());
     }
 
-    let output = std::process::Command::new("git")
-        .args(["reset", "--hard", "main"])
-        .current_dir(&worktree_dir)
-        .output()
-        .context("failed to reset engineer worktree to main")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let previous_branch = current_worktree_branch(&worktree_dir)?;
+    let base_branch = engineer_base_branch_name(engineer_name);
+    if let Err(error) = checkout_worktree_branch_from_main(&worktree_dir, &base_branch) {
         warn!(
             engineer = engineer_name,
-            error = %stderr,
+            error = %error,
             "failed to reset worktree after merge"
         );
         return Ok(());
     }
 
+    if previous_branch != base_branch
+        && (previous_branch == engineer_name
+            || previous_branch.starts_with(&format!("{engineer_name}/")))
+        && branch_is_merged_into(project_root, &previous_branch, "main")?
+        && let Err(error) = delete_branch(project_root, &previous_branch)
+    {
+        warn!(
+            engineer = engineer_name,
+            branch = %previous_branch,
+            error = %error,
+            "failed to delete merged engineer task branch"
+        );
+    }
+
     info!(
         engineer = engineer_name,
+        branch = %base_branch,
         worktree = %worktree_dir.display(),
         "reset worktree to main after merge"
     );
+    Ok(())
+}
+
+pub(crate) fn engineer_base_branch_name(engineer_name: &str) -> String {
+    format!("eng-main/{engineer_name}")
+}
+
+fn maybe_migrate_legacy_engineer_worktree(
+    project_root: &Path,
+    worktree_dir: &Path,
+    engineer_name: &str,
+    base_branch: &str,
+) -> Result<()> {
+    if !worktree_dir.exists() {
+        return Ok(());
+    }
+
+    let current_branch = current_worktree_branch(worktree_dir)?;
+    if current_branch != engineer_name {
+        return Ok(());
+    }
+
+    if worktree_has_user_changes(worktree_dir)? {
+        bail!(
+            "legacy engineer branch '{}' is still checked out in {} with uncommitted changes; resolve it before assigning a new task branch",
+            engineer_name,
+            worktree_dir.display()
+        );
+    }
+
+    checkout_worktree_branch_from_main(worktree_dir, base_branch)?;
+    if branch_is_merged_into(project_root, engineer_name, "main")? {
+        delete_branch(project_root, engineer_name)?;
+        info!(
+            branch = engineer_name,
+            base_branch,
+            worktree = %worktree_dir.display(),
+            "auto-migrated legacy engineer worktree to base branch"
+        );
+        return Ok(());
+    }
+
+    let archive_branch = archived_legacy_branch_name(project_root, engineer_name)?;
+    rename_branch(project_root, engineer_name, &archive_branch)?;
+    warn!(
+        old_branch = engineer_name,
+        new_branch = %archive_branch,
+        base_branch,
+        worktree = %worktree_dir.display(),
+        "auto-migrated unmerged legacy engineer worktree to base branch"
+    );
+    Ok(())
+}
+
+fn ensure_task_branch_namespace_available(project_root: &Path, engineer_name: &str) -> Result<()> {
+    if !branch_exists(project_root, engineer_name)? {
+        return Ok(());
+    }
+
+    if branch_is_checked_out_in_any_worktree(project_root, engineer_name)? {
+        bail!(
+            "legacy engineer branch '{}' is still checked out in a worktree; resolve it before assigning a new task branch",
+            engineer_name
+        );
+    }
+
+    if branch_is_merged_into(project_root, engineer_name, "main")? {
+        delete_branch(project_root, engineer_name)?;
+        info!(
+            branch = engineer_name,
+            "deleted merged legacy engineer branch to free task namespace"
+        );
+        return Ok(());
+    }
+
+    let archive_branch = archived_legacy_branch_name(project_root, engineer_name)?;
+    rename_branch(project_root, engineer_name, &archive_branch)?;
+    warn!(
+        old_branch = engineer_name,
+        new_branch = %archive_branch,
+        "archived legacy engineer branch to free task namespace"
+    );
+    Ok(())
+}
+
+fn ensure_engineer_worktree_links(worktree_dir: &Path, team_config_dir: &Path) -> Result<()> {
+    let wt_batty_dir = worktree_dir.join(".batty");
+    std::fs::create_dir_all(&wt_batty_dir).ok();
+    let wt_config_link = wt_batty_dir.join("team_config");
+
+    if !wt_config_link.exists() {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(team_config_dir, &wt_config_link).with_context(|| {
+            format!(
+                "failed to symlink {} -> {}",
+                wt_config_link.display(),
+                team_config_dir.display()
+            )
+        })?;
+
+        #[cfg(not(unix))]
+        {
+            warn!("symlinks not supported on this platform, copying config instead");
+            let _ = std::fs::create_dir_all(&wt_config_link);
+        }
+
+        debug!(
+            link = %wt_config_link.display(),
+            target = %team_config_dir.display(),
+            "symlinked team config into worktree"
+        );
+    }
+
+    Ok(())
+}
+
+fn worktree_has_user_changes(worktree_dir: &Path) -> Result<bool> {
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(worktree_dir)
+        .output()
+        .context("failed to inspect worktree status")?;
+    if !status.status.success() {
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        bail!("git status --porcelain failed: {stderr}");
+    }
+
+    Ok(String::from_utf8_lossy(&status.stdout)
+        .lines()
+        .any(|line| !line.starts_with("?? .batty/")))
+}
+
+fn current_worktree_branch(worktree_dir: &Path) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(worktree_dir)
+        .output()
+        .context("failed to determine worktree branch")?;
+    if !output.status.success() {
+        bail!("failed to determine worktree branch");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn checkout_worktree_branch_from_main(worktree_dir: &Path, branch_name: &str) -> Result<()> {
+    let output = std::process::Command::new("git")
+        .args(["checkout", "-B", branch_name, "main"])
+        .current_dir(worktree_dir)
+        .output()
+        .with_context(|| format!("failed to switch worktree to branch '{branch_name}'"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git checkout -B {branch_name} main failed: {stderr}");
+    }
+    Ok(())
+}
+
+fn branch_exists(project_root: &Path, branch_name: &str) -> Result<bool> {
+    let output = std::process::Command::new("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch_name}"),
+        ])
+        .current_dir(project_root)
+        .output()
+        .with_context(|| format!("failed to check whether branch '{branch_name}' exists"))?;
+    Ok(output.status.success())
+}
+
+fn branch_is_checked_out_in_any_worktree(project_root: &Path, branch_name: &str) -> Result<bool> {
+    let output = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(project_root)
+        .output()
+        .context("failed to list git worktrees")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git worktree list --porcelain failed: {stderr}");
+    }
+
+    let target = format!("branch refs/heads/{branch_name}");
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.trim() == target))
+}
+
+fn branch_is_merged_into(
+    project_root: &Path,
+    branch_name: &str,
+    base_branch: &str,
+) -> Result<bool> {
+    let output = std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", branch_name, base_branch])
+        .current_dir(project_root)
+        .output()
+        .with_context(|| {
+            format!("failed to compare branch '{branch_name}' with '{base_branch}'")
+        })?;
+    Ok(output.status.success())
+}
+
+fn delete_branch(project_root: &Path, branch_name: &str) -> Result<()> {
+    let output = std::process::Command::new("git")
+        .args(["branch", "-D", branch_name])
+        .current_dir(project_root)
+        .output()
+        .with_context(|| format!("failed to delete branch '{branch_name}'"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git branch -D {branch_name} failed: {stderr}");
+    }
+    Ok(())
+}
+
+fn archived_legacy_branch_name(project_root: &Path, engineer_name: &str) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--short", engineer_name])
+        .current_dir(project_root)
+        .output()
+        .with_context(|| format!("failed to resolve legacy branch '{engineer_name}'"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git rev-parse --short {engineer_name} failed: {stderr}");
+    }
+
+    let short_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let mut candidate = format!("legacy/{engineer_name}-{short_sha}");
+    let mut counter = 1usize;
+    while branch_exists(project_root, &candidate)? {
+        counter += 1;
+        candidate = format!("legacy/{engineer_name}-{short_sha}-{counter}");
+    }
+    Ok(candidate)
+}
+
+fn rename_branch(project_root: &Path, old_branch: &str, new_branch: &str) -> Result<()> {
+    let output = std::process::Command::new("git")
+        .args(["branch", "-m", old_branch, new_branch])
+        .current_dir(project_root)
+        .output()
+        .with_context(|| format!("failed to rename branch '{old_branch}' to '{new_branch}'"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git branch -m {old_branch} {new_branch} failed: {stderr}");
+    }
     Ok(())
 }
 
@@ -550,6 +825,40 @@ mod tests {
         let main_head = git_stdout(&repo, &["rev-parse", "HEAD"]);
         let wt_head = git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
         assert_eq!(main_head, wt_head);
+    }
+
+    #[test]
+    fn test_reset_worktree_restores_engineer_base_branch_after_task_merge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-1",
+            "eng-1/task-42",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        std::fs::write(worktree_dir.join("feature.txt"), "work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "feature.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "engineer work"]);
+
+        let result = merge_engineer_branch(&repo, "eng-1").unwrap();
+        assert!(matches!(result, MergeOutcome::Success));
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            engineer_base_branch_name("eng-1")
+        );
+
+        let branch_check = git(&repo, &["rev-parse", "--verify", "eng-1/task-42"]);
+        assert!(
+            !branch_check.status.success(),
+            "merged task branch should be deleted"
+        );
     }
 
     #[test]
@@ -702,6 +1011,147 @@ mod tests {
         let after = git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
         assert_eq!(before, after);
         assert!(worktree_dir.exists());
+    }
+
+    #[test]
+    fn test_prepare_assignment_worktree_checks_out_task_branch_from_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-5");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-5",
+            "eng-5/task-123",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "eng-5/task-123"
+        );
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "main"]),
+            git_stdout(&worktree_dir, &["rev-parse", "HEAD"])
+        );
+        assert!(worktree_dir.join(".batty").join("team_config").exists());
+    }
+
+    #[test]
+    fn test_prepare_assignment_worktree_rejects_dirty_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-6");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            &engineer_base_branch_name("eng-6"),
+            &team_config_dir,
+        )
+        .unwrap();
+        std::fs::write(worktree_dir.join("scratch.txt"), "uncommitted\n").unwrap();
+
+        let err = prepare_engineer_assignment_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-6",
+            "eng-6/task-7",
+            &team_config_dir,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("uncommitted changes"));
+    }
+
+    #[test]
+    fn test_prepare_assignment_worktree_auto_migrates_clean_legacy_worktree_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-6b");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-6b", &team_config_dir).unwrap();
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-6b",
+            "eng-6b/task-17",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        let legacy_check = git(&repo, &["rev-parse", "--verify", "eng-6b"]);
+        assert!(!legacy_check.status.success());
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "eng-6b/task-17"
+        );
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "--verify", "eng-main/eng-6b"]),
+            git_stdout(&repo, &["rev-parse", "--verify", "main"])
+        );
+    }
+
+    #[test]
+    fn test_prepare_assignment_worktree_deletes_merged_legacy_branch_namespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-7");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        git_ok(&repo, &["branch", "eng-7"]);
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-7",
+            "eng-7/task-99",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        let legacy_check = git(&repo, &["rev-parse", "--verify", "eng-7"]);
+        assert!(!legacy_check.status.success());
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "eng-7/task-99"
+        );
+    }
+
+    #[test]
+    fn test_prepare_assignment_worktree_archives_unmerged_legacy_branch_namespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-8");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        git_ok(&repo, &["checkout", "-b", "eng-8"]);
+        std::fs::write(repo.join("legacy.txt"), "legacy branch work\n").unwrap();
+        git_ok(&repo, &["add", "legacy.txt"]);
+        git_ok(&repo, &["commit", "-m", "legacy work"]);
+        git_ok(&repo, &["checkout", "main"]);
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-8",
+            "eng-8/task-100",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        let legacy_check = git(&repo, &["rev-parse", "--verify", "eng-8"]);
+        assert!(!legacy_check.status.success());
+        assert!(!git_stdout(&repo, &["branch", "--list", "legacy/eng-8-*"]).is_empty());
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "eng-8/task-100"
+        );
     }
 
     #[test]

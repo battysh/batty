@@ -123,8 +123,16 @@ fn main() -> Result<()> {
         }
 
         Command::Assign { engineer, task } => {
-            team::assign_task(&root, &engineer, &task)?;
-            println!("Task assigned to {engineer}.");
+            let id = team::assign_task(&root, &engineer, &task)?;
+            println!(
+                "Task queued for {engineer}. Inbox message id: {id}. Delivery result will be reported by Batty."
+            );
+            match team::wait_for_assignment_result(&root, &id, std::time::Duration::from_secs(8))? {
+                Some(result) => eprintln!("{}", team::format_assignment_result(&result)),
+                None => eprintln!(
+                    "Assignment is still queued or pending delivery. No daemon result was available yet for {id}."
+                ),
+            }
         }
 
         Command::Validate => {

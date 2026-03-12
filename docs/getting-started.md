@@ -104,6 +104,11 @@ Total members: 5
 Valid.
 ```
 
+If `use_worktrees: true` is enabled for engineers, Batty keeps one stable
+worktree per engineer at `.batty/worktrees/<engineer>`. New assignments reuse
+that path but switch the engineer onto a fresh task branch from current `main`.
+After merge, the engineer returns to `eng-main/<engineer>`.
+
 ## Launch
 
 Start the daemon and attach to tmux immediately:

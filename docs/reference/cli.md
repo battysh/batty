@@ -71,6 +71,10 @@ Options:
 
 Assign a task to an engineer (used by manager agent)
 
+`batty assign` first queues the assignment into the engineer inbox, then waits
+briefly for the daemon to report the delivery result. On success it prints the
+task branch and engineer worktree path. On failure it prints the daemon error.
+
 ```text
 Assign a task to an engineer (used by manager agent)
 
@@ -89,6 +93,17 @@ Options:
 
   -h, --help
           Print help
+```
+
+Typical output:
+
+```text
+Task queued for eng-1-2. Inbox message id: 1773349460....
+Assignment delivered: 1773349460.... -> eng-1-2
+Task: Say Hello
+Branch: eng-1-2/task-say-hello-1633ae2d
+Worktree: /path/to/project/.batty/worktrees/eng-1-2
+Detail: assignment launched
 ```
 
 ## `batty attach`
