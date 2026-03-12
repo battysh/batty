@@ -68,6 +68,7 @@ struct CodexSessionTracker {
 struct ClaudeSessionTracker {
     projects_root: PathBuf,
     cwd: PathBuf,
+    session_id: Option<String>,
     session_file: Option<PathBuf>,
     offset: u64,
     last_state: TrackerState,
@@ -107,6 +108,7 @@ impl SessionWatcher {
                     SessionTracker::Claude(ClaudeSessionTracker {
                         projects_root: default_claude_projects_root(),
                         cwd,
+                        session_id: None,
                         session_file: None,
                         offset: 0,
                         last_state: TrackerState::Unknown,
@@ -199,6 +201,18 @@ impl SessionWatcher {
         }
     }
 
+    pub fn set_session_id(&mut self, session_id: Option<String>) {
+        if let Some(SessionTracker::Claude(claude)) = self.tracker.as_mut() {
+            if claude.session_id == session_id {
+                return;
+            }
+            claude.session_id = session_id;
+            claude.session_file = None;
+            claude.offset = 0;
+            claude.last_state = TrackerState::Unknown;
+        }
+    }
+
     /// Mark this watcher as idle.
     pub fn deactivate(&mut self) {
         self.state = WatcherState::Idle;
@@ -215,6 +229,14 @@ impl SessionWatcher {
         let lines: Vec<&str> = self.last_capture.lines().collect();
         let start = lines.len().saturating_sub(n);
         lines[start..].join("\n")
+    }
+
+    pub fn current_session_id(&self) -> Option<String> {
+        match self.tracker.as_ref() {
+            Some(SessionTracker::Codex(codex)) => session_file_id(codex.session_file.as_ref()),
+            Some(SessionTracker::Claude(claude)) => session_file_id(claude.session_file.as_ref()),
+            None => None,
+        }
     }
 
     fn poll_tracker(&mut self) -> Result<TrackerState> {
@@ -432,6 +454,14 @@ fn current_file_len(path: &Path) -> Result<u64> {
     Ok(fs::metadata(path)?.len())
 }
 
+fn session_file_id(path: Option<&PathBuf>) -> Option<String> {
+    path.and_then(|path| {
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(|stem| stem.to_string())
+    })
+}
+
 fn discover_codex_session_file(sessions_root: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
     if !sessions_root.exists() {
         return Ok(None);
@@ -463,12 +493,24 @@ fn discover_codex_session_file(sessions_root: &Path, cwd: &Path) -> Result<Optio
     Ok(newest.map(|(_, path)| path))
 }
 
-fn discover_claude_session_file(projects_root: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
+fn discover_claude_session_file(
+    projects_root: &Path,
+    cwd: &Path,
+    session_id: Option<&str>,
+) -> Result<Option<PathBuf>> {
     if !projects_root.exists() {
         return Ok(None);
     }
 
     let preferred_dir = projects_root.join(cwd.to_string_lossy().replace('/', "-"));
+    if let Some(session_id) = session_id {
+        let exact = preferred_dir.join(format!("{session_id}.jsonl"));
+        if exact.is_file() {
+            return Ok(Some(exact));
+        }
+        return Ok(None);
+    }
+
     if preferred_dir.is_dir() {
         let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
         for entry in read_dir_paths(&preferred_dir)? {
@@ -606,7 +648,11 @@ fn poll_codex_session_file(path: &Path, offset: &mut u64) -> Result<bool> {
 
 fn poll_claude_session(tracker: &mut ClaudeSessionTracker) -> Result<TrackerState> {
     if tracker.session_file.is_none() {
-        tracker.session_file = discover_claude_session_file(&tracker.projects_root, &tracker.cwd)?;
+        tracker.session_file = discover_claude_session_file(
+            &tracker.projects_root,
+            &tracker.cwd,
+            tracker.session_id.as_deref(),
+        )?;
         if let Some(session_file) = tracker.session_file.clone() {
             // Bind at EOF so historical entries from an older or unrelated
             // Claude session do not override the live pane state on first poll.
@@ -1093,8 +1139,35 @@ mod tests {
         )
         .unwrap();
 
-        let discovered = discover_claude_session_file(&projects_root, &cwd).unwrap();
+        let discovered = discover_claude_session_file(&projects_root, &cwd, None).unwrap();
         assert_eq!(discovered.as_deref(), Some(session_file.as_path()));
+    }
+
+    #[test]
+    fn discover_claude_session_file_requires_exact_session_id_when_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects_root = tmp.path().join("projects");
+        let cwd = PathBuf::from("/Users/zedmor/chess_test");
+        let project_dir = projects_root.join("-Users-zedmor-chess-test");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let other_session = project_dir.join("11111111-1111-4111-8111-111111111111.jsonl");
+        std::fs::write(
+            &other_session,
+            format!(
+                "{{\"type\":\"user\",\"cwd\":\"{}\",\"sessionId\":\"11111111-1111-4111-8111-111111111111\"}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+
+        let discovered = discover_claude_session_file(
+            &projects_root,
+            &cwd,
+            Some("22222222-2222-4222-8222-222222222222"),
+        )
+        .unwrap();
+        assert!(discovered.is_none());
     }
 
     #[test]
@@ -1162,6 +1235,7 @@ mod tests {
         let mut tracker = ClaudeSessionTracker {
             projects_root,
             cwd,
+            session_id: None,
             session_file: None,
             offset: 0,
             last_state: TrackerState::Unknown,
@@ -1173,5 +1247,25 @@ mod tests {
         );
         assert_eq!(tracker.offset, current_file_len(&session_file).unwrap());
         assert_eq!(tracker.last_state, TrackerState::Unknown);
+    }
+
+    #[test]
+    fn watcher_exposes_tracker_session_id_from_bound_file() {
+        let mut watcher = SessionWatcher::new("%0", "architect", 300, None);
+        watcher.tracker = Some(SessionTracker::Claude(ClaudeSessionTracker {
+            projects_root: PathBuf::from("/tmp"),
+            cwd: PathBuf::from("/repo"),
+            session_id: Some("1e94dc68-6004-402a-9a7b-1bfca674806e".to_string()),
+            session_file: Some(PathBuf::from(
+                "/tmp/-Users-zedmor-project/1e94dc68-6004-402a-9a7b-1bfca674806e.jsonl",
+            )),
+            offset: 0,
+            last_state: TrackerState::Unknown,
+        }));
+
+        assert_eq!(
+            watcher.current_session_id().as_deref(),
+            Some("1e94dc68-6004-402a-9a7b-1bfca674806e")
+        );
     }
 }

@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use super::board;
 use super::comms::{self, Channel};
@@ -80,6 +81,7 @@ pub struct TeamDaemon {
 struct LaunchIdentity {
     agent: String,
     prompt: String,
+    session_id: Option<String>,
 }
 
 impl TeamDaemon {
@@ -190,7 +192,7 @@ impl TeamDaemon {
     /// Run the daemon loop. Blocks until the session is killed or an error occurs.
     ///
     /// If `resume` is true, agents are launched with session-resume flags
-    /// (`claude --continue` / `codex resume --last`) instead of fresh starts.
+    /// (`claude --resume <session-id>` / `codex resume --last`) instead of fresh starts.
     pub fn run(&mut self, resume: bool) -> Result<()> {
         self.event_sink.emit(TeamEvent::daemon_started())?;
         info!(session = %self.config.session, resume, "daemon started");
@@ -206,6 +208,7 @@ impl TeamDaemon {
             }
 
             self.poll_watchers()?;
+            self.sync_launch_state_session_ids()?;
             self.drain_legacy_command_queue()?;
             self.deliver_inbox_messages()?;
             self.maybe_auto_dispatch()?;
@@ -228,6 +231,7 @@ impl TeamDaemon {
     fn spawn_all_agents(&mut self, resume: bool) -> Result<()> {
         let team_config_dir = self.config.project_root.join(".batty").join("team_config");
         let previous_launch_state = load_launch_state(&self.config.project_root);
+        let duplicate_claude_session_ids = duplicate_claude_session_ids(&previous_launch_state);
         let mut next_launch_state = HashMap::new();
 
         // Ensure inboxes exist for all members
@@ -282,12 +286,21 @@ impl TeamDaemon {
             let prompt_text = strip_nudge_section(&self.load_prompt(member, &team_config_dir));
             let idle = role_starts_idle();
             let normalized_agent = canonical_agent_name(agent_name);
-            let member_resume = should_resume_member(
+            let requested_resume = should_resume_member(
                 resume,
                 &previous_launch_state,
                 &member.name,
                 &normalized_agent,
                 &prompt_text,
+            );
+            let previous_identity = previous_launch_state.get(&member.name);
+            let (member_resume, session_id) = resolve_member_launch_session(
+                &normalized_agent,
+                previous_identity,
+                requested_resume,
+                previous_identity
+                    .and_then(|identity| identity.session_id.as_deref())
+                    .is_some_and(|session_id| duplicate_claude_session_ids.contains(session_id)),
             );
 
             let short_cmd = write_launch_script(
@@ -299,6 +312,7 @@ impl TeamDaemon {
                 &self.config.project_root,
                 idle,
                 member_resume,
+                session_id.as_deref(),
             )?;
 
             debug!(
@@ -309,12 +323,16 @@ impl TeamDaemon {
                 member_resume,
                 "spawning agent"
             );
+            if let Some(watcher) = self.watchers.get_mut(&member.name) {
+                watcher.set_session_id(session_id.clone());
+            }
             tmux::send_keys(pane_id, &short_cmd, true)?;
             next_launch_state.insert(
                 member.name.clone(),
                 LaunchIdentity {
                     agent: normalized_agent,
                     prompt: prompt_text.clone(),
+                    session_id,
                 },
             );
 
@@ -939,6 +957,8 @@ impl TeamDaemon {
         }
         let role_context =
             member.map(|m| strip_nudge_section(&self.load_prompt(m, &team_config_dir)));
+        let normalized_agent = canonical_agent_name(agent_name);
+        let session_id = new_member_session_id(&normalized_agent);
 
         // Wait for agent to reset, then launch with new task (never resume for assignments)
         std::thread::sleep(Duration::from_secs(1));
@@ -951,8 +971,15 @@ impl TeamDaemon {
             &self.config.project_root,
             false,
             false,
+            session_id.as_deref(),
         )?;
+        if let Some(watcher) = self.watchers.get_mut(engineer) {
+            watcher.set_session_id(session_id.clone());
+        }
         tmux::send_keys(&pane_id, &short_cmd, true)?;
+        if let Some(session_id) = session_id.as_deref() {
+            self.persist_member_session_id(engineer, session_id)?;
+        }
 
         // Update state
         self.mark_member_working(engineer);
@@ -1162,6 +1189,43 @@ impl TeamDaemon {
             .and_then(|r| r.standup_interval_secs)
             .unwrap_or(self.config.team_config.standup.interval_secs);
         Some(Duration::from_secs(interval_secs))
+    }
+
+    fn sync_launch_state_session_ids(&self) -> Result<()> {
+        let mut launch_state = load_launch_state(&self.config.project_root);
+        let mut changed = false;
+
+        for (member_name, watcher) in &self.watchers {
+            let Some(session_id) = watcher.current_session_id() else {
+                continue;
+            };
+            let Some(entry) = launch_state.get_mut(member_name) else {
+                continue;
+            };
+            if entry.session_id.as_deref() == Some(session_id.as_str()) {
+                continue;
+            }
+            entry.session_id = Some(session_id);
+            changed = true;
+        }
+
+        if changed {
+            save_launch_state(&self.config.project_root, &launch_state)?;
+        }
+
+        Ok(())
+    }
+
+    fn persist_member_session_id(&self, member_name: &str, session_id: &str) -> Result<()> {
+        let mut launch_state = load_launch_state(&self.config.project_root);
+        let Some(entry) = launch_state.get_mut(member_name) else {
+            return Ok(());
+        };
+        if entry.session_id.as_deref() == Some(session_id) {
+            return Ok(());
+        }
+        entry.session_id = Some(session_id.to_string());
+        save_launch_state(&self.config.project_root, &launch_state)
     }
 
     /// Fire nudges for members that have been idle long enough.
@@ -1576,6 +1640,7 @@ fn write_launch_script(
     project_root: &Path,
     idle: bool,
     resume: bool,
+    session_id: Option<&str>,
 ) -> Result<String> {
     let script_path = std::env::temp_dir().join(format!("batty-launch-{member_name}.sh"));
     let escaped_prompt = prompt.replace('\'', "'\\''");
@@ -1601,14 +1666,22 @@ fn write_launch_script(
         }
         _ => {
             if resume {
-                // Resume the most recent Claude session in this working directory
-                "exec claude --dangerously-skip-permissions --continue".to_string()
+                let session_id = session_id.context("missing Claude session ID for resume")?;
+                format!("exec claude --dangerously-skip-permissions --resume '{session_id}'")
             } else if idle {
+                let session_flag = session_id
+                    .map(|id| format!(" --session-id '{id}'"))
+                    .unwrap_or_default();
                 format!(
-                    "exec claude --dangerously-skip-permissions --append-system-prompt '{escaped_prompt}'"
+                    "exec claude --dangerously-skip-permissions{session_flag} --append-system-prompt '{escaped_prompt}'"
                 )
             } else {
-                format!("exec claude --dangerously-skip-permissions '{escaped_prompt}'")
+                let session_flag = session_id
+                    .map(|id| format!(" --session-id '{id}'"))
+                    .unwrap_or_default();
+                format!(
+                    "exec claude --dangerously-skip-permissions{session_flag} '{escaped_prompt}'"
+                )
             }
         }
     };
@@ -1747,6 +1820,57 @@ fn save_launch_state(project_root: &Path, state: &HashMap<String, LaunchIdentity
     Ok(())
 }
 
+fn new_member_session_id(agent_name: &str) -> Option<String> {
+    (agent_name == "claude-code").then(|| Uuid::new_v4().to_string())
+}
+
+fn resolve_member_launch_session(
+    agent_name: &str,
+    previous_identity: Option<&LaunchIdentity>,
+    resume_requested: bool,
+    duplicate_session_id: bool,
+) -> (bool, Option<String>) {
+    let Some(session_id) = new_member_session_id(agent_name) else {
+        return (resume_requested, None);
+    };
+
+    if !resume_requested {
+        return (false, Some(session_id));
+    }
+
+    if duplicate_session_id {
+        return (false, Some(session_id));
+    }
+
+    if let Some(previous_session_id) =
+        previous_identity.and_then(|identity| identity.session_id.clone())
+    {
+        return (true, Some(previous_session_id));
+    }
+
+    // Older launch-state files did not persist Claude session IDs. Starting
+    // fresh is safer than ambiguous `claude --continue` in a shared cwd.
+    (false, Some(session_id))
+}
+
+fn duplicate_claude_session_ids(state: &HashMap<String, LaunchIdentity>) -> HashSet<&str> {
+    let mut counts = HashMap::new();
+    for identity in state.values() {
+        if identity.agent != "claude-code" {
+            continue;
+        }
+        let Some(session_id) = identity.session_id.as_deref() else {
+            continue;
+        };
+        *counts.entry(session_id).or_insert(0usize) += 1;
+    }
+
+    counts
+        .into_iter()
+        .filter_map(|(session_id, count)| (count > 1).then_some(session_id))
+        .collect()
+}
+
 fn should_resume_member(
     resume_requested: bool,
     previous_state: &HashMap<String, LaunchIdentity>,
@@ -1839,12 +1963,15 @@ mod tests {
             Path::new("/project"),
             false,
             false,
+            Some("11111111-1111-4111-8111-111111111111"),
         )
         .unwrap();
         assert!(cmd.contains("batty-launch-arch-1.sh"));
         let script_path = std::env::temp_dir().join("batty-launch-arch-1.sh");
         let content = std::fs::read_to_string(&script_path).unwrap();
-        assert!(content.contains("claude --dangerously-skip-permissions 'plan the project'"));
+        assert!(content.contains(
+            "claude --dangerously-skip-permissions --session-id '11111111-1111-4111-8111-111111111111' 'plan the project'"
+        ));
         assert!(!content.contains("--append-system-prompt"));
     }
 
@@ -1859,11 +1986,15 @@ mod tests {
             Path::new("/project"),
             true,
             false,
+            Some("22222222-2222-4222-8222-222222222222"),
         )
         .unwrap();
         assert!(cmd.contains("batty-launch-mgr-1.sh"));
         let script_path = std::env::temp_dir().join("batty-launch-mgr-1.sh");
         let content = std::fs::read_to_string(&script_path).unwrap();
+        assert!(content.contains(
+            "--session-id '22222222-2222-4222-8222-222222222222' --append-system-prompt"
+        ));
         assert!(content.contains("--append-system-prompt"));
         assert!(!content.contains("'You are the manager.''\n"));
     }
@@ -1883,6 +2014,7 @@ mod tests {
             tmp.path(),
             true,
             false,
+            None,
         )
         .unwrap();
         let script_path = std::env::temp_dir().join("batty-launch-eng-1.sh");
@@ -1913,6 +2045,7 @@ mod tests {
             tmp.path(),
             false,
             false,
+            None,
         )
         .unwrap();
         assert!(cmd.contains("batty-launch-codex-active-test.sh"));
@@ -1960,11 +2093,33 @@ mod tests {
             Path::new("/tmp"),
             false,
             false,
+            Some("33333333-3333-4333-8333-333333333333"),
         )
         .unwrap();
         let script_path = std::env::temp_dir().join("batty-launch-eng-2.sh");
         let content = std::fs::read_to_string(&script_path).unwrap();
         assert!(content.contains("user'\\''s"));
+    }
+
+    #[test]
+    fn launch_script_resume_claude_uses_explicit_session_id() {
+        write_launch_script(
+            "architect",
+            "claude",
+            "ignored",
+            None,
+            Path::new("/project"),
+            Path::new("/project"),
+            true,
+            true,
+            Some("44444444-4444-4444-8444-444444444444"),
+        )
+        .unwrap();
+        let script_path = std::env::temp_dir().join("batty-launch-architect.sh");
+        let content = std::fs::read_to_string(&script_path).unwrap();
+        assert!(content.contains(
+            "exec claude --dangerously-skip-permissions --resume '44444444-4444-4444-8444-444444444444'"
+        ));
     }
 
     #[test]
@@ -2063,6 +2218,7 @@ mod tests {
             LaunchIdentity {
                 agent: "claude-code".to_string(),
                 prompt: "role prompt".to_string(),
+                session_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
             },
         );
 
@@ -2080,6 +2236,7 @@ mod tests {
             LaunchIdentity {
                 agent: "codex-cli".to_string(),
                 prompt: "same prompt".to_string(),
+                session_id: None,
             },
         );
 
@@ -2100,6 +2257,7 @@ mod tests {
             LaunchIdentity {
                 agent: "claude-code".to_string(),
                 prompt: "old prompt".to_string(),
+                session_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
             },
         );
 
@@ -2120,6 +2278,7 @@ mod tests {
             LaunchIdentity {
                 agent: "claude-code".to_string(),
                 prompt: "same prompt".to_string(),
+                session_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
             },
         );
 
@@ -2130,6 +2289,58 @@ mod tests {
             "claude-code",
             "same prompt",
         ));
+    }
+
+    #[test]
+    fn resolve_member_launch_session_reuses_saved_claude_session_id() {
+        let previous = LaunchIdentity {
+            agent: "claude-code".to_string(),
+            prompt: "same prompt".to_string(),
+            session_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+        };
+
+        let (resume, session_id) =
+            resolve_member_launch_session("claude-code", Some(&previous), true, false);
+
+        assert!(resume);
+        assert_eq!(
+            session_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+    }
+
+    #[test]
+    fn resolve_member_launch_session_starts_fresh_when_claude_session_id_missing() {
+        let previous = LaunchIdentity {
+            agent: "claude-code".to_string(),
+            prompt: "same prompt".to_string(),
+            session_id: None,
+        };
+
+        let (resume, session_id) =
+            resolve_member_launch_session("claude-code", Some(&previous), true, false);
+
+        assert!(!resume);
+        assert!(session_id.is_some());
+    }
+
+    #[test]
+    fn resolve_member_launch_session_starts_fresh_when_session_id_is_duplicated() {
+        let previous = LaunchIdentity {
+            agent: "claude-code".to_string(),
+            prompt: "same prompt".to_string(),
+            session_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+        };
+
+        let (resume, session_id) =
+            resolve_member_launch_session("claude-code", Some(&previous), true, true);
+
+        assert!(!resume);
+        assert!(session_id.is_some());
+        assert_ne!(
+            session_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
     }
 
     #[test]
