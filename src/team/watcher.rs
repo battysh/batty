@@ -765,6 +765,7 @@ fn classify_claude_log_entry(entry: &Value) -> TrackerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::io::Write;
 
     #[test]
@@ -976,6 +977,93 @@ mod tests {
             ),
             WatcherState::Active
         );
+    }
+
+    #[test]
+    #[serial]
+    fn idle_poll_consumes_non_empty_capture() {
+        let session = "batty-test-watcher-idle-poll";
+        let _ = crate::tmux::kill_session(session);
+
+        crate::tmux::create_session(
+            session,
+            "bash",
+            &[
+                "-lc".to_string(),
+                "printf 'watcher-idle-poll\\n'; sleep 3".to_string(),
+            ],
+            "/tmp",
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let pane_id = crate::tmux::pane_id(session).unwrap();
+        let mut watcher = SessionWatcher::new(&pane_id, "eng-1-1", 300, None);
+
+        assert_eq!(watcher.poll().unwrap(), WatcherState::Active);
+        assert!(watcher.last_output().contains("watcher-idle-poll"));
+
+        crate::tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn active_poll_updates_state_when_capture_changes() {
+        let session = "batty-test-watcher-active-change";
+        let _ = crate::tmux::kill_session(session);
+
+        crate::tmux::create_session(
+            session,
+            "bash",
+            &[
+                "-lc".to_string(),
+                "printf 'watcher-active-change\\n'; sleep 3".to_string(),
+            ],
+            "/tmp",
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let pane_id = crate::tmux::pane_id(session).unwrap();
+        let mut watcher = SessionWatcher::new(&pane_id, "eng-1-1", 300, None);
+        watcher.state = WatcherState::Active;
+
+        assert_eq!(watcher.poll().unwrap(), WatcherState::Active);
+        assert_ne!(watcher.last_output_hash, 0);
+        assert!(watcher.last_output().contains("watcher-active-change"));
+
+        crate::tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn active_poll_uses_stale_path_when_capture_is_unchanged() {
+        let session = "batty-test-watcher-stale";
+        let _ = crate::tmux::kill_session(session);
+
+        crate::tmux::create_session(
+            session,
+            "bash",
+            &[
+                "-lc".to_string(),
+                "printf 'watcher-stale\\n'; sleep 3".to_string(),
+            ],
+            "/tmp",
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let pane_id = crate::tmux::pane_id(session).unwrap();
+        let capture = crate::tmux::capture_pane(&pane_id).unwrap();
+        let mut watcher = SessionWatcher::new(&pane_id, "eng-1-1", 0, None);
+        watcher.state = WatcherState::Active;
+        watcher.last_capture = capture.clone();
+        watcher.last_output_hash = simple_hash(&capture);
+        watcher.last_change = Instant::now() - std::time::Duration::from_millis(10);
+
+        assert_eq!(watcher.poll().unwrap(), WatcherState::Stale);
+
+        crate::tmux::kill_session(session).unwrap();
     }
 
     #[test]
