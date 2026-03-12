@@ -1,11 +1,16 @@
 # Demo
 
-Watch the latest Batty demo below.
+Watch the latest Batty demo on YouTube.
 
-<video controls preload="metadata" poster="assets/demo-poster.jpg" style="width: 100%; max-width: 1280px; border-radius: 12px;">
-  <source src="assets/batty-demo.mp4" type="video/mp4">
-  Your browser does not support embedded video.
-</video>
+<iframe
+  width="100%"
+  height="720"
+  src="https://www.youtube.com/embed/2wmBcUnq0vw"
+  title="Batty demo"
+  frameborder="0"
+  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+  referrerpolicy="strict-origin-when-cross-origin"
+  allowfullscreen>
+</iframe>
 
-- [Open the demo video directly](assets/batty-demo.mp4)
-- Duration: about 16 minutes
+- [Open the demo on YouTube](https://www.youtube.com/watch?v=2wmBcUnq0vw)
