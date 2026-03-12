@@ -38,6 +38,17 @@ That gets you from zero to a live team session. For the full walkthrough, templa
 
 ## Quick Demo
 
+<p align="center">
+  <a href="https://battysh.github.io/batty/demo/">
+    <img src="assets/demo-poster.jpg" alt="Watch the Batty demo" width="1000">
+  </a>
+</p>
+
+<p align="center">
+  <strong><a href="https://battysh.github.io/batty/demo/">Watch the full demo</a></strong><br>
+  GitHub does not inline repository-hosted video players in README files, so the full recording is published on GitHub Pages.
+</p>
+
 ```text
 You
   |
@@ -198,6 +209,7 @@ This session shows Batty coordinating a live team in `~/mafia_solver`: the `arch
 ## Docs and Links
 
 - [Getting Started](docs/getting-started.md)
+- [Demo](https://battysh.github.io/batty/demo/)
 - [CLI Reference](docs/reference/cli.md)
 - [Runtime Config Reference](docs/reference/config.md)
 - [Module Reference](docs/reference/modules.md)
