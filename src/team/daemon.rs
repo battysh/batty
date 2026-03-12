@@ -394,9 +394,7 @@ impl TeamDaemon {
                 Ok(new_state) => {
                     let member_state = match new_state {
                         WatcherState::Active => MemberState::Working,
-                        WatcherState::Completed => MemberState::Completed,
                         WatcherState::Idle => MemberState::Idle,
-                        WatcherState::Stale => MemberState::Working, // still working, just slow
                     };
 
                     if prev_state != Some(member_state) {
@@ -404,18 +402,6 @@ impl TeamDaemon {
 
                         // Update automation countdowns on state transitions.
                         self.update_automation_timers_for_state(name, member_state);
-
-                        match member_state {
-                            MemberState::Completed => {
-                                info!(member = %name, "detected completion");
-                                self.handle_completion(name)?;
-                            }
-                            MemberState::Crashed => {
-                                warn!(member = %name, "detected crash");
-                                self.handle_crash(name)?;
-                            }
-                            _ => {}
-                        }
                     }
                 }
                 Err(e) => {
@@ -423,39 +409,6 @@ impl TeamDaemon {
                 }
             }
         }
-
-        Ok(())
-    }
-
-    /// Handle a member completing their task.
-    fn handle_completion(&mut self, member_name: &str) -> Result<()> {
-        let is_engineer = self
-            .config
-            .members
-            .iter()
-            .any(|m| m.name == member_name && m.role_type == RoleType::Engineer);
-        if is_engineer && self.active_task_id(member_name).is_some() {
-            return self.handle_engineer_completion(member_name);
-        }
-
-        self.event_sink
-            .emit(TeamEvent::task_completed(member_name))?;
-
-        let output = self
-            .watchers
-            .get(member_name)
-            .map(|w| w.last_lines(10))
-            .unwrap_or_default();
-        let msg = format!("[{member_name}] completed task.\nLast output:\n{output}");
-        self.notify_reports_to(member_name, &msg)?;
-
-        // Mark as idle, deactivate watcher, start nudge countdown
-        self.states
-            .insert(member_name.to_string(), MemberState::Idle);
-        if let Some(watcher) = self.watchers.get_mut(member_name) {
-            watcher.deactivate();
-        }
-        self.update_automation_timers_for_state(member_name, MemberState::Idle);
 
         Ok(())
     }
@@ -742,32 +695,6 @@ impl TeamDaemon {
         Ok(())
     }
 
-    /// Handle a crashed member — restart if possible.
-    fn handle_crash(&mut self, member_name: &str) -> Result<()> {
-        let Some(pane_id) = self.config.pane_map.get(member_name).cloned() else {
-            return Ok(());
-        };
-
-        // Check if pane is dead
-        if tmux::pane_dead(&pane_id).unwrap_or(false) {
-            info!(member = %member_name, "respawning dead pane");
-            tmux::respawn_pane(&pane_id, "bash")?;
-        }
-
-        self.event_sink
-            .emit(TeamEvent::member_crashed(member_name, true))?;
-
-        // Reset to idle — will be reassigned, start nudge countdown
-        self.states
-            .insert(member_name.to_string(), MemberState::Idle);
-        if let Some(watcher) = self.watchers.get_mut(member_name) {
-            watcher.deactivate();
-        }
-        self.update_automation_timers_for_state(member_name, MemberState::Idle);
-
-        Ok(())
-    }
-
     /// Drain the legacy `commands.jsonl` queue into Maildir inboxes.
     ///
     /// This provides backward compatibility during migration. Commands written
@@ -826,34 +753,19 @@ impl TeamDaemon {
     /// Deliver inbox messages to agents that are at their prompt.
     ///
     /// For each member with a pane, check their `new/` inbox. If the agent's
-    /// watcher state is Idle, Completed, or Stale, inject the message via
-    /// tmux and move it to `cur/`. If the agent is actively working,
-    /// messages stay in `new/` and survive daemon restarts.
-    ///
-    /// Stale agents are included because they have produced no new output
-    /// for longer than the stale threshold — they are almost certainly
-    /// sitting at an idle prompt that the watcher failed to classify,
-    /// and blocking message delivery indefinitely is worse than
-    /// interrupting a genuinely slow operation.
+    /// watcher state is Idle, inject the message via tmux and move it to
+    /// `cur/`. If the agent is actively working, messages stay in `new/`
+    /// and survive daemon restarts.
     fn deliver_inbox_messages(&mut self) -> Result<()> {
         let root = inbox::inboxes_root(&self.config.project_root);
 
         let member_names: Vec<String> = self.config.pane_map.keys().cloned().collect();
 
         for name in &member_names {
-            // Deliver to idle, completed, or stale agents. Stale agents
-            // haven't produced output in a while and are likely sitting at
-            // an undetected prompt — delivering unblocks stuck message
-            // queues that would otherwise require manual tmux injection.
             let is_ready = self
                 .watchers
                 .get(name)
-                .map(|w| {
-                    matches!(
-                        w.state,
-                        WatcherState::Idle | WatcherState::Completed | WatcherState::Stale
-                    )
-                })
+                .map(|w| matches!(w.state, WatcherState::Idle))
                 .unwrap_or(true);
 
             if !is_ready {
@@ -1092,8 +1004,6 @@ impl TeamDaemon {
             let state_str = match state {
                 MemberState::Idle => "#[fg=yellow]idle#[default]",
                 MemberState::Working => "#[fg=cyan]working#[default]",
-                MemberState::Completed => "#[fg=green]done#[default]",
-                MemberState::Crashed => "#[fg=red,bold]CRASHED#[default]",
             };
 
             let nudge_str = format_nudge_status(self.nudges.get(&member.name));
@@ -1124,12 +1034,12 @@ impl TeamDaemon {
 
     /// Update the nudge countdown when a member's state changes.
     ///
-    /// - Transition to idle/completed/crashed: start the countdown if needed.
+    /// - Transition to idle: start the countdown if needed.
     /// - Transition to working: pause the countdown and restart it on next idle.
     fn update_nudge_for_state(&mut self, member_name: &str, new_state: MemberState) {
         if let Some(schedule) = self.nudges.get_mut(member_name) {
             match new_state {
-                MemberState::Idle | MemberState::Completed => {
+                MemberState::Idle => {
                     if schedule.paused || schedule.idle_since.is_none() {
                         schedule.idle_since = Some(Instant::now());
                         schedule.fired_this_idle = false;
@@ -1140,14 +1050,6 @@ impl TeamDaemon {
                     schedule.idle_since = None;
                     schedule.fired_this_idle = false;
                     schedule.paused = true;
-                }
-                MemberState::Crashed => {
-                    // Treat crash like idle — the agent is stuck
-                    if schedule.paused || schedule.idle_since.is_none() {
-                        schedule.idle_since = Some(Instant::now());
-                        schedule.fired_this_idle = false;
-                    }
-                    schedule.paused = false;
                 }
             }
         }
@@ -1170,7 +1072,7 @@ impl TeamDaemon {
                 self.paused_standups.insert(member_name.to_string());
                 self.last_standup.remove(member_name);
             }
-            MemberState::Idle | MemberState::Completed | MemberState::Crashed => {
+            MemberState::Idle => {
                 let was_paused = self.paused_standups.remove(member_name);
                 if was_paused || !self.last_standup.contains_key(member_name) {
                     self.last_standup

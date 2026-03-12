@@ -5,13 +5,11 @@
 //! tails their on-disk session JSONL data to reduce false classifications from
 //! stale pane text.
 
+use anyhow::Result;
+use serde_json::Value;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
-
-use anyhow::Result;
-use serde_json::Value;
 
 use crate::tmux;
 
@@ -20,12 +18,8 @@ use crate::tmux;
 pub enum WatcherState {
     /// Agent is actively producing output.
     Active,
-    /// Agent completed its task (returned to shell or exited).
-    Completed,
     /// No agent running in pane (idle / waiting for assignment).
     Idle,
-    /// No new output for longer than the stale threshold.
-    Stale,
 }
 
 pub struct SessionWatcher {
@@ -34,9 +28,7 @@ pub struct SessionWatcher {
     pub member_name: String,
     pub state: WatcherState,
     last_output_hash: u64,
-    last_change: Instant,
     last_capture: String,
-    stale_threshold: Duration,
     tracker: Option<SessionTracker>,
 }
 
@@ -86,7 +78,7 @@ impl SessionWatcher {
     pub fn new(
         pane_id: &str,
         member_name: &str,
-        stale_secs: u64,
+        _stale_secs: u64,
         tracker: Option<SessionTrackerConfig>,
     ) -> Self {
         Self {
@@ -94,9 +86,7 @@ impl SessionWatcher {
             member_name: member_name.to_string(),
             state: WatcherState::Idle,
             last_output_hash: 0,
-            last_change: Instant::now(),
             last_capture: String::new(),
-            stale_threshold: Duration::from_secs(stale_secs),
             tracker: tracker.map(|tracker| match tracker {
                 SessionTrackerConfig::Codex { cwd } => SessionTracker::Codex(CodexSessionTracker {
                     sessions_root: default_codex_sessions_root(),
@@ -122,13 +112,13 @@ impl SessionWatcher {
     pub fn poll(&mut self) -> Result<WatcherState> {
         // Check if pane still exists
         if !tmux::pane_exists(&self.pane_id) {
-            self.state = WatcherState::Completed;
+            self.state = WatcherState::Idle;
             return Ok(self.state);
         }
 
         // Check if pane process died
         if tmux::pane_dead(&self.pane_id).unwrap_or(false) {
-            self.state = WatcherState::Completed;
+            self.state = WatcherState::Idle;
             return Ok(self.state);
         }
 
@@ -143,10 +133,9 @@ impl SessionWatcher {
             if !capture.is_empty() {
                 self.last_capture = capture;
                 let next_state =
-                    next_state_after_capture(tracker_kind, screen_state, tracker_state, false);
-                if matches!(next_state, WatcherState::Active | WatcherState::Completed) {
+                    next_state_after_capture(tracker_kind, screen_state, tracker_state, self.state);
+                if next_state == WatcherState::Active {
                     self.last_output_hash = simple_hash(&self.last_capture);
-                    self.last_change = Instant::now();
                     self.state = next_state;
                 }
             }
@@ -159,16 +148,16 @@ impl SessionWatcher {
         let screen_state = classify_capture_state(&capture);
         let tracker_state = self.poll_tracker().unwrap_or(TrackerState::Unknown);
         let tracker_kind = self.tracker_kind();
-        let stale = self.last_change.elapsed() > self.stale_threshold;
 
         if hash != self.last_output_hash {
             self.last_output_hash = hash;
-            self.last_change = Instant::now();
             self.last_capture = capture;
-            self.state = next_state_after_capture(tracker_kind, screen_state, tracker_state, false);
+            self.state =
+                next_state_after_capture(tracker_kind, screen_state, tracker_state, self.state);
         } else {
             self.last_capture = capture;
-            self.state = next_state_after_capture(tracker_kind, screen_state, tracker_state, stale);
+            self.state =
+                next_state_after_capture(tracker_kind, screen_state, tracker_state, self.state);
         }
 
         Ok(self.state)
@@ -177,7 +166,6 @@ impl SessionWatcher {
     /// Mark this watcher as actively working.
     pub fn activate(&mut self) {
         self.state = WatcherState::Active;
-        self.last_change = Instant::now();
         self.last_output_hash = 0;
         if let Some(tracker) = self.tracker.as_mut() {
             match tracker {
@@ -385,12 +373,8 @@ fn next_state_after_capture(
     tracker_kind: TrackerKind,
     screen_state: ScreenState,
     tracker_state: TrackerState,
-    stale: bool,
+    previous_state: WatcherState,
 ) -> WatcherState {
-    if tracker_state == TrackerState::Completed {
-        return WatcherState::Completed;
-    }
-
     if tracker_kind == TrackerKind::Claude {
         match screen_state {
             // Claude's live pane state is more reliable than session logs when
@@ -405,21 +389,14 @@ fn next_state_after_capture(
 
     match tracker_state {
         TrackerState::Active => return WatcherState::Active,
-        TrackerState::Idle => return WatcherState::Idle,
-        TrackerState::Completed => return WatcherState::Completed,
+        TrackerState::Idle | TrackerState::Completed => return WatcherState::Idle,
         TrackerState::Unknown => {}
     }
 
     match screen_state {
         ScreenState::Active => WatcherState::Active,
         ScreenState::Idle => WatcherState::Idle,
-        ScreenState::Unknown => {
-            if stale {
-                WatcherState::Stale
-            } else {
-                WatcherState::Active
-            }
-        }
+        ScreenState::Unknown => previous_state,
     }
 }
 
@@ -938,7 +915,7 @@ mod tests {
                 TrackerKind::Codex,
                 ScreenState::Idle,
                 TrackerState::Unknown,
-                false,
+                WatcherState::Idle,
             ),
             WatcherState::Idle
         );
@@ -947,7 +924,7 @@ mod tests {
                 TrackerKind::Codex,
                 ScreenState::Idle,
                 TrackerState::Active,
-                false,
+                WatcherState::Idle,
             ),
             WatcherState::Active
         );
@@ -956,7 +933,7 @@ mod tests {
                 TrackerKind::Codex,
                 ScreenState::Idle,
                 TrackerState::Idle,
-                false,
+                WatcherState::Active,
             ),
             WatcherState::Idle
         );
@@ -965,16 +942,16 @@ mod tests {
                 TrackerKind::Codex,
                 ScreenState::Unknown,
                 TrackerState::Unknown,
-                true,
+                WatcherState::Active,
             ),
-            WatcherState::Stale
+            WatcherState::Active
         );
         assert_eq!(
             next_state_after_capture(
                 TrackerKind::Codex,
                 ScreenState::Active,
                 TrackerState::Unknown,
-                false,
+                WatcherState::Idle,
             ),
             WatcherState::Active
         );
@@ -983,9 +960,9 @@ mod tests {
                 TrackerKind::Codex,
                 ScreenState::Idle,
                 TrackerState::Completed,
-                false,
+                WatcherState::Active,
             ),
-            WatcherState::Completed
+            WatcherState::Idle
         );
     }
 
@@ -996,7 +973,7 @@ mod tests {
                 TrackerKind::Claude,
                 ScreenState::Idle,
                 TrackerState::Active,
-                false,
+                WatcherState::Active,
             ),
             WatcherState::Idle
         );
@@ -1009,7 +986,7 @@ mod tests {
                 TrackerKind::Claude,
                 ScreenState::Active,
                 TrackerState::Idle,
-                false,
+                WatcherState::Idle,
             ),
             WatcherState::Active
         );
@@ -1036,7 +1013,7 @@ mod tests {
         let pane_id = crate::tmux::pane_id(session).unwrap();
         let mut watcher = SessionWatcher::new(&pane_id, "eng-1-1", 300, None);
 
-        assert_eq!(watcher.poll().unwrap(), WatcherState::Active);
+        assert_eq!(watcher.poll().unwrap(), WatcherState::Idle);
         assert!(!watcher.last_output().is_empty());
 
         crate::tmux::kill_session(session).unwrap();
@@ -1073,8 +1050,8 @@ mod tests {
 
     #[test]
     #[serial]
-    fn active_poll_uses_stale_path_when_capture_is_unchanged() {
-        let session = "batty-test-watcher-stale";
+    fn active_poll_keeps_previous_state_when_capture_is_unchanged() {
+        let session = "batty-test-watcher-unchanged";
         let _ = crate::tmux::kill_session(session);
 
         crate::tmux::create_session(
@@ -1082,7 +1059,7 @@ mod tests {
             "bash",
             &[
                 "-lc".to_string(),
-                "printf 'watcher-stale\\n'; sleep 3".to_string(),
+                "printf 'watcher-unchanged\\n'; sleep 3".to_string(),
             ],
             "/tmp",
         )
@@ -1095,9 +1072,8 @@ mod tests {
         watcher.state = WatcherState::Active;
         watcher.last_capture = capture.clone();
         watcher.last_output_hash = simple_hash(&capture);
-        watcher.last_change = Instant::now() - std::time::Duration::from_millis(10);
 
-        assert_eq!(watcher.poll().unwrap(), WatcherState::Stale);
+        assert_eq!(watcher.poll().unwrap(), WatcherState::Active);
 
         crate::tmux::kill_session(session).unwrap();
     }
