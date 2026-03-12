@@ -1,9 +1,9 @@
 //! Disk-based session monitoring — polls agent output via tmux capture-pane.
 //!
 //! Detects agent completion, crashes, and staleness by periodically capturing
-//! pane output and checking for state changes. For Codex, this also tails the
-//! authoritative `~/.codex/sessions` JSONL log associated with the member's
-//! unique working directory.
+//! pane output and checking for state changes. For Codex and Claude, this also
+//! tails their on-disk session JSONL data to reduce false classifications from
+//! stale pane text.
 
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -37,7 +37,25 @@ pub struct SessionWatcher {
     last_change: Instant,
     last_capture: String,
     stale_threshold: Duration,
-    codex: Option<CodexSessionTracker>,
+    tracker: Option<SessionTracker>,
+}
+
+#[derive(Debug, Clone)]
+pub enum SessionTrackerConfig {
+    Codex { cwd: PathBuf },
+    Claude { cwd: PathBuf },
+}
+
+enum SessionTracker {
+    Codex(CodexSessionTracker),
+    Claude(ClaudeSessionTracker),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrackerKind {
+    None,
+    Codex,
+    Claude,
 }
 
 struct CodexSessionTracker {
@@ -47,12 +65,28 @@ struct CodexSessionTracker {
     offset: u64,
 }
 
+struct ClaudeSessionTracker {
+    projects_root: PathBuf,
+    cwd: PathBuf,
+    session_file: Option<PathBuf>,
+    offset: u64,
+    last_state: TrackerState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrackerState {
+    Active,
+    Idle,
+    Completed,
+    Unknown,
+}
+
 impl SessionWatcher {
     pub fn new(
         pane_id: &str,
         member_name: &str,
         stale_secs: u64,
-        codex_cwd: Option<PathBuf>,
+        tracker: Option<SessionTrackerConfig>,
     ) -> Self {
         Self {
             pane_id: pane_id.to_string(),
@@ -62,11 +96,22 @@ impl SessionWatcher {
             last_change: Instant::now(),
             last_capture: String::new(),
             stale_threshold: Duration::from_secs(stale_secs),
-            codex: codex_cwd.map(|cwd| CodexSessionTracker {
-                sessions_root: default_codex_sessions_root(),
-                cwd,
-                session_file: None,
-                offset: 0,
+            tracker: tracker.map(|tracker| match tracker {
+                SessionTrackerConfig::Codex { cwd } => SessionTracker::Codex(CodexSessionTracker {
+                    sessions_root: default_codex_sessions_root(),
+                    cwd,
+                    session_file: None,
+                    offset: 0,
+                }),
+                SessionTrackerConfig::Claude { cwd } => {
+                    SessionTracker::Claude(ClaudeSessionTracker {
+                        projects_root: default_claude_projects_root(),
+                        cwd,
+                        session_file: None,
+                        offset: 0,
+                        last_state: TrackerState::Unknown,
+                    })
+                }
             }),
         }
     }
@@ -85,17 +130,38 @@ impl SessionWatcher {
             return Ok(self.state);
         }
 
-        // If idle, stay idle until explicitly activated
+        // If idle, peek at the pane to detect if the agent started working.
+        // This lets the watcher self-heal without requiring explicit activation
+        // from the daemon whenever a nudge, standup, or external input arrives.
         if self.state == WatcherState::Idle {
+            let capture = tmux::capture_pane(&self.pane_id).unwrap_or_default();
+            let screen_state = classify_capture_state(&capture);
+            let tracker_state = self.poll_tracker().unwrap_or(TrackerState::Unknown);
+            let tracker_kind = self.tracker_kind();
+            if !capture.is_empty() {
+                self.last_capture = capture;
+                let next_state = next_state_after_capture(
+                    tracker_kind,
+                    screen_state,
+                    tracker_state,
+                    false,
+                    false,
+                );
+                if matches!(next_state, WatcherState::Active | WatcherState::Completed) {
+                    self.last_output_hash = simple_hash(&self.last_capture);
+                    self.last_change = Instant::now();
+                    self.state = next_state;
+                }
+            }
             return Ok(self.state);
         }
 
         // Capture current pane content
         let capture = tmux::capture_pane(&self.pane_id).unwrap_or_default();
         let hash = simple_hash(&capture);
-        let prompt_visible = is_at_agent_prompt(&capture);
-        let codex_managed = self.codex.is_some();
-        let codex_completed = self.poll_codex_session().unwrap_or(false);
+        let screen_state = classify_capture_state(&capture);
+        let tracker_state = self.poll_tracker().unwrap_or(TrackerState::Unknown);
+        let tracker_kind = self.tracker_kind();
         let stale = self.last_change.elapsed() > self.stale_threshold;
 
         if hash != self.last_output_hash {
@@ -103,14 +169,11 @@ impl SessionWatcher {
             self.last_change = Instant::now();
             self.last_capture = capture;
             self.state =
-                next_state_after_capture(codex_managed, prompt_visible, codex_completed, false);
+                next_state_after_capture(tracker_kind, screen_state, tracker_state, false, false);
         } else {
             self.last_capture = capture;
-            self.state = if stale {
-                WatcherState::Stale
-            } else {
-                next_state_after_capture(codex_managed, prompt_visible, codex_completed, true)
-            };
+            self.state =
+                next_state_after_capture(tracker_kind, screen_state, tracker_state, stale, true);
         }
 
         Ok(self.state)
@@ -121,9 +184,18 @@ impl SessionWatcher {
         self.state = WatcherState::Active;
         self.last_change = Instant::now();
         self.last_output_hash = 0;
-        if let Some(codex) = self.codex.as_mut() {
-            codex.session_file = None;
-            codex.offset = 0;
+        if let Some(tracker) = self.tracker.as_mut() {
+            match tracker {
+                SessionTracker::Codex(codex) => {
+                    codex.session_file = None;
+                    codex.offset = 0;
+                }
+                SessionTracker::Claude(claude) => {
+                    claude.session_file = None;
+                    claude.offset = 0;
+                    claude.last_state = TrackerState::Unknown;
+                }
+            }
         }
     }
 
@@ -145,30 +217,48 @@ impl SessionWatcher {
         lines[start..].join("\n")
     }
 
-    fn poll_codex_session(&mut self) -> Result<bool> {
-        let Some(codex) = self.codex.as_mut() else {
-            return Ok(false);
+    fn poll_tracker(&mut self) -> Result<TrackerState> {
+        let Some(tracker) = self.tracker.as_mut() else {
+            return Ok(TrackerState::Unknown);
         };
 
-        if codex.session_file.is_none() {
-            codex.session_file = discover_codex_session_file(&codex.sessions_root, &codex.cwd)?;
-            if let Some(session_file) = codex.session_file.as_ref() {
-                codex.offset = current_file_len(session_file)?;
+        match tracker {
+            SessionTracker::Codex(codex) => {
+                if codex.session_file.is_none() {
+                    codex.session_file =
+                        discover_codex_session_file(&codex.sessions_root, &codex.cwd)?;
+                    if let Some(session_file) = codex.session_file.as_ref() {
+                        codex.offset = current_file_len(session_file)?;
+                    }
+                    return Ok(TrackerState::Unknown);
+                }
+
+                let Some(session_file) = codex.session_file.clone() else {
+                    return Ok(TrackerState::Unknown);
+                };
+
+                if !session_file.exists() {
+                    codex.session_file = None;
+                    codex.offset = 0;
+                    return Ok(TrackerState::Unknown);
+                }
+
+                if poll_codex_session_file(&session_file, &mut codex.offset)? {
+                    Ok(TrackerState::Completed)
+                } else {
+                    Ok(TrackerState::Unknown)
+                }
             }
-            return Ok(false);
+            SessionTracker::Claude(claude) => poll_claude_session(claude),
         }
+    }
 
-        let Some(session_file) = codex.session_file.clone() else {
-            return Ok(false);
-        };
-
-        if !session_file.exists() {
-            codex.session_file = None;
-            codex.offset = 0;
-            return Ok(false);
+    fn tracker_kind(&self) -> TrackerKind {
+        match self.tracker {
+            Some(SessionTracker::Codex(_)) => TrackerKind::Codex,
+            Some(SessionTracker::Claude(_)) => TrackerKind::Claude,
+            None => TrackerKind::None,
         }
-
-        poll_codex_session_file(&session_file, &mut codex.offset)
     }
 }
 
@@ -181,12 +271,7 @@ impl SessionWatcher {
 /// very bottom: when Claude is processing, it appends `· esc to interrupt`.
 /// If we detect that indicator we return `false` immediately.
 fn is_at_agent_prompt(capture: &str) -> bool {
-    let trimmed: Vec<&str> = capture
-        .lines()
-        .rev()
-        .filter(|l| !l.trim().is_empty())
-        .take(5)
-        .collect();
+    let trimmed = recent_non_empty_lines(capture, 5);
 
     // Claude Code shows "esc to interrupt" in the bottom status bar while working
     for line in &trimmed {
@@ -198,8 +283,12 @@ fn is_at_agent_prompt(capture: &str) -> bool {
     // Claude can also land in an interrupt-resolution UI after a blocked tool call
     // or nested interactive flow. That still represents an active task, not an idle
     // prompt waiting for a fresh assignment.
-    if capture.contains("What should Claude do instead?")
-        || capture.contains("Conversation interrupted")
+    if trimmed
+        .iter()
+        .any(|line| line.contains("What should Claude do instead?"))
+        || trimmed
+            .iter()
+            .any(|line| line.contains("Conversation interrupted"))
     {
         return false;
     }
@@ -222,28 +311,94 @@ fn is_at_agent_prompt(capture: &str) -> bool {
     false
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenState {
+    Active,
+    Idle,
+    Unknown,
+}
+
+fn recent_non_empty_lines(capture: &str, limit: usize) -> Vec<&str> {
+    capture
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(limit)
+        .collect()
+}
+
+fn classify_capture_state(capture: &str) -> ScreenState {
+    let trimmed = recent_non_empty_lines(capture, 12);
+
+    if trimmed.iter().any(|line| line.contains("esc to interrupt")) {
+        return ScreenState::Active;
+    }
+
+    if trimmed
+        .iter()
+        .any(|line| looks_like_claude_spinner_status(line))
+    {
+        return ScreenState::Active;
+    }
+
+    if is_at_agent_prompt(capture) {
+        return ScreenState::Idle;
+    }
+
+    ScreenState::Unknown
+}
+
+fn looks_like_claude_spinner_status(line: &str) -> bool {
+    let trimmed = line.trim();
+    let Some(first) = trimmed.chars().next() else {
+        return false;
+    };
+    matches!(first, '·' | '✢' | '✳' | '✶' | '✻' | '✽')
+        && (trimmed.contains('…') || trimmed.contains("(thinking"))
+}
+
 fn next_state_after_capture(
-    codex_managed: bool,
-    prompt_visible: bool,
-    codex_completed: bool,
+    tracker_kind: TrackerKind,
+    screen_state: ScreenState,
+    tracker_state: TrackerState,
+    stale: bool,
     unchanged_capture: bool,
 ) -> WatcherState {
-    if codex_completed {
+    if tracker_state == TrackerState::Completed {
         return WatcherState::Completed;
     }
 
-    if codex_managed {
-        return if prompt_visible && unchanged_capture {
-            WatcherState::Idle
-        } else {
-            WatcherState::Active
-        };
+    if tracker_kind == TrackerKind::Claude {
+        match screen_state {
+            // Claude's live pane state is more reliable than session logs when
+            // multiple matching JSONL files exist. A visible spinner or
+            // interrupt bar means working; a clean prompt with neither means
+            // idle, even if an old session file still looks active.
+            ScreenState::Active => return WatcherState::Active,
+            ScreenState::Idle => return WatcherState::Idle,
+            ScreenState::Unknown => {}
+        }
     }
 
-    if prompt_visible {
-        WatcherState::Idle
-    } else {
-        WatcherState::Active
+    match tracker_state {
+        TrackerState::Active => return WatcherState::Active,
+        TrackerState::Idle => return WatcherState::Idle,
+        TrackerState::Completed => return WatcherState::Completed,
+        TrackerState::Unknown => {}
+    }
+
+    match screen_state {
+        ScreenState::Active => WatcherState::Active,
+        ScreenState::Idle => WatcherState::Idle,
+        ScreenState::Unknown => {
+            if stale {
+                WatcherState::Stale
+            } else if unchanged_capture {
+                WatcherState::Active
+            } else {
+                WatcherState::Active
+            }
+        }
     }
 }
 
@@ -263,6 +418,14 @@ fn default_codex_sessions_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
         .join(".codex")
         .join("sessions")
+}
+
+fn default_claude_projects_root() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+        .join(".claude")
+        .join("projects")
 }
 
 fn current_file_len(path: &Path) -> Result<u64> {
@@ -300,6 +463,56 @@ fn discover_codex_session_file(sessions_root: &Path, cwd: &Path) -> Result<Optio
     Ok(newest.map(|(_, path)| path))
 }
 
+fn discover_claude_session_file(projects_root: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
+    if !projects_root.exists() {
+        return Ok(None);
+    }
+
+    let preferred_dir = projects_root.join(cwd.to_string_lossy().replace('/', "-"));
+    if preferred_dir.is_dir() {
+        let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+        for entry in read_dir_paths(&preferred_dir)? {
+            if entry.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let modified = fs::metadata(&entry)
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            match &newest {
+                Some((current, _)) if modified <= *current => {}
+                _ => newest = Some((modified, entry)),
+            }
+        }
+        if newest.is_some() {
+            return Ok(newest.map(|(_, path)| path));
+        }
+    }
+
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for project_dir in read_dir_paths(projects_root)? {
+        if !project_dir.is_dir() {
+            continue;
+        }
+        for entry in read_dir_paths(&project_dir)? {
+            if entry.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if session_file_cwd(&entry)?.as_deref() != Some(cwd.as_os_str()) {
+                continue;
+            }
+            let modified = fs::metadata(&entry)
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            match &newest {
+                Some((current, _)) if modified <= *current => {}
+                _ => newest = Some((modified, entry)),
+            }
+        }
+    }
+
+    Ok(newest.map(|(_, path)| path))
+}
+
 fn read_dir_paths(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for entry in fs::read_dir(dir)? {
@@ -328,6 +541,24 @@ fn session_meta_cwd(path: &Path) -> Result<Option<std::ffi::OsString>> {
             .and_then(|payload| payload.get("cwd"))
             .and_then(Value::as_str)
             .map(std::ffi::OsString::from));
+    }
+    Ok(None)
+}
+
+fn session_file_cwd(path: &Path) -> Result<Option<std::ffi::OsString>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if let Some(cwd) = entry.get("cwd").and_then(Value::as_str) {
+            return Ok(Some(std::ffi::OsString::from(cwd)));
+        }
     }
     Ok(None)
 }
@@ -371,6 +602,128 @@ fn poll_codex_session_file(path: &Path, offset: &mut u64) -> Result<bool> {
     }
 
     Ok(completed)
+}
+
+fn poll_claude_session(tracker: &mut ClaudeSessionTracker) -> Result<TrackerState> {
+    if tracker.session_file.is_none() {
+        tracker.session_file = discover_claude_session_file(&tracker.projects_root, &tracker.cwd)?;
+        if let Some(session_file) = tracker.session_file.clone() {
+            // Bind at EOF so historical entries from an older or unrelated
+            // Claude session do not override the live pane state on first poll.
+            tracker.offset = current_file_len(&session_file)?;
+            tracker.last_state = TrackerState::Unknown;
+        }
+        return Ok(tracker.last_state);
+    }
+
+    let Some(session_file) = tracker.session_file.clone() else {
+        return Ok(TrackerState::Unknown);
+    };
+
+    if !session_file.exists() {
+        tracker.session_file = None;
+        tracker.offset = 0;
+        tracker.last_state = TrackerState::Unknown;
+        return Ok(TrackerState::Unknown);
+    }
+
+    let (state, offset) = parse_claude_session_file(&session_file, tracker.offset)?;
+    tracker.offset = offset;
+    if state != TrackerState::Unknown {
+        tracker.last_state = state;
+    }
+    Ok(tracker.last_state)
+}
+
+fn parse_claude_session_file(path: &Path, start_offset: u64) -> Result<(TrackerState, u64)> {
+    let file_len = fs::metadata(path)?.len();
+    let mut offset = if file_len < start_offset {
+        0
+    } else {
+        start_offset
+    };
+
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    reader.seek(SeekFrom::Start(offset))?;
+
+    let mut state = TrackerState::Unknown;
+    loop {
+        let line_start = reader.stream_position()?;
+        let mut line = String::new();
+        let bytes = reader.read_line(&mut line)?;
+        if bytes == 0 {
+            break;
+        }
+        if !line.ends_with('\n') {
+            reader.seek(SeekFrom::Start(line_start))?;
+            break;
+        }
+
+        if let Ok(entry) = serde_json::from_str::<Value>(&line) {
+            let line_state = classify_claude_log_entry(&entry);
+            if line_state != TrackerState::Unknown {
+                state = line_state;
+            }
+        }
+
+        offset = reader.stream_position()?;
+    }
+
+    Ok((state, offset))
+}
+
+fn classify_claude_log_entry(entry: &Value) -> TrackerState {
+    match entry.get("type").and_then(Value::as_str) {
+        Some("assistant") => {
+            let stop_reason = entry
+                .get("message")
+                .and_then(|message| message.get("stop_reason"))
+                .and_then(Value::as_str);
+            match stop_reason {
+                Some("tool_use") => TrackerState::Active,
+                Some("end_turn") => TrackerState::Idle,
+                _ => TrackerState::Unknown,
+            }
+        }
+        Some("progress") => TrackerState::Active,
+        Some("user") => {
+            if entry
+                .get("toolUseResult")
+                .and_then(Value::as_object)
+                .is_some()
+            {
+                return TrackerState::Active;
+            }
+            if let Some(content) = entry
+                .get("message")
+                .and_then(|message| message.get("content"))
+            {
+                if let Some(text) = content.as_str() {
+                    if text == "[Request interrupted by user]" {
+                        return TrackerState::Idle;
+                    }
+                    return TrackerState::Active;
+                }
+                if let Some(items) = content.as_array() {
+                    for item in items {
+                        if item.get("tool_use_id").is_some() {
+                            return TrackerState::Active;
+                        }
+                        if item.get("type").and_then(Value::as_str) == Some("text")
+                            && item.get("text").and_then(Value::as_str)
+                                == Some("[Request interrupted by user]")
+                        {
+                            return TrackerState::Idle;
+                        }
+                    }
+                    return TrackerState::Active;
+                }
+            }
+            TrackerState::Unknown
+        }
+        _ => TrackerState::Unknown,
+    }
 }
 
 #[cfg(test)]
@@ -479,22 +832,121 @@ mod tests {
     }
 
     #[test]
+    fn claude_historical_interruption_does_not_poison_idle_prompt() {
+        let capture = concat!(
+            "Interrupted · What should Claude do instead?\n",
+            "Lots of old output here\n",
+            "\n\n\n\n\n\n\n\n\n\n",
+            "────────────────────────────\n",
+            "❯ \n",
+            "────────────────────────────\n",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
+        );
+        assert!(is_at_agent_prompt(capture));
+        assert_eq!(classify_capture_state(capture), ScreenState::Idle);
+    }
+
+    #[test]
+    fn claude_spinner_status_marks_capture_active() {
+        let capture = concat!(
+            "✶ Envisioning… (thinking with high effort)\n",
+            "────────────────────────────\n",
+            "❯ \n",
+            "────────────────────────────\n",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt\n",
+        );
+        assert_eq!(classify_capture_state(capture), ScreenState::Active);
+    }
+
+    #[test]
     fn codex_prompt_keeps_active_state_until_completion_event() {
         assert_eq!(
-            next_state_after_capture(true, true, false, false),
-            WatcherState::Active
-        );
-        assert_eq!(
-            next_state_after_capture(true, true, false, true),
+            next_state_after_capture(
+                TrackerKind::Codex,
+                ScreenState::Idle,
+                TrackerState::Unknown,
+                false,
+                false
+            ),
             WatcherState::Idle
         );
         assert_eq!(
-            next_state_after_capture(true, false, false, true),
+            next_state_after_capture(
+                TrackerKind::Codex,
+                ScreenState::Idle,
+                TrackerState::Active,
+                false,
+                false
+            ),
             WatcherState::Active
         );
         assert_eq!(
-            next_state_after_capture(true, true, true, true),
+            next_state_after_capture(
+                TrackerKind::Codex,
+                ScreenState::Idle,
+                TrackerState::Idle,
+                false,
+                true
+            ),
+            WatcherState::Idle
+        );
+        assert_eq!(
+            next_state_after_capture(
+                TrackerKind::Codex,
+                ScreenState::Unknown,
+                TrackerState::Unknown,
+                true,
+                true
+            ),
+            WatcherState::Stale
+        );
+        assert_eq!(
+            next_state_after_capture(
+                TrackerKind::Codex,
+                ScreenState::Active,
+                TrackerState::Unknown,
+                false,
+                true
+            ),
+            WatcherState::Active
+        );
+        assert_eq!(
+            next_state_after_capture(
+                TrackerKind::Codex,
+                ScreenState::Idle,
+                TrackerState::Completed,
+                false,
+                true
+            ),
             WatcherState::Completed
+        );
+    }
+
+    #[test]
+    fn claude_idle_prompt_beats_stale_file_activity() {
+        assert_eq!(
+            next_state_after_capture(
+                TrackerKind::Claude,
+                ScreenState::Idle,
+                TrackerState::Active,
+                false,
+                true
+            ),
+            WatcherState::Idle
+        );
+    }
+
+    #[test]
+    fn claude_spinner_beats_idle_file_state() {
+        assert_eq!(
+            next_state_after_capture(
+                TrackerKind::Claude,
+                ScreenState::Active,
+                TrackerState::Idle,
+                false,
+                true
+            ),
+            WatcherState::Active
         );
     }
 
@@ -621,5 +1073,105 @@ mod tests {
             poll_codex_session_file(tracker.session_file.as_ref().unwrap(), &mut tracker.offset)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn discovers_claude_session_by_exact_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects_root = tmp.path().join("projects");
+        let cwd = PathBuf::from("/Users/zedmor/chess_test");
+        let project_dir = projects_root.join("-Users-zedmor-chess-test");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let session_file = project_dir.join("latest.jsonl");
+        std::fs::write(
+            &session_file,
+            format!(
+                "{{\"type\":\"user\",\"cwd\":\"{}\",\"message\":{{\"content\":\"hello\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+
+        let discovered = discover_claude_session_file(&projects_root, &cwd).unwrap();
+        assert_eq!(discovered.as_deref(), Some(session_file.as_path()));
+    }
+
+    #[test]
+    fn classify_claude_log_entry_tracks_tool_and_end_turn() {
+        let tool_use: Value =
+            serde_json::from_str(r#"{"type":"assistant","message":{"stop_reason":"tool_use"}}"#)
+                .unwrap();
+        let end_turn: Value =
+            serde_json::from_str(r#"{"type":"assistant","message":{"stop_reason":"end_turn"}}"#)
+                .unwrap();
+        let tool_result: Value =
+            serde_json::from_str(r#"{"type":"user","toolUseResult":{"stdout":"ok"}}"#).unwrap();
+
+        assert_eq!(classify_claude_log_entry(&tool_use), TrackerState::Active);
+        assert_eq!(
+            classify_claude_log_entry(&tool_result),
+            TrackerState::Active
+        );
+        assert_eq!(classify_claude_log_entry(&end_turn), TrackerState::Idle);
+    }
+
+    #[test]
+    fn parse_claude_session_file_reports_latest_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_file = tmp.path().join("session.jsonl");
+        std::fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}\n",
+                "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\"}}\n",
+                "{\"type\":\"user\",\"toolUseResult\":{\"stdout\":\"ok\"}}\n",
+                "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}\n",
+            ),
+        )
+        .unwrap();
+
+        let (state, offset) = parse_claude_session_file(&session_file, 0).unwrap();
+        assert_eq!(state, TrackerState::Idle);
+        assert!(offset > 0);
+    }
+
+    #[test]
+    fn claude_tracker_binding_ignores_historical_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects_root = tmp.path().join("projects");
+        let cwd = tmp
+            .path()
+            .join("repo")
+            .join(".batty")
+            .join("worktrees")
+            .join("eng-1");
+        let project_dir = projects_root.join(cwd.to_string_lossy().replace('/', "-"));
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let session_file = project_dir.join("latest.jsonl");
+        std::fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}\n",
+                "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\"}}\n",
+            ),
+        )
+        .unwrap();
+
+        let mut tracker = ClaudeSessionTracker {
+            projects_root,
+            cwd,
+            session_file: None,
+            offset: 0,
+            last_state: TrackerState::Unknown,
+        };
+
+        assert_eq!(
+            poll_claude_session(&mut tracker).unwrap(),
+            TrackerState::Unknown
+        );
+        assert_eq!(tracker.offset, current_file_len(&session_file).unwrap());
+        assert_eq!(tracker.last_state, TrackerState::Unknown);
     }
 }

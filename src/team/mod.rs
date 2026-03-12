@@ -448,9 +448,11 @@ fn summarize_runtime_member_status(raw_status: &str, pane_dead: bool) -> Runtime
 
     let label = strip_tmux_style(raw_status);
     let normalized = label.to_ascii_lowercase();
+    let has_paused_nudge = normalized.contains("nudge paused");
     let has_nudge_sent = normalized.contains("nudge sent");
-    let has_waiting_nudge = normalized.contains("nudge") && !has_nudge_sent;
-    let has_standup = normalized.contains("standup");
+    let has_waiting_nudge = normalized.contains("nudge") && !has_nudge_sent && !has_paused_nudge;
+    let has_paused_standup = normalized.contains("standup paused");
+    let has_standup = normalized.contains("standup") && !has_paused_standup;
 
     let state = if normalized.contains("crashed") {
         "crashed"
@@ -466,15 +468,20 @@ fn summarize_runtime_member_status(raw_status: &str, pane_dead: bool) -> Runtime
         "unknown"
     };
 
-    let signal = match (has_waiting_nudge, has_nudge_sent, has_standup) {
-        (true, false, true) => Some("waiting for nudge, standup".to_string()),
-        (true, false, false) => Some("waiting for nudge".to_string()),
-        (false, true, true) => Some("nudged, standup".to_string()),
-        (false, true, false) => Some("nudged".to_string()),
-        (false, false, true) => Some("standup".to_string()),
-        (false, false, false) => None,
-        (true, true, _) => Some("nudged".to_string()),
-    };
+    let mut signals = Vec::new();
+    if has_paused_nudge {
+        signals.push("nudge paused");
+    } else if has_nudge_sent {
+        signals.push("nudged");
+    } else if has_waiting_nudge {
+        signals.push("waiting for nudge");
+    }
+    if has_paused_standup {
+        signals.push("standup paused");
+    } else if has_standup {
+        signals.push("standup");
+    }
+    let signal = (!signals.is_empty()).then(|| signals.join(", "));
 
     RuntimeMemberStatus {
         state: state.to_string(),
@@ -1135,6 +1142,24 @@ mod tests {
         assert_eq!(summary.state, "idle");
         assert_eq!(summary.signal.as_deref(), Some("nudged"));
         assert_eq!(summary.label.as_deref(), Some("idle nudge sent"));
+    }
+
+    #[test]
+    fn summarize_runtime_member_status_tracks_paused_automation() {
+        let summary = summarize_runtime_member_status(
+            "#[fg=cyan]working#[default] #[fg=244]nudge paused#[default] #[fg=244]standup paused#[default]",
+            false,
+        );
+
+        assert_eq!(summary.state, "working");
+        assert_eq!(
+            summary.signal.as_deref(),
+            Some("nudge paused, standup paused")
+        );
+        assert_eq!(
+            summary.label.as_deref(),
+            Some("working nudge paused standup paused")
+        );
     }
 
     #[test]
