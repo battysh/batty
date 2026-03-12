@@ -286,7 +286,12 @@ impl SessionWatcher {
 /// very bottom: when Claude is processing, it appends `· esc to interrupt`.
 /// If we detect that indicator we return `false` immediately.
 fn is_at_agent_prompt(capture: &str) -> bool {
-    let trimmed = recent_non_empty_lines(capture, 5);
+    // Use 12 lines to match classify_capture_state's spinner window.
+    // Claude Code's idle layout includes separator lines (────) and a
+    // status bar below the ❯ prompt, which can push the prompt past a
+    // 5-line window and cause false Unknown classifications.
+    let trimmed = recent_non_empty_lines(capture, 12);
+    let bottom_lines = recent_lines(capture, 12);
 
     // Claude Code shows "esc to interrupt" in the bottom status bar while working
     for line in &trimmed {
@@ -298,10 +303,10 @@ fn is_at_agent_prompt(capture: &str) -> bool {
     // Claude can also land in an interrupt-resolution UI after a blocked tool call
     // or nested interactive flow. That still represents an active task, not an idle
     // prompt waiting for a fresh assignment.
-    if trimmed
+    if bottom_lines
         .iter()
         .any(|line| line.contains("What should Claude do instead?"))
-        || trimmed
+        || bottom_lines
             .iter()
             .any(|line| line.contains("Conversation interrupted"))
     {
@@ -340,6 +345,10 @@ fn recent_non_empty_lines(capture: &str, limit: usize) -> Vec<&str> {
         .filter(|l| !l.trim().is_empty())
         .take(limit)
         .collect()
+}
+
+fn recent_lines(capture: &str, limit: usize) -> Vec<&str> {
+    capture.lines().rev().take(limit).collect()
 }
 
 fn classify_capture_state(capture: &str) -> ScreenState {
@@ -877,6 +886,33 @@ mod tests {
             "────────────────────────────\n",
             "❯ \n",
             "────────────────────────────\n",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
+        );
+        assert!(is_at_agent_prompt(capture));
+        assert_eq!(classify_capture_state(capture), ScreenState::Idle);
+    }
+
+    #[test]
+    fn claude_prompt_deep_in_output_still_detected_as_idle() {
+        // Regression: Claude Code's idle layout can push the ❯ prompt past
+        // a narrow line window when tool output, separator lines, and the
+        // status bar fill the bottom of the pane. The old 5-line window
+        // missed this and returned Unknown, which fell through to a stale
+        // tracker state and blocked message delivery.
+        let capture = concat!(
+            "⏺ Task merged to main.\n",
+            "\n",
+            "  ┌──────────┬──────────────────────┬──────────┐\n",
+            "  │ Engineer │       Assignment       │  Status  │\n",
+            "  ├──────────┼──────────────────────┼──────────┤\n",
+            "  │ eng-1-1  │ Add features           │ Assigned │\n",
+            "  └──────────┴──────────────────────┴──────────┘\n",
+            "\n",
+            "✻ Sautéed for 1m 56s\n",
+            "\n",
+            "────────────────────────────────────────────────────────\n",
+            "❯ \n",
+            "────────────────────────────────────────────────────────\n",
             "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
         );
         assert!(is_at_agent_prompt(capture));
