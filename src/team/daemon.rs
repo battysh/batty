@@ -4,7 +4,7 @@
 //! panes, monitors their output via `SessionWatcher`, routes messages between
 //! roles, generates periodic standups, and emits structured events.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -26,7 +26,7 @@ use super::task_loop::{
     MergeLock, MergeOutcome, next_unclaimed_task, read_task_title, refresh_engineer_worktree,
     run_tests_in_worktree, setup_engineer_worktree,
 };
-use super::watcher::{SessionWatcher, WatcherState};
+use super::watcher::{SessionTrackerConfig, SessionWatcher, WatcherState};
 use crate::agent;
 use crate::tmux;
 
@@ -50,10 +50,12 @@ struct NudgeSchedule {
     text: String,
     /// How long the member must stay idle before the nudge fires.
     interval: Duration,
-    /// When the member last became idle (`None` if currently working).
+    /// When the member last became idle (`None` if currently working/paused).
     idle_since: Option<Instant>,
     /// Whether the nudge has already fired for the current idle period.
     fired_this_idle: bool,
+    /// Whether the timer is currently paused because the member is working.
+    paused: bool,
 }
 
 /// The running team daemon.
@@ -67,6 +69,7 @@ pub struct TeamDaemon {
     nudges: HashMap<String, NudgeSchedule>,
     telegram_bot: Option<super::telegram::TelegramBot>,
     event_sink: EventSink,
+    paused_standups: HashSet<String>,
     last_standup: HashMap<String, Instant>,
     last_board_rotation: Instant,
     last_auto_dispatch: Instant,
@@ -90,14 +93,14 @@ impl TeamDaemon {
         let mut watchers = HashMap::new();
         let stale_secs = config.team_config.standup.interval_secs * 2;
         for (name, pane_id) in &config.pane_map {
-            let codex_cwd = config
+            let session_tracker = config
                 .members
                 .iter()
                 .find(|member| member.name == *name)
-                .and_then(|member| member_codex_cwd(&config.project_root, member));
+                .and_then(|member| member_session_tracker_config(&config.project_root, member));
             watchers.insert(
                 name.clone(),
-                SessionWatcher::new(pane_id, name, stale_secs, codex_cwd),
+                SessionWatcher::new(pane_id, name, stale_secs, session_tracker),
             );
         }
 
@@ -158,6 +161,7 @@ impl TeamDaemon {
                                 // All roles start idle, so begin the countdown
                                 idle_since: Some(Instant::now()),
                                 fired_this_idle: false,
+                                paused: false,
                             },
                         );
                     }
@@ -175,6 +179,7 @@ impl TeamDaemon {
             nudges,
             telegram_bot,
             event_sink,
+            paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
@@ -233,7 +238,8 @@ impl TeamDaemon {
             }
         }
 
-        for member in &self.config.members {
+        let members = self.config.members.clone();
+        for member in &members {
             if member.role_type == RoleType::User {
                 continue;
             }
@@ -314,6 +320,7 @@ impl TeamDaemon {
 
             let initial_state = initial_member_state(idle, member_resume);
             self.states.insert(member.name.clone(), initial_state);
+            self.update_automation_timers_for_state(&member.name, initial_state);
             if should_activate_watcher_on_spawn(idle, member_resume) {
                 if let Some(watcher) = self.watchers.get_mut(&member.name) {
                     watcher.activate();
@@ -377,8 +384,8 @@ impl TeamDaemon {
                     if prev_state != Some(member_state) {
                         self.states.insert(name.clone(), member_state);
 
-                        // Update nudge countdown on state transitions
-                        self.update_nudge_for_state(name, member_state);
+                        // Update automation countdowns on state transitions.
+                        self.update_automation_timers_for_state(name, member_state);
 
                         match member_state {
                             MemberState::Completed => {
@@ -430,7 +437,7 @@ impl TeamDaemon {
         if let Some(watcher) = self.watchers.get_mut(member_name) {
             watcher.deactivate();
         }
-        self.update_nudge_for_state(member_name, MemberState::Idle);
+        self.update_automation_timers_for_state(member_name, MemberState::Idle);
 
         Ok(())
     }
@@ -522,7 +529,7 @@ impl TeamDaemon {
                     if let Some(watcher) = self.watchers.get_mut(engineer) {
                         watcher.deactivate();
                     }
-                    self.update_nudge_for_state(engineer, MemberState::Idle);
+                    self.update_automation_timers_for_state(engineer, MemberState::Idle);
                 }
                 MergeOutcome::RebaseConflict(conflict_info) => {
                     drop(_lock);
@@ -593,7 +600,7 @@ impl TeamDaemon {
                         if let Some(watcher) = self.watchers.get_mut(engineer) {
                             watcher.deactivate();
                         }
-                        self.update_nudge_for_state(engineer, MemberState::Idle);
+                        self.update_automation_timers_for_state(engineer, MemberState::Idle);
                     }
                 }
             }
@@ -668,7 +675,7 @@ impl TeamDaemon {
         if let Some(watcher) = self.watchers.get_mut(engineer) {
             watcher.deactivate();
         }
-        self.update_nudge_for_state(engineer, MemberState::Idle);
+        self.update_automation_timers_for_state(engineer, MemberState::Idle);
         info!(engineer, task_id, "escalated to manager after max retries");
         Ok(())
     }
@@ -679,7 +686,7 @@ impl TeamDaemon {
         if let Some(watcher) = self.watchers.get_mut(member_name) {
             watcher.activate();
         }
-        self.update_nudge_for_state(member_name, MemberState::Working);
+        self.update_automation_timers_for_state(member_name, MemberState::Working);
     }
 
     fn active_task_id(&self, engineer: &str) -> Option<u32> {
@@ -738,7 +745,7 @@ impl TeamDaemon {
         if let Some(watcher) = self.watchers.get_mut(member_name) {
             watcher.deactivate();
         }
-        self.update_nudge_for_state(member_name, MemberState::Idle);
+        self.update_automation_timers_for_state(member_name, MemberState::Idle);
 
         Ok(())
     }
@@ -1027,8 +1034,6 @@ impl TeamDaemon {
 
     /// Update `@batty_status` on each pane border with state + timer countdowns.
     fn update_pane_status_labels(&self) {
-        let global_interval = self.config.team_config.standup.interval_secs;
-
         for member in &self.config.members {
             if member.role_type == RoleType::User {
                 continue;
@@ -1051,42 +1056,16 @@ impl TeamDaemon {
             };
 
             let nudge_str = format_nudge_status(self.nudges.get(&member.name));
-
-            // Standup timer for roles that receive standups
-            let role_def = self
-                .config
-                .team_config
-                .roles
-                .iter()
-                .find(|r| r.name == member.role_name);
-            let receives = role_def
-                .and_then(|r| r.receives_standup)
-                .unwrap_or(matches!(
-                    member.role_type,
-                    RoleType::Manager | RoleType::Architect
-                ));
-            let standup_interval_secs = role_def
-                .and_then(|r| r.standup_interval_secs)
-                .unwrap_or(global_interval);
-            let standup_interval = Duration::from_secs(standup_interval_secs);
-
-            let standup_str = if receives {
-                if let Some(last) = self.last_standup.get(&member.name) {
-                    let elapsed = last.elapsed();
-                    if elapsed < standup_interval {
-                        let remaining = standup_interval - elapsed;
-                        let mins = remaining.as_secs() / 60;
-                        let secs = remaining.as_secs() % 60;
-                        format!(" #[fg=blue]standup {mins}:{secs:02}#[default]")
-                    } else {
-                        " #[fg=blue]standup now#[default]".to_string()
-                    }
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            };
+            let standup_str = self
+                .standup_interval_for_member_name(&member.name)
+                .map(|standup_interval| {
+                    format_standup_status(
+                        self.last_standup.get(&member.name).copied(),
+                        standup_interval,
+                        self.paused_standups.contains(&member.name),
+                    )
+                })
+                .unwrap_or_default();
 
             let label = format!("{state_str}{nudge_str}{standup_str}");
 
@@ -1096,32 +1075,93 @@ impl TeamDaemon {
         }
     }
 
+    /// Update automation countdowns when a member's state changes.
+    fn update_automation_timers_for_state(&mut self, member_name: &str, new_state: MemberState) {
+        self.update_nudge_for_state(member_name, new_state);
+        self.update_standup_for_state(member_name, new_state);
+    }
+
     /// Update the nudge countdown when a member's state changes.
     ///
-    /// - Transition to idle/completed: start the countdown.
-    /// - Transition to working: clear the countdown (member is active).
+    /// - Transition to idle/completed/crashed: start the countdown if needed.
+    /// - Transition to working: pause the countdown and restart it on next idle.
     fn update_nudge_for_state(&mut self, member_name: &str, new_state: MemberState) {
         if let Some(schedule) = self.nudges.get_mut(member_name) {
             match new_state {
                 MemberState::Idle | MemberState::Completed => {
-                    if schedule.idle_since.is_none() {
+                    if schedule.paused || schedule.idle_since.is_none() {
                         schedule.idle_since = Some(Instant::now());
                         schedule.fired_this_idle = false;
                     }
+                    schedule.paused = false;
                 }
                 MemberState::Working => {
                     schedule.idle_since = None;
                     schedule.fired_this_idle = false;
+                    schedule.paused = true;
                 }
                 MemberState::Crashed => {
                     // Treat crash like idle — the agent is stuck
-                    if schedule.idle_since.is_none() {
+                    if schedule.paused || schedule.idle_since.is_none() {
                         schedule.idle_since = Some(Instant::now());
                         schedule.fired_this_idle = false;
                     }
+                    schedule.paused = false;
                 }
             }
         }
+    }
+
+    /// Update the standup countdown when a member's state changes.
+    ///
+    /// Standups are intended to wake up idle members, not interrupt active work.
+    /// When a member starts working, pause the standup timer and require a fresh
+    /// idle period before the next standup countdown begins.
+    fn update_standup_for_state(&mut self, member_name: &str, new_state: MemberState) {
+        if self.standup_interval_for_member_name(member_name).is_none() {
+            self.paused_standups.remove(member_name);
+            self.last_standup.remove(member_name);
+            return;
+        }
+
+        match new_state {
+            MemberState::Working => {
+                self.paused_standups.insert(member_name.to_string());
+                self.last_standup.remove(member_name);
+            }
+            MemberState::Idle | MemberState::Completed | MemberState::Crashed => {
+                let was_paused = self.paused_standups.remove(member_name);
+                if was_paused || !self.last_standup.contains_key(member_name) {
+                    self.last_standup
+                        .insert(member_name.to_string(), Instant::now());
+                }
+            }
+        }
+    }
+
+    fn standup_interval_for_member_name(&self, member_name: &str) -> Option<Duration> {
+        let member = self.config.members.iter().find(|m| m.name == member_name)?;
+        let role_def = self
+            .config
+            .team_config
+            .roles
+            .iter()
+            .find(|r| r.name == member.role_name);
+
+        let receives = role_def
+            .and_then(|r| r.receives_standup)
+            .unwrap_or(matches!(
+                member.role_type,
+                RoleType::Manager | RoleType::Architect
+            ));
+        if !receives {
+            return None;
+        }
+
+        let interval_secs = role_def
+            .and_then(|r| r.standup_interval_secs)
+            .unwrap_or(self.config.team_config.standup.interval_secs);
+        Some(Duration::from_secs(interval_secs))
     }
 
     /// Fire nudges for members that have been idle long enough.
@@ -1189,6 +1229,10 @@ impl TeamDaemon {
         let mut any_generated = false;
 
         for (recipient, interval) in &recipients {
+            if self.paused_standups.contains(&recipient.name) {
+                continue;
+            }
+
             // Check per-member timer
             let last = self.last_standup.get(&recipient.name).copied();
             let should_fire = match last {
@@ -1467,8 +1511,12 @@ fn format_nudge_status(schedule: Option<&NudgeSchedule>) -> String {
         return " #[fg=magenta]nudge sent#[default]".to_string();
     }
 
+    if schedule.paused {
+        return " #[fg=244]nudge paused#[default]".to_string();
+    }
+
     let Some(idle_since) = schedule.idle_since else {
-        // Working — no countdown shown
+        // No active idle countdown to display.
         return String::new();
     };
 
@@ -1480,6 +1528,30 @@ fn format_nudge_status(schedule: Option<&NudgeSchedule>) -> String {
         format!(" #[fg=magenta]nudge {mins}:{secs:02}#[default]")
     } else {
         " #[fg=magenta]nudge now#[default]".to_string()
+    }
+}
+
+fn format_standup_status(
+    last_standup: Option<Instant>,
+    interval: Duration,
+    paused: bool,
+) -> String {
+    if paused {
+        return " #[fg=244]standup paused#[default]".to_string();
+    }
+
+    let Some(last_standup) = last_standup else {
+        return String::new();
+    };
+
+    let elapsed = last_standup.elapsed();
+    if elapsed < interval {
+        let remaining = interval - elapsed;
+        let mins = remaining.as_secs() / 60;
+        let secs = remaining.as_secs() % 60;
+        format!(" #[fg=blue]standup {mins}:{secs:02}#[default]")
+    } else {
+        " #[fg=blue]standup now#[default]".to_string()
     }
 }
 
@@ -1704,23 +1776,28 @@ fn should_resume_member(
     false
 }
 
-fn member_codex_cwd(project_root: &Path, member: &MemberInstance) -> Option<PathBuf> {
+fn member_session_tracker_config(
+    project_root: &Path,
+    member: &MemberInstance,
+) -> Option<SessionTrackerConfig> {
+    let work_dir = if member.use_worktrees {
+        project_root
+            .join(".batty")
+            .join("worktrees")
+            .join(&member.name)
+    } else {
+        project_root.to_path_buf()
+    };
+
     match member.agent.as_deref() {
-        Some("codex") | Some("codex-cli") => {
-            let work_dir = if member.use_worktrees {
-                project_root
-                    .join(".batty")
-                    .join("worktrees")
-                    .join(&member.name)
-            } else {
-                project_root.to_path_buf()
-            };
-            Some(
-                work_dir
-                    .join(".batty")
-                    .join("codex-context")
-                    .join(&member.name),
-            )
+        Some("codex") | Some("codex-cli") => Some(SessionTrackerConfig::Codex {
+            cwd: work_dir
+                .join(".batty")
+                .join("codex-context")
+                .join(&member.name),
+        }),
+        Some("claude") | Some("claude-code") | None => {
+            Some(SessionTrackerConfig::Claude { cwd: work_dir })
         }
         _ => None,
     }
@@ -1936,11 +2013,36 @@ mod tests {
             interval: Duration::from_secs(600),
             idle_since: Some(Instant::now() - Duration::from_secs(601)),
             fired_this_idle: true,
+            paused: false,
         };
 
         assert_eq!(
             format_nudge_status(Some(&schedule)),
             " #[fg=magenta]nudge sent#[default]"
+        );
+    }
+
+    #[test]
+    fn format_nudge_status_marks_paused_while_member_is_working() {
+        let schedule = NudgeSchedule {
+            text: "check in".to_string(),
+            interval: Duration::from_secs(600),
+            idle_since: None,
+            fired_this_idle: false,
+            paused: true,
+        };
+
+        assert_eq!(
+            format_nudge_status(Some(&schedule)),
+            " #[fg=244]nudge paused#[default]"
+        );
+    }
+
+    #[test]
+    fn format_standup_status_marks_paused_while_member_is_working() {
+        assert_eq!(
+            format_standup_status(Some(Instant::now()), Duration::from_secs(600), true),
+            " #[fg=244]standup paused#[default]"
         );
     }
 
@@ -2027,6 +2129,32 @@ mod tests {
             "architect",
             "claude-code",
             "same prompt",
+        ));
+    }
+
+    #[test]
+    fn member_session_tracker_config_uses_engineer_worktree_for_claude() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member = MemberInstance {
+            name: "eng-1-1".to_string(),
+            role_name: "engineer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: true,
+        };
+
+        let tracker = member_session_tracker_config(tmp.path(), &member);
+
+        assert!(matches!(
+            tracker,
+            Some(SessionTrackerConfig::Claude { cwd })
+                if cwd == tmp
+                    .path()
+                    .join(".batty")
+                    .join("worktrees")
+                    .join("eng-1-1")
         ));
     }
 
@@ -2199,6 +2327,7 @@ mod tests {
             nudges: HashMap::new(),
             telegram_bot: None,
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
@@ -2235,6 +2364,7 @@ mod tests {
             nudges: HashMap::new(),
             telegram_bot: None,
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
@@ -2276,6 +2406,7 @@ mod tests {
             nudges: HashMap::new(),
             telegram_bot: None,
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
@@ -2315,6 +2446,7 @@ mod tests {
             nudges: HashMap::new(),
             telegram_bot: None,
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
@@ -2358,6 +2490,7 @@ mod tests {
             nudges: HashMap::new(),
             telegram_bot: None,
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
@@ -2400,6 +2533,7 @@ mod tests {
             nudges: HashMap::new(),
             telegram_bot: None,
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
@@ -2416,6 +2550,92 @@ mod tests {
                 .map(|watcher| watcher.state),
             Some(WatcherState::Active)
         );
+    }
+
+    #[test]
+    fn automation_timers_pause_while_working_and_restart_on_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let role = RoleDef {
+            name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            instances: 1,
+            prompt: None,
+            talks_to: vec![],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: Some(true),
+            standup_interval_secs: Some(600),
+            owns: Vec::new(),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    layout: None,
+                    roles: vec![role],
+                },
+                session: "test".to_string(),
+                members: vec![member],
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::from([(
+                "manager".to_string(),
+                NudgeSchedule {
+                    text: "check in".to_string(),
+                    interval: Duration::from_secs(600),
+                    idle_since: Some(Instant::now() - Duration::from_secs(90)),
+                    fired_this_idle: false,
+                    paused: false,
+                },
+            )]),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::from([(
+                "manager".to_string(),
+                Instant::now() - Duration::from_secs(120),
+            )]),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        daemon.update_automation_timers_for_state("manager", MemberState::Working);
+
+        let paused_nudge = daemon.nudges.get("manager").unwrap();
+        assert!(paused_nudge.paused);
+        assert!(paused_nudge.idle_since.is_none());
+        assert!(daemon.paused_standups.contains("manager"));
+        assert!(!daemon.last_standup.contains_key("manager"));
+
+        daemon.update_automation_timers_for_state("manager", MemberState::Idle);
+
+        let restarted_nudge = daemon.nudges.get("manager").unwrap();
+        assert!(!restarted_nudge.paused);
+        assert!(!restarted_nudge.fired_this_idle);
+        assert!(restarted_nudge.idle_since.unwrap().elapsed() < Duration::from_secs(1));
+        assert!(!daemon.paused_standups.contains("manager"));
+        assert!(daemon.last_standup["manager"].elapsed() < Duration::from_secs(1));
     }
 
     /// Helper: build a minimal DaemonConfig with the given roles.
