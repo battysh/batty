@@ -142,13 +142,8 @@ impl SessionWatcher {
             let tracker_kind = self.tracker_kind();
             if !capture.is_empty() {
                 self.last_capture = capture;
-                let next_state = next_state_after_capture(
-                    tracker_kind,
-                    screen_state,
-                    tracker_state,
-                    false,
-                    false,
-                );
+                let next_state =
+                    next_state_after_capture(tracker_kind, screen_state, tracker_state, false);
                 if matches!(next_state, WatcherState::Active | WatcherState::Completed) {
                     self.last_output_hash = simple_hash(&self.last_capture);
                     self.last_change = Instant::now();
@@ -170,12 +165,10 @@ impl SessionWatcher {
             self.last_output_hash = hash;
             self.last_change = Instant::now();
             self.last_capture = capture;
-            self.state =
-                next_state_after_capture(tracker_kind, screen_state, tracker_state, false, false);
+            self.state = next_state_after_capture(tracker_kind, screen_state, tracker_state, false);
         } else {
             self.last_capture = capture;
-            self.state =
-                next_state_after_capture(tracker_kind, screen_state, tracker_state, stale, true);
+            self.state = next_state_after_capture(tracker_kind, screen_state, tracker_state, stale);
         }
 
         Ok(self.state)
@@ -384,7 +377,6 @@ fn next_state_after_capture(
     screen_state: ScreenState,
     tracker_state: TrackerState,
     stale: bool,
-    unchanged_capture: bool,
 ) -> WatcherState {
     if tracker_state == TrackerState::Completed {
         return WatcherState::Completed;
@@ -415,8 +407,6 @@ fn next_state_after_capture(
         ScreenState::Unknown => {
             if stale {
                 WatcherState::Stale
-            } else if unchanged_capture {
-                WatcherState::Active
             } else {
                 WatcherState::Active
             }
@@ -912,7 +902,6 @@ mod tests {
                 ScreenState::Idle,
                 TrackerState::Unknown,
                 false,
-                false
             ),
             WatcherState::Idle
         );
@@ -922,7 +911,6 @@ mod tests {
                 ScreenState::Idle,
                 TrackerState::Active,
                 false,
-                false
             ),
             WatcherState::Active
         );
@@ -932,7 +920,6 @@ mod tests {
                 ScreenState::Idle,
                 TrackerState::Idle,
                 false,
-                true
             ),
             WatcherState::Idle
         );
@@ -942,7 +929,6 @@ mod tests {
                 ScreenState::Unknown,
                 TrackerState::Unknown,
                 true,
-                true
             ),
             WatcherState::Stale
         );
@@ -952,7 +938,6 @@ mod tests {
                 ScreenState::Active,
                 TrackerState::Unknown,
                 false,
-                true
             ),
             WatcherState::Active
         );
@@ -962,7 +947,6 @@ mod tests {
                 ScreenState::Idle,
                 TrackerState::Completed,
                 false,
-                true
             ),
             WatcherState::Completed
         );
@@ -976,7 +960,6 @@ mod tests {
                 ScreenState::Idle,
                 TrackerState::Active,
                 false,
-                true
             ),
             WatcherState::Idle
         );
@@ -990,7 +973,6 @@ mod tests {
                 ScreenState::Active,
                 TrackerState::Idle,
                 false,
-                true
             ),
             WatcherState::Active
         );

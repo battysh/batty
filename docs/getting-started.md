@@ -217,9 +217,9 @@ batty telegram
 The setup wizard will:
 
 1. Validate your bot token with the Telegram Bot API
-2. Ask for your numeric Telegram user ID
-3. Optionally send a test message
-4. Update `.batty/team_config/team.yaml`
+1. Ask for your numeric Telegram user ID
+1. Optionally send a test message
+1. Update `.batty/team_config/team.yaml`
 
 Typical resulting config:
 
