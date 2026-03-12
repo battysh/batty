@@ -37,8 +37,6 @@ pub fn generate_standup_for(
             let state_str = match state {
                 MemberState::Idle => "idle",
                 MemberState::Working => "working",
-                MemberState::Completed => "completed",
-                MemberState::Crashed => "CRASHED",
             };
 
             report.push_str(&format!("\n[{}] status: {}\n", member.name, state_str));
@@ -74,9 +72,6 @@ pub fn inject_standup(pane_id: &str, standup: &str) -> Result<()> {
 pub enum MemberState {
     Idle,
     Working,
-    Completed,
-    #[allow(dead_code)] // Reported in tests and reserved for future crash surfacing.
-    Crashed,
 }
 
 #[cfg(test)]
@@ -166,40 +161,20 @@ mod tests {
     }
 
     #[test]
-    fn standup_shows_crashed_state() {
-        let members = vec![
-            make_member("manager", RoleType::Manager, None),
-            make_member("eng-1", RoleType::Engineer, Some("manager")),
-        ];
-        let mut states = HashMap::new();
-        states.insert("eng-1".to_string(), MemberState::Crashed);
-
-        let manager = &members[0];
-        let report = generate_standup_for(manager, &members, &HashMap::new(), &states, 5);
-        assert!(report.contains("CRASHED"));
-    }
-
-    #[test]
     fn test_generate_standup_for_formats_various_member_states() {
         let members = vec![
             make_member("manager", RoleType::Manager, None),
             make_member("eng-idle", RoleType::Engineer, Some("manager")),
             make_member("eng-working", RoleType::Engineer, Some("manager")),
-            make_member("eng-done", RoleType::Engineer, Some("manager")),
-            make_member("eng-crashed", RoleType::Engineer, Some("manager")),
         ];
         let mut states = HashMap::new();
         states.insert("eng-working".to_string(), MemberState::Working);
-        states.insert("eng-done".to_string(), MemberState::Completed);
-        states.insert("eng-crashed".to_string(), MemberState::Crashed);
 
         let report = generate_standup_for(&members[0], &members, &HashMap::new(), &states, 5);
 
         assert!(report.contains("=== STANDUP for manager ==="));
         assert!(report.contains("[eng-idle] status: idle"));
         assert!(report.contains("[eng-working] status: working"));
-        assert!(report.contains("[eng-done] status: completed"));
-        assert!(report.contains("[eng-crashed] status: CRASHED"));
         assert!(report.contains("=== END STANDUP ==="));
     }
 
