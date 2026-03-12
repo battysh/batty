@@ -27,6 +27,7 @@ pub struct SessionWatcher {
     #[allow(dead_code)] // Useful for diagnostics; currently the map key is used instead.
     pub member_name: String,
     pub state: WatcherState,
+    completion_observed: bool,
     last_output_hash: u64,
     last_capture: String,
     tracker: Option<SessionTracker>,
@@ -85,6 +86,7 @@ impl SessionWatcher {
             pane_id: pane_id.to_string(),
             member_name: member_name.to_string(),
             state: WatcherState::Idle,
+            completion_observed: false,
             last_output_hash: 0,
             last_capture: String::new(),
             tracker: tracker.map(|tracker| match tracker {
@@ -129,6 +131,7 @@ impl SessionWatcher {
             let capture = tmux::capture_pane(&self.pane_id).unwrap_or_default();
             let screen_state = classify_capture_state(&capture);
             let tracker_state = self.poll_tracker().unwrap_or(TrackerState::Unknown);
+            self.completion_observed = tracker_state == TrackerState::Completed;
             let tracker_kind = self.tracker_kind();
             if !capture.is_empty() {
                 self.last_capture = capture;
@@ -147,6 +150,7 @@ impl SessionWatcher {
         let hash = simple_hash(&capture);
         let screen_state = classify_capture_state(&capture);
         let tracker_state = self.poll_tracker().unwrap_or(TrackerState::Unknown);
+        self.completion_observed = tracker_state == TrackerState::Completed;
         let tracker_kind = self.tracker_kind();
 
         if hash != self.last_output_hash {
@@ -166,6 +170,7 @@ impl SessionWatcher {
     /// Mark this watcher as actively working.
     pub fn activate(&mut self) {
         self.state = WatcherState::Active;
+        self.completion_observed = false;
         self.last_output_hash = 0;
         if let Some(tracker) = self.tracker.as_mut() {
             match tracker {
@@ -187,6 +192,7 @@ impl SessionWatcher {
             if claude.session_id == session_id {
                 return;
             }
+            self.completion_observed = false;
             claude.session_id = session_id;
             claude.session_file = None;
             claude.offset = 0;
@@ -197,6 +203,7 @@ impl SessionWatcher {
     /// Mark this watcher as idle.
     pub fn deactivate(&mut self) {
         self.state = WatcherState::Idle;
+        self.completion_observed = false;
     }
 
     /// Get the last captured pane output.
@@ -218,6 +225,12 @@ impl SessionWatcher {
             Some(SessionTracker::Claude(claude)) => session_file_id(claude.session_file.as_ref()),
             None => None,
         }
+    }
+
+    pub fn take_completion_event(&mut self) -> bool {
+        let observed = self.completion_observed;
+        self.completion_observed = false;
+        observed
     }
 
     fn poll_tracker(&mut self) -> Result<TrackerState> {
