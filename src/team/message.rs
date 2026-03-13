@@ -68,6 +68,15 @@ pub fn enqueue_command(queue_path: &Path, cmd: &QueuedCommand) -> Result<()> {
 
 /// Read and drain all pending commands from the queue file.
 pub fn drain_command_queue(queue_path: &Path) -> Result<Vec<QueuedCommand>> {
+    let commands = read_command_queue(queue_path)?;
+    if !commands.is_empty() {
+        write_command_queue(queue_path, &[])?;
+    }
+    Ok(commands)
+}
+
+/// Read all pending commands from the queue file without clearing it.
+pub fn read_command_queue(queue_path: &Path) -> Result<Vec<QueuedCommand>> {
     if !queue_path.exists() {
         return Ok(Vec::new());
     }
@@ -89,14 +98,38 @@ pub fn drain_command_queue(queue_path: &Path) -> Result<Vec<QueuedCommand>> {
         }
     }
 
-    // Truncate the file after reading
-    if !commands.is_empty() {
-        std::fs::write(queue_path, "").with_context(|| {
-            format!("failed to truncate command queue: {}", queue_path.display())
-        })?;
+    Ok(commands)
+}
+
+/// Atomically rewrite the command queue with the remaining commands.
+pub fn write_command_queue(queue_path: &Path, commands: &[QueuedCommand]) -> Result<()> {
+    if let Some(parent) = queue_path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
 
-    Ok(commands)
+    let tmp_path = queue_path.with_extension("jsonl.tmp");
+    {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .with_context(|| format!("failed to open temp command queue: {}", tmp_path.display()))?;
+        for cmd in commands {
+            let json = serde_json::to_string(cmd)?;
+            writeln!(file, "{json}")?;
+        }
+        file.flush()?;
+    }
+
+    std::fs::rename(&tmp_path, queue_path).with_context(|| {
+        format!(
+            "failed to replace command queue {} with {}",
+            queue_path.display(),
+            tmp_path.display()
+        )
+    })?;
+    Ok(())
 }
 
 /// Resolve the command queue path.
@@ -192,6 +225,61 @@ mod tests {
         let queue = tmp.path().join("nonexistent.jsonl");
         let commands = drain_command_queue(&queue).unwrap();
         assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn read_command_queue_keeps_file_contents_intact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue = tmp.path().join("commands.jsonl");
+        enqueue_command(
+            &queue,
+            &QueuedCommand::Send {
+                from: "human".into(),
+                to: "arch".into(),
+                message: "hello".into(),
+            },
+        )
+        .unwrap();
+
+        let commands = read_command_queue(&queue).unwrap();
+        assert_eq!(commands.len(), 1);
+        let persisted = std::fs::read_to_string(&queue).unwrap();
+        assert!(persisted.contains("\"message\":\"hello\""));
+    }
+
+    #[test]
+    fn write_command_queue_rewrites_remaining_commands_atomically() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue = tmp.path().join("commands.jsonl");
+        enqueue_command(
+            &queue,
+            &QueuedCommand::Send {
+                from: "human".into(),
+                to: "arch".into(),
+                message: "hello".into(),
+            },
+        )
+        .unwrap();
+
+        write_command_queue(
+            &queue,
+            &[QueuedCommand::Assign {
+                from: "manager".into(),
+                engineer: "eng-1".into(),
+                task: "Task #1".into(),
+            }],
+        )
+        .unwrap();
+
+        let commands = read_command_queue(&queue).unwrap();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            QueuedCommand::Assign { engineer, task, .. } => {
+                assert_eq!(engineer, "eng-1");
+                assert_eq!(task, "Task #1");
+            }
+            other => panic!("expected assign command after rewrite, got {other:?}"),
+        }
     }
 
     #[test]
