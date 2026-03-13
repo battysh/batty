@@ -92,6 +92,14 @@ struct AssignmentLaunch {
     work_dir: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+struct MemberLaunchPlan {
+    short_cmd: String,
+    identity: LaunchIdentity,
+    initial_state: MemberState,
+    activate_watcher: bool,
+}
+
 impl TeamDaemon {
     /// Create a new daemon from resolved config and layout.
     pub fn new(config: DaemonConfig) -> Result<Self> {
@@ -202,7 +210,7 @@ impl TeamDaemon {
     /// If `resume` is true, agents are launched with session-resume flags
     /// (`claude --resume <session-id>` / `codex resume --last`) instead of fresh starts.
     pub fn run(&mut self, resume: bool) -> Result<()> {
-        self.event_sink.emit(TeamEvent::daemon_started())?;
+        self.emit_event(TeamEvent::daemon_started());
         info!(session = %self.config.session, resume, "daemon started");
 
         // Spawn agents in all panes
@@ -215,6 +223,7 @@ impl TeamDaemon {
                 break;
             }
 
+            self.run_loop_step("restart_dead_members", |daemon| daemon.restart_dead_members());
             self.run_loop_step("poll_watchers", |daemon| daemon.poll_watchers());
             self.run_loop_step("sync_launch_state_session_ids", |daemon| {
                 daemon.sync_launch_state_session_ids()
@@ -238,7 +247,7 @@ impl TeamDaemon {
             std::thread::sleep(self.poll_interval);
         }
 
-        self.event_sink.emit(TeamEvent::daemon_stopped())?;
+        self.emit_event(TeamEvent::daemon_stopped());
         info!("daemon stopped");
         Ok(())
     }
@@ -252,9 +261,187 @@ impl TeamDaemon {
         }
     }
 
+    fn emit_event(&mut self, event: TeamEvent) {
+        if let Err(error) = self.event_sink.emit(event) {
+            warn!(error = %error, "failed to write daemon event; continuing");
+        }
+    }
+
+    fn prepare_member_launch(
+        &self,
+        member: &MemberInstance,
+        resume: bool,
+        previous_launch_state: &HashMap<String, LaunchIdentity>,
+        duplicate_claude_session_ids: &HashSet<&str>,
+    ) -> Result<MemberLaunchPlan> {
+        let team_config_dir = self.config.project_root.join(".batty").join("team_config");
+
+        let work_dir = if member.use_worktrees {
+            let wt_dir = self
+                .config
+                .project_root
+                .join(".batty")
+                .join("worktrees")
+                .join(&member.name);
+            let branch_name = engineer_base_branch_name(&member.name);
+            match setup_engineer_worktree(
+                &self.config.project_root,
+                &wt_dir,
+                &branch_name,
+                &team_config_dir,
+            ) {
+                Ok(path) => path,
+                Err(error) => {
+                    warn!(
+                        member = %member.name,
+                        error = %error,
+                        "worktree setup failed, using project root"
+                    );
+                    self.config.project_root.clone()
+                }
+            }
+        } else {
+            self.config.project_root.clone()
+        };
+
+        let agent_name = member.agent.as_deref().unwrap_or("claude");
+        let prompt_text = strip_nudge_section(&self.load_prompt(member, &team_config_dir));
+        let idle = role_starts_idle();
+        let normalized_agent = canonical_agent_name(agent_name);
+        let requested_resume = should_resume_member(
+            resume,
+            previous_launch_state,
+            &member.name,
+            &normalized_agent,
+            &prompt_text,
+        );
+        let previous_identity = previous_launch_state.get(&member.name);
+        let claude_session_available = previous_identity
+            .and_then(|identity| identity.session_id.as_deref())
+            .is_none_or(claude_session_id_exists);
+        let (member_resume, session_id) = resolve_member_launch_session(
+            &normalized_agent,
+            previous_identity,
+            requested_resume,
+            claude_session_available,
+            previous_identity
+                .and_then(|identity| identity.session_id.as_deref())
+                .is_some_and(|existing| duplicate_claude_session_ids.contains(existing)),
+        );
+
+        let short_cmd = write_launch_script(
+            &member.name,
+            agent_name,
+            &prompt_text,
+            Some(&prompt_text),
+            &work_dir,
+            &self.config.project_root,
+            idle,
+            member_resume,
+            session_id.as_deref(),
+        )?;
+
+        debug!(
+            member = %member.name,
+            agent = agent_name,
+            idle,
+            resume_requested = resume,
+            member_resume,
+            "prepared member launch"
+        );
+
+        Ok(MemberLaunchPlan {
+            short_cmd,
+            identity: LaunchIdentity {
+                agent: normalized_agent,
+                prompt: prompt_text,
+                session_id,
+            },
+            initial_state: initial_member_state(idle, member_resume),
+            activate_watcher: should_activate_watcher_on_spawn(idle, member_resume),
+        })
+    }
+
+    fn apply_member_launch(
+        &mut self,
+        member: &MemberInstance,
+        pane_id: &str,
+        plan: &MemberLaunchPlan,
+    ) -> Result<()> {
+        if let Some(watcher) = self.watchers.get_mut(&member.name) {
+            watcher.set_session_id(plan.identity.session_id.clone());
+        }
+        tmux::send_keys(pane_id, &plan.short_cmd, true)?;
+        self.states.insert(member.name.clone(), plan.initial_state);
+        self.update_automation_timers_for_state(&member.name, plan.initial_state);
+        if plan.activate_watcher
+            && let Some(watcher) = self.watchers.get_mut(&member.name)
+        {
+            watcher.activate();
+        }
+        self.emit_event(TeamEvent::agent_spawned(&member.name));
+        Ok(())
+    }
+
+    fn persist_member_launch_identity(&self, member_name: &str, identity: LaunchIdentity) -> Result<()> {
+        let mut launch_state = load_launch_state(&self.config.project_root);
+        launch_state.insert(member_name.to_string(), identity);
+        save_launch_state(&self.config.project_root, &launch_state)
+    }
+
+    fn restart_dead_members(&mut self) -> Result<()> {
+        let member_names: Vec<String> = self.config.pane_map.keys().cloned().collect();
+        for name in member_names {
+            let Some(pane_id) = self.config.pane_map.get(&name) else {
+                continue;
+            };
+            if !tmux::pane_exists(pane_id) {
+                continue;
+            }
+            if !tmux::pane_dead(pane_id).unwrap_or(false) {
+                continue;
+            }
+            self.restart_member(&name)?;
+        }
+        Ok(())
+    }
+
+    fn restart_member(&mut self, member_name: &str) -> Result<()> {
+        let Some(member) = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let Some(pane_id) = self.config.pane_map.get(member_name).cloned() else {
+            return Ok(());
+        };
+
+        warn!(member = %member_name, pane = %pane_id, "detected dead pane, restarting member");
+        tmux::respawn_pane(&pane_id, "bash")?;
+        std::thread::sleep(Duration::from_millis(200));
+
+        let previous_launch_state = load_launch_state(&self.config.project_root);
+        let duplicate_claude_session_ids = duplicate_claude_session_ids(&previous_launch_state);
+        let plan = self.prepare_member_launch(
+            &member,
+            true,
+            &previous_launch_state,
+            &duplicate_claude_session_ids,
+        )?;
+        self.apply_member_launch(&member, &pane_id, &plan)?;
+        if let Err(error) = self.persist_member_launch_identity(&member.name, plan.identity.clone()) {
+            warn!(member = %member.name, error = %error, "failed to persist restarted launch identity");
+        }
+        self.emit_event(TeamEvent::member_crashed(&member.name, true));
+        Ok(())
+    }
+
     /// Spawn the correct agent in each member's pane.
     fn spawn_all_agents(&mut self, resume: bool) -> Result<()> {
-        let team_config_dir = self.config.project_root.join(".batty").join("team_config");
         let previous_launch_state = load_launch_state(&self.config.project_root);
         let duplicate_claude_session_ids = duplicate_claude_session_ids(&previous_launch_state);
         let mut next_launch_state = HashMap::new();
@@ -273,113 +460,36 @@ impl TeamDaemon {
                 continue;
             }
 
-            let Some(pane_id) = self.config.pane_map.get(&member.name) else {
+            let Some(pane_id) = self.config.pane_map.get(&member.name).cloned() else {
                 warn!(member = %member.name, "no pane found for member");
                 continue;
             };
-
-            // Set up worktree if needed
-            let work_dir = if member.use_worktrees {
-                let wt_dir = self
-                    .config
-                    .project_root
-                    .join(".batty")
-                    .join("worktrees")
-                    .join(&member.name);
-                let branch_name = engineer_base_branch_name(&member.name);
-                match setup_engineer_worktree(
-                    &self.config.project_root,
-                    &wt_dir,
-                    &branch_name,
-                    &team_config_dir,
-                ) {
-                    Ok(path) => path,
-                    Err(e) => {
-                        warn!(member = %member.name, error = %e, "worktree setup failed, using project root");
-                        self.config.project_root.clone()
-                    }
-                }
-            } else {
-                self.config.project_root.clone()
-            };
-
-            // Build launch script (strip ## Nudge section — that's daemon-only).
-            // Fresh launches start idle so their role prompt is loaded as
-            // persistent context instead of being interpreted as an immediate
-            // shell task. Resumed launches start active so the watcher can
-            // immediately reclassify the restored session from live pane output.
-            let agent_name = member.agent.as_deref().unwrap_or("claude");
-            let prompt_text = strip_nudge_section(&self.load_prompt(member, &team_config_dir));
-            let idle = role_starts_idle();
-            let normalized_agent = canonical_agent_name(agent_name);
-            let requested_resume = should_resume_member(
+            match self.prepare_member_launch(
+                member,
                 resume,
                 &previous_launch_state,
-                &member.name,
-                &normalized_agent,
-                &prompt_text,
-            );
-            let previous_identity = previous_launch_state.get(&member.name);
-            let claude_session_available = previous_identity
-                .and_then(|identity| identity.session_id.as_deref())
-                .is_none_or(claude_session_id_exists);
-            let (member_resume, session_id) = resolve_member_launch_session(
-                &normalized_agent,
-                previous_identity,
-                requested_resume,
-                claude_session_available,
-                previous_identity
-                    .and_then(|identity| identity.session_id.as_deref())
-                    .is_some_and(|session_id| duplicate_claude_session_ids.contains(session_id)),
-            );
-
-            let short_cmd = write_launch_script(
-                &member.name,
-                agent_name,
-                &prompt_text,
-                Some(&prompt_text),
-                &work_dir,
-                &self.config.project_root,
-                idle,
-                member_resume,
-                session_id.as_deref(),
-            )?;
-
-            debug!(
-                member = %member.name,
-                agent = agent_name,
-                idle,
-                resume_requested = resume,
-                member_resume,
-                "spawning agent"
-            );
-            if let Some(watcher) = self.watchers.get_mut(&member.name) {
-                watcher.set_session_id(session_id.clone());
-            }
-            tmux::send_keys(pane_id, &short_cmd, true)?;
-            next_launch_state.insert(
-                member.name.clone(),
-                LaunchIdentity {
-                    agent: normalized_agent,
-                    prompt: prompt_text.clone(),
-                    session_id,
-                },
-            );
-
-            let initial_state = initial_member_state(idle, member_resume);
-            self.states.insert(member.name.clone(), initial_state);
-            self.update_automation_timers_for_state(&member.name, initial_state);
-            if should_activate_watcher_on_spawn(idle, member_resume) {
-                if let Some(watcher) = self.watchers.get_mut(&member.name) {
-                    watcher.activate();
+                &duplicate_claude_session_ids,
+            ) {
+                Ok(plan) => {
+                    if let Err(error) = self.apply_member_launch(member, &pane_id, &plan) {
+                        warn!(member = %member.name, error = %error, "failed to launch member");
+                        continue;
+                    }
+                    next_launch_state.insert(member.name.clone(), plan.identity);
+                }
+                Err(error) => {
+                    warn!(
+                        member = %member.name,
+                        error = %error,
+                        "failed to prepare member launch"
+                    );
                 }
             }
-
-            self.event_sink
-                .emit(TeamEvent::agent_spawned(&member.name))?;
         }
 
-        save_launch_state(&self.config.project_root, &next_launch_state)?;
+        if let Err(error) = save_launch_state(&self.config.project_root, &next_launch_state) {
+            warn!(error = %error, "failed to persist launch state after spawning agents");
+        }
 
         Ok(())
     }
@@ -539,7 +649,7 @@ impl TeamDaemon {
                     }
 
                     self.clear_active_task(engineer);
-                    self.event_sink.emit(TeamEvent::task_completed(engineer))?;
+                    self.emit_event(TeamEvent::task_completed(engineer));
                     self.states.insert(engineer.to_string(), MemberState::Idle);
                     if let Some(watcher) = self.watchers.get_mut(engineer) {
                         watcher.deactivate();
@@ -566,8 +676,7 @@ impl TeamDaemon {
                             self.mark_member_working(mgr_name);
                         }
 
-                        self.event_sink
-                            .emit(TeamEvent::task_escalated(engineer, &task_id.to_string()))?;
+                        self.emit_event(TeamEvent::task_escalated(engineer, &task_id.to_string()));
 
                         if let Some(ref mgr_name) = manager_name {
                             let escalation = format!(
@@ -617,8 +726,7 @@ impl TeamDaemon {
                     );
                     self.queue_message("daemon", engineer, &engineer_notice)?;
 
-                    self.event_sink
-                        .emit(TeamEvent::task_escalated(engineer, &task_id.to_string()))?;
+                    self.emit_event(TeamEvent::task_escalated(engineer, &task_id.to_string()));
                     self.clear_active_task(engineer);
                     self.states.insert(engineer.to_string(), MemberState::Idle);
                     if let Some(watcher) = self.watchers.get_mut(engineer) {
@@ -655,8 +763,7 @@ impl TeamDaemon {
             self.mark_member_working(mgr_name);
         }
 
-        self.event_sink
-            .emit(TeamEvent::task_escalated(engineer, &task_id.to_string()))?;
+        self.emit_event(TeamEvent::task_escalated(engineer, &task_id.to_string()));
 
         if let Some(ref mgr_name) = manager_name {
             let escalation = format!(
@@ -765,8 +872,7 @@ impl TeamDaemon {
     fn queue_message(&mut self, from: &str, recipient: &str, body: &str) -> Result<()> {
         if let Some(channel) = self.channels.get(recipient) {
             channel.send(body)?;
-            self.event_sink
-                .emit(TeamEvent::message_routed(from, recipient))?;
+            self.emit_event(TeamEvent::message_routed(from, recipient));
             return Ok(());
         }
 
@@ -784,8 +890,7 @@ impl TeamDaemon {
         if let Some(pane_id) = self.config.pane_map.get(recipient) {
             match message::inject_message(pane_id, from, body) {
                 Ok(()) => {
-                    self.event_sink
-                        .emit(TeamEvent::message_routed(from, recipient))?;
+                    self.emit_event(TeamEvent::message_routed(from, recipient));
                     return Ok(());
                 }
                 Err(error) => {
@@ -802,8 +907,7 @@ impl TeamDaemon {
         let root = inbox::inboxes_root(&self.config.project_root);
         let msg = inbox::InboxMessage::new_send(from, recipient, body);
         inbox::deliver_to_inbox(&root, &msg)?;
-        self.event_sink
-            .emit(TeamEvent::message_routed(from, recipient))?;
+        self.emit_event(TeamEvent::message_routed(from, recipient));
         Ok(())
     }
 
@@ -922,14 +1026,15 @@ impl TeamDaemon {
     /// to the old queue file are converted to inbox messages and delivered.
     fn drain_legacy_command_queue(&mut self) -> Result<()> {
         let queue_path = message::command_queue_path(&self.config.project_root);
-        let commands = message::drain_command_queue(&queue_path)?;
+        let commands = message::read_command_queue(&queue_path)?;
         if commands.is_empty() {
             return Ok(());
         }
 
         let root = inbox::inboxes_root(&self.config.project_root);
+        let mut remaining_commands = Vec::new();
         for cmd in commands {
-            match cmd {
+            let result: Result<()> = (|| match &cmd {
                 message::QueuedCommand::Send {
                     from,
                     to,
@@ -941,20 +1046,20 @@ impl TeamDaemon {
                         .team_config
                         .roles
                         .iter()
-                        .any(|r| r.name == to && r.role_type == RoleType::User);
+                        .any(|r| r.name == to.as_str() && r.role_type == RoleType::User);
 
                     if is_user {
-                        if let Some(channel) = self.channels.get(&to) {
+                        if let Some(channel) = self.channels.get(to.as_str()) {
                             let formatted = format!("[From {from}]\n{msg}");
                             channel.send(&formatted)?;
                         }
-                        self.event_sink
-                            .emit(TeamEvent::message_routed(&from, &to))?;
+                        self.emit_event(TeamEvent::message_routed(&from, &to));
                     } else {
                         let inbox_msg = inbox::InboxMessage::new_send(&from, &to, &msg);
                         inbox::deliver_to_inbox(&root, &inbox_msg)?;
                         debug!(from, to, "legacy command routed to inbox");
                     }
+                    Ok(())
                 }
                 message::QueuedCommand::Assign {
                     from,
@@ -964,9 +1069,17 @@ impl TeamDaemon {
                     let msg = inbox::InboxMessage::new_assign(&from, &engineer, &task);
                     inbox::deliver_to_inbox(&root, &msg)?;
                     debug!(engineer, "legacy assign routed to inbox");
+                    Ok(())
                 }
+            })();
+
+            if let Err(error) = result {
+                warn!(error = %error, "failed to process legacy command; preserving in queue");
+                remaining_commands.push(cmd);
             }
         }
+
+        message::write_command_queue(&queue_path, &remaining_commands)?;
 
         Ok(())
     }
@@ -1077,8 +1190,7 @@ impl TeamDaemon {
                         "failed to mark delivered"
                     );
                 } else {
-                    self.event_sink
-                        .emit(TeamEvent::message_routed(&msg.from, name))?;
+                    self.emit_event(TeamEvent::message_routed(&msg.from, name));
                 }
 
                 // Small delay between multiple messages
@@ -1175,8 +1287,7 @@ impl TeamDaemon {
         // Update state
         self.mark_member_working(engineer);
 
-        self.event_sink
-            .emit(TeamEvent::task_assigned(engineer, task))?;
+        self.emit_event(TeamEvent::task_assigned(engineer, task));
 
         Ok(AssignmentLaunch {
             branch: task_branch,
@@ -1517,8 +1628,7 @@ impl TeamDaemon {
                 if let Err(e) = standup::inject_standup(pane_id, &report) {
                     warn!(member = %recipient.name, error = %e, "failed to inject standup");
                 } else {
-                    self.event_sink
-                        .emit(TeamEvent::standup_generated(&recipient.name))?;
+                    self.emit_event(TeamEvent::standup_generated(&recipient.name));
                     any_generated = true;
                 }
             }
@@ -1622,8 +1732,7 @@ impl TeamDaemon {
                 }
             }
 
-            self.event_sink
-                .emit(TeamEvent::message_routed("human", "telegram"))?;
+            self.emit_event(TeamEvent::message_routed("human", "telegram"));
         }
 
         Ok(())
@@ -1657,19 +1766,18 @@ impl TeamDaemon {
                 continue;
             }
 
-            let channel = match self.channels.get(user_name) {
-                Some(ch) => ch,
-                None => {
-                    debug!(user = %user_name, "no channel for user role");
-                    continue;
-                }
-            };
-
             for msg in &messages {
                 info!(from = %msg.from, to = %user_name, id = %msg.id, "delivering to user channel");
 
                 let formatted = format!("--- Message from {} ---\n{}", msg.from, msg.body);
-                if let Err(e) = channel.send(&formatted) {
+                let send_result = match self.channels.get(user_name) {
+                    Some(channel) => channel.send(&formatted),
+                    None => {
+                        debug!(user = %user_name, "no channel for user role");
+                        break;
+                    }
+                };
+                if let Err(e) = send_result {
                     warn!(to = %user_name, error = %e, "failed to send via channel");
                     // Don't mark as delivered on failure — retry next cycle
                     continue;
@@ -1679,8 +1787,7 @@ impl TeamDaemon {
                     warn!(user = %user_name, id = %msg.id, error = %e, "failed to mark delivered");
                 }
 
-                self.event_sink
-                    .emit(TeamEvent::message_routed(&msg.from, user_name))?;
+                self.emit_event(TeamEvent::message_routed(&msg.from, user_name));
             }
         }
 
@@ -2255,6 +2362,7 @@ fn resolve_binary(name: &str) -> String {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::io;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
     use std::sync::{Arc, Mutex};
@@ -2263,6 +2371,7 @@ mod tests {
     use crate::team::config::{BoardConfig, ChannelConfig, RoleDef, StandupConfig};
     use crate::team::events::EventSink;
     use crate::team::watcher::WatcherState;
+    use serial_test::serial;
 
     struct RecordingChannel {
         messages: Arc<Mutex<Vec<String>>>,
@@ -2276,6 +2385,30 @@ mod tests {
 
         fn channel_type(&self) -> &str {
             "test"
+        }
+    }
+
+    struct FailingChannel;
+
+    impl Channel for FailingChannel {
+        fn send(&self, _message: &str) -> Result<()> {
+            bail!("synthetic channel failure")
+        }
+
+        fn channel_type(&self) -> &str {
+            "test-failing"
+        }
+    }
+
+    struct FailingWriter;
+
+    impl io::Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("synthetic event sink failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("synthetic event sink failure"))
         }
     }
 
@@ -2869,6 +3002,156 @@ mod tests {
             .unwrap();
 
         assert_eq!(sent.lock().unwrap().as_slice(), ["Assignment delivered."]);
+    }
+
+    #[test]
+    fn queue_daemon_message_ignores_event_sink_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: Vec::new(),
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::from_writer(tmp.path().join("broken-events.jsonl").as_path(), FailingWriter),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        daemon.channels.insert(
+            "human".to_string(),
+            Box::new(RecordingChannel {
+                messages: Arc::clone(&sent),
+            }),
+        );
+
+        daemon
+            .queue_daemon_message("human", "Event sink can fail without breaking delivery.")
+            .unwrap();
+
+        assert_eq!(
+            sent.lock().unwrap().as_slice(),
+            ["Event sink can fail without breaking delivery."]
+        );
+    }
+
+    #[test]
+    fn drain_legacy_command_queue_preserves_failed_commands() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue_path = message::command_queue_path(tmp.path());
+        message::enqueue_command(
+            &queue_path,
+            &message::QueuedCommand::Send {
+                from: "architect".into(),
+                to: "human".into(),
+                message: "status".into(),
+            },
+        )
+        .unwrap();
+        message::enqueue_command(
+            &queue_path,
+            &message::QueuedCommand::Assign {
+                from: "manager".into(),
+                engineer: "eng-1".into(),
+                task: "Task #7: recover".into(),
+            },
+        )
+        .unwrap();
+
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    layout: None,
+                    roles: vec![RoleDef {
+                        name: "human".to_string(),
+                        role_type: RoleType::User,
+                        agent: None,
+                        instances: 1,
+                        prompt: None,
+                        talks_to: vec![],
+                        channel: Some("telegram".to_string()),
+                        channel_config: Some(ChannelConfig {
+                            target: "123".to_string(),
+                            provider: "fake".to_string(),
+                            bot_token: None,
+                            allowed_user_ids: vec![],
+                        }),
+                        nudge_interval_secs: None,
+                        receives_standup: None,
+                        standup_interval_secs: None,
+                        owns: Vec::new(),
+                        use_worktrees: false,
+                    }],
+                },
+                session: "test".to_string(),
+                members: vec![MemberInstance {
+                    name: "eng-1".to_string(),
+                    role_name: "eng-1".to_string(),
+                    role_type: RoleType::Engineer,
+                    agent: Some("claude".to_string()),
+                    prompt: None,
+                    reports_to: None,
+                    use_worktrees: false,
+                }],
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            channels: HashMap::from([(
+                "human".to_string(),
+                Box::new(FailingChannel) as Box<dyn Channel>,
+            )]),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        daemon.drain_legacy_command_queue().unwrap();
+
+        let remaining = message::read_command_queue(&queue_path).unwrap();
+        assert_eq!(remaining.len(), 1);
+        match &remaining[0] {
+            message::QueuedCommand::Send { to, message, .. } => {
+                assert_eq!(to, "human");
+                assert_eq!(message, "status");
+            }
+            other => panic!("expected failed send command to remain queued, got {other:?}"),
+        }
+
+        let engineer_pending = inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "eng-1").unwrap();
+        assert_eq!(engineer_pending.len(), 1);
+        assert_eq!(engineer_pending[0].from, "manager");
+        assert!(engineer_pending[0].body.contains("Task #7: recover"));
     }
 
     #[test]
@@ -3528,6 +3811,110 @@ mod tests {
         assert!(engineer_messages[0]
             .body
             .contains("could not merge it into main"));
+    }
+
+    #[test]
+    #[serial]
+    fn restart_dead_members_respawns_member_and_records_event() {
+        let session = "batty-test-restart-dead-member";
+        let _ = crate::tmux::kill_session(session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let fake_bin = tmp.path().join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        let fake_log = tmp.path().join("fake-claude.log");
+        let fake_claude = fake_bin.join("claude");
+        std::fs::write(
+            &fake_claude,
+            "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$BATTY_FAKE_CLAUDE_LOG\"\nsleep 5\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        unsafe {
+            std::env::set_var("PATH", format!("{}:{original_path}", fake_bin.display()));
+            std::env::set_var("BATTY_FAKE_CLAUDE_LOG", fake_log.display().to_string());
+        }
+
+        crate::tmux::create_session(session, "bash", &[], tmp.path().to_str().unwrap()).unwrap();
+        crate::tmux::create_window(
+            session,
+            "keeper",
+            "sleep",
+            &["30".to_string()],
+            tmp.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let pane_id = crate::tmux::pane_id(session).unwrap();
+        Command::new("tmux")
+            .args(["set-option", "-p", "-t", &pane_id, "remain-on-exit", "on"])
+            .output()
+            .unwrap();
+
+        let member = MemberInstance {
+            name: "architect".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                layout: None,
+                roles: Vec::new(),
+            },
+            session: session.to_string(),
+            members: vec![member],
+            pane_map: HashMap::from([("architect".to_string(), pane_id.clone())]),
+        })
+        .unwrap();
+        daemon
+            .states
+            .insert("architect".to_string(), MemberState::Working);
+
+        crate::tmux::send_keys(&pane_id, "exit", true).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(crate::tmux::pane_dead(&pane_id).unwrap());
+
+        daemon.restart_dead_members().unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+
+        assert!(!crate::tmux::pane_dead(&pane_id).unwrap_or(true));
+        assert_eq!(daemon.states.get("architect"), Some(&MemberState::Idle));
+
+        let log = std::fs::read_to_string(&fake_log).unwrap();
+        assert!(log.contains("--append-system-prompt"));
+
+        let events = std::fs::read_to_string(
+            tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.contains("\"event\":\"member_crashed\""));
+        assert!(events.contains("\"role\":\"architect\""));
+        assert!(events.contains("\"restart\":true"));
+
+        unsafe {
+            std::env::set_var("PATH", original_path);
+            std::env::remove_var("BATTY_FAKE_CLAUDE_LOG");
+        }
+        crate::tmux::kill_session(session).unwrap();
     }
 
     #[test]

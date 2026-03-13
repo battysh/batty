@@ -1,6 +1,6 @@
 //! Structured JSONL event stream for external consumers.
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -153,7 +153,7 @@ impl TeamEvent {
 }
 
 pub struct EventSink {
-    writer: BufWriter<File>,
+    writer: Box<dyn Write + Send>,
     path: PathBuf,
 }
 
@@ -168,9 +168,17 @@ impl EventSink {
             .open(path)
             .with_context(|| format!("failed to open event sink: {}", path.display()))?;
         Ok(Self {
-            writer: BufWriter::new(file),
+            writer: Box::new(BufWriter::new(file)),
             path: path.to_path_buf(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_writer(path: &Path, writer: impl Write + Send + 'static) -> Self {
+        Self {
+            writer: Box::new(writer),
+            path: path.to_path_buf(),
+        }
     }
 
     pub fn emit(&mut self, event: TeamEvent) -> Result<()> {
