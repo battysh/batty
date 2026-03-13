@@ -1398,6 +1398,9 @@ impl TeamDaemon {
 
     /// Update `@batty_status` on each pane border with state + timer countdowns.
     fn update_pane_status_labels(&self) {
+        let globally_paused =
+            super::pause_marker_path(&self.config.project_root).exists();
+
         for member in &self.config.members {
             if member.role_type == RoleType::User {
                 continue;
@@ -1417,19 +1420,22 @@ impl TeamDaemon {
                 MemberState::Working => "#[fg=cyan]working#[default]",
             };
 
-            let nudge_str = format_nudge_status(self.nudges.get(&member.name));
-            let standup_str = self
-                .standup_interval_for_member_name(&member.name)
-                .map(|standup_interval| {
-                    format_standup_status(
-                        self.last_standup.get(&member.name).copied(),
-                        standup_interval,
-                        self.paused_standups.contains(&member.name),
-                    )
-                })
-                .unwrap_or_default();
-
-            let label = format!("{state_str}{nudge_str}{standup_str}");
+            let label = if globally_paused {
+                format!("{state_str} #[fg=red]PAUSED#[default]")
+            } else {
+                let nudge_str = format_nudge_status(self.nudges.get(&member.name));
+                let standup_str = self
+                    .standup_interval_for_member_name(&member.name)
+                    .map(|standup_interval| {
+                        format_standup_status(
+                            self.last_standup.get(&member.name).copied(),
+                            standup_interval,
+                            self.paused_standups.contains(&member.name),
+                        )
+                    })
+                    .unwrap_or_default();
+                format!("{state_str}{nudge_str}{standup_str}")
+            };
 
             let _ = std::process::Command::new("tmux")
                 .args(["set-option", "-p", "-t", pane_id, "@batty_status", &label])
@@ -1559,7 +1565,11 @@ impl TeamDaemon {
     ///
     /// The nudge only fires once per idle period. The member must transition
     /// back to working and then to idle again before a new nudge can fire.
+    /// Skipped entirely when the pause marker file exists.
     fn maybe_fire_nudges(&mut self) -> Result<()> {
+        if super::pause_marker_path(&self.config.project_root).exists() {
+            return Ok(());
+        }
         let member_names: Vec<String> = self.nudges.keys().cloned().collect();
 
         for name in member_names {
@@ -1602,7 +1612,11 @@ impl TeamDaemon {
     /// Each recipient gets a scoped standup showing only their direct reports.
     /// The interval is per-role: `standup_interval_secs` on the role definition
     /// takes precedence, falling back to the global `standup.interval_secs`.
+    /// Skipped entirely when the pause marker file exists.
     fn maybe_generate_standup(&mut self) -> Result<()> {
+        if super::pause_marker_path(&self.config.project_root).exists() {
+            return Ok(());
+        }
         let global_interval = self.config.team_config.standup.interval_secs;
 
         // Build list of recipients with their per-role intervals.

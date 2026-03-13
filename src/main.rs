@@ -231,6 +231,16 @@ fn main() -> Result<()> {
             clap_complete::generate(shell, &mut Cli::command(), "batty", &mut std::io::stdout());
         }
 
+        Command::Pause => {
+            team::pause_team(&root)?;
+            println!("Nudges and standups paused. Run `batty resume` to resume.");
+        }
+
+        Command::Resume => {
+            team::resume_team(&root)?;
+            println!("Nudges and standups resumed.");
+        }
+
         Command::Telegram => {
             team::setup_telegram(&root)?;
         }
