@@ -1077,9 +1077,9 @@ impl TeamDaemon {
                             let formatted = format!("[From {from}]\n{msg}");
                             channel.send(&formatted)?;
                         }
-                        self.emit_event(TeamEvent::message_routed(&from, &to));
+                        self.emit_event(TeamEvent::message_routed(from, to));
                     } else {
-                        let inbox_msg = inbox::InboxMessage::new_send(&from, &to, &msg);
+                        let inbox_msg = inbox::InboxMessage::new_send(from, to, msg);
                         inbox::deliver_to_inbox(&root, &inbox_msg)?;
                         debug!(from, to, "legacy command routed to inbox");
                     }
@@ -1090,7 +1090,7 @@ impl TeamDaemon {
                     engineer,
                     task,
                 } => {
-                    let msg = inbox::InboxMessage::new_assign(&from, &engineer, &task);
+                    let msg = inbox::InboxMessage::new_assign(from, engineer, task);
                     inbox::deliver_to_inbox(&root, &msg)?;
                     debug!(engineer, "legacy assign routed to inbox");
                     Ok(())

@@ -67,6 +67,7 @@ pub fn enqueue_command(queue_path: &Path, cmd: &QueuedCommand) -> Result<()> {
 }
 
 /// Read and drain all pending commands from the queue file.
+#[cfg(test)]
 pub fn drain_command_queue(queue_path: &Path) -> Result<Vec<QueuedCommand>> {
     let commands = read_command_queue(queue_path)?;
     if !commands.is_empty() {
