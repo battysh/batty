@@ -223,7 +223,9 @@ impl TeamDaemon {
                 break;
             }
 
-            self.run_loop_step("restart_dead_members", |daemon| daemon.restart_dead_members());
+            self.run_loop_step("restart_dead_members", |daemon| {
+                daemon.restart_dead_members()
+            });
             self.run_loop_step("poll_watchers", |daemon| daemon.poll_watchers());
             self.run_loop_step("sync_launch_state_session_ids", |daemon| {
                 daemon.sync_launch_state_session_ids()
@@ -383,7 +385,11 @@ impl TeamDaemon {
         Ok(())
     }
 
-    fn persist_member_launch_identity(&self, member_name: &str, identity: LaunchIdentity) -> Result<()> {
+    fn persist_member_launch_identity(
+        &self,
+        member_name: &str,
+        identity: LaunchIdentity,
+    ) -> Result<()> {
         let mut launch_state = load_launch_state(&self.config.project_root);
         launch_state.insert(member_name.to_string(), identity);
         save_launch_state(&self.config.project_root, &launch_state)
@@ -433,7 +439,8 @@ impl TeamDaemon {
             &duplicate_claude_session_ids,
         )?;
         self.apply_member_launch(&member, &pane_id, &plan)?;
-        if let Err(error) = self.persist_member_launch_identity(&member.name, plan.identity.clone()) {
+        if let Err(error) = self.persist_member_launch_identity(&member.name, plan.identity.clone())
+        {
             warn!(member = %member.name, error = %error, "failed to persist restarted launch identity");
         }
         self.emit_event(TeamEvent::member_crashed(&member.name, true));
@@ -3028,7 +3035,10 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            event_sink: EventSink::from_writer(tmp.path().join("broken-events.jsonl").as_path(), FailingWriter),
+            event_sink: EventSink::from_writer(
+                tmp.path().join("broken-events.jsonl").as_path(),
+                FailingWriter,
+            ),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
@@ -3148,7 +3158,8 @@ mod tests {
             other => panic!("expected failed send command to remain queued, got {other:?}"),
         }
 
-        let engineer_pending = inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "eng-1").unwrap();
+        let engineer_pending =
+            inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "eng-1").unwrap();
         assert_eq!(engineer_pending.len(), 1);
         assert_eq!(engineer_pending[0].from, "manager");
         assert!(engineer_pending[0].body.contains("Task #7: recover"));
@@ -3771,8 +3782,10 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            event_sink: EventSink::new(&repo.join(".batty").join("team_config").join("events.jsonl"))
-                .unwrap(),
+            event_sink: EventSink::new(
+                &repo.join(".batty").join("team_config").join("events.jsonl"),
+            )
+            .unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
@@ -3794,23 +3807,29 @@ mod tests {
             inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
         assert_eq!(manager_messages.len(), 1);
         assert_eq!(manager_messages[0].from, "daemon");
-        assert!(manager_messages[0]
-            .body
-            .contains("could not be merged to main"));
-        assert!(manager_messages[0]
-            .body
-            .contains("would be overwritten by merge")
-            || manager_messages[0]
+        assert!(
+            manager_messages[0]
                 .body
-                .contains("Please commit your changes or stash them"));
+                .contains("could not be merged to main")
+        );
+        assert!(
+            manager_messages[0]
+                .body
+                .contains("would be overwritten by merge")
+                || manager_messages[0]
+                    .body
+                    .contains("Please commit your changes or stash them")
+        );
 
         let engineer_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
         assert_eq!(engineer_messages.len(), 1);
         assert_eq!(engineer_messages[0].from, "daemon");
-        assert!(engineer_messages[0]
-            .body
-            .contains("could not merge it into main"));
+        assert!(
+            engineer_messages[0]
+                .body
+                .contains("could not merge it into main")
+        );
     }
 
     #[test]
@@ -3834,8 +3853,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755))
-                .unwrap();
+            std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
         let original_path = std::env::var("PATH").unwrap_or_default();

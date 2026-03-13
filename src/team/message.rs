@@ -114,7 +114,9 @@ pub fn write_command_queue(queue_path: &Path, commands: &[QueuedCommand]) -> Res
             .write(true)
             .truncate(true)
             .open(&tmp_path)
-            .with_context(|| format!("failed to open temp command queue: {}", tmp_path.display()))?;
+            .with_context(|| {
+                format!("failed to open temp command queue: {}", tmp_path.display())
+            })?;
         for cmd in commands {
             let json = serde_json::to_string(cmd)?;
             writeln!(file, "{json}")?;
