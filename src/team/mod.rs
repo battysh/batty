@@ -663,6 +663,36 @@ fn resume_marker_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("resume")
 }
 
+/// Path to the pause marker file. Presence pauses nudges and standups.
+pub fn pause_marker_path(project_root: &Path) -> PathBuf {
+    project_root.join(".batty").join("paused")
+}
+
+/// Create the pause marker file, pausing nudges and standups.
+pub fn pause_team(project_root: &Path) -> Result<()> {
+    let marker = pause_marker_path(project_root);
+    if marker.exists() {
+        bail!("Team is already paused.");
+    }
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&marker, "").context("failed to write pause marker")?;
+    info!("paused nudges and standups");
+    Ok(())
+}
+
+/// Remove the pause marker file, resuming nudges and standups.
+pub fn resume_team(project_root: &Path) -> Result<()> {
+    let marker = pause_marker_path(project_root);
+    if !marker.exists() {
+        bail!("Team is not paused.");
+    }
+    std::fs::remove_file(&marker).context("failed to remove pause marker")?;
+    info!("resumed nudges and standups");
+    Ok(())
+}
+
 /// Stop a running team session and clean up any orphaned `batty-` sessions.
 pub fn stop_team(project_root: &Path) -> Result<()> {
     // Write resume marker before tearing down — agents have sessions to continue
@@ -1211,6 +1241,25 @@ mod tests {
                 .join("batty_engineer.md")
                 .exists()
         );
+    }
+
+    #[test]
+    fn pause_creates_marker_and_resume_removes_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+
+        assert!(!pause_marker_path(tmp.path()).exists());
+        pause_team(tmp.path()).unwrap();
+        assert!(pause_marker_path(tmp.path()).exists());
+
+        // Double-pause should fail
+        assert!(pause_team(tmp.path()).is_err());
+
+        resume_team(tmp.path()).unwrap();
+        assert!(!pause_marker_path(tmp.path()).exists());
+
+        // Double-resume should fail
+        assert!(resume_team(tmp.path()).is_err());
     }
 
     #[test]

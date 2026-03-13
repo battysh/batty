@@ -108,6 +108,12 @@ pub enum Command {
         shell: CompletionShell,
     },
 
+    /// Pause nudges and standups
+    Pause,
+
+    /// Resume nudges and standups
+    Resume,
+
     /// Set up Telegram bot for human communication
     Telegram,
 
@@ -308,6 +314,18 @@ mod tests {
             }
             other => panic!("expected ack command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pause_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "pause"]);
+        assert!(matches!(cli.command, Command::Pause));
+    }
+
+    #[test]
+    fn resume_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "resume"]);
+        assert!(matches!(cli.command, Command::Resume));
     }
 
     #[test]
