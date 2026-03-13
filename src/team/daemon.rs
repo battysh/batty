@@ -2062,11 +2062,11 @@ fn write_launch_script(
     .ok();
     set_executable(&kanban_wrapper);
 
-    // batty wrapper: points to the exact binary that launched this daemon,
-    // avoiding PATH issues where the installed binary may be blocked.
-    let real_batty = std::env::current_exe()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| resolve_binary("batty"));
+    // batty wrapper: resolve the installed binary from PATH.
+    // Do NOT use current_exe() — if the daemon was launched from a debug/test
+    // build (target/debug/deps/batty-*), agents would inherit that test binary,
+    // causing `batty send` to run cargo tests instead of the real command.
+    let real_batty = resolve_binary("batty");
     let batty_wrapper = wrapper_dir.join("batty");
     std::fs::write(
         &batty_wrapper,
