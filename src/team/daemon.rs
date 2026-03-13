@@ -100,6 +100,14 @@ struct MemberLaunchPlan {
     activate_watcher: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageDelivery {
+    Channel,
+    LivePane,
+    InboxQueued,
+    SkippedUnknownRecipient,
+}
+
 impl TeamDaemon {
     /// Create a new daemon from resolved config and layout.
     pub fn new(config: DaemonConfig) -> Result<Self> {
@@ -873,14 +881,23 @@ impl TeamDaemon {
     }
 
     fn queue_daemon_message(&mut self, recipient: &str, body: &str) -> Result<()> {
-        self.queue_message("daemon", recipient, body)
+        self.deliver_message("daemon", recipient, body).map(|_| ())
     }
 
     fn queue_message(&mut self, from: &str, recipient: &str, body: &str) -> Result<()> {
+        self.deliver_message(from, recipient, body).map(|_| ())
+    }
+
+    fn deliver_message(
+        &mut self,
+        from: &str,
+        recipient: &str,
+        body: &str,
+    ) -> Result<MessageDelivery> {
         if let Some(channel) = self.channels.get(recipient) {
             channel.send(body)?;
             self.emit_event(TeamEvent::message_routed(from, recipient));
-            return Ok(());
+            return Ok(MessageDelivery::Channel);
         }
 
         let known_recipient = self.config.pane_map.contains_key(recipient)
@@ -891,14 +908,14 @@ impl TeamDaemon {
                 .any(|member| member.name == recipient);
         if !known_recipient {
             debug!(from, recipient, "skipping message for unknown recipient");
-            return Ok(());
+            return Ok(MessageDelivery::SkippedUnknownRecipient);
         }
 
         if let Some(pane_id) = self.config.pane_map.get(recipient) {
             match message::inject_message(pane_id, from, body) {
                 Ok(()) => {
                     self.emit_event(TeamEvent::message_routed(from, recipient));
-                    return Ok(());
+                    return Ok(MessageDelivery::LivePane);
                 }
                 Err(error) => {
                     warn!(
@@ -915,7 +932,7 @@ impl TeamDaemon {
         let msg = inbox::InboxMessage::new_send(from, recipient, body);
         inbox::deliver_to_inbox(&root, &msg)?;
         self.emit_event(TeamEvent::message_routed(from, recipient));
-        Ok(())
+        Ok(MessageDelivery::InboxQueued)
     }
 
     fn notify_assignment_sender_success(
@@ -1560,10 +1577,20 @@ impl TeamDaemon {
             if fire {
                 let text = self.nudges[&name].text.clone();
                 info!(member = %name, "firing nudge (idle timeout)");
-                if let Err(error) = self.queue_message("daemon", &name, &text) {
-                    warn!(member = %name, error = %error, "failed to deliver nudge");
+                let delivered_live = match self.deliver_message("daemon", &name, &text) {
+                    Ok(MessageDelivery::LivePane) => true,
+                    Ok(_) => false,
+                    Err(error) => {
+                        warn!(member = %name, error = %error, "failed to deliver nudge");
+                        continue;
+                    }
+                };
+                if let Some(schedule) = self.nudges.get_mut(&name) {
+                    schedule.fired_this_idle = true;
                 }
-                self.nudges.get_mut(&name).unwrap().fired_this_idle = true;
+                if delivered_live {
+                    self.mark_member_working(&name);
+                }
             }
         }
 
@@ -3841,25 +3868,24 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
 
-        let fake_bin = tmp.path().join("fake-bin");
+        let member_name = "architect-restart";
+        let fake_bin = std::env::temp_dir().join(format!("batty-bin-{member_name}"));
+        let _ = std::fs::remove_dir_all(&fake_bin);
         std::fs::create_dir_all(&fake_bin).unwrap();
         let fake_log = tmp.path().join("fake-claude.log");
         let fake_claude = fake_bin.join("claude");
         std::fs::write(
             &fake_claude,
-            "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$BATTY_FAKE_CLAUDE_LOG\"\nsleep 5\n",
+            format!(
+                "#!/bin/bash\nprintf '%s\\n' \"$*\" >> '{}'\nsleep 5\n",
+                fake_log.display()
+            ),
         )
         .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        unsafe {
-            std::env::set_var("PATH", format!("{}:{original_path}", fake_bin.display()));
-            std::env::set_var("BATTY_FAKE_CLAUDE_LOG", fake_log.display().to_string());
         }
 
         crate::tmux::create_session(session, "bash", &[], tmp.path().to_str().unwrap()).unwrap();
@@ -3878,7 +3904,7 @@ mod tests {
             .unwrap();
 
         let member = MemberInstance {
-            name: "architect".to_string(),
+            name: member_name.to_string(),
             role_name: "architect".to_string(),
             role_type: RoleType::Architect,
             agent: Some("claude".to_string()),
@@ -3897,12 +3923,12 @@ mod tests {
             },
             session: session.to_string(),
             members: vec![member],
-            pane_map: HashMap::from([("architect".to_string(), pane_id.clone())]),
+            pane_map: HashMap::from([(member_name.to_string(), pane_id.clone())]),
         })
         .unwrap();
         daemon
             .states
-            .insert("architect".to_string(), MemberState::Working);
+            .insert(member_name.to_string(), MemberState::Working);
 
         crate::tmux::send_keys(&pane_id, "exit", true).unwrap();
         std::thread::sleep(Duration::from_millis(300));
@@ -3912,10 +3938,38 @@ mod tests {
         std::thread::sleep(Duration::from_millis(700));
 
         assert!(!crate::tmux::pane_dead(&pane_id).unwrap_or(true));
-        assert_eq!(daemon.states.get("architect"), Some(&MemberState::Idle));
+        assert_eq!(daemon.states.get(member_name), Some(&MemberState::Idle));
 
-        let log = std::fs::read_to_string(&fake_log).unwrap();
+        let log = (0..20)
+            .find_map(|_| {
+                let content = match std::fs::read_to_string(&fake_log) {
+                    Ok(content) => content,
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_millis(100));
+                        return None;
+                    }
+                };
+                if content.contains("--append-system-prompt") {
+                    Some(content)
+                } else {
+                    std::thread::sleep(Duration::from_millis(100));
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "fake claude log was not written by restarted member at {}",
+                    fake_log.display()
+                )
+            });
         assert!(log.contains("--append-system-prompt"));
+
+        let launch_state = load_launch_state(tmp.path());
+        let identity = launch_state
+            .get(member_name)
+            .expect("missing restarted member launch state");
+        assert_eq!(identity.agent, "claude-code");
+        assert!(identity.session_id.is_some());
 
         let events = std::fs::read_to_string(
             tmp.path()
@@ -3925,14 +3979,11 @@ mod tests {
         )
         .unwrap();
         assert!(events.contains("\"event\":\"member_crashed\""));
-        assert!(events.contains("\"role\":\"architect\""));
+        assert!(events.contains(&format!("\"role\":\"{member_name}\"")));
         assert!(events.contains("\"restart\":true"));
 
-        unsafe {
-            std::env::set_var("PATH", original_path);
-            std::env::remove_var("BATTY_FAKE_CLAUDE_LOG");
-        }
         crate::tmux::kill_session(session).unwrap();
+        let _ = std::fs::remove_dir_all(&fake_bin);
     }
 
     #[test]
@@ -4069,6 +4120,143 @@ mod tests {
         assert!(restarted_nudge.idle_since.unwrap().elapsed() < Duration::from_secs(1));
         assert!(!daemon.paused_standups.contains("manager"));
         assert!(daemon.last_standup["manager"].elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    #[serial]
+    fn maybe_fire_nudges_marks_member_working_after_live_delivery() {
+        let session = "batty-test-nudge-live-delivery";
+        let _ = crate::tmux::kill_session(session);
+
+        crate::tmux::create_session(session, "cat", &[], "/tmp").unwrap();
+        let pane_id = crate::tmux::pane_id(session).unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let member = MemberInstance {
+            name: "scientist".to_string(),
+            role_name: "scientist".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut watchers = HashMap::new();
+        watchers.insert(
+            "scientist".to_string(),
+            SessionWatcher::new(&pane_id, "scientist", 300, None),
+        );
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: session.to_string(),
+                members: vec![member],
+                pane_map: HashMap::from([("scientist".to_string(), pane_id.clone())]),
+            },
+            watchers,
+            states: HashMap::from([("scientist".to_string(), MemberState::Idle)]),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::from([(
+                "scientist".to_string(),
+                NudgeSchedule {
+                    text: "Please make progress.".to_string(),
+                    interval: Duration::from_secs(1),
+                    idle_since: Some(Instant::now() - Duration::from_secs(5)),
+                    fired_this_idle: false,
+                    paused: false,
+                },
+            )]),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        daemon.maybe_fire_nudges().unwrap();
+
+        assert_eq!(daemon.states.get("scientist"), Some(&MemberState::Working));
+        let schedule = daemon.nudges.get("scientist").unwrap();
+        assert!(schedule.paused);
+        assert!(schedule.idle_since.is_none());
+        assert!(!schedule.fired_this_idle);
+
+        crate::tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn maybe_fire_nudges_keeps_member_idle_when_delivery_falls_back_to_inbox() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member = MemberInstance {
+            name: "scientist".to_string(),
+            role_name: "scientist".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![member],
+                pane_map: HashMap::from([("scientist".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([("scientist".to_string(), MemberState::Idle)]),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::from([(
+                "scientist".to_string(),
+                NudgeSchedule {
+                    text: "Please make progress.".to_string(),
+                    interval: Duration::from_secs(1),
+                    idle_since: Some(Instant::now() - Duration::from_secs(5)),
+                    fired_this_idle: false,
+                    paused: false,
+                },
+            )]),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        daemon.maybe_fire_nudges().unwrap();
+
+        assert_eq!(daemon.states.get("scientist"), Some(&MemberState::Idle));
+        let schedule = daemon.nudges.get("scientist").unwrap();
+        assert!(!schedule.paused);
+        assert!(schedule.fired_this_idle);
+
+        let messages =
+            inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "scientist").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].from, "daemon");
+        assert!(messages[0].body.contains("Please make progress."));
     }
 
     /// Helper: build a minimal DaemonConfig with the given roles.
