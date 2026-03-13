@@ -295,7 +295,7 @@ fn is_at_agent_prompt(capture: &str) -> bool {
     // while working. Restrict this check to the raw bottom window so older
     // non-empty lines higher in the transcript do not pin the watcher active.
     for line in &recent_lines(capture, 6) {
-        if line.contains("esc to interrupt") {
+        if is_live_interrupt_footer(line) {
             return false;
         }
     }
@@ -355,7 +355,7 @@ fn classify_capture_state(capture: &str) -> ScreenState {
 
     if recent_lines(capture, 6)
         .iter()
-        .any(|line| line.contains("esc to interrupt"))
+        .any(|line| is_live_interrupt_footer(line))
     {
         return ScreenState::Active;
     }
@@ -381,6 +381,14 @@ fn looks_like_claude_spinner_status(line: &str) -> bool {
     };
     matches!(first, '·' | '✢' | '✳' | '✶' | '✻' | '✽')
         && (trimmed.contains('…') || trimmed.contains("(thinking"))
+}
+
+fn is_live_interrupt_footer(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.contains("esc to interrupt")
+        || trimmed.contains("esc to inter")
+        || trimmed.contains("esc to in…")
+        || trimmed.contains("esc to in...")
 }
 
 fn next_state_after_capture(
@@ -844,6 +852,20 @@ mod tests {
     }
 
     #[test]
+    fn claude_working_not_idle_when_interrupt_footer_is_truncated() {
+        let capture = concat!(
+            "✢ Cascading… (48s · ↓ 130 tokens · thought for 17s)\n",
+            "  ⎿  Tip: Use /btw to ask a quick side question\n",
+            "────────────────────────────\n",
+            "❯ \n",
+            "────────────────────────────\n",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to in…\n",
+        );
+        assert!(!is_at_agent_prompt(capture));
+        assert_eq!(classify_capture_state(capture), ScreenState::Active);
+    }
+
+    #[test]
     fn claude_idle_detected_without_esc_to_interrupt() {
         let capture = concat!(
             "⏺ Done.\n",
@@ -977,6 +999,18 @@ mod tests {
             "❯ \n",
             "────────────────────────────\n",
             "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt\n",
+        );
+        assert_eq!(classify_capture_state(capture), ScreenState::Active);
+    }
+
+    #[test]
+    fn claude_truncated_interrupt_footer_marks_capture_active() {
+        let capture = concat!(
+            "✻ Baked for 4m 30s\n",
+            "────────────────────────────\n",
+            "❯ \n",
+            "────────────────────────────\n",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to in…\n",
         );
         assert_eq!(classify_capture_state(capture), ScreenState::Active);
     }
