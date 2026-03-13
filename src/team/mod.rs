@@ -1007,6 +1007,7 @@ pub fn merge_worktree(project_root: &Path, engineer: &str) -> Result<()> {
         task_loop::MergeOutcome::RebaseConflict(stderr) => {
             bail!("merge blocked by rebase conflict: {stderr}")
         }
+        task_loop::MergeOutcome::MergeFailure(stderr) => bail!("merge failed: {stderr}"),
     }
 }
 

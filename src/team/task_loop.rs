@@ -43,6 +43,7 @@ impl Drop for MergeLock {
 pub(crate) enum MergeOutcome {
     Success,
     RebaseConflict(String),
+    MergeFailure(String),
 }
 
 fn priority_rank(p: &str) -> u32 {
@@ -378,8 +379,9 @@ pub fn merge_engineer_branch(project_root: &Path, engineer_name: &str) -> Result
         .context("git merge failed")?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("merge failed: {stderr}");
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        warn!(engineer = engineer_name, branch = %branch, "git merge failed");
+        return Ok(MergeOutcome::MergeFailure(stderr));
     }
 
     println!("Merged branch '{branch}' from {engineer_name}");
@@ -915,6 +917,38 @@ mod tests {
 
         let status = git(&worktree_dir, &["status", "--porcelain"]);
         assert!(status.status.success());
+    }
+
+    #[test]
+    fn test_merge_with_dirty_main_returns_merge_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-3");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        std::fs::write(repo.join("journal.md"), "base\n").unwrap();
+        git_ok(&repo, &["add", "journal.md"]);
+        git_ok(&repo, &["commit", "-m", "add journal"]);
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-3", &team_config_dir).unwrap();
+
+        std::fs::write(worktree_dir.join("journal.md"), "engineer version\n").unwrap();
+        git_ok(&worktree_dir, &["add", "journal.md"]);
+        git_ok(&worktree_dir, &["commit", "-m", "engineer update"]);
+
+        std::fs::write(repo.join("journal.md"), "dirty main\n").unwrap();
+
+        let result = merge_engineer_branch(&repo, "eng-3").unwrap();
+        match result {
+            MergeOutcome::MergeFailure(stderr) => {
+                assert!(
+                    stderr.contains("would be overwritten by merge")
+                        || stderr.contains("Please commit your changes or stash them"),
+                    "unexpected merge failure stderr: {stderr}"
+                );
+            }
+            other => panic!("expected merge failure outcome, got {other:?}"),
+        }
     }
 
     #[test]
