@@ -833,8 +833,8 @@ pub fn validate_team(project_root: &Path) -> Result<()> {
 /// (e.g. "engineer"). Returns the name itself if no config is available.
 fn resolve_role_name(project_root: &Path, member_name: &str) -> String {
     // "human" is not a member instance — it's the CLI user
-    if member_name == "human" {
-        return "human".to_string();
+    if matches!(member_name, "human" | "daemon") {
+        return member_name.to_string();
     }
     let config_path = team_config_path(project_root);
     if let Ok(team_config) = config::TeamConfig::load(&config_path) {
@@ -848,6 +848,44 @@ fn resolve_role_name(project_root: &Path, member_name: &str) -> String {
     member_name.to_string()
 }
 
+/// Resolve a caller-facing role/member name to a concrete member instance.
+///
+/// Examples:
+/// - exact member names pass through unchanged (`sam-designer-1-1`)
+/// - unique role aliases resolve to their single member instance (`sam-designer`)
+/// - ambiguous aliases error and require an explicit member name
+fn resolve_member_name(project_root: &Path, member_name: &str) -> Result<String> {
+    if matches!(member_name, "human" | "daemon") {
+        return Ok(member_name.to_string());
+    }
+
+    let config_path = team_config_path(project_root);
+    if let Ok(team_config) = config::TeamConfig::load(&config_path) {
+        if let Ok(members) = hierarchy::resolve_hierarchy(&team_config) {
+            if let Some(member) = members.iter().find(|m| m.name == member_name) {
+                return Ok(member.name.clone());
+            }
+
+            let matches: Vec<String> = members
+                .iter()
+                .filter(|m| m.role_name == member_name)
+                .map(|m| m.name.clone())
+                .collect();
+
+            return match matches.len() {
+                0 => Ok(member_name.to_string()),
+                1 => Ok(matches[0].clone()),
+                _ => bail!(
+                    "'{member_name}' matches multiple members: {}. Use the explicit member name.",
+                    matches.join(", ")
+                ),
+            };
+        }
+    }
+
+    Ok(member_name.to_string())
+}
+
 /// Send a message to a role via their Maildir inbox.
 ///
 /// The sender is auto-detected from the `@batty_role` tmux pane option
@@ -855,16 +893,17 @@ fn resolve_role_name(project_root: &Path, member_name: &str) -> String {
 /// Enforces communication routing rules from team config.
 pub fn send_message(project_root: &Path, role: &str, msg: &str) -> Result<()> {
     let from = detect_sender().unwrap_or_else(|| "human".to_string());
+    let recipient = resolve_member_name(project_root, role)?;
 
     // Enforce routing: check talks_to rules
     let config_path = team_config_path(project_root);
     if config_path.exists() {
         if let Ok(team_config) = config::TeamConfig::load(&config_path) {
             let from_role = resolve_role_name(project_root, &from);
-            let to_role = resolve_role_name(project_root, role);
+            let to_role = resolve_role_name(project_root, &recipient);
             if !team_config.can_talk(&from_role, &to_role) {
                 bail!(
-                    "{from} ({from_role}) is not allowed to message {role} ({to_role}). \
+                    "{from} ({from_role}) is not allowed to message {recipient} ({to_role}). \
                      Check talks_to in team.yaml."
                 );
             }
@@ -872,9 +911,9 @@ pub fn send_message(project_root: &Path, role: &str, msg: &str) -> Result<()> {
     }
 
     let root = inbox::inboxes_root(project_root);
-    let inbox_msg = inbox::InboxMessage::new_send(&from, role, msg);
+    let inbox_msg = inbox::InboxMessage::new_send(&from, &recipient, msg);
     let id = inbox::deliver_to_inbox(&root, &inbox_msg)?;
-    info!(to = role, id = %id, "message delivered to inbox");
+    info!(to = %recipient, id = %id, "message delivered to inbox");
     Ok(())
 }
 
@@ -897,15 +936,16 @@ fn detect_sender() -> Option<String> {
 /// Assign a task to an engineer via their Maildir inbox.
 pub fn assign_task(project_root: &Path, engineer: &str, task: &str) -> Result<String> {
     let from = detect_sender().unwrap_or_else(|| "human".to_string());
+    let recipient = resolve_member_name(project_root, engineer)?;
 
     let config_path = team_config_path(project_root);
     if config_path.exists() {
         if let Ok(team_config) = config::TeamConfig::load(&config_path) {
             let from_role = resolve_role_name(project_root, &from);
-            let to_role = resolve_role_name(project_root, engineer);
+            let to_role = resolve_role_name(project_root, &recipient);
             if !team_config.can_talk(&from_role, &to_role) {
                 bail!(
-                    "{from} ({from_role}) is not allowed to assign {engineer} ({to_role}). \
+                    "{from} ({from_role}) is not allowed to assign {recipient} ({to_role}). \
                      Check talks_to in team.yaml."
                 );
             }
@@ -913,16 +953,17 @@ pub fn assign_task(project_root: &Path, engineer: &str, task: &str) -> Result<St
     }
 
     let root = inbox::inboxes_root(project_root);
-    let msg = inbox::InboxMessage::new_assign(&from, engineer, task);
+    let msg = inbox::InboxMessage::new_assign(&from, &recipient, task);
     let id = inbox::deliver_to_inbox(&root, &msg)?;
-    info!(from, engineer, task, id = %id, "assignment delivered to inbox");
+    info!(from, engineer = %recipient, task, id = %id, "assignment delivered to inbox");
     Ok(id)
 }
 
 /// List inbox messages for a member.
 pub fn list_inbox(project_root: &Path, member: &str) -> Result<()> {
+    let member = resolve_member_name(project_root, member)?;
     let root = inbox::inboxes_root(project_root);
-    let messages = inbox::all_messages(&root, member)?;
+    let messages = inbox::all_messages(&root, &member)?;
 
     if messages.is_empty() {
         println!("No messages for {member}.");
@@ -961,8 +1002,9 @@ pub fn list_inbox(project_root: &Path, member: &str) -> Result<()> {
 
 /// Read a specific message from a member's inbox by ID or prefix.
 pub fn read_message(project_root: &Path, member: &str, id: &str) -> Result<()> {
+    let member = resolve_member_name(project_root, member)?;
     let root = inbox::inboxes_root(project_root);
-    let messages = inbox::all_messages(&root, member)?;
+    let messages = inbox::all_messages(&root, &member)?;
 
     // Find message by exact ID or prefix match
     let matching: Vec<_> = messages
@@ -994,15 +1036,17 @@ pub fn read_message(project_root: &Path, member: &str, id: &str) -> Result<()> {
 
 /// Acknowledge (mark delivered) a message in a member's inbox.
 pub fn ack_message(project_root: &Path, member: &str, id: &str) -> Result<()> {
+    let member = resolve_member_name(project_root, member)?;
     let root = inbox::inboxes_root(project_root);
-    inbox::mark_delivered(&root, member, id)?;
+    inbox::mark_delivered(&root, &member, id)?;
     info!(member, id, "message acknowledged");
     Ok(())
 }
 
 /// Merge an engineer's worktree branch.
 pub fn merge_worktree(project_root: &Path, engineer: &str) -> Result<()> {
-    match daemon::merge_engineer_branch(project_root, engineer)? {
+    let engineer = resolve_member_name(project_root, engineer)?;
+    match daemon::merge_engineer_branch(project_root, &engineer)? {
         task_loop::MergeOutcome::Success => Ok(()),
         task_loop::MergeOutcome::RebaseConflict(stderr) => {
             bail!("merge blocked by rebase conflict: {stderr}")
@@ -1199,6 +1243,111 @@ mod tests {
         assert_eq!(pending[0].to, "eng-1-1");
         assert_eq!(pending[0].body, "fix bug");
         assert_eq!(pending[0].msg_type, inbox::MessageType::Assign);
+    }
+
+    fn write_team_config(project_root: &Path, yaml: &str) {
+        std::fs::create_dir_all(team_config_dir(project_root)).unwrap();
+        std::fs::write(team_config_path(project_root), yaml).unwrap();
+    }
+
+    #[test]
+    fn resolve_member_name_maps_unique_role_alias_to_instance() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_team_config(
+            tmp.path(),
+            r#"
+name: test
+roles:
+  - name: human
+    role_type: user
+    talks_to:
+      - sam-designer
+  - name: jordan-pm
+    role_type: manager
+    agent: claude
+    instances: 1
+  - name: sam-designer
+    role_type: engineer
+    agent: codex
+    instances: 1
+    talks_to:
+      - jordan-pm
+"#,
+        );
+
+        assert_eq!(
+            resolve_member_name(tmp.path(), "sam-designer").unwrap(),
+            "sam-designer-1-1"
+        );
+        assert_eq!(
+            resolve_member_name(tmp.path(), "sam-designer-1-1").unwrap(),
+            "sam-designer-1-1"
+        );
+    }
+
+    #[test]
+    fn resolve_member_name_rejects_ambiguous_role_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_team_config(
+            tmp.path(),
+            r#"
+name: test
+roles:
+  - name: jordan-pm
+    role_type: manager
+    agent: claude
+    instances: 2
+  - name: sam-designer
+    role_type: engineer
+    agent: codex
+    instances: 1
+    talks_to:
+      - jordan-pm
+"#,
+        );
+
+        let error = resolve_member_name(tmp.path(), "sam-designer")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("matches multiple members"));
+        assert!(error.contains("sam-designer-1-1"));
+        assert!(error.contains("sam-designer-2-1"));
+    }
+
+    #[test]
+    fn send_message_delivers_to_unique_instance_inbox() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_team_config(
+            tmp.path(),
+            r#"
+name: test
+roles:
+  - name: human
+    role_type: user
+    talks_to:
+      - sam-designer
+  - name: jordan-pm
+    role_type: manager
+    agent: claude
+    instances: 1
+  - name: sam-designer
+    role_type: engineer
+    agent: codex
+    instances: 1
+    talks_to:
+      - jordan-pm
+"#,
+        );
+
+        send_message(tmp.path(), "sam-designer", "hello").unwrap();
+
+        let root = inbox::inboxes_root(tmp.path());
+        assert!(inbox::pending_messages(&root, "sam-designer").unwrap().is_empty());
+
+        let pending = inbox::pending_messages(&root, "sam-designer-1-1").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].to, "sam-designer-1-1");
+        assert_eq!(pending[0].body, "hello");
     }
 
     #[test]
