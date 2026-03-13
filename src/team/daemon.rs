@@ -1398,8 +1398,7 @@ impl TeamDaemon {
 
     /// Update `@batty_status` on each pane border with state + timer countdowns.
     fn update_pane_status_labels(&self) {
-        let globally_paused =
-            super::pause_marker_path(&self.config.project_root).exists();
+        let globally_paused = super::pause_marker_path(&self.config.project_root).exists();
 
         for member in &self.config.members {
             if member.role_type == RoleType::User {

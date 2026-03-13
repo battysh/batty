@@ -1391,7 +1391,11 @@ roles:
         send_message(tmp.path(), "sam-designer", "hello").unwrap();
 
         let root = inbox::inboxes_root(tmp.path());
-        assert!(inbox::pending_messages(&root, "sam-designer").unwrap().is_empty());
+        assert!(
+            inbox::pending_messages(&root, "sam-designer")
+                .unwrap()
+                .is_empty()
+        );
 
         let pending = inbox::pending_messages(&root, "sam-designer-1-1").unwrap();
         assert_eq!(pending.len(), 1);
