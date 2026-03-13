@@ -215,16 +215,24 @@ impl TeamDaemon {
                 break;
             }
 
-            self.poll_watchers()?;
-            self.sync_launch_state_session_ids()?;
-            self.drain_legacy_command_queue()?;
-            self.deliver_inbox_messages()?;
-            self.maybe_auto_dispatch()?;
-            self.poll_telegram()?;
-            self.deliver_user_inbox()?;
-            self.maybe_fire_nudges()?;
-            self.maybe_generate_standup()?;
-            self.maybe_rotate_board()?;
+            self.run_loop_step("poll_watchers", |daemon| daemon.poll_watchers());
+            self.run_loop_step("sync_launch_state_session_ids", |daemon| {
+                daemon.sync_launch_state_session_ids()
+            });
+            self.run_loop_step("drain_legacy_command_queue", |daemon| {
+                daemon.drain_legacy_command_queue()
+            });
+            self.run_loop_step("deliver_inbox_messages", |daemon| {
+                daemon.deliver_inbox_messages()
+            });
+            self.run_loop_step("maybe_auto_dispatch", |daemon| daemon.maybe_auto_dispatch());
+            self.run_loop_step("poll_telegram", |daemon| daemon.poll_telegram());
+            self.run_loop_step("deliver_user_inbox", |daemon| daemon.deliver_user_inbox());
+            self.run_loop_step("maybe_fire_nudges", |daemon| daemon.maybe_fire_nudges());
+            self.run_loop_step("maybe_generate_standup", |daemon| {
+                daemon.maybe_generate_standup()
+            });
+            self.run_loop_step("maybe_rotate_board", |daemon| daemon.maybe_rotate_board());
             self.update_pane_status_labels();
 
             std::thread::sleep(self.poll_interval);
@@ -233,6 +241,15 @@ impl TeamDaemon {
         self.event_sink.emit(TeamEvent::daemon_stopped())?;
         info!("daemon stopped");
         Ok(())
+    }
+
+    fn run_loop_step<F>(&mut self, step: &str, action: F)
+    where
+        F: FnOnce(&mut Self) -> Result<()>,
+    {
+        if let Err(error) = action(self) {
+            warn!(step, error = %error, "daemon loop step failed; continuing");
+        }
     }
 
     /// Spawn the correct agent in each member's pane.
@@ -426,7 +443,13 @@ impl TeamDaemon {
 
             if completion_observed && self.active_task_id(name).is_some() {
                 info!(member = %name, "detected task completion");
-                self.handle_engineer_completion(name)?;
+                if let Err(error) = self.handle_engineer_completion(name) {
+                    warn!(
+                        member = %name,
+                        error = %error,
+                        "engineer completion handling failed; continuing"
+                    );
+                }
             }
         }
 
@@ -456,6 +479,12 @@ impl TeamDaemon {
             .join("team_config")
             .join("board");
         let board_dir_str = board_dir.to_string_lossy().to_string();
+        let manager_name = self
+            .config
+            .members
+            .iter()
+            .find(|m| m.name == engineer)
+            .and_then(|member| member.reports_to.clone());
 
         let (tests_passed, output_truncated) = run_tests_in_worktree(&worktree_dir)?;
         if tests_passed {
@@ -467,8 +496,8 @@ impl TeamDaemon {
                 MergeOutcome::Success => {
                     drop(_lock);
 
-                    let output = std::process::Command::new("kanban-md")
-                        .args([
+                    let board_update_ok = self.run_kanban_md_nonfatal(
+                        &[
                             "move",
                             &task_id.to_string(),
                             "done",
@@ -476,40 +505,35 @@ impl TeamDaemon {
                             engineer,
                             "--dir",
                             &board_dir_str,
-                        ])
-                        .output()
-                        .context("failed to mark task done after passing tests")?;
-                    if !output.status.success() {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        bail!("kanban-md move failed: {stderr}");
-                    }
+                        ],
+                        &format!("move task #{task_id} to done"),
+                        manager_name
+                            .as_deref()
+                            .into_iter()
+                            .chain(std::iter::once(engineer)),
+                    );
 
-                    let manager_target = self
-                        .config
-                        .members
-                        .iter()
-                        .find(|m| m.name == engineer)
-                        .and_then(|member| member.reports_to.clone())
-                        .and_then(|mgr_name| {
-                            self.config
-                                .pane_map
-                                .get(&mgr_name)
-                                .cloned()
-                                .map(|pane_id| (mgr_name, pane_id))
-                        });
-                    if let Some((ref mgr_name, ref mgr_pane)) = manager_target {
+                    if let Some(ref mgr_name) = manager_name {
                         let msg = format!(
-                            "[{engineer}] Task #{task_id} completed.\nTitle: {task_title}\nTests: passed\nMerge: success"
+                            "[{engineer}] Task #{task_id} completed.\nTitle: {task_title}\nTests: passed\nMerge: success{}",
+                            if board_update_ok {
+                                ""
+                            } else {
+                                "\nBoard: update failed; decide next board action manually."
+                            }
                         );
-                        message::inject_message(mgr_pane, engineer, &msg)?;
+                        self.queue_message(engineer, mgr_name, &msg)?;
                         self.mark_member_working(mgr_name);
-                        self.event_sink
-                            .emit(TeamEvent::message_routed(engineer, mgr_name))?;
                     }
 
-                    if let Some((ref mgr_name, _)) = manager_target {
+                    if let Some(ref mgr_name) = manager_name {
                         let rollup = format!(
-                            "Rollup: Task #{task_id} completed by {engineer}. Tests passed, merged to main."
+                            "Rollup: Task #{task_id} completed by {engineer}. Tests passed, merged to main.{}",
+                            if board_update_ok {
+                                ""
+                            } else {
+                                " Board automation failed; decide manually."
+                            }
                         );
                         self.notify_reports_to(mgr_name, &rollup)?;
                     }
@@ -527,64 +551,46 @@ impl TeamDaemon {
 
                     let attempt = self.increment_retry(engineer);
                     if attempt <= 2 {
-                        let Some(pane_id) = self.config.pane_map.get(engineer).cloned() else {
-                            bail!("no pane found for engineer '{engineer}'");
-                        };
                         let msg = format!(
                             "Merge conflict during rebase onto main (attempt {attempt}/2). Fix the conflicts in your worktree and try again:\n{conflict_info}"
                         );
-                        message::inject_message(&pane_id, "batty", &msg)?;
+                        self.queue_message("batty", engineer, &msg)?;
                         self.mark_member_working(engineer);
                         info!(engineer, attempt, "rebase conflict, sending back for retry");
                     } else {
-                        let manager_target = self
-                            .config
-                            .members
-                            .iter()
-                            .find(|m| m.name == engineer)
-                            .and_then(|member| member.reports_to.clone())
-                            .and_then(|mgr_name| {
-                                self.config
-                                    .pane_map
-                                    .get(&mgr_name)
-                                    .cloned()
-                                    .map(|pane_id| (mgr_name, pane_id))
-                            });
-                        if let Some((ref mgr_name, ref mgr_pane)) = manager_target {
+                        if let Some(ref mgr_name) = manager_name {
                             let msg = format!(
                                 "[{engineer}] task #{task_id} has unresolvable merge conflicts after 2 retries. Escalating.\n{conflict_info}"
                             );
-                            message::inject_message(mgr_pane, engineer, &msg)?;
+                            self.queue_message(engineer, mgr_name, &msg)?;
                             self.mark_member_working(mgr_name);
-                            self.event_sink
-                                .emit(TeamEvent::message_routed(engineer, mgr_name))?;
                         }
 
                         self.event_sink
                             .emit(TeamEvent::task_escalated(engineer, &task_id.to_string()))?;
 
-                        if let Some((ref mgr_name, _)) = manager_target {
+                        if let Some(ref mgr_name) = manager_name {
                             let escalation = format!(
                                 "ESCALATION: Task #{task_id} assigned to {engineer} has unresolvable merge conflicts. Task blocked on board."
                             );
                             self.notify_reports_to(mgr_name, &escalation)?;
                         }
 
-                        let output = std::process::Command::new("kanban-md")
-                            .args([
+                        self.run_kanban_md_nonfatal(
+                            &[
                                 "edit",
                                 &task_id.to_string(),
                                 "--block",
                                 "merge conflicts after 2 retries",
                                 "--dir",
                                 &board_dir_str,
-                            ])
-                            .output()
-                            .context("failed to block task after merge conflict retries")?;
-                        if !output.status.success() {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            bail!("kanban-md edit failed: {stderr}");
-                        }
+                            ],
+                            &format!("block task #{task_id} after merge conflict retries"),
+                            manager_name
+                                .as_deref()
+                                .into_iter()
+                                .chain(std::iter::once(engineer)),
+                        );
 
                         self.clear_active_task(engineer);
                         self.states.insert(engineer.to_string(), MemberState::Idle);
@@ -594,72 +600,86 @@ impl TeamDaemon {
                         self.update_automation_timers_for_state(engineer, MemberState::Idle);
                     }
                 }
+                MergeOutcome::MergeFailure(merge_info) => {
+                    drop(_lock);
+
+                    let manager_notice = format!(
+                        "Task #{task_id} from {engineer} passed tests but could not be merged to main.\n{merge_info}\nDecide whether to clean the main worktree, retry the merge, or redirect the engineer."
+                    );
+                    if let Some(ref mgr_name) = manager_name {
+                        self.queue_message("daemon", mgr_name, &manager_notice)?;
+                        self.mark_member_working(mgr_name);
+                        self.notify_reports_to(mgr_name, &manager_notice)?;
+                    }
+
+                    let engineer_notice = format!(
+                        "Your task passed tests, but Batty could not merge it into main.\n{merge_info}\nWait for lead direction before making more changes."
+                    );
+                    self.queue_message("daemon", engineer, &engineer_notice)?;
+
+                    self.event_sink
+                        .emit(TeamEvent::task_escalated(engineer, &task_id.to_string()))?;
+                    self.clear_active_task(engineer);
+                    self.states.insert(engineer.to_string(), MemberState::Idle);
+                    if let Some(watcher) = self.watchers.get_mut(engineer) {
+                        watcher.deactivate();
+                    }
+                    self.update_automation_timers_for_state(engineer, MemberState::Idle);
+                    warn!(
+                        engineer,
+                        task_id,
+                        error = %merge_info,
+                        "merge into main failed after passing tests; escalated without exiting daemon"
+                    );
+                }
             }
             return Ok(());
         }
 
         let attempt = self.increment_retry(engineer);
         if attempt <= 2 {
-            let Some(pane_id) = self.config.pane_map.get(engineer).cloned() else {
-                bail!("no pane found for engineer '{engineer}'");
-            };
             let msg = format!(
                 "Tests failed (attempt {attempt}/2). Fix the failures and try again:\n{output_truncated}"
             );
-            message::inject_message(&pane_id, "batty", &msg)?;
+            self.queue_message("batty", engineer, &msg)?;
             self.mark_member_working(engineer);
             info!(engineer, attempt, "test failure, sending back for retry");
             return Ok(());
         }
 
-        let manager_target = self
-            .config
-            .members
-            .iter()
-            .find(|m| m.name == engineer)
-            .and_then(|member| member.reports_to.clone())
-            .and_then(|mgr_name| {
-                self.config
-                    .pane_map
-                    .get(&mgr_name)
-                    .cloned()
-                    .map(|pane_id| (mgr_name, pane_id))
-            });
-        if let Some((ref mgr_name, ref mgr_pane)) = manager_target {
+        if let Some(ref mgr_name) = manager_name {
             let msg = format!(
                 "[{engineer}] task #{task_id} failed tests after 2 retries. Escalating.\nLast output:\n{output_truncated}"
             );
-            message::inject_message(mgr_pane, engineer, &msg)?;
+            self.queue_message(engineer, mgr_name, &msg)?;
             self.mark_member_working(mgr_name);
-            self.event_sink
-                .emit(TeamEvent::message_routed(engineer, mgr_name))?;
         }
 
         self.event_sink
             .emit(TeamEvent::task_escalated(engineer, &task_id.to_string()))?;
 
-        if let Some((ref mgr_name, _)) = manager_target {
+        if let Some(ref mgr_name) = manager_name {
             let escalation = format!(
                 "ESCALATION: Task #{task_id} assigned to {engineer} failed tests after 2 retries. Task blocked on board."
             );
             self.notify_reports_to(mgr_name, &escalation)?;
         }
 
-        let output = std::process::Command::new("kanban-md")
-            .args([
+        self.run_kanban_md_nonfatal(
+            &[
                 "edit",
                 &task_id.to_string(),
                 "--block",
                 "tests failed after 2 retries",
                 "--dir",
                 &board_dir_str,
-            ])
-            .output()
-            .context("failed to block task after max retries")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("kanban-md edit failed: {stderr}");
-        }
+            ],
+            &format!("block task #{task_id} after max test retries"),
+            manager_name
+                .as_deref()
+                .into_iter()
+                .chain(std::iter::once(engineer)),
+        );
 
         self.clear_active_task(engineer);
         self.states.insert(engineer.to_string(), MemberState::Idle);
@@ -695,11 +715,58 @@ impl TeamDaemon {
         self.retry_counts.remove(engineer);
     }
 
+    fn run_kanban_md_nonfatal<'a, I>(&mut self, args: &[&str], action: &str, recipients: I) -> bool
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        match std::process::Command::new("kanban-md").args(args).output() {
+            Ok(output) if output.status.success() => true,
+            Ok(output) => {
+                let detail = describe_command_failure("kanban-md", args, &output);
+                self.report_nonfatal_kanban_failure(action, &detail, recipients);
+                false
+            }
+            Err(error) => {
+                let detail = format!("failed to execute `kanban-md {}`: {error}", args.join(" "));
+                self.report_nonfatal_kanban_failure(action, &detail, recipients);
+                false
+            }
+        }
+    }
+
+    fn report_nonfatal_kanban_failure<'a, I>(&mut self, action: &str, detail: &str, recipients: I)
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        warn!(
+            action,
+            error = detail,
+            "kanban-md command failed; continuing"
+        );
+
+        let body = format!(
+            "Board automation failed while trying to {action}.\n{detail}\nDecide the next board action manually."
+        );
+        let mut notified = HashSet::new();
+        for recipient in recipients {
+            if !notified.insert(recipient.to_string()) {
+                continue;
+            }
+            if let Err(error) = self.queue_daemon_message(recipient, &body) {
+                warn!(to = recipient, error = %error, "failed to relay kanban-md failure");
+            }
+        }
+    }
+
     fn queue_daemon_message(&mut self, recipient: &str, body: &str) -> Result<()> {
+        self.queue_message("daemon", recipient, body)
+    }
+
+    fn queue_message(&mut self, from: &str, recipient: &str, body: &str) -> Result<()> {
         if let Some(channel) = self.channels.get(recipient) {
             channel.send(body)?;
             self.event_sink
-                .emit(TeamEvent::message_routed("daemon", recipient))?;
+                .emit(TeamEvent::message_routed(from, recipient))?;
             return Ok(());
         }
 
@@ -710,15 +777,33 @@ impl TeamDaemon {
                 .iter()
                 .any(|member| member.name == recipient);
         if !known_recipient {
-            debug!(recipient, "skipping daemon reply for unknown recipient");
+            debug!(from, recipient, "skipping message for unknown recipient");
             return Ok(());
         }
 
+        if let Some(pane_id) = self.config.pane_map.get(recipient) {
+            match message::inject_message(pane_id, from, body) {
+                Ok(()) => {
+                    self.event_sink
+                        .emit(TeamEvent::message_routed(from, recipient))?;
+                    return Ok(());
+                }
+                Err(error) => {
+                    warn!(
+                        from,
+                        to = recipient,
+                        error = %error,
+                        "live message delivery failed; queueing to inbox"
+                    );
+                }
+            }
+        }
+
         let root = inbox::inboxes_root(&self.config.project_root);
-        let msg = inbox::InboxMessage::new_send("daemon", recipient, body);
+        let msg = inbox::InboxMessage::new_send(from, recipient, body);
         inbox::deliver_to_inbox(&root, &msg)?;
         self.event_sink
-            .emit(TeamEvent::message_routed("daemon", recipient))?;
+            .emit(TeamEvent::message_routed(from, recipient))?;
         Ok(())
     }
 
@@ -826,13 +911,8 @@ impl TeamDaemon {
         let Some(parent_name) = parent else {
             return Ok(());
         };
-        let Some(parent_pane) = self.config.pane_map.get(&parent_name).cloned() else {
-            return Ok(());
-        };
-        message::inject_message(&parent_pane, from_role, msg)?;
+        self.queue_message(from_role, &parent_name, msg)?;
         self.mark_member_working(&parent_name);
-        self.event_sink
-            .emit(TeamEvent::message_routed(from_role, &parent_name))?;
         Ok(())
     }
 
@@ -1128,8 +1208,17 @@ impl TeamDaemon {
                 break;
             };
 
-            let output = std::process::Command::new("kanban-md")
-                .args([
+            let board_failure_recipients: Vec<String> = self
+                .config
+                .members
+                .iter()
+                .filter(|member| {
+                    matches!(member.role_type, RoleType::Architect | RoleType::Manager)
+                })
+                .map(|member| member.name.clone())
+                .collect();
+            if !self.run_kanban_md_nonfatal(
+                &[
                     "pick",
                     "--claim",
                     &engineer_name,
@@ -1137,12 +1226,11 @@ impl TeamDaemon {
                     "in-progress",
                     "--dir",
                     &board_dir_str,
-                ])
-                .output()
-                .context("failed to run kanban-md pick for auto-dispatch")?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                bail!("kanban-md pick failed: {stderr}");
+                ],
+                &format!("pick the next task for {engineer_name}"),
+                board_failure_recipients.iter().map(String::as_str),
+            ) {
+                break;
             }
 
             let assignment_message =
@@ -1352,12 +1440,10 @@ impl TeamDaemon {
             };
 
             if fire {
-                if let Some(pane_id) = self.config.pane_map.get(&name) {
-                    let text = self.nudges[&name].text.clone();
-                    info!(member = %name, "firing nudge (idle timeout)");
-                    message::inject_message(pane_id, "daemon", &text)?;
-                    self.event_sink
-                        .emit(TeamEvent::message_routed("daemon", &name))?;
+                let text = self.nudges[&name].text.clone();
+                info!(member = %name, "firing nudge (idle timeout)");
+                if let Err(error) = self.queue_message("daemon", &name, &text) {
+                    warn!(member = %name, error = %error, "failed to deliver nudge");
                 }
                 self.nudges.get_mut(&name).unwrap().fired_this_idle = true;
             }
@@ -1613,6 +1699,20 @@ impl TeamDaemon {
             .map(|m| m.role_name.clone())
             .unwrap_or_else(|| member_name.to_string())
     }
+}
+
+fn describe_command_failure(command: &str, args: &[&str], output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let details = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        format!("process exited with status {}", output.status)
+    };
+
+    format!("`{command} {}` failed: {details}", args.join(" "))
 }
 
 /// Extract the `## Nudge` section from a prompt .md file.
@@ -2155,6 +2255,8 @@ fn resolve_binary(name: &str) -> String {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output};
     use std::sync::{Arc, Mutex};
 
     use crate::team::comms::Channel;
@@ -2175,6 +2277,63 @@ mod tests {
         fn channel_type(&self) -> &str {
             "test"
         }
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> Output {
+        Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap()
+    }
+
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let output = git(dir, args);
+        assert!(
+            output.status.success(),
+            "git {:?} failed:\nstdout={}\nstderr={}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_git_repo(tmp: &tempfile::TempDir) -> PathBuf {
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::create_dir_all(repo.join(".batty").join("team_config")).unwrap();
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"batty-daemon-test\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("src").join("lib.rs"),
+            "pub fn smoke() -> bool { true }\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn smoke_test() {\n        assert!(smoke());\n    }\n}\n",
+        )
+        .unwrap();
+        git_ok(tmp.path(), &["init", "-b", "main", repo.to_str().unwrap()]);
+        git_ok(&repo, &["config", "user.email", "batty@example.com"]);
+        git_ok(&repo, &["config", "user.name", "Batty Tests"]);
+        git_ok(&repo, &["add", "."]);
+        git_ok(&repo, &["commit", "-m", "initial"]);
+        repo
+    }
+
+    fn write_task_file(project_root: &Path, id: u32, title: &str) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join(format!("{id:03}-{title}.md")),
+            format!(
+                "---\nid: {id}\ntitle: {title}\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\n---\n\nTask description.\n"
+            ),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -3158,6 +3317,217 @@ mod tests {
         daemon.active_tasks.insert("eng-1".into(), 42);
         daemon.handle_engineer_completion("eng-1").unwrap();
         assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+    }
+
+    #[test]
+    fn nonfatal_kanban_failures_are_relayed_to_known_members() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![manager],
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        daemon.report_nonfatal_kanban_failure(
+            "move task #42 to done",
+            "kanban-md stderr goes here",
+            ["manager"],
+        );
+
+        let messages =
+            inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "manager").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].from, "daemon");
+        assert!(messages[0].body.contains("move task #42 to done"));
+        assert!(messages[0].body.contains("kanban-md stderr goes here"));
+    }
+
+    #[test]
+    fn queue_message_falls_back_to_inbox_when_live_delivery_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![manager],
+                pane_map: HashMap::from([("manager".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        daemon
+            .queue_message("eng-1", "manager", "Need review on merge handling.")
+            .unwrap();
+
+        let messages =
+            inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "manager").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].from, "eng-1");
+        assert!(messages[0].body.contains("Need review on merge handling."));
+    }
+
+    #[test]
+    fn handle_engineer_completion_escalates_merge_failures_without_crashing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        write_task_file(&repo, 42, "merge-blocked-task");
+
+        std::fs::write(repo.join("journal.md"), "base\n").unwrap();
+        git_ok(&repo, &["add", "journal.md"]);
+        git_ok(&repo, &["commit", "-m", "add journal"]);
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        std::fs::write(worktree_dir.join("journal.md"), "engineer version\n").unwrap();
+        git_ok(&worktree_dir, &["add", "journal.md"]);
+        git_ok(&worktree_dir, &["commit", "-m", "engineer update"]);
+
+        std::fs::write(repo.join("journal.md"), "dirty main\n").unwrap();
+
+        let members = vec![
+            MemberInstance {
+                name: "manager".to_string(),
+                role_name: "manager".to_string(),
+                role_type: RoleType::Manager,
+                agent: Some("claude".to_string()),
+                prompt: None,
+                reports_to: None,
+                use_worktrees: false,
+            },
+            MemberInstance {
+                name: "eng-1".to_string(),
+                role_name: "eng-1".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("claude".to_string()),
+                prompt: None,
+                reports_to: Some("manager".to_string()),
+                use_worktrees: true,
+            },
+        ];
+
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: repo.clone(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members,
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&repo.join(".batty").join("team_config").join("events.jsonl"))
+                .unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        daemon.active_tasks.insert("eng-1".to_string(), 42);
+        daemon
+            .states
+            .insert("eng-1".to_string(), MemberState::Working);
+
+        daemon.handle_engineer_completion("eng-1").unwrap();
+
+        assert_eq!(daemon.active_task_id("eng-1"), None);
+        assert_eq!(daemon.states.get("eng-1"), Some(&MemberState::Idle));
+
+        let manager_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
+        assert_eq!(manager_messages.len(), 1);
+        assert_eq!(manager_messages[0].from, "daemon");
+        assert!(manager_messages[0]
+            .body
+            .contains("could not be merged to main"));
+        assert!(manager_messages[0]
+            .body
+            .contains("would be overwritten by merge")
+            || manager_messages[0]
+                .body
+                .contains("Please commit your changes or stash them"));
+
+        let engineer_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
+        assert_eq!(engineer_messages.len(), 1);
+        assert_eq!(engineer_messages[0].from, "daemon");
+        assert!(engineer_messages[0]
+            .body
+            .contains("could not merge it into main"));
     }
 
     #[test]

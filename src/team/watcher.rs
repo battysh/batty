@@ -287,41 +287,27 @@ impl SessionWatcher {
 /// very bottom: when Claude is processing, it appends `· esc to interrupt`.
 /// If we detect that indicator we return `false` immediately.
 fn is_at_agent_prompt(capture: &str) -> bool {
-    // Use 12 lines to match classify_capture_state's spinner window.
-    // Claude Code's idle layout includes separator lines (────) and a
-    // status bar below the ❯ prompt, which can push the prompt past a
-    // 5-line window and cause false Unknown classifications.
+    // Use 12 non-empty lines to account for Claude's separators and status
+    // bar pushing the prompt further up than a tight tail window.
     let trimmed = recent_non_empty_lines(capture, 12);
-    let bottom_lines = recent_lines(capture, 12);
 
-    // Claude Code shows "esc to interrupt" in the bottom status bar while working
-    for line in &trimmed {
+    // Claude Code shows "esc to interrupt" in the current bottom status bar
+    // while working. Restrict this check to the raw bottom window so older
+    // non-empty lines higher in the transcript do not pin the watcher active.
+    for line in &recent_lines(capture, 6) {
         if line.contains("esc to interrupt") {
             return false;
         }
     }
 
-    // Claude can also land in an interrupt-resolution UI after a blocked tool call
-    // or nested interactive flow. That still represents an active task, not an idle
-    // prompt waiting for a fresh assignment.
-    if bottom_lines
-        .iter()
-        .any(|line| line.contains("What should Claude do instead?"))
-        || bottom_lines
-            .iter()
-            .any(|line| line.contains("Conversation interrupted"))
-    {
-        return false;
-    }
-
     for line in &trimmed {
         let l = line.trim();
         // Claude Code idle prompt
-        if l == "❯" || l.starts_with("❯ ") {
+        if starts_with_agent_prompt(l, '❯') {
             return true;
         }
         // Codex idle composer prompt
-        if l == "›" || l.starts_with("› ") {
+        if starts_with_agent_prompt(l, '›') {
             return true;
         }
         // Fell back to shell
@@ -330,6 +316,18 @@ fn is_at_agent_prompt(capture: &str) -> bool {
         }
     }
     false
+}
+
+fn starts_with_agent_prompt(line: &str, prompt: char) -> bool {
+    let Some(rest) = line.strip_prefix(prompt) else {
+        return false;
+    };
+    rest.is_empty()
+        || rest
+            .chars()
+            .next()
+            .map(char::is_whitespace)
+            .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,8 +353,15 @@ fn recent_lines(capture: &str, limit: usize) -> Vec<&str> {
 fn classify_capture_state(capture: &str) -> ScreenState {
     let trimmed = recent_non_empty_lines(capture, 12);
 
-    if trimmed.iter().any(|line| line.contains("esc to interrupt")) {
+    if recent_lines(capture, 6)
+        .iter()
+        .any(|line| line.contains("esc to interrupt"))
+    {
         return ScreenState::Active;
+    }
+
+    if is_at_agent_prompt(capture) {
+        return ScreenState::Idle;
     }
 
     if trimmed
@@ -364,10 +369,6 @@ fn classify_capture_state(capture: &str) -> ScreenState {
         .any(|line| looks_like_claude_spinner_status(line))
     {
         return ScreenState::Active;
-    }
-
-    if is_at_agent_prompt(capture) {
-        return ScreenState::Idle;
     }
 
     ScreenState::Unknown
@@ -855,6 +856,23 @@ mod tests {
     }
 
     #[test]
+    fn claude_pasted_text_prompt_counts_as_idle() {
+        let capture = concat!(
+            "✻ Crunched for 54s\n",
+            "────────────────────────────────────────────────────────\n",
+            "❯\u{00a0}[Pasted text #2 +40 lines]\n",
+            "  --- Message from human ---\n",
+            "  Provide me report of latest development\n",
+            "  --- end message ---\n",
+            "  To reply, run: batty send human \"<your response>\"\n",
+            "────────────────────────────────────────────────────────\n",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
+        );
+        assert!(is_at_agent_prompt(capture));
+        assert_eq!(classify_capture_state(capture), ScreenState::Idle);
+    }
+
+    #[test]
     fn claude_interrupted_prompt_not_idle() {
         let capture = concat!(
             "■ Conversation interrupted - tell the model what to do differently.\n",
@@ -864,7 +882,8 @@ mod tests {
             "❯ \n",
             "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
         );
-        assert!(!is_at_agent_prompt(capture));
+        assert!(is_at_agent_prompt(capture));
+        assert_eq!(classify_capture_state(capture), ScreenState::Idle);
     }
 
     #[test]
@@ -876,6 +895,47 @@ mod tests {
             "────────────────────────────\n",
             "❯ \n",
             "────────────────────────────\n",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
+        );
+        assert!(is_at_agent_prompt(capture));
+        assert_eq!(classify_capture_state(capture), ScreenState::Idle);
+    }
+
+    #[test]
+    fn claude_recent_interruption_without_esc_still_counts_as_idle() {
+        let capture = concat!(
+            "--- Message from manager ---\n",
+            "No worries about the interrupted background task.\n",
+            "--- end message ---\n",
+            "To reply, run: batty send manager \"<your response>\"\n",
+            "  ⎿  Interrupted · What should Claude do instead?\n",
+            "\n",
+            "⏺ Background command stopped\n",
+            "────────────────────────────────────────────────────────\n",
+            "❯ \n",
+            "────────────────────────────────────────────────────────\n",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
+        );
+        assert!(is_at_agent_prompt(capture));
+        assert_eq!(classify_capture_state(capture), ScreenState::Idle);
+    }
+
+    #[test]
+    fn stale_esc_line_above_latest_prompt_does_not_pin_active() {
+        let capture = concat!(
+            "⏺ Bash(tmux capture-pane -t batty-mafia-adversarial-research:0.5 -p 2>/dev/null | tail -30)\n",
+            "  ⎿  • Working (5s • esc to interrupt)\n",
+            "     • Messages to be submitted after next tool call (press\n",
+            "     … +9 lines (ctrl+o to expand)\n",
+            "\n",
+            "⏺ Good, the message is queued and will be processed. Let me wait a bit and check back.\n",
+            "\n",
+            "⏺ Bash(sleep 30 && tmux capture-pane -t batty-mafia-adversarial-research:0.5 -p 2>/dev/null | tail -30)\n",
+            "  ⎿  Interrupted · What should Claude do instead?\n",
+            "\n",
+            "───────────────────────────────────────────────────────────────────────────────────────────────────────────\n",
+            "❯\u{00a0}\n",
+            "───────────────────────────────────────────────────────────────────────────────────────────────────────────\n",
             "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
         );
         assert!(is_at_agent_prompt(capture));
