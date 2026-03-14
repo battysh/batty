@@ -22,12 +22,15 @@ pub struct TeamConfig {
 pub struct BoardConfig {
     #[serde(default = "default_rotation_threshold")]
     pub rotation_threshold: u32,
+    #[serde(default = "default_board_auto_dispatch")]
+    pub auto_dispatch: bool,
 }
 
 impl Default for BoardConfig {
     fn default() -> Self {
         Self {
             rotation_threshold: default_rotation_threshold(),
+            auto_dispatch: default_board_auto_dispatch(),
         }
     }
 }
@@ -120,6 +123,10 @@ pub enum RoleType {
 
 fn default_rotation_threshold() -> u32 {
     20
+}
+
+fn default_board_auto_dispatch() -> bool {
+    true
 }
 
 fn default_standup_interval() -> u64 {
@@ -315,6 +322,7 @@ roles:
 name: mafia-solver
 board:
   rotation_threshold: 20
+  auto_dispatch: false
 standup:
   interval_secs: 1200
   output_lines: 30
@@ -354,6 +362,7 @@ roles:
         let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.name, "mafia-solver");
         assert_eq!(config.board.rotation_threshold, 20);
+        assert!(!config.board.auto_dispatch);
         assert_eq!(config.standup.interval_secs, 1200);
         let layout = config.layout.as_ref().unwrap();
         assert_eq!(layout.zones.len(), 3);
@@ -372,6 +381,7 @@ roles:
 "#;
         let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.board.rotation_threshold, 20);
+        assert!(config.board.auto_dispatch);
         assert_eq!(config.standup.interval_secs, 1200);
         assert_eq!(config.standup.output_lines, 30);
         assert_eq!(config.roles[0].instances, 1);

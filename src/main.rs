@@ -157,6 +157,7 @@ fn main() -> Result<()> {
                     "members": members.len(),
                     "board": {
                         "rotation_threshold": team_config.board.rotation_threshold,
+                        "auto_dispatch": team_config.board.auto_dispatch,
                     },
                     "standup": {
                         "interval_secs": team_config.standup.interval_secs,
@@ -174,6 +175,7 @@ fn main() -> Result<()> {
                     "Board rotation threshold: {}",
                     team_config.board.rotation_threshold
                 );
+                println!("Board auto-dispatch: {}", team_config.board.auto_dispatch);
                 println!("Standup interval: {}s", team_config.standup.interval_secs);
             }
         }
