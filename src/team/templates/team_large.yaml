@@ -2,6 +2,7 @@ name: my-project
 
 board:
   rotation_threshold: 20
+  auto_dispatch: false
 
 standup:
   interval_secs: 1200

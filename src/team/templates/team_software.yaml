@@ -2,6 +2,7 @@ name: my-product
 
 board:
   rotation_threshold: 25
+  auto_dispatch: false
 
 standup:
   interval_secs: 900

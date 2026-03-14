@@ -2,6 +2,7 @@ name: my-research-project
 
 board:
   rotation_threshold: 30
+  auto_dispatch: false
 
 standup:
   interval_secs: 1800

@@ -1385,6 +1385,10 @@ impl TeamDaemon {
     }
 
     fn maybe_auto_dispatch(&mut self) -> Result<()> {
+        if !self.config.team_config.board.auto_dispatch {
+            return Ok(());
+        }
+
         if self.last_auto_dispatch.elapsed() < Duration::from_secs(10) {
             return Ok(());
         }
@@ -3482,6 +3486,46 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let before = daemon.last_auto_dispatch;
+        daemon.maybe_auto_dispatch().unwrap();
+        assert_eq!(daemon.last_auto_dispatch, before);
+    }
+
+    #[test]
+    fn test_maybe_auto_dispatch_skips_when_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig {
+                        auto_dispatch: false,
+                        ..BoardConfig::default()
+                    },
+                    standup: StandupConfig::default(),
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: Vec::new(),
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now() - Duration::from_secs(30),
             poll_interval: Duration::from_secs(5),
         };
 
