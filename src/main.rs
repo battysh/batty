@@ -243,6 +243,10 @@ fn main() -> Result<()> {
             println!("Nudges and standups resumed.");
         }
 
+        Command::Load => {
+            team::show_load(&root)?;
+        }
+
         Command::Telegram => {
             team::setup_telegram(&root)?;
         }

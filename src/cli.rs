@@ -117,6 +117,9 @@ pub enum Command {
     /// Set up Telegram bot for human communication
     Telegram,
 
+    /// Estimate team load and show recent load history
+    Load,
+
     /// Internal: run the daemon loop (spawned by `batty start`)
     #[command(hide = true)]
     Daemon {
@@ -332,6 +335,12 @@ mod tests {
     fn telegram_subcommand_parses() {
         let cli = Cli::parse_from(["batty", "telegram"]);
         assert!(matches!(cli.command, Command::Telegram));
+    }
+
+    #[test]
+    fn load_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "load"]);
+        assert!(matches!(cli.command, Command::Load));
     }
 
     #[test]
