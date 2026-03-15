@@ -1,14 +1,15 @@
 //! Structured JSONL event stream for external consumers.
 
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+
 pub struct TeamEvent {
     pub event: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -23,6 +24,14 @@ pub struct TeamEvent {
     pub to: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restart: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_members: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_members: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_running: Option<bool>,
     pub ts: u64,
 }
 
@@ -43,6 +52,10 @@ impl TeamEvent {
             from: None,
             to: None,
             restart: None,
+            load: None,
+            working_members: None,
+            total_members: None,
+            session_running: None,
             ts: Self::now(),
         }
     }
@@ -56,6 +69,10 @@ impl TeamEvent {
             from: None,
             to: None,
             restart: None,
+            load: None,
+            working_members: None,
+            total_members: None,
+            session_running: None,
             ts: Self::now(),
         }
     }
@@ -69,6 +86,10 @@ impl TeamEvent {
             from: None,
             to: None,
             restart: None,
+            load: None,
+            working_members: None,
+            total_members: None,
+            session_running: None,
             ts: Self::now(),
         }
     }
@@ -82,6 +103,10 @@ impl TeamEvent {
             from: None,
             to: None,
             restart: None,
+            load: None,
+            working_members: None,
+            total_members: None,
+            session_running: None,
             ts: Self::now(),
         }
     }
@@ -95,6 +120,10 @@ impl TeamEvent {
             from: None,
             to: None,
             restart: None,
+            load: None,
+            working_members: None,
+            total_members: None,
+            session_running: None,
             ts: Self::now(),
         }
     }
@@ -108,6 +137,10 @@ impl TeamEvent {
             from: None,
             to: None,
             restart: None,
+            load: None,
+            working_members: None,
+            total_members: None,
+            session_running: None,
             ts: Self::now(),
         }
     }
@@ -121,6 +154,10 @@ impl TeamEvent {
             from: None,
             to: None,
             restart: Some(restart),
+            load: None,
+            working_members: None,
+            total_members: None,
+            session_running: None,
             ts: Self::now(),
         }
     }
@@ -134,6 +171,10 @@ impl TeamEvent {
             from: Some(from.into()),
             to: Some(to.into()),
             restart: None,
+            load: None,
+            working_members: None,
+            total_members: None,
+            session_running: None,
             ts: Self::now(),
         }
     }
@@ -147,6 +188,36 @@ impl TeamEvent {
             from: None,
             to: None,
             restart: None,
+            load: None,
+            working_members: None,
+            total_members: None,
+            session_running: None,
+            ts: Self::now(),
+        }
+    }
+
+    pub fn load_snapshot(
+        working_members: u32,
+        total_members: u32,
+        session_running: bool,
+    ) -> Self {
+        let load = if total_members == 0 {
+            0.0
+        } else {
+            working_members as f64 / total_members as f64
+        };
+        Self {
+            event: "load_snapshot".into(),
+            role: None,
+            task: None,
+            recipient: None,
+            from: None,
+            to: None,
+            restart: None,
+            load: Some(load),
+            working_members: Some(working_members),
+            total_members: Some(total_members),
+            session_running: Some(session_running),
             ts: Self::now(),
         }
     }
@@ -192,6 +263,24 @@ impl EventSink {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+pub fn read_events(path: &Path) -> Result<Vec<TeamEvent>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(path).context("failed to read event log")?;
+    let mut events = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(event) = serde_json::from_str::<TeamEvent>(line) {
+            events.push(event);
+        }
+    }
+    Ok(events)
 }
 
 #[cfg(test)]
@@ -246,6 +335,7 @@ mod tests {
             ("member_crashed", TeamEvent::member_crashed("eng-1", true)),
             ("message_routed", TeamEvent::message_routed("a", "b")),
             ("agent_spawned", TeamEvent::agent_spawned("eng-1")),
+            ("load_snapshot", TeamEvent::load_snapshot(2, 5, true)),
         ];
         for (expected_event, event) in &variants {
             let json = serde_json::to_string(event).unwrap();
@@ -253,6 +343,34 @@ mod tests {
             assert_eq!(parsed["event"].as_str().unwrap(), *expected_event);
             assert!(parsed["ts"].as_u64().is_some());
         }
+    }
+
+    #[test]
+    fn load_snapshot_serializes_optional_metrics() {
+        let event = TeamEvent::load_snapshot(3, 7, false);
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"load_snapshot\""));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["load"].as_f64().unwrap(), 3.0 / 7.0);
+        assert_eq!(parsed["working_members"].as_u64().unwrap(), 3);
+        assert_eq!(parsed["total_members"].as_u64().unwrap(), 7);
+        assert_eq!(parsed["session_running"].as_bool().unwrap(), false);
+    }
+
+    #[test]
+    fn read_events_parses_all_known_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("events.jsonl");
+        let mut sink = EventSink::new(&path).unwrap();
+        sink.emit(TeamEvent::daemon_started()).unwrap();
+        sink.emit(TeamEvent::load_snapshot(1, 4, true)).unwrap();
+        sink.emit(TeamEvent::load_snapshot(2, 4, true)).unwrap();
+
+        let events = read_events(&path).unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[1].event, "load_snapshot");
+        assert_eq!(events[1].working_members, Some(1));
+        assert_eq!(events[2].total_members, Some(4));
     }
 
     #[test]
