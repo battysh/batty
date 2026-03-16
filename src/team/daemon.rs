@@ -861,6 +861,61 @@ impl TeamDaemon {
         self.update_automation_timers_for_state(member_name, MemberState::Working);
     }
 
+    /// After injecting a message, verify the agent started working.
+    ///
+    /// Polls the pane for up to `max_attempts` rounds. If the pane still shows
+    /// an agent prompt (idle), resends Enter to unstick the submission.
+    /// Returns true if the agent transitioned to working, false if still stuck.
+    fn verify_message_delivered(&mut self, recipient: &str, max_attempts: u32) -> bool {
+        let Some(pane_id) = self.config.pane_map.get(recipient).cloned() else {
+            return true; // No pane to verify
+        };
+
+        for attempt in 1..=max_attempts {
+            // Wait for the agent to start processing
+            std::thread::sleep(Duration::from_secs(2));
+
+            // Capture the pane and check state
+            let capture = match tmux::capture_pane(&pane_id) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(recipient, error = %e, "failed to capture pane for delivery verification");
+                    return true; // Can't verify, assume OK
+                }
+            };
+
+            // If pane shows spinner or interrupt footer, agent is working
+            if !super::watcher::is_at_agent_prompt(&capture) {
+                debug!(
+                    recipient,
+                    attempt, "message delivery verified: agent is working"
+                );
+                return true;
+            }
+
+            // Agent is still at prompt — the Enter didn't land. Retry.
+            warn!(
+                recipient,
+                attempt, "agent still at prompt after message injection; resending Enter"
+            );
+            if let Err(e) = tmux::send_keys(&pane_id, "", true) {
+                warn!(recipient, error = %e, "failed to resend Enter");
+            }
+        }
+
+        // After all attempts, check one final time
+        std::thread::sleep(Duration::from_secs(2));
+        let capture = tmux::capture_pane(&pane_id).unwrap_or_default();
+        let accepted = !super::watcher::is_at_agent_prompt(&capture);
+        if !accepted {
+            warn!(
+                recipient,
+                max_attempts, "message may be stuck — agent still at prompt after retries"
+            );
+        }
+        accepted
+    }
+
     fn active_task_id(&self, engineer: &str) -> Option<u32> {
         self.active_tasks.get(engineer).copied()
     }
@@ -954,6 +1009,7 @@ impl TeamDaemon {
             match message::inject_message(pane_id, from, body) {
                 Ok(()) => {
                     self.emit_event(TeamEvent::message_routed(from, recipient));
+                    self.verify_message_delivered(recipient, 3);
                     return Ok(MessageDelivery::LivePane);
                 }
                 Err(error) => {
@@ -1200,6 +1256,7 @@ impl TeamDaemon {
                     continue;
                 }
 
+                let is_send = matches!(msg.msg_type, inbox::MessageType::Send);
                 let delivery_result = match msg.msg_type {
                     inbox::MessageType::Send => {
                         info!(from = %msg.from, to = %name, id = %msg.id, "delivering inbox message");
@@ -1221,6 +1278,9 @@ impl TeamDaemon {
                     Ok(()) => {
                         delivered_any = true;
                         mark_delivered = true;
+                        if is_send {
+                            self.verify_message_delivered(name, 3);
+                        }
                     }
                     Err(error) => {
                         warn!(
