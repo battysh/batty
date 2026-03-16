@@ -29,7 +29,10 @@ Commands:
   ack          Acknowledge (mark delivered) a message in a member's inbox
   merge        Merge an engineer's worktree branch into main
   completions  Generate shell completions
+  pause        Pause nudges and standups
+  resume       Resume nudges and standups
   telegram     Set up Telegram bot for human communication
+  load         Estimate team load and show recent load history
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -244,6 +247,23 @@ Options:
           Print help (see a summary with '-h')
 ```
 
+## `batty load`
+
+Estimate team load and show recent load history
+
+```text
+Estimate team load and show recent load history
+
+Usage: batty load [OPTIONS]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
 ## `batty merge`
 
 Merge an engineer's worktree branch into main
@@ -256,6 +276,23 @@ Usage: batty merge [OPTIONS] <ENGINEER>
 Arguments:
   <ENGINEER>
           Engineer instance name (e.g., "eng-1-1")
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty pause`
+
+Pause nudges and standups
+
+```text
+Pause nudges and standups
+
+Usage: batty pause [OPTIONS]
 
 Options:
   -v, --verbose...
@@ -280,6 +317,23 @@ Arguments:
 
   <ID>
           Message ID (or prefix) from `batty inbox` output
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty resume`
+
+Resume nudges and standups
+
+```text
+Resume nudges and standups
+
+Usage: batty resume [OPTIONS]
 
 Options:
   -v, --verbose...
