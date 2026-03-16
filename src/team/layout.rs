@@ -14,6 +14,13 @@ use super::config::{LayoutConfig, RoleType};
 use super::hierarchy::MemberInstance;
 use crate::tmux;
 
+#[derive(Debug, Clone)]
+struct ZonePlan<'a> {
+    width_pct: u32,
+    members: Vec<&'a MemberInstance>,
+    horizontal_columns: usize,
+}
+
 /// Build the tmux layout for a team session.
 ///
 /// Creates the session with the first member's pane, then splits to create
@@ -85,9 +92,9 @@ pub fn build_layout(
     //   Split 1: source = zones [0,1,2] = 100%. New pane gets (20+60)/100 = 80%.
     //   Split 2: source = zones [1,2] = 80%.  New pane gets 60/80 = 75%.
     let mut zone_panes: Vec<String> = vec![initial_pane.clone()];
-    let mut remaining_pct: u32 = zones.iter().map(|(p, _)| *p).sum();
-    for (i, (_width_pct, _zone_members)) in zones.iter().enumerate().skip(1) {
-        let right_side: u32 = zones[i..].iter().map(|(p, _)| *p).sum();
+    let mut remaining_pct: u32 = zones.iter().map(|zone| zone.width_pct).sum();
+    for (i, _zone) in zones.iter().enumerate().skip(1) {
+        let right_side: u32 = zones[i..].iter().map(|zone| zone.width_pct).sum();
         let split_pct = ((right_side as f64 / remaining_pct as f64) * 100.0).round() as u32;
         let split_pct = split_pct.clamp(10, 90);
         let split_from = zone_panes.last().unwrap();
@@ -99,8 +106,9 @@ pub fn build_layout(
 
     // Within each zone, split vertically for members. Engineer zones with
     // multiple managers are partitioned into per-manager subcolumns first.
-    for (zone_idx, (_, zone_members)) in zones.iter().enumerate() {
+    for (zone_idx, zone) in zones.iter().enumerate() {
         let zone_pane = &zone_panes[zone_idx];
+        let zone_members = &zone.members;
 
         if zone_members.is_empty() {
             continue;
@@ -108,7 +116,15 @@ pub fn build_layout(
 
         let subgroups = split_zone_subgroups(zone_members);
         if subgroups.len() == 1 {
-            stack_members_in_pane(session, zone_pane, &subgroups[0], &mut pane_map)?;
+            let columns = split_members_into_columns(zone_members, zone.horizontal_columns);
+            if columns.len() == 1 {
+                stack_members_in_pane(session, zone_pane, &columns[0], &mut pane_map)?;
+            } else {
+                let column_panes = split_subgroup_columns(zone_pane, &columns)?;
+                for (column_pane, column_members) in column_panes.iter().zip(columns.iter()) {
+                    stack_members_in_pane(session, column_pane, column_members, &mut pane_map)?;
+                }
+            }
             continue;
         }
 
@@ -149,6 +165,28 @@ fn split_zone_subgroups<'a>(zone_members: &'a [&MemberInstance]) -> Vec<Vec<&'a 
     }
 
     groups.into_iter().map(|(_, grouped)| grouped).collect()
+}
+
+fn split_members_into_columns<'a>(
+    members: &[&'a MemberInstance],
+    desired_columns: usize,
+) -> Vec<Vec<&'a MemberInstance>> {
+    let columns = desired_columns.clamp(1, members.len().max(1));
+    if columns == 1 {
+        return vec![members.to_vec()];
+    }
+
+    let mut groups = Vec::with_capacity(columns);
+    let mut start = 0;
+    for column_idx in 0..columns {
+        let remaining_members = members.len() - start;
+        let remaining_columns = columns - column_idx;
+        let take = remaining_members.div_ceil(remaining_columns);
+        groups.push(members[start..start + take].to_vec());
+        start += take;
+    }
+
+    groups
 }
 
 fn split_subgroup_columns(
@@ -228,19 +266,57 @@ fn set_pane_title(_session: &str, pane_id: &str, title: &str) -> Result<()> {
 fn build_zones_from_config<'a>(
     config: &LayoutConfig,
     members: &'a [&MemberInstance],
-) -> Vec<(u32, Vec<&'a MemberInstance>)> {
-    let mut zones: Vec<(u32, Vec<&MemberInstance>)> = config
+) -> Vec<ZonePlan<'a>> {
+    let mut zones: Vec<ZonePlan<'a>> = config
         .zones
         .iter()
-        .map(|z| (z.width_pct, Vec::new()))
+        .map(|z| ZonePlan {
+            width_pct: z.width_pct,
+            members: Vec::new(),
+            horizontal_columns: z
+                .split
+                .as_ref()
+                .map(|split| split.horizontal as usize)
+                .unwrap_or(1)
+                .max(1),
+        })
         .collect();
 
     // Map members to zones by role type
     let mut member_queue: Vec<&MemberInstance> = members.to_vec();
 
     for (zone_idx, zone_def) in config.zones.iter().enumerate() {
+        let zone_name = zone_def.name.as_str();
+
+        let exact_matches: Vec<&MemberInstance> = member_queue
+            .iter()
+            .copied()
+            .filter(|member| member.name == zone_name || member.role_name == zone_name)
+            .collect();
+        if !exact_matches.is_empty() {
+            let mut selected_names: Vec<&str> = Vec::new();
+            for member in exact_matches {
+                if !selected_names.contains(&member.name.as_str()) {
+                    zones[zone_idx].members.push(member);
+                    selected_names.push(member.name.as_str());
+                }
+                if member.role_type == RoleType::Manager {
+                    for report in member_queue.iter().copied().filter(|candidate| {
+                        candidate.reports_to.as_deref() == Some(member.name.as_str())
+                    }) {
+                        if !selected_names.contains(&report.name.as_str()) {
+                            zones[zone_idx].members.push(report);
+                            selected_names.push(report.name.as_str());
+                        }
+                    }
+                }
+            }
+            member_queue.retain(|member| !selected_names.contains(&member.name.as_str()));
+            continue;
+        }
+
         // Try to match zone name to role types
-        let target_types = match zone_def.name.as_str() {
+        let target_types = match zone_name {
             n if n.contains("architect") => vec![RoleType::Architect],
             n if n.contains("manager") => vec![RoleType::Manager],
             n if n.contains("engineer") => vec![RoleType::Engineer],
@@ -259,7 +335,7 @@ fn build_zones_from_config<'a>(
                 return true;
             }
             if target_types.contains(&m.role_type) {
-                zones[zone_idx].1.push(m);
+                zones[zone_idx].members.push(m);
                 taken += 1;
                 false
             } else {
@@ -270,16 +346,16 @@ fn build_zones_from_config<'a>(
 
     // Put any unplaced members in the last zone
     if let Some(last) = zones.last_mut() {
-        last.1.extend(member_queue);
+        last.members.extend(member_queue);
     }
 
     // Remove empty zones
-    zones.retain(|(_pct, members)| !members.is_empty());
+    zones.retain(|zone| !zone.members.is_empty());
     zones
 }
 
 /// Auto-generate zones from member role types.
-fn build_zones_auto<'a>(members: &'a [&MemberInstance]) -> Vec<(u32, Vec<&'a MemberInstance>)> {
+fn build_zones_auto<'a>(members: &'a [&MemberInstance]) -> Vec<ZonePlan<'a>> {
     let architects: Vec<_> = members
         .iter()
         .filter(|m| m.role_type == RoleType::Architect)
@@ -301,15 +377,27 @@ fn build_zones_auto<'a>(members: &'a [&MemberInstance]) -> Vec<(u32, Vec<&'a Mem
 
     if !architects.is_empty() {
         let pct = ((architects.len() as u32 * 100) / total).max(10);
-        zones.push((pct, architects));
+        zones.push(ZonePlan {
+            width_pct: pct,
+            members: architects,
+            horizontal_columns: 1,
+        });
     }
     if !managers.is_empty() {
         let pct = ((managers.len() as u32 * 100) / total).max(15);
-        zones.push((pct, managers));
+        zones.push(ZonePlan {
+            width_pct: pct,
+            members: managers,
+            horizontal_columns: 1,
+        });
     }
     if !engineers.is_empty() {
         let pct = ((engineers.len() as u32 * 100) / total).max(20);
-        zones.push((pct, engineers));
+        zones.push(ZonePlan {
+            width_pct: pct,
+            members: engineers,
+            horizontal_columns: 1,
+        });
     }
 
     zones
@@ -354,9 +442,9 @@ roles:
             .collect();
         let zones = build_zones_auto(&pane_members);
         assert_eq!(zones.len(), 3);
-        assert_eq!(zones[0].1.len(), 1); // architect
-        assert_eq!(zones[1].1.len(), 2); // managers
-        assert_eq!(zones[2].1.len(), 6); // engineers (2 managers × 3 each)
+        assert_eq!(zones[0].members.len(), 1); // architect
+        assert_eq!(zones[1].members.len(), 2); // managers
+        assert_eq!(zones[2].members.len(), 6); // engineers (2 managers × 3 each)
     }
 
     #[test]
@@ -404,9 +492,9 @@ roles:
             .collect();
         let zones = build_zones_from_config(&layout, &pane_members);
         assert_eq!(zones.len(), 3);
-        assert_eq!(zones[0].1[0].role_type, RoleType::Architect);
-        assert_eq!(zones[1].1[0].role_type, RoleType::Manager);
-        assert_eq!(zones[2].1.len(), 3);
+        assert_eq!(zones[0].members[0].role_type, RoleType::Architect);
+        assert_eq!(zones[1].members[0].role_type, RoleType::Manager);
+        assert_eq!(zones[2].members.len(), 3);
     }
 
     #[test]
@@ -527,7 +615,7 @@ roles:
             .collect();
         let zones = build_zones_auto(&pane_members);
         assert_eq!(zones.len(), 1);
-        assert_eq!(zones[0].1.len(), 4);
+        assert_eq!(zones[0].members.len(), 4);
     }
 
     #[test]
@@ -599,6 +687,191 @@ roles:
         let zones = build_zones_from_config(&layout, &pane_members);
         // Architect zone gets architect + leftover manager/engineers
         assert_eq!(zones.len(), 1);
-        assert_eq!(zones[0].1.len(), 4); // 1 arch + 1 mgr + 2 eng
+        assert_eq!(zones[0].members.len(), 4); // 1 arch + 1 mgr + 2 eng
+    }
+
+    #[test]
+    fn config_zones_exact_manager_role_collects_direct_reports() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: scientist
+    role_type: architect
+    agent: claude
+  - name: black-lead
+    role_type: manager
+    agent: claude
+    talks_to: [architect, black-eng]
+  - name: red-lead
+    role_type: manager
+    agent: claude
+    talks_to: [architect, red-eng]
+  - name: black-eng
+    role_type: engineer
+    agent: codex
+    instances: 2
+    talks_to: [black-lead]
+  - name: red-eng
+    role_type: engineer
+    agent: codex
+    instances: 2
+    talks_to: [red-lead]
+"#,
+        );
+        let layout = LayoutConfig {
+            zones: vec![
+                super::super::config::ZoneDef {
+                    name: "scientist".to_string(),
+                    width_pct: 10,
+                    split: None,
+                },
+                super::super::config::ZoneDef {
+                    name: "architect".to_string(),
+                    width_pct: 10,
+                    split: None,
+                },
+                super::super::config::ZoneDef {
+                    name: "black-lead".to_string(),
+                    width_pct: 40,
+                    split: None,
+                },
+                super::super::config::ZoneDef {
+                    name: "red-lead".to_string(),
+                    width_pct: 40,
+                    split: None,
+                },
+            ],
+        };
+        let pane_members: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_type != RoleType::User)
+            .collect();
+        let zones = build_zones_from_config(&layout, &pane_members);
+        assert_eq!(zones.len(), 4);
+        assert_eq!(
+            zones[0]
+                .members
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["scientist"]
+        );
+        assert_eq!(
+            zones[1]
+                .members
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["architect"]
+        );
+        assert_eq!(
+            zones[2]
+                .members
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["black-lead", "black-eng-1-1", "black-eng-1-2"]
+        );
+        assert_eq!(
+            zones[3]
+                .members
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["red-lead", "red-eng-1-1", "red-eng-1-2"]
+        );
+    }
+
+    #[test]
+    fn split_members_into_columns_balances_contiguous_groups() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+    instances: 5
+"#,
+        );
+        let pane_members: Vec<_> = members.iter().collect();
+        let columns = split_members_into_columns(&pane_members, 2);
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].len(), 3);
+        assert_eq!(columns[1].len(), 2);
+        assert_eq!(columns[0][0].name, pane_members[0].name);
+        assert_eq!(columns[1][0].name, pane_members[3].name);
+    }
+
+    #[test]
+    #[serial]
+    fn build_layout_honors_horizontal_split_for_architect_zone() {
+        let session = "batty-test-team-layout-architect-pair";
+        let _ = crate::tmux::kill_session(session);
+
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: scientist
+    role_type: architect
+    agent: claude
+"#,
+        );
+
+        let layout = Some(LayoutConfig {
+            zones: vec![super::super::config::ZoneDef {
+                name: "architect".to_string(),
+                width_pct: 100,
+                split: Some(super::super::config::SplitDef { horizontal: 2 }),
+            }],
+        });
+
+        let pane_map = build_layout(session, &members, &layout, Path::new("/tmp")).unwrap();
+        assert_eq!(pane_map.len(), 2);
+
+        let geometry_output = Command::new("tmux")
+            .args([
+                "list-panes",
+                "-t",
+                session,
+                "-F",
+                "#{pane_title}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}",
+            ])
+            .output()
+            .unwrap();
+        assert!(geometry_output.status.success());
+
+        let mut panes = HashMap::new();
+        for line in String::from_utf8_lossy(&geometry_output.stdout).lines() {
+            let parts: Vec<_> = line.split('\t').collect();
+            if parts.len() != 5 {
+                continue;
+            }
+            panes.insert(
+                parts[0].to_string(),
+                (
+                    parts[1].parse::<u32>().unwrap(),
+                    parts[2].parse::<u32>().unwrap(),
+                    parts[3].parse::<u32>().unwrap(),
+                    parts[4].parse::<u32>().unwrap(),
+                ),
+            );
+        }
+
+        let architect = panes.get("architect").unwrap();
+        let scientist = panes.get("scientist").unwrap();
+        assert_ne!(architect.0, scientist.0, "expected side-by-side panes");
+        assert_eq!(architect.1, scientist.1, "expected aligned top edges");
+        assert!(architect.3 > 0 && scientist.3 > 0);
+
+        crate::tmux::kill_session(session).unwrap();
     }
 }
