@@ -32,6 +32,14 @@ pub struct TeamEvent {
     pub total_members: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_running: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uptime_secs: Option<u64>,
     pub ts: u64,
 }
 
@@ -43,9 +51,9 @@ impl TeamEvent {
             .as_secs()
     }
 
-    pub fn daemon_started() -> Self {
+    fn base(event: &str) -> Self {
         Self {
-            event: "daemon_started".into(),
+            event: event.into(),
             role: None,
             task: None,
             recipient: None,
@@ -56,169 +64,118 @@ impl TeamEvent {
             working_members: None,
             total_members: None,
             session_running: None,
+            reason: None,
+            step: None,
+            error: None,
+            uptime_secs: None,
             ts: Self::now(),
         }
     }
 
+    pub fn daemon_started() -> Self {
+        Self::base("daemon_started")
+    }
+
+    #[allow(dead_code)]
     pub fn daemon_stopped() -> Self {
+        Self::base("daemon_stopped")
+    }
+
+    pub fn daemon_stopped_with_reason(reason: &str, uptime_secs: u64) -> Self {
         Self {
-            event: "daemon_stopped".into(),
-            role: None,
-            task: None,
-            recipient: None,
-            from: None,
-            to: None,
-            restart: None,
-            load: None,
-            working_members: None,
-            total_members: None,
-            session_running: None,
-            ts: Self::now(),
+            reason: Some(reason.into()),
+            uptime_secs: Some(uptime_secs),
+            ..Self::base("daemon_stopped")
+        }
+    }
+
+    pub fn daemon_heartbeat(uptime_secs: u64) -> Self {
+        Self {
+            uptime_secs: Some(uptime_secs),
+            ..Self::base("daemon_heartbeat")
+        }
+    }
+
+    pub fn loop_step_error(step: &str, error: &str) -> Self {
+        Self {
+            step: Some(step.into()),
+            error: Some(error.into()),
+            ..Self::base("loop_step_error")
+        }
+    }
+
+    pub fn daemon_panic(reason: &str) -> Self {
+        Self {
+            reason: Some(reason.into()),
+            ..Self::base("daemon_panic")
         }
     }
 
     pub fn task_assigned(role: &str, task: &str) -> Self {
         Self {
-            event: "task_assigned".into(),
             role: Some(role.into()),
             task: Some(task.into()),
-            recipient: None,
-            from: None,
-            to: None,
-            restart: None,
-            load: None,
-            working_members: None,
-            total_members: None,
-            session_running: None,
-            ts: Self::now(),
+            ..Self::base("task_assigned")
         }
     }
 
     pub fn task_escalated(role: &str, task: &str) -> Self {
         Self {
-            event: "task_escalated".into(),
             role: Some(role.into()),
             task: Some(task.into()),
-            recipient: None,
-            from: None,
-            to: None,
-            restart: None,
-            load: None,
-            working_members: None,
-            total_members: None,
-            session_running: None,
-            ts: Self::now(),
+            ..Self::base("task_escalated")
         }
     }
 
     pub fn task_completed(role: &str) -> Self {
         Self {
-            event: "task_completed".into(),
             role: Some(role.into()),
-            task: None,
-            recipient: None,
-            from: None,
-            to: None,
-            restart: None,
-            load: None,
-            working_members: None,
-            total_members: None,
-            session_running: None,
-            ts: Self::now(),
+            ..Self::base("task_completed")
         }
     }
 
     pub fn standup_generated(recipient: &str) -> Self {
         Self {
-            event: "standup_generated".into(),
-            role: None,
-            task: None,
             recipient: Some(recipient.into()),
-            from: None,
-            to: None,
-            restart: None,
-            load: None,
-            working_members: None,
-            total_members: None,
-            session_running: None,
-            ts: Self::now(),
+            ..Self::base("standup_generated")
         }
     }
 
     pub fn member_crashed(role: &str, restart: bool) -> Self {
         Self {
-            event: "member_crashed".into(),
             role: Some(role.into()),
-            task: None,
-            recipient: None,
-            from: None,
-            to: None,
             restart: Some(restart),
-            load: None,
-            working_members: None,
-            total_members: None,
-            session_running: None,
-            ts: Self::now(),
+            ..Self::base("member_crashed")
         }
     }
 
     pub fn message_routed(from: &str, to: &str) -> Self {
         Self {
-            event: "message_routed".into(),
-            role: None,
-            task: None,
-            recipient: None,
             from: Some(from.into()),
             to: Some(to.into()),
-            restart: None,
-            load: None,
-            working_members: None,
-            total_members: None,
-            session_running: None,
-            ts: Self::now(),
+            ..Self::base("message_routed")
         }
     }
 
     pub fn agent_spawned(role: &str) -> Self {
         Self {
-            event: "agent_spawned".into(),
             role: Some(role.into()),
-            task: None,
-            recipient: None,
-            from: None,
-            to: None,
-            restart: None,
-            load: None,
-            working_members: None,
-            total_members: None,
-            session_running: None,
-            ts: Self::now(),
+            ..Self::base("agent_spawned")
         }
     }
 
-    pub fn load_snapshot(
-        working_members: u32,
-        total_members: u32,
-        session_running: bool,
-    ) -> Self {
+    pub fn load_snapshot(working_members: u32, total_members: u32, session_running: bool) -> Self {
         let load = if total_members == 0 {
             0.0
         } else {
             working_members as f64 / total_members as f64
         };
         Self {
-            event: "load_snapshot".into(),
-            role: None,
-            task: None,
-            recipient: None,
-            from: None,
-            to: None,
-            restart: None,
             load: Some(load),
             working_members: Some(working_members),
             total_members: Some(total_members),
             session_running: Some(session_running),
-            ts: Self::now(),
+            ..Self::base("load_snapshot")
         }
     }
 }
@@ -328,6 +285,19 @@ mod tests {
         let variants: Vec<(&str, TeamEvent)> = vec![
             ("daemon_started", TeamEvent::daemon_started()),
             ("daemon_stopped", TeamEvent::daemon_stopped()),
+            (
+                "daemon_stopped",
+                TeamEvent::daemon_stopped_with_reason("signal", 3600),
+            ),
+            ("daemon_heartbeat", TeamEvent::daemon_heartbeat(120)),
+            (
+                "loop_step_error",
+                TeamEvent::loop_step_error("poll_watchers", "tmux error"),
+            ),
+            (
+                "daemon_panic",
+                TeamEvent::daemon_panic("index out of bounds"),
+            ),
             ("task_assigned", TeamEvent::task_assigned("eng-1", "task")),
             ("task_escalated", TeamEvent::task_escalated("eng-1", "task")),
             ("task_completed", TeamEvent::task_completed("eng-1")),
@@ -414,6 +384,55 @@ mod tests {
         assert!(json.contains("\"event\":\"task_escalated\""));
         assert!(json.contains("\"role\":\"eng-1-1\""));
         assert!(json.contains("\"task\":\"42\""));
+    }
+
+    #[test]
+    fn daemon_stopped_with_reason_includes_fields() {
+        let event = TeamEvent::daemon_stopped_with_reason("signal", 7200);
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["reason"].as_str().unwrap(), "signal");
+        assert_eq!(parsed["uptime_secs"].as_u64().unwrap(), 7200);
+    }
+
+    #[test]
+    fn heartbeat_includes_uptime() {
+        let event = TeamEvent::daemon_heartbeat(600);
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"].as_str().unwrap(), "daemon_heartbeat");
+        assert_eq!(parsed["uptime_secs"].as_u64().unwrap(), 600);
+        // No reason/step/error fields
+        assert!(parsed.get("reason").is_none());
+        assert!(parsed.get("step").is_none());
+    }
+
+    #[test]
+    fn loop_step_error_includes_step_and_error() {
+        let event = TeamEvent::loop_step_error("poll_watchers", "connection refused");
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["step"].as_str().unwrap(), "poll_watchers");
+        assert_eq!(parsed["error"].as_str().unwrap(), "connection refused");
+    }
+
+    #[test]
+    fn daemon_panic_includes_reason() {
+        let event = TeamEvent::daemon_panic("index out of bounds");
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"].as_str().unwrap(), "daemon_panic");
+        assert_eq!(parsed["reason"].as_str().unwrap(), "index out of bounds");
+    }
+
+    #[test]
+    fn new_fields_omitted_from_basic_events() {
+        let event = TeamEvent::daemon_started();
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(!json.contains("\"reason\""));
+        assert!(!json.contains("\"step\""));
+        assert!(!json.contains("\"error\""));
+        assert!(!json.contains("\"uptime_secs\""));
     }
 
     #[test]

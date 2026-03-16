@@ -468,8 +468,45 @@ pub fn run_daemon(project_root: &Path, resume: bool) -> Result<()> {
         pane_map,
     };
 
+    let events_path = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("events.jsonl");
+
     let mut d = daemon::TeamDaemon::new(daemon_config)?;
-    d.run(resume)
+
+    // Wrap in catch_unwind so panics are logged to events before exit
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| d.run(resume)));
+
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => {
+            eprintln!("daemon exited with error: {e:#}");
+            // Try to log the error event
+            if let Ok(mut sink) = events::EventSink::new(&events_path) {
+                let _ = sink.emit(events::TeamEvent::daemon_stopped_with_reason(
+                    &format!("error: {e:#}"),
+                    0,
+                ));
+            }
+            Err(e)
+        }
+        Err(panic_payload) => {
+            let reason = match panic_payload.downcast_ref::<&str>() {
+                Some(s) => s.to_string(),
+                None => match panic_payload.downcast_ref::<String>() {
+                    Some(s) => s.clone(),
+                    None => "unknown panic".to_string(),
+                },
+            };
+            eprintln!("daemon panicked: {reason}");
+            // Log panic event
+            if let Ok(mut sink) = events::EventSink::new(&events_path) {
+                let _ = sink.emit(events::TeamEvent::daemon_panic(&reason));
+            }
+            std::panic::resume_unwind(panic_payload);
+        }
+    }
 }
 
 /// Find the tmux pane ID tagged with `@batty_role=<member_name>` in a session.
@@ -1038,7 +1075,11 @@ fn render_load_graph(samples: &[TeamLoadSnapshot], now: u64) -> String {
             }
         }
 
-        let value = if count == 0 { previous } else { sum / count as f64 };
+        let value = if count == 0 {
+            previous
+        } else {
+            sum / count as f64
+        };
         previous = value;
         history.push(load_point_char(value));
     }
@@ -1803,7 +1844,7 @@ roles:
 
     #[test]
     fn average_load_ignores_points_older_than_window() {
-        let now = 1_000u64;
+        let now = 10_000u64;
         let samples = vec![
             TeamLoadSnapshot {
                 timestamp: now - 3_000,
@@ -1813,14 +1854,14 @@ roles:
                 session_running: true,
             },
             TeamLoadSnapshot {
-                timestamp: now - 100,
+                timestamp: now - 10,
                 total_members: 10,
                 working_members: 0,
                 load: 0.4,
                 session_running: true,
             },
             TeamLoadSnapshot {
-                timestamp: now - 200,
+                timestamp: now - 20,
                 total_members: 10,
                 working_members: 0,
                 load: 0.6,
@@ -1835,7 +1876,7 @@ roles:
 
     #[test]
     fn render_load_graph_returns_expected_width() {
-        let now = 1_000u64;
+        let now = 10_000u64;
         let samples = vec![
             TeamLoadSnapshot {
                 timestamp: now - 3_600,

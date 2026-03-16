@@ -221,12 +221,34 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::daemon_started());
         info!(session = %self.config.session, resume, "daemon started");
 
+        // Install signal handler so we log clean shutdowns
+        let shutdown_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag_clone = shutdown_flag.clone();
+        if let Err(e) = ctrlc::set_handler(move || {
+            flag_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        }) {
+            warn!(error = %e, "failed to install signal handler");
+        }
+
         // Spawn agents in all panes
         self.spawn_all_agents(resume)?;
 
+        let started_at = Instant::now();
+        let heartbeat_interval = Duration::from_secs(300); // 5 minutes
+        let mut last_heartbeat = Instant::now();
+
         // Main polling loop
+        let shutdown_reason;
         loop {
+            // Check for signal-based shutdown
+            if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                shutdown_reason = "signal";
+                info!("received shutdown signal");
+                break;
+            }
+
             if !tmux::session_exists(&self.config.session) {
+                shutdown_reason = "session_gone";
                 info!("tmux session gone, shutting down");
                 break;
             }
@@ -254,11 +276,27 @@ impl TeamDaemon {
             self.run_loop_step("maybe_rotate_board", |daemon| daemon.maybe_rotate_board());
             self.update_pane_status_labels();
 
+            // Periodic heartbeat
+            if last_heartbeat.elapsed() >= heartbeat_interval {
+                let uptime = started_at.elapsed().as_secs();
+                self.emit_event(TeamEvent::daemon_heartbeat(uptime));
+                debug!(uptime_secs = uptime, "daemon heartbeat");
+                last_heartbeat = Instant::now();
+            }
+
             std::thread::sleep(self.poll_interval);
         }
 
-        self.emit_event(TeamEvent::daemon_stopped());
-        info!("daemon stopped");
+        let uptime = started_at.elapsed().as_secs();
+        self.emit_event(TeamEvent::daemon_stopped_with_reason(
+            shutdown_reason,
+            uptime,
+        ));
+        info!(
+            reason = shutdown_reason,
+            uptime_secs = uptime,
+            "daemon stopped"
+        );
         Ok(())
     }
 
@@ -268,6 +306,7 @@ impl TeamDaemon {
     {
         if let Err(error) = action(self) {
             warn!(step, error = %error, "daemon loop step failed; continuing");
+            self.emit_event(TeamEvent::loop_step_error(step, &error.to_string()));
         }
     }
 
