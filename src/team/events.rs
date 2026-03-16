@@ -324,7 +324,7 @@ mod tests {
         assert_eq!(parsed["load"].as_f64().unwrap(), 3.0 / 7.0);
         assert_eq!(parsed["working_members"].as_u64().unwrap(), 3);
         assert_eq!(parsed["total_members"].as_u64().unwrap(), 7);
-        assert_eq!(parsed["session_running"].as_bool().unwrap(), false);
+        assert!(!parsed["session_running"].as_bool().unwrap());
     }
 
     #[test]
