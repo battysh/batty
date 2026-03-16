@@ -286,7 +286,7 @@ impl SessionWatcher {
 /// actively working.  The reliable differentiator is the status bar at the
 /// very bottom: when Claude is processing, it appends `· esc to interrupt`.
 /// If we detect that indicator we return `false` immediately.
-fn is_at_agent_prompt(capture: &str) -> bool {
+pub fn is_at_agent_prompt(capture: &str) -> bool {
     // Use 12 non-empty lines to account for Claude's separators and status
     // bar pushing the prompt further up than a tight tail window.
     let trimmed = recent_non_empty_lines(capture, 12);
