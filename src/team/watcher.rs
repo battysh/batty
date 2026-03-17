@@ -660,6 +660,8 @@ fn poll_claude_session(tracker: &mut ClaudeSessionTracker) -> Result<TrackerStat
         return Ok(tracker.last_state);
     }
 
+    maybe_rebind_claude_session_file(tracker)?;
+
     let Some(session_file) = tracker.session_file.clone() else {
         return Ok(TrackerState::Unknown);
     };
@@ -677,6 +679,39 @@ fn poll_claude_session(tracker: &mut ClaudeSessionTracker) -> Result<TrackerStat
         tracker.last_state = state;
     }
     Ok(tracker.last_state)
+}
+
+fn maybe_rebind_claude_session_file(tracker: &mut ClaudeSessionTracker) -> Result<()> {
+    let Some(current_file) = tracker.session_file.clone() else {
+        return Ok(());
+    };
+
+    let Some(newest_file) =
+        discover_claude_session_file(&tracker.projects_root, &tracker.cwd, None)?
+    else {
+        return Ok(());
+    };
+
+    if newest_file == current_file {
+        return Ok(());
+    }
+
+    let current_modified = fs::metadata(&current_file)
+        .and_then(|meta| meta.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let newest_modified = fs::metadata(&newest_file)
+        .and_then(|meta| meta.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+    if newest_modified <= current_modified {
+        return Ok(());
+    }
+
+    tracker.session_file = Some(newest_file.clone());
+    tracker.session_id = session_file_id(Some(&newest_file));
+    tracker.offset = current_file_len(&newest_file)?;
+    tracker.last_state = TrackerState::Unknown;
+    Ok(())
 }
 
 fn parse_claude_session_file(path: &Path, start_offset: u64) -> Result<(TrackerState, u64)> {
@@ -1436,6 +1471,56 @@ mod tests {
         );
         assert_eq!(tracker.offset, current_file_len(&session_file).unwrap());
         assert_eq!(tracker.last_state, TrackerState::Unknown);
+    }
+
+    #[test]
+    fn claude_tracker_rebinds_to_newer_session_file_after_manual_resume() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects_root = tmp.path().join("projects");
+        let cwd = tmp
+            .path()
+            .join("repo")
+            .join(".batty")
+            .join("worktrees")
+            .join("eng-1");
+        let project_dir = projects_root.join(cwd.to_string_lossy().replace('/', "-"));
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let old_session = project_dir.join("11111111-1111-4111-8111-111111111111.jsonl");
+        std::fs::write(
+            &old_session,
+            "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}\n",
+        )
+        .unwrap();
+
+        let mut tracker = ClaudeSessionTracker {
+            projects_root: projects_root.clone(),
+            cwd: cwd.clone(),
+            session_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+            session_file: Some(old_session.clone()),
+            offset: current_file_len(&old_session).unwrap(),
+            last_state: TrackerState::Idle,
+        };
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        let new_session = project_dir.join("22222222-2222-4222-8222-222222222222.jsonl");
+        std::fs::write(
+            &new_session,
+            "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            poll_claude_session(&mut tracker).unwrap(),
+            TrackerState::Unknown
+        );
+        assert_eq!(tracker.session_file.as_deref(), Some(new_session.as_path()));
+        assert_eq!(
+            tracker.session_id.as_deref(),
+            Some("22222222-2222-4222-8222-222222222222")
+        );
+        assert_eq!(tracker.offset, current_file_len(&new_session).unwrap());
     }
 
     #[test]
