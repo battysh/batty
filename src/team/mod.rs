@@ -289,6 +289,10 @@ fn daemon_log_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("daemon.log")
 }
 
+pub(crate) fn daemon_state_path(project_root: &Path) -> PathBuf {
+    project_root.join(".batty").join("daemon-state.json")
+}
+
 /// Spawn the daemon as a detached background process.
 ///
 /// The daemon runs in its own process group with stdio redirected to a log
@@ -400,10 +404,12 @@ pub fn start_team(project_root: &Path, attach: bool) -> Result<String> {
 
     // Check for resume marker (left by a prior `batty stop`)
     let marker = resume_marker_path(project_root);
-    let resume = marker.exists();
+    let resume = marker.exists() || should_resume_from_daemon_state(project_root);
     if resume {
-        // Consume the marker — it's a one-shot flag
-        std::fs::remove_file(&marker).ok();
+        if marker.exists() {
+            // Consume the marker — it's a one-shot flag
+            std::fs::remove_file(&marker).ok();
+        }
         info!("resuming agent sessions from previous run");
     }
 
@@ -715,6 +721,31 @@ fn build_team_status_rows(
 /// Path to the resume marker file. Presence indicates agents have prior sessions.
 fn resume_marker_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("resume")
+}
+
+#[derive(Debug, Deserialize)]
+struct DaemonStateResumeProbe {
+    #[serde(default)]
+    clean_shutdown: bool,
+}
+
+fn should_resume_from_daemon_state(project_root: &Path) -> bool {
+    let path = daemon_state_path(project_root);
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+
+    match serde_json::from_str::<DaemonStateResumeProbe>(&content) {
+        Ok(state) => !state.clean_shutdown,
+        Err(error) => {
+            warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to parse daemon state while probing for resume"
+            );
+            false
+        }
+    }
 }
 
 /// Path to the pause marker file. Presence pauses nudges and standups.
@@ -1520,6 +1551,26 @@ mod tests {
 
         // Double-resume should fail
         assert!(resume_team(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn daemon_state_probe_requests_resume_after_unclean_shutdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = daemon_state_path(tmp.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"clean_shutdown":false}"#).unwrap();
+
+        assert!(should_resume_from_daemon_state(tmp.path()));
+    }
+
+    #[test]
+    fn daemon_state_probe_ignores_clean_shutdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = daemon_state_path(tmp.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"clean_shutdown":true}"#).unwrap();
+
+        assert!(!should_resume_from_daemon_state(tmp.path()));
     }
 
     #[test]

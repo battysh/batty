@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use super::hierarchy::MemberInstance;
 use super::watcher::SessionWatcher;
@@ -68,7 +69,8 @@ pub fn inject_standup(pane_id: &str, standup: &str) -> Result<()> {
 }
 
 /// Simple member state enum used by standup reporting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MemberState {
     Idle,
     Working,
