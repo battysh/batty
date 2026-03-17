@@ -92,6 +92,25 @@ struct AssignmentLaunch {
     work_dir: PathBuf,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PersistedNudgeState {
+    idle_elapsed_secs: Option<u64>,
+    fired_this_idle: bool,
+    paused: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PersistedDaemonState {
+    clean_shutdown: bool,
+    saved_at: u64,
+    states: HashMap<String, MemberState>,
+    active_tasks: HashMap<String, u32>,
+    retry_counts: HashMap<String, u32>,
+    paused_standups: HashSet<String>,
+    last_standup_elapsed_secs: HashMap<String, u64>,
+    nudge_state: HashMap<String, PersistedNudgeState>,
+}
+
 #[derive(Debug, Clone)]
 struct MemberLaunchPlan {
     short_cmd: String,
@@ -232,6 +251,10 @@ impl TeamDaemon {
 
         // Spawn agents in all panes
         self.spawn_all_agents(resume)?;
+        if resume {
+            self.restore_runtime_state();
+        }
+        self.persist_runtime_state(false)?;
 
         let started_at = Instant::now();
         let heartbeat_interval = Duration::from_secs(300); // 5 minutes
@@ -280,6 +303,9 @@ impl TeamDaemon {
             if last_heartbeat.elapsed() >= heartbeat_interval {
                 let uptime = started_at.elapsed().as_secs();
                 self.emit_event(TeamEvent::daemon_heartbeat(uptime));
+                if let Err(error) = self.persist_runtime_state(false) {
+                    warn!(error = %error, "failed to persist daemon checkpoint");
+                }
                 debug!(uptime_secs = uptime, "daemon heartbeat");
                 last_heartbeat = Instant::now();
             }
@@ -288,6 +314,9 @@ impl TeamDaemon {
         }
 
         let uptime = started_at.elapsed().as_secs();
+        if let Err(error) = self.persist_runtime_state(true) {
+            warn!(error = %error, "failed to persist final daemon checkpoint");
+        }
         self.emit_event(TeamEvent::daemon_stopped_with_reason(
             shutdown_reason,
             uptime,
@@ -1663,6 +1692,73 @@ impl TeamDaemon {
         save_launch_state(&self.config.project_root, &launch_state)
     }
 
+    fn restore_runtime_state(&mut self) {
+        let Some(state) = load_daemon_state(&self.config.project_root) else {
+            return;
+        };
+
+        self.states = state.states;
+        self.active_tasks = state.active_tasks;
+        self.retry_counts = state.retry_counts;
+        self.paused_standups = state.paused_standups;
+        self.last_standup = state
+            .last_standup_elapsed_secs
+            .into_iter()
+            .map(|(member, elapsed_secs)| {
+                (
+                    member,
+                    Instant::now()
+                        .checked_sub(Duration::from_secs(elapsed_secs))
+                        .unwrap_or_else(Instant::now),
+                )
+            })
+            .collect();
+
+        for (member_name, persisted) in state.nudge_state {
+            let Some(schedule) = self.nudges.get_mut(&member_name) else {
+                continue;
+            };
+            schedule.idle_since = persisted.idle_elapsed_secs.map(|elapsed_secs| {
+                Instant::now()
+                    .checked_sub(Duration::from_secs(elapsed_secs))
+                    .unwrap_or_else(Instant::now)
+            });
+            schedule.fired_this_idle = persisted.fired_this_idle;
+            schedule.paused = persisted.paused;
+        }
+    }
+
+    fn persist_runtime_state(&self, clean_shutdown: bool) -> Result<()> {
+        let state = PersistedDaemonState {
+            clean_shutdown,
+            saved_at: now_unix(),
+            states: self.states.clone(),
+            active_tasks: self.active_tasks.clone(),
+            retry_counts: self.retry_counts.clone(),
+            paused_standups: self.paused_standups.clone(),
+            last_standup_elapsed_secs: self
+                .last_standup
+                .iter()
+                .map(|(member, instant)| (member.clone(), instant.elapsed().as_secs()))
+                .collect(),
+            nudge_state: self
+                .nudges
+                .iter()
+                .map(|(member, schedule)| {
+                    (
+                        member.clone(),
+                        PersistedNudgeState {
+                            idle_elapsed_secs: schedule.idle_since.map(|t| t.elapsed().as_secs()),
+                            fired_this_idle: schedule.fired_this_idle,
+                            paused: schedule.paused,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        save_daemon_state(&self.config.project_root, &state)
+    }
+
     /// Fire nudges for members that have been idle long enough.
     ///
     /// The nudge only fires once per idle period. The member must transition
@@ -2254,6 +2350,10 @@ fn launch_state_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("launch-state.json")
 }
 
+fn daemon_state_path(project_root: &Path) -> PathBuf {
+    super::daemon_state_path(project_root)
+}
+
 fn load_launch_state(project_root: &Path) -> HashMap<String, LaunchIdentity> {
     let path = launch_state_path(project_root);
     let Ok(content) = fs::read_to_string(&path) else {
@@ -2277,6 +2377,33 @@ fn save_launch_state(project_root: &Path, state: &HashMap<String, LaunchIdentity
     }
     let content =
         serde_json::to_string_pretty(state).context("failed to serialize launch state")?;
+    fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn load_daemon_state(project_root: &Path) -> Option<PersistedDaemonState> {
+    let path = daemon_state_path(project_root);
+    let Ok(content) = fs::read_to_string(&path) else {
+        return None;
+    };
+
+    match serde_json::from_str(&content) {
+        Ok(state) => Some(state),
+        Err(error) => {
+            warn!(path = %path.display(), error = %error, "failed to parse daemon state, ignoring");
+            None
+        }
+    }
+}
+
+fn save_daemon_state(project_root: &Path, state: &PersistedDaemonState) -> Result<()> {
+    let path = daemon_state_path(project_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let content =
+        serde_json::to_string_pretty(state).context("failed to serialize daemon state")?;
     fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
@@ -2922,6 +3049,33 @@ mod tests {
         save_launch_state(tmp.path(), &state).unwrap();
 
         let loaded = load_launch_state(tmp.path());
+        assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn daemon_state_round_trip_preserves_runtime_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = PersistedDaemonState {
+            clean_shutdown: false,
+            saved_at: 123,
+            states: HashMap::from([("eng-1".to_string(), MemberState::Working)]),
+            active_tasks: HashMap::from([("eng-1".to_string(), 42)]),
+            retry_counts: HashMap::from([("eng-1".to_string(), 2)]),
+            paused_standups: HashSet::from(["manager".to_string()]),
+            last_standup_elapsed_secs: HashMap::from([("architect".to_string(), 55)]),
+            nudge_state: HashMap::from([(
+                "eng-1".to_string(),
+                PersistedNudgeState {
+                    idle_elapsed_secs: Some(88),
+                    fired_this_idle: true,
+                    paused: false,
+                },
+            )]),
+        };
+
+        save_daemon_state(tmp.path(), &state).unwrap();
+
+        let loaded = load_daemon_state(tmp.path()).unwrap();
         assert_eq!(loaded, state);
     }
 
