@@ -2,6 +2,47 @@
 
 All notable changes to Batty are documented here.
 
+## 0.2.0 — 2026-03-18
+
+This release expands Batty's runtime controls and makes long-running team
+sessions easier to observe, pause, resume, and recover without losing routing
+state.
+
+### Highlights
+
+- **Operational control commands** — add `batty pause` / `batty resume` to
+  suppress nudges and standups during manual intervention, plus `batty load` to
+  report historical worker utilization from recorded team events.
+- **Richer runtime visibility** — `batty status` now reports live worker
+  states, and the daemon emits heartbeat, shutdown, loop-step, and panic
+  diagnostics for post-run inspection.
+- **More reliable message delivery** — after tmux injection, Batty now verifies
+  that the target pane actually left the prompt and retries Enter when terminal
+  timing drops the keypress.
+- **Safer resume behavior** — daemon state now persists across heartbeats so
+  restored sessions can recover activity, and Claude watchers can rebind cleanly
+  after manual resumes.
+
+### Reliability
+
+- Improve assignment delivery, engineer branch handling, idle detection, and
+  completion event restoration across the team runtime.
+- Harden daemon error handling and simplify runtime state tracking so nudges,
+  watchers, and inbox delivery stay consistent through failures and resumes.
+- Fix Claude-specific watcher edge cases, including explicit session binding,
+  truncated interrupt footers, resumed watcher visibility, and pause timer
+  behavior.
+- Resolve unique role aliases to concrete member instances and fix agent
+  wrappers to use the installed `batty` binary instead of debug test binaries.
+- Add an `auto_dispatch` team configuration toggle so dispatch polling can be
+  disabled when a board should be driven manually.
+
+### Documentation
+
+- Tighten onboarding guidance in the README and getting started docs, refresh
+  generated CLI/config references, and publish the demo video page with YouTube
+  links.
+
 ## 0.1.5 — 2026-03-11
 
 Follow-up release to finish the `0.1.4` stabilization work and restore a fully
