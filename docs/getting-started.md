@@ -56,14 +56,22 @@ If you want a different scaffold, use `batty init --template solo|pair|simple|sq
 
 ## Configure
 
-Edit `.batty/team_config/team.yaml`. Start with `name`, `layout`, `roles`, and `use_worktrees`.
+Edit `.batty/team_config/team.yaml`. Start with `name`, `layout`, `roles`, `use_worktrees`, and the `automation` block.
 
 Batty also has an optional `.batty/config.toml` for lower-level runtime defaults,
-but team topology, layout, routing, standups, and channel integration all live
+but team topology, layout, routing, automation, standups, and channel integration all live
 in `team.yaml`.
 
 ```yaml
 name: my-project
+automation:
+  timeout_nudges: true
+  standups: true
+  triage_interventions: true
+  review_interventions: true
+  owned_task_interventions: true
+  manager_dispatch_interventions: true
+  architect_utilization_interventions: true
 layout:
   zones:
     - name: architect
@@ -103,6 +111,18 @@ Roles: 3
 Total members: 5
 Valid.
 ```
+
+The `automation` block controls which daemon behaviors are active. In most teams,
+the reactive interventions should stay enabled:
+
+- `triage_interventions` for delivered direct-report results that still need lead action
+- `review_interventions` for completed work waiting on manager review
+- `owned_task_interventions` for idle members who still own active work
+- `manager_dispatch_interventions` for idle managers with idle reports and open lane work
+- `architect_utilization_interventions` for idle architects while the team is underloaded
+
+`timeout_nudges` and `standups` are still useful, but they are fallback safety nets rather
+than the main control loop.
 
 If `use_worktrees: true` is enabled for engineers, Batty keeps one stable
 worktree per engineer at `.batty/worktrees/<engineer>`. New assignments reuse

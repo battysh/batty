@@ -68,6 +68,9 @@ pub struct TeamDaemon {
     states: HashMap<String, MemberState>,
     active_tasks: HashMap<String, u32>,
     retry_counts: HashMap<String, u32>,
+    triage_idle_epochs: HashMap<String, u64>,
+    triage_interventions: HashMap<String, u64>,
+    owned_task_interventions: HashMap<String, OwnedTaskInterventionState>,
     channels: HashMap<String, Box<dyn Channel>>,
     nudges: HashMap<String, NudgeSchedule>,
     telegram_bot: Option<super::telegram::TelegramBot>,
@@ -77,6 +80,25 @@ pub struct TeamDaemon {
     last_board_rotation: Instant,
     last_auto_dispatch: Instant,
     poll_interval: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnedTaskInterventionState {
+    idle_epoch: u64,
+    signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemberWorktreeContext {
+    path: PathBuf,
+    branch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReportDispatchSnapshot {
+    name: String,
+    is_working: bool,
+    active_task_ids: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -220,6 +242,9 @@ impl TeamDaemon {
             states,
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
             channels,
             nudges,
             telegram_bot,
@@ -289,7 +314,22 @@ impl TeamDaemon {
             self.run_loop_step("deliver_inbox_messages", |daemon| {
                 daemon.deliver_inbox_messages()
             });
+            self.run_loop_step("maybe_intervene_triage_backlog", |daemon| {
+                daemon.maybe_intervene_triage_backlog()
+            });
+            self.run_loop_step("maybe_intervene_review_backlog", |daemon| {
+                daemon.maybe_intervene_review_backlog()
+            });
+            self.run_loop_step("maybe_intervene_owned_tasks", |daemon| {
+                daemon.maybe_intervene_owned_tasks()
+            });
             self.run_loop_step("maybe_auto_dispatch", |daemon| daemon.maybe_auto_dispatch());
+            self.run_loop_step("maybe_intervene_manager_dispatch_gap", |daemon| {
+                daemon.maybe_intervene_manager_dispatch_gap()
+            });
+            self.run_loop_step("maybe_intervene_architect_utilization", |daemon| {
+                daemon.maybe_intervene_architect_utilization()
+            });
             self.run_loop_step("poll_telegram", |daemon| daemon.poll_telegram());
             self.run_loop_step("deliver_user_inbox", |daemon| daemon.deliver_user_inbox());
             self.run_loop_step("maybe_fire_nudges", |daemon| daemon.maybe_fire_nudges());
@@ -1003,8 +1043,9 @@ impl TeamDaemon {
         }
     }
 
-    fn queue_daemon_message(&mut self, recipient: &str, body: &str) -> Result<()> {
-        self.deliver_message("daemon", recipient, body).map(|_| ())
+    fn queue_daemon_message(&mut self, recipient: &str, body: &str) -> Result<MessageDelivery> {
+        let visible_sender = self.automation_sender_for(recipient);
+        self.deliver_message(&visible_sender, recipient, body)
     }
 
     fn queue_message(&mut self, from: &str, recipient: &str, body: &str) -> Result<()> {
@@ -1531,6 +1572,10 @@ impl TeamDaemon {
     /// Update `@batty_status` on each pane border with state + timer countdowns.
     fn update_pane_status_labels(&self) {
         let globally_paused = super::pause_marker_path(&self.config.project_root).exists();
+        let inbox_root = inbox::inboxes_root(&self.config.project_root);
+        let direct_reports = super::direct_reports_by_member(&self.config.members);
+        let owned_task_buckets =
+            super::owned_task_buckets(&self.config.project_root, &self.config.members);
 
         for member in &self.config.members {
             if member.role_type == RoleType::User {
@@ -1546,13 +1591,45 @@ impl TeamDaemon {
                 .copied()
                 .unwrap_or(MemberState::Idle);
 
-            let state_str = match state {
-                MemberState::Idle => "#[fg=yellow]idle#[default]",
-                MemberState::Working => "#[fg=cyan]working#[default]",
+            let pending_inbox = match inbox::pending_message_count(&inbox_root, &member.name) {
+                Ok(count) => count,
+                Err(error) => {
+                    warn!(member = %member.name, error = %error, "failed to count pending inbox messages");
+                    0
+                }
             };
+            let triage_backlog = match direct_reports.get(&member.name) {
+                Some(reports) => {
+                    match super::delivered_direct_report_triage_count(
+                        &inbox_root,
+                        &member.name,
+                        reports,
+                    ) {
+                        Ok(count) => count,
+                        Err(error) => {
+                            warn!(member = %member.name, error = %error, "failed to compute triage backlog");
+                            0
+                        }
+                    }
+                }
+                None => 0,
+            };
+            let member_owned_tasks = owned_task_buckets
+                .get(&member.name)
+                .cloned()
+                .unwrap_or_default();
 
             let label = if globally_paused {
-                format!("{state_str} #[fg=red]PAUSED#[default]")
+                compose_pane_status_label(
+                    state,
+                    pending_inbox,
+                    triage_backlog,
+                    &member_owned_tasks.active,
+                    &member_owned_tasks.review,
+                    true,
+                    "",
+                    "",
+                )
             } else {
                 let nudge_str = format_nudge_status(self.nudges.get(&member.name));
                 let standup_str = self
@@ -1565,7 +1642,16 @@ impl TeamDaemon {
                         )
                     })
                     .unwrap_or_default();
-                format!("{state_str}{nudge_str}{standup_str}")
+                compose_pane_status_label(
+                    state,
+                    pending_inbox,
+                    triage_backlog,
+                    &member_owned_tasks.active,
+                    &member_owned_tasks.review,
+                    false,
+                    &nudge_str,
+                    &standup_str,
+                )
             };
 
             let _ = std::process::Command::new("tmux")
@@ -1578,6 +1664,7 @@ impl TeamDaemon {
     fn update_automation_timers_for_state(&mut self, member_name: &str, new_state: MemberState) {
         self.update_nudge_for_state(member_name, new_state);
         self.update_standup_for_state(member_name, new_state);
+        self.update_triage_intervention_for_state(member_name, new_state);
     }
 
     /// Update the nudge countdown when a member's state changes.
@@ -1630,6 +1717,30 @@ impl TeamDaemon {
         }
     }
 
+    /// Track idle epochs so triage interventions fire once per post-work idle period.
+    ///
+    /// Startup idle does not count as an intervention-worthy idle period. A member must
+    /// first enter working state, then become idle again to arm a triage intervention.
+    fn update_triage_intervention_for_state(&mut self, member_name: &str, new_state: MemberState) {
+        match new_state {
+            MemberState::Working => {
+                self.triage_idle_epochs
+                    .entry(member_name.to_string())
+                    .or_insert(0);
+            }
+            MemberState::Idle => {
+                let had_epoch = self.triage_idle_epochs.contains_key(member_name);
+                let epoch = self
+                    .triage_idle_epochs
+                    .entry(member_name.to_string())
+                    .or_insert(0);
+                if had_epoch {
+                    *epoch += 1;
+                }
+            }
+        }
+    }
+
     fn standup_interval_for_member_name(&self, member_name: &str) -> Option<Duration> {
         let member = self.config.members.iter().find(|m| m.name == member_name)?;
         let role_def = self
@@ -1653,6 +1764,24 @@ impl TeamDaemon {
             .and_then(|r| r.standup_interval_secs)
             .unwrap_or(self.config.team_config.standup.interval_secs);
         Some(Duration::from_secs(interval_secs))
+    }
+
+    fn is_member_idle(&self, member_name: &str) -> bool {
+        self.watchers
+            .get(member_name)
+            .map(|watcher| matches!(watcher.state, WatcherState::Idle))
+            .unwrap_or(matches!(
+                self.states.get(member_name),
+                Some(MemberState::Idle) | None
+            ))
+    }
+
+    fn manager_for_member_name(&self, member_name: &str) -> Option<&str> {
+        self.config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+            .and_then(|member| member.reports_to.as_deref())
     }
 
     fn sync_launch_state_session_ids(&self) -> Result<()> {
@@ -1765,6 +1894,9 @@ impl TeamDaemon {
     /// back to working and then to idle again before a new nudge can fire.
     /// Skipped entirely when the pause marker file exists.
     fn maybe_fire_nudges(&mut self) -> Result<()> {
+        if !self.config.team_config.automation.timeout_nudges {
+            return Ok(());
+        }
         if super::pause_marker_path(&self.config.project_root).exists() {
             return Ok(());
         }
@@ -1785,7 +1917,7 @@ impl TeamDaemon {
             if fire {
                 let text = self.nudges[&name].text.clone();
                 info!(member = %name, "firing nudge (idle timeout)");
-                let delivered_live = match self.deliver_message("daemon", &name, &text) {
+                let delivered_live = match self.queue_daemon_message(&name, &text) {
                     Ok(MessageDelivery::LivePane) => true,
                     Ok(_) => false,
                     Err(error) => {
@@ -1805,6 +1937,1039 @@ impl TeamDaemon {
         Ok(())
     }
 
+    fn maybe_intervene_triage_backlog(&mut self) -> Result<()> {
+        if !self.config.team_config.automation.triage_interventions {
+            return Ok(());
+        }
+        if super::pause_marker_path(&self.config.project_root).exists() {
+            return Ok(());
+        }
+
+        let inbox_root = inbox::inboxes_root(&self.config.project_root);
+        let direct_reports = super::direct_reports_by_member(&self.config.members);
+        let member_names: Vec<String> = self.config.pane_map.keys().cloned().collect();
+
+        for name in member_names {
+            let Some(member) = self
+                .config
+                .members
+                .iter()
+                .find(|member| member.name == name)
+            else {
+                continue;
+            };
+            let is_idle = self
+                .watchers
+                .get(&name)
+                .map(|w| matches!(w.state, WatcherState::Idle))
+                .unwrap_or(matches!(
+                    self.states.get(&name),
+                    Some(MemberState::Idle) | None
+                ));
+            if !is_idle {
+                continue;
+            }
+
+            let Some(reports) = direct_reports.get(&name) else {
+                continue;
+            };
+
+            let triage_state = match super::delivered_direct_report_triage_state(
+                &inbox_root,
+                &name,
+                reports,
+            ) {
+                Ok(state) => state,
+                Err(error) => {
+                    warn!(member = %name, error = %error, "failed to compute triage intervention state");
+                    continue;
+                }
+            };
+            if triage_state.count == 0 {
+                continue;
+            }
+
+            let idle_epoch = self.triage_idle_epochs.get(&name).copied().unwrap_or(0);
+            if idle_epoch == 0 {
+                continue;
+            }
+
+            let already_notified_for = self.triage_interventions.get(&name).copied().unwrap_or(0);
+            if already_notified_for >= idle_epoch {
+                continue;
+            }
+
+            let text = self.build_triage_intervention_message(member, reports, triage_state.count);
+            info!(member = %name, triage_backlog = triage_state.count, "firing triage intervention");
+            let delivered_live = match self.queue_daemon_message(&name, &text) {
+                Ok(MessageDelivery::LivePane) => true,
+                Ok(_) => false,
+                Err(error) => {
+                    warn!(member = %name, error = %error, "failed to deliver triage intervention");
+                    continue;
+                }
+            };
+            self.triage_interventions.insert(name.clone(), idle_epoch);
+            if delivered_live {
+                self.mark_member_working(&name);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn maybe_intervene_owned_tasks(&mut self) -> Result<()> {
+        if !self.config.team_config.automation.owned_task_interventions {
+            return Ok(());
+        }
+        if super::pause_marker_path(&self.config.project_root).exists() {
+            return Ok(());
+        }
+
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
+        let direct_reports = super::direct_reports_by_member(&self.config.members);
+        let member_names: Vec<String> = self.config.pane_map.keys().cloned().collect();
+
+        for name in member_names {
+            let Some(member) = self
+                .config
+                .members
+                .iter()
+                .find(|member| member.name == name)
+            else {
+                continue;
+            };
+            let is_idle = self
+                .watchers
+                .get(&name)
+                .map(|w| matches!(w.state, WatcherState::Idle))
+                .unwrap_or(matches!(
+                    self.states.get(&name),
+                    Some(MemberState::Idle) | None
+                ));
+            if !is_idle {
+                continue;
+            }
+
+            let owned_tasks: Vec<&crate::task::Task> = tasks
+                .iter()
+                .filter(|task| task.claimed_by.as_deref() == Some(name.as_str()))
+                .filter(|task| task_needs_owned_intervention(task.status.as_str()))
+                .collect();
+            if owned_tasks.is_empty() {
+                self.owned_task_interventions.remove(&name);
+                continue;
+            }
+
+            let idle_epoch = self.triage_idle_epochs.get(&name).copied().unwrap_or(0);
+
+            let signature = owned_task_intervention_signature(&owned_tasks);
+            if self
+                .owned_task_interventions
+                .get(&name)
+                .is_some_and(|state| state.signature == signature)
+            {
+                continue;
+            }
+
+            let reports = direct_reports.get(&name).cloned().unwrap_or_default();
+            let text = self.build_owned_task_intervention_message(member, &owned_tasks, &reports);
+            info!(
+                member = %name,
+                owned_task_count = owned_tasks.len(),
+                "firing owned-task intervention"
+            );
+            let delivered_live = match self.queue_daemon_message(&name, &text) {
+                Ok(MessageDelivery::LivePane) => true,
+                Ok(_) => false,
+                Err(error) => {
+                    warn!(member = %name, error = %error, "failed to deliver owned-task intervention");
+                    continue;
+                }
+            };
+            self.owned_task_interventions.insert(
+                name.clone(),
+                OwnedTaskInterventionState {
+                    idle_epoch,
+                    signature,
+                },
+            );
+            if delivered_live {
+                self.mark_member_working(&name);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn maybe_intervene_review_backlog(&mut self) -> Result<()> {
+        if !self.config.team_config.automation.review_interventions {
+            return Ok(());
+        }
+        if super::pause_marker_path(&self.config.project_root).exists() {
+            return Ok(());
+        }
+
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
+        let member_names: Vec<String> = self.config.pane_map.keys().cloned().collect();
+
+        for name in member_names {
+            let Some(member) = self
+                .config
+                .members
+                .iter()
+                .find(|member| member.name == name)
+            else {
+                continue;
+            };
+            let is_idle = self
+                .watchers
+                .get(&name)
+                .map(|w| matches!(w.state, WatcherState::Idle))
+                .unwrap_or(matches!(
+                    self.states.get(&name),
+                    Some(MemberState::Idle) | None
+                ));
+            if !is_idle {
+                continue;
+            }
+
+            let review_tasks: Vec<&crate::task::Task> = tasks
+                .iter()
+                .filter(|task| {
+                    review_backlog_owner_for_task(task, &self.config.members).as_deref()
+                        == Some(name.as_str())
+                })
+                .collect();
+            if review_tasks.is_empty() {
+                self.owned_task_interventions
+                    .remove(&review_intervention_key(&name));
+                continue;
+            }
+
+            let idle_epoch = self.triage_idle_epochs.get(&name).copied().unwrap_or(0);
+            if idle_epoch == 0 {
+                continue;
+            }
+
+            let signature = review_task_intervention_signature(&review_tasks);
+            let review_key = review_intervention_key(&name);
+            if self
+                .owned_task_interventions
+                .get(&review_key)
+                .is_some_and(|state| state.signature == signature)
+            {
+                continue;
+            }
+
+            let text = self.build_review_intervention_message(member, &review_tasks);
+            info!(
+                member = %name,
+                review_task_count = review_tasks.len(),
+                "firing review intervention"
+            );
+            let delivered_live = match self.queue_daemon_message(&name, &text) {
+                Ok(MessageDelivery::LivePane) => true,
+                Ok(_) => false,
+                Err(error) => {
+                    warn!(member = %name, error = %error, "failed to deliver review intervention");
+                    continue;
+                }
+            };
+            self.owned_task_interventions.insert(
+                review_key,
+                OwnedTaskInterventionState {
+                    idle_epoch,
+                    signature,
+                },
+            );
+            if delivered_live {
+                self.mark_member_working(&name);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn maybe_intervene_manager_dispatch_gap(&mut self) -> Result<()> {
+        if !self
+            .config
+            .team_config
+            .automation
+            .manager_dispatch_interventions
+        {
+            return Ok(());
+        }
+        if super::pause_marker_path(&self.config.project_root).exists() {
+            return Ok(());
+        }
+
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
+        let direct_reports = super::direct_reports_by_member(&self.config.members);
+        let member_names: Vec<String> = self.config.pane_map.keys().cloned().collect();
+
+        for name in member_names {
+            let Some(member) = self
+                .config
+                .members
+                .iter()
+                .find(|member| member.name == name)
+            else {
+                continue;
+            };
+            if member.role_type != RoleType::Manager {
+                continue;
+            }
+            if !self.is_member_idle(&name) {
+                continue;
+            }
+
+            let Some(reports) = direct_reports.get(&name) else {
+                continue;
+            };
+            if reports.is_empty() {
+                continue;
+            }
+
+            let triage_state = super::delivered_direct_report_triage_state(
+                &inbox::inboxes_root(&self.config.project_root),
+                &name,
+                reports,
+            )?;
+            if triage_state.count > 0 {
+                continue;
+            }
+
+            let review_count = tasks
+                .iter()
+                .filter(|task| {
+                    review_backlog_owner_for_task(task, &self.config.members).as_deref()
+                        == Some(name.as_str())
+                })
+                .count();
+            if review_count > 0 {
+                continue;
+            }
+
+            let report_snapshots: Vec<ReportDispatchSnapshot> = reports
+                .iter()
+                .map(|report| ReportDispatchSnapshot {
+                    name: report.clone(),
+                    is_working: !self.is_member_idle(report),
+                    active_task_ids: tasks
+                        .iter()
+                        .filter(|task| task.claimed_by.as_deref() == Some(report.as_str()))
+                        .filter(|task| task_needs_owned_intervention(task.status.as_str()))
+                        .map(|task| task.id)
+                        .collect(),
+                })
+                .collect();
+
+            if report_snapshots.iter().any(|snapshot| snapshot.is_working) {
+                continue;
+            }
+
+            let idle_active_reports: Vec<&ReportDispatchSnapshot> = report_snapshots
+                .iter()
+                .filter(|snapshot| !snapshot.active_task_ids.is_empty())
+                .collect();
+            let idle_unassigned_reports: Vec<&ReportDispatchSnapshot> = report_snapshots
+                .iter()
+                .filter(|snapshot| snapshot.active_task_ids.is_empty())
+                .collect();
+
+            let unassigned_open_tasks: Vec<&crate::task::Task> = tasks
+                .iter()
+                .filter(|task| task.claimed_by.is_none())
+                .filter(|task| matches!(task.status.as_str(), "backlog" | "todo"))
+                .collect();
+
+            if idle_active_reports.is_empty() && unassigned_open_tasks.is_empty() {
+                continue;
+            }
+
+            let dispatch_key = manager_dispatch_intervention_key(&name);
+            let signature = manager_dispatch_intervention_signature(
+                &idle_active_reports,
+                &idle_unassigned_reports,
+                &unassigned_open_tasks,
+            );
+            if self
+                .owned_task_interventions
+                .get(&dispatch_key)
+                .is_some_and(|state| state.signature == signature)
+            {
+                continue;
+            }
+
+            let text = self.build_manager_dispatch_gap_message(
+                member,
+                &idle_active_reports,
+                &idle_unassigned_reports,
+                &unassigned_open_tasks,
+            );
+            info!(
+                member = %name,
+                idle_active_reports = idle_active_reports.len(),
+                idle_unassigned_reports = idle_unassigned_reports.len(),
+                unassigned_open_tasks = unassigned_open_tasks.len(),
+                "firing manager dispatch-gap intervention"
+            );
+            let delivered_live = match self.queue_daemon_message(&name, &text) {
+                Ok(MessageDelivery::LivePane) => true,
+                Ok(_) => false,
+                Err(error) => {
+                    warn!(member = %name, error = %error, "failed to deliver manager dispatch-gap intervention");
+                    continue;
+                }
+            };
+            let idle_epoch = self.triage_idle_epochs.get(&name).copied().unwrap_or(0);
+            self.owned_task_interventions.insert(
+                dispatch_key,
+                OwnedTaskInterventionState {
+                    idle_epoch,
+                    signature,
+                },
+            );
+            if delivered_live {
+                self.mark_member_working(&name);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn maybe_intervene_architect_utilization(&mut self) -> Result<()> {
+        if !self
+            .config
+            .team_config
+            .automation
+            .architect_utilization_interventions
+        {
+            return Ok(());
+        }
+        if super::pause_marker_path(&self.config.project_root).exists() {
+            return Ok(());
+        }
+
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
+        let direct_reports = super::direct_reports_by_member(&self.config.members);
+        let engineer_names: Vec<String> = self
+            .config
+            .members
+            .iter()
+            .filter(|member| member.role_type == RoleType::Engineer)
+            .map(|member| member.name.clone())
+            .collect();
+        let total_engineers = engineer_names.len();
+        if total_engineers == 0 {
+            return Ok(());
+        }
+
+        let working_engineers: Vec<String> = engineer_names
+            .iter()
+            .filter(|name| !self.is_member_idle(name))
+            .cloned()
+            .collect();
+        let idle_unassigned_engineers: Vec<String> = engineer_names
+            .iter()
+            .filter(|name| self.is_member_idle(name))
+            .filter(|name| {
+                !tasks.iter().any(|task| {
+                    task.claimed_by.as_deref() == Some(name.as_str())
+                        && task_needs_owned_intervention(task.status.as_str())
+                })
+            })
+            .cloned()
+            .collect();
+        let idle_active_engineers: Vec<(String, Vec<u32>)> = engineer_names
+            .iter()
+            .filter(|name| self.is_member_idle(name))
+            .filter_map(|name| {
+                let task_ids: Vec<u32> = tasks
+                    .iter()
+                    .filter(|task| task.claimed_by.as_deref() == Some(name.as_str()))
+                    .filter(|task| task_needs_owned_intervention(task.status.as_str()))
+                    .map(|task| task.id)
+                    .collect();
+                (!task_ids.is_empty()).then(|| (name.clone(), task_ids))
+            })
+            .collect();
+        let unassigned_open_tasks: Vec<&crate::task::Task> = tasks
+            .iter()
+            .filter(|task| task.claimed_by.is_none())
+            .filter(|task| matches!(task.status.as_str(), "backlog" | "todo"))
+            .collect();
+
+        let utilization_gap = !idle_active_engineers.is_empty()
+            || (!idle_unassigned_engineers.is_empty() && !unassigned_open_tasks.is_empty());
+        if !utilization_gap {
+            return Ok(());
+        }
+        if working_engineers.len() >= total_engineers.div_ceil(2) {
+            return Ok(());
+        }
+
+        let architect_members: Vec<MemberInstance> = self
+            .config
+            .members
+            .iter()
+            .filter(|member| {
+                member.role_type == RoleType::Architect && direct_reports.contains_key(&member.name)
+            })
+            .cloned()
+            .collect();
+
+        for architect in &architect_members {
+            if !self.is_member_idle(&architect.name) {
+                continue;
+            }
+
+            let utilization_key = architect_utilization_intervention_key(&architect.name);
+            let signature = architect_utilization_intervention_signature(
+                &working_engineers,
+                &idle_active_engineers,
+                &idle_unassigned_engineers,
+                &unassigned_open_tasks,
+            );
+            if self
+                .owned_task_interventions
+                .get(&utilization_key)
+                .is_some_and(|state| state.signature == signature)
+            {
+                continue;
+            }
+
+            let text = self.build_architect_utilization_message(
+                architect,
+                &working_engineers,
+                &idle_active_engineers,
+                &idle_unassigned_engineers,
+                &unassigned_open_tasks,
+            );
+            info!(
+                member = %architect.name,
+                working_engineers = working_engineers.len(),
+                idle_active_engineers = idle_active_engineers.len(),
+                idle_unassigned_engineers = idle_unassigned_engineers.len(),
+                unassigned_open_tasks = unassigned_open_tasks.len(),
+                "firing architect utilization intervention"
+            );
+            let delivered_live = match self.queue_daemon_message(&architect.name, &text) {
+                Ok(MessageDelivery::LivePane) => true,
+                Ok(_) => false,
+                Err(error) => {
+                    warn!(member = %architect.name, error = %error, "failed to deliver architect utilization intervention");
+                    continue;
+                }
+            };
+            let idle_epoch = self
+                .triage_idle_epochs
+                .get(&architect.name)
+                .copied()
+                .unwrap_or(0);
+            self.owned_task_interventions.insert(
+                utilization_key,
+                OwnedTaskInterventionState {
+                    idle_epoch,
+                    signature,
+                },
+            );
+            if delivered_live {
+                self.mark_member_working(&architect.name);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn build_triage_intervention_message(
+        &self,
+        member: &MemberInstance,
+        direct_reports: &[String],
+        triage_count: usize,
+    ) -> String {
+        let report_list = direct_reports.join(", ");
+        let first_report = direct_reports.first().cloned().unwrap_or_default();
+        let engineer_reports: Vec<&String> = direct_reports
+            .iter()
+            .filter(|name| {
+                self.config
+                    .members
+                    .iter()
+                    .find(|member| member.name == **name)
+                    .is_some_and(|member| member.role_type == RoleType::Engineer)
+            })
+            .collect();
+        let first_engineer = engineer_reports.first().map(|name| name.as_str());
+
+        let mut message = format!(
+            "Triage backlog detected: you have {triage_count} delivered direct-report result packet(s) waiting for review. Reports in scope: {report_list}.\n\
+Resolve it with Batty commands now:\n\
+1. `batty inbox {member_name}` to list the recent result packets.\n\
+2. `batty read {member_name} <ref>` for each packet you need to review in full.\n\
+3. `batty send {first_report} \"accepted / blocked / next step\"` to disposition each report and unblock the sender.",
+            member_name = member.name,
+        );
+
+        if let Some(engineer) = first_engineer {
+            message.push_str(&format!(
+                "\n4. If more implementation is needed, issue it directly with `batty assign {engineer} \"<next task>\"`."
+            ));
+        }
+
+        if let Some(parent) = &member.reports_to {
+            message.push_str(&format!(
+                "\n5. After triage, summarize upward with `batty send {parent} \"triage summary: accepted / blocked / reassigned / next load\"`."
+            ));
+        }
+
+        message.push_str(
+            "\nDo the triage now and drive the backlog to zero. Batty will remind you again the next time you become idle while triage backlog remains.",
+        );
+        message
+    }
+
+    fn build_owned_task_intervention_message(
+        &self,
+        member: &MemberInstance,
+        owned_tasks: &[&crate::task::Task],
+        direct_reports: &[String],
+    ) -> String {
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let board_dir_str = board_dir.display();
+        let task_summary = owned_tasks
+            .iter()
+            .map(|task| format!("#{} ({}) {}", task.id, task.status, task.title))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let task_context_cmds = owned_tasks
+            .iter()
+            .map(|task| {
+                format!(
+                    "- `kanban-md show --dir {board_dir_str} {task_id}`\n- `sed -n '1,220p' {task_path}`",
+                    task_id = task.id,
+                    task_path = task.source_path.display(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let first_task = owned_tasks[0];
+
+        let mut message = format!(
+            "Owned active task backlog detected: you are idle but still own active board task(s): {task_summary}.\n\
+Retrieve task context now:\n\
+1. `kanban-md list --dir {board_dir_str} --status in-progress`\n\
+2. Review each owned task:\n{task_context_cmds}",
+        );
+
+        if let Some(first_report) = direct_reports.first() {
+            let report_is_engineer = self
+                .config
+                .members
+                .iter()
+                .find(|candidate| candidate.name == *first_report)
+                .is_some_and(|candidate| candidate.role_type == RoleType::Engineer);
+            if report_is_engineer {
+                message.push_str(&format!(
+                    "\n3. If the task can move, assign the next concrete slice now with `batty assign {first_report} \"Task #{task_id}: <scoped subtask>\"`.",
+                    task_id = first_task.id,
+                ));
+            } else {
+                message.push_str(&format!(
+                    "\n3. If the task can move, delegate the next concrete step now with `batty send {first_report} \"Task #{task_id}: <next step>\"`.",
+                    task_id = first_task.id,
+                ));
+            }
+        }
+
+        if let Some(parent) = &member.reports_to {
+            message.push_str(&format!(
+                "\n4. If the lane is blocked, escalate explicitly with `batty send {parent} \"Task #{task_id} blocker: <exact blocker and next decision>\"`.",
+                task_id = first_task.id,
+            ));
+        }
+
+        message.push_str(&format!(
+            "\n5. If the work is complete or ready for review, update board state now with `kanban-md move --dir {board_dir_str} {task_id} review` or `kanban-md move --dir {board_dir_str} {task_id} done` as appropriate.",
+            task_id = first_task.id,
+        ));
+        message.push_str(
+            "\nDo not stay idle while owning active work. Either move the task forward, split it, or escalate the blocker now. Batty will remind you again the next time you become idle while you still own unfinished tasks.",
+        );
+        message
+    }
+
+    fn build_review_intervention_message(
+        &self,
+        member: &MemberInstance,
+        review_tasks: &[&crate::task::Task],
+    ) -> String {
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let board_dir_str = board_dir.display();
+        let task_summary = review_tasks
+            .iter()
+            .map(|task| {
+                let claimed_by = task.claimed_by.as_deref().unwrap_or("unknown");
+                if let Some(context) = self.member_worktree_context(claimed_by) {
+                    match context.branch {
+                        Some(branch) => format!(
+                            "#{} by {} [branch: {} | worktree: {}]",
+                            task.id,
+                            claimed_by,
+                            branch,
+                            context.path.display()
+                        ),
+                        None => format!(
+                            "#{} by {} [worktree: {}]",
+                            task.id,
+                            claimed_by,
+                            context.path.display()
+                        ),
+                    }
+                } else {
+                    format!("#{} by {}", task.id, claimed_by)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let task_context_cmds = review_tasks
+            .iter()
+            .map(|task| {
+                let claimed_by = task.claimed_by.as_deref().unwrap_or("unknown");
+                let mut lines = vec![
+                    format!("- `kanban-md show --dir {board_dir_str} {}`", task.id),
+                    format!("- `sed -n '1,220p' {}`", task.source_path.display()),
+                ];
+                if let Some(context) = self.member_worktree_context(claimed_by) {
+                    lines.push(format!(
+                        "- worktree: `{}`{}",
+                        context.path.display(),
+                        context
+                            .branch
+                            .as_deref()
+                            .map(|branch| format!(" (branch `{branch}`)"))
+                            .unwrap_or_default()
+                    ));
+                }
+                lines.join("\n")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let first_task = review_tasks[0];
+        let first_report = first_task.claimed_by.as_deref().unwrap_or("engineer");
+        let first_report_is_engineer = self
+            .config
+            .members
+            .iter()
+            .find(|candidate| candidate.name == first_report)
+            .is_some_and(|candidate| candidate.role_type == RoleType::Engineer);
+
+        let mut message = format!(
+            "Review backlog detected: direct-report work has completed and is waiting for your review: {task_summary}.\n\
+Review and disposition it now:\n\
+1. `kanban-md list --dir {board_dir_str} --status review`\n\
+2. `batty inbox {member_name}` then `batty read {member_name} <ref>` to inspect the completion packet(s).\n\
+3. Review each task and its lane context:\n{task_context_cmds}",
+            member_name = member.name,
+        );
+
+        if first_report_is_engineer {
+            message.push_str(&format!(
+                "\n4. To accept engineer work, run `batty merge {first_report}` then `kanban-md move --dir {board_dir_str} {task_id} done`.",
+                task_id = first_task.id,
+            ));
+        } else {
+            message.push_str(&format!(
+                "\n4. To accept the review packet, move it forward with `kanban-md move --dir {board_dir_str} {task_id} done` and send the disposition to `{first_report}`.",
+                task_id = first_task.id,
+            ));
+        }
+
+        message.push_str(&format!(
+            "\n5. To discard it, run `kanban-md move --dir {board_dir_str} {task_id} archived` and `batty send {first_report} \"Task #{task_id} discarded: <reason>\"`.",
+            task_id = first_task.id,
+        ));
+        let rework_command = if first_report_is_engineer {
+            format!(
+                "`batty assign {first_report} \"Task #{task_id}: <required changes>\"`",
+                task_id = first_task.id
+            )
+        } else {
+            format!(
+                "`batty send {first_report} \"Task #{task_id}: <required changes>\"`",
+                task_id = first_task.id
+            )
+        };
+        message.push_str(&format!(
+            "\n6. To request rework, run `kanban-md move --dir {board_dir_str} {task_id} in-progress` and {rework_command}.",
+            task_id = first_task.id,
+        ));
+
+        if let Some(parent) = &member.reports_to {
+            message.push_str(&format!(
+                "\n7. After each review decision, report upward with `batty send {parent} \"Reviewed Task #{task_id}: merged / archived / rework sent to {first_report}\"`.",
+                task_id = first_task.id,
+            ));
+        }
+
+        message.push_str(
+            "\nDo not leave completed direct-report work parked in review. Merge it, discard it, or send exact rework now. Batty will remind you again if review backlog remains unchanged.",
+        );
+        message
+    }
+
+    fn build_manager_dispatch_gap_message(
+        &self,
+        member: &MemberInstance,
+        idle_active_reports: &[&ReportDispatchSnapshot],
+        idle_unassigned_reports: &[&ReportDispatchSnapshot],
+        unassigned_open_tasks: &[&crate::task::Task],
+    ) -> String {
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let board_dir_str = board_dir.display();
+        let active_report_summary = if idle_active_reports.is_empty() {
+            "none".to_string()
+        } else {
+            idle_active_reports
+                .iter()
+                .map(|snapshot| {
+                    let ids = snapshot
+                        .active_task_ids
+                        .iter()
+                        .map(|id| format!("#{id}"))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("{} on {}", snapshot.name, ids)
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        let unassigned_report_summary = if idle_unassigned_reports.is_empty() {
+            "none".to_string()
+        } else {
+            idle_unassigned_reports
+                .iter()
+                .map(|snapshot| snapshot.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let open_task_summary = if unassigned_open_tasks.is_empty() {
+            "none".to_string()
+        } else {
+            unassigned_open_tasks
+                .iter()
+                .take(3)
+                .map(|task| format!("#{} ({}) {}", task.id, task.status, task.title))
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+
+        let mut message = format!(
+            "Dispatch recovery needed: you are idle, your reports are idle, and the lane has no triage/review backlog. Idle reports still holding active work: {active_report_summary}. Idle reports with no active task: {unassigned_report_summary}. Unassigned open board work: {open_task_summary}.\n\
+Recover the lane now:\n\
+1. `batty status`\n\
+2. `kanban-md list --dir {board_dir_str} --status in-progress`\n\
+3. `kanban-md list --dir {board_dir_str} --status todo`\n\
+4. `kanban-md list --dir {board_dir_str} --status backlog`"
+        );
+
+        if let Some(first_active) = idle_active_reports.first() {
+            let first_task_id = first_active.active_task_ids[0];
+            message.push_str(&format!(
+                "\n5. For an idle active lane, intervene directly with `batty send {report} \"Task #{task_id} is idle under your ownership. Either move it forward now, report the exact blocker, or request board normalization.\"`.",
+                report = first_active.name,
+                task_id = first_task_id,
+            ));
+        }
+
+        if let (Some(first_unassigned_report), Some(first_open_task)) = (
+            idle_unassigned_reports.first(),
+            unassigned_open_tasks.first(),
+        ) {
+            message.push_str(&format!(
+                "\n6. If executable work exists, start it now with `batty assign {report} \"Task #{task_id}: {title}\"`.",
+                report = first_unassigned_report.name,
+                task_id = first_open_task.id,
+                title = first_open_task.title,
+            ));
+        }
+
+        if let Some(parent) = &member.reports_to {
+            message.push_str(&format!(
+                "\n7. If the lane has no executable next step, escalate explicitly with `batty send {parent} \"lane blocked: all reports idle; need new dispatch or decision\"`."
+            ));
+        }
+
+        message.push_str(
+            "\nDo not let the entire lane sit idle. Either wake an active task, assign new executable work, or escalate the exact blockage now.",
+        );
+        message
+    }
+
+    fn build_architect_utilization_message(
+        &self,
+        member: &MemberInstance,
+        working_engineers: &[String],
+        idle_active_engineers: &[(String, Vec<u32>)],
+        idle_unassigned_engineers: &[String],
+        unassigned_open_tasks: &[&crate::task::Task],
+    ) -> String {
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let board_dir_str = board_dir.display();
+        let working_summary = if working_engineers.is_empty() {
+            "none".to_string()
+        } else {
+            working_engineers.join(", ")
+        };
+        let idle_active_summary = if idle_active_engineers.is_empty() {
+            "none".to_string()
+        } else {
+            idle_active_engineers
+                .iter()
+                .map(|(engineer, task_ids)| {
+                    let ids = task_ids
+                        .iter()
+                        .map(|id| format!("#{id}"))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("{engineer} on {ids}")
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        let idle_unassigned_summary = if idle_unassigned_engineers.is_empty() {
+            "none".to_string()
+        } else {
+            idle_unassigned_engineers.join(", ")
+        };
+        let open_task_summary = if unassigned_open_tasks.is_empty() {
+            "none".to_string()
+        } else {
+            unassigned_open_tasks
+                .iter()
+                .take(4)
+                .map(|task| format!("#{} ({}) {}", task.id, task.status, task.title))
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+
+        let mut message = format!(
+            "Utilization recovery needed: you are idle while team throughput is low. Working engineers: {working_summary}. Idle engineers still holding active work: {idle_active_summary}. Idle engineers with no active task: {idle_unassigned_summary}. Unassigned open board work: {open_task_summary}.\n\
+Recover throughput now:\n\
+1. `batty status`\n\
+2. `kanban-md list --dir {board_dir_str} --status in-progress`\n\
+3. `kanban-md list --dir {board_dir_str} --status todo`\n\
+4. `kanban-md list --dir {board_dir_str} --status backlog`"
+        );
+
+        if let Some((engineer, task_ids)) = idle_active_engineers.first() {
+            let task_id = task_ids[0];
+            if let Some(lead) = self.manager_for_member_name(engineer) {
+                message.push_str(&format!(
+                    "\n5. For an idle active lane, force lead action now with `batty send {lead} \"Engineer {engineer} is idle on Task #{task_id}. Normalize the board state or unblock/reassign this lane now.\"`."
+                ));
+            }
+        }
+
+        if let (Some(engineer), Some(task)) = (
+            idle_unassigned_engineers.first(),
+            unassigned_open_tasks.first(),
+        ) {
+            if let Some(lead) = self.manager_for_member_name(engineer) {
+                message.push_str(&format!(
+                    "\n6. For unused capacity, dispatch through the lead now with `batty send {lead} \"Start Task #{task_id} on {engineer} now: {title}\"`.",
+                    task_id = task.id,
+                    title = task.title,
+                ));
+            }
+        }
+
+        message.push_str(
+            "\n7. If the board has no executable work left, create the next concrete task or ask the human only for a real policy decision. Do not leave the team underloaded without an explicit next dispatch.",
+        );
+        if let Some(parent) = &member.reports_to {
+            message.push_str(&format!(
+                "\n8. Report the recovery decision upward with `batty send {parent} \"utilization recovery: <what was dispatched or why the board is blocked>\"`."
+            ));
+        }
+        message
+    }
+
+    fn member_worktree_context(&self, member_name: &str) -> Option<MemberWorktreeContext> {
+        let worktree_path = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("worktrees")
+            .join(member_name);
+        if !worktree_path.exists() {
+            return None;
+        }
+
+        let branch = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(&worktree_path)
+            .output()
+            .ok()
+            .and_then(|output| {
+                output
+                    .status
+                    .success()
+                    .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            })
+            .filter(|branch| !branch.is_empty());
+
+        Some(MemberWorktreeContext {
+            path: worktree_path,
+            branch,
+        })
+    }
+
     /// Generate and inject standup for each recipient whose interval has elapsed.
     ///
     /// Each recipient gets a scoped standup showing only their direct reports.
@@ -1812,6 +2977,9 @@ impl TeamDaemon {
     /// takes precedence, falling back to the global `standup.interval_secs`.
     /// Skipped entirely when the pause marker file exists.
     fn maybe_generate_standup(&mut self) -> Result<()> {
+        if !self.config.team_config.automation.standups {
+            return Ok(());
+        }
         if super::pause_marker_path(&self.config.project_root).exists() {
             return Ok(());
         }
@@ -2052,6 +3220,26 @@ impl TeamDaemon {
             .map(|m| m.role_name.clone())
             .unwrap_or_else(|| member_name.to_string())
     }
+
+    fn automation_sender_for(&self, recipient: &str) -> String {
+        let recipient_member = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == recipient);
+
+        if let Some(member) = recipient_member {
+            if let Some(parent) = &member.reports_to {
+                return parent.clone();
+            }
+        }
+
+        if let Some(sender) = &self.config.team_config.automation_sender {
+            return sender.clone();
+        }
+
+        "daemon".to_string()
+    }
 }
 
 fn describe_command_failure(command: &str, args: &[&str], output: &std::process::Output) -> String {
@@ -2150,6 +3338,175 @@ fn format_nudge_status(schedule: Option<&NudgeSchedule>) -> String {
     } else {
         " #[fg=magenta]nudge now#[default]".to_string()
     }
+}
+
+fn format_inbox_status(pending_count: usize) -> String {
+    if pending_count == 0 {
+        " #[fg=244]inbox 0#[default]".to_string()
+    } else {
+        format!(" #[fg=colour214,bold]inbox {pending_count}#[default]")
+    }
+}
+
+fn format_active_task_status(active_task_ids: &[u32]) -> String {
+    match active_task_ids {
+        [] => String::new(),
+        [task_id] => format!(" #[fg=green,bold]task {task_id}#[default]"),
+        _ => format!(" #[fg=green,bold]tasks {}#[default]", active_task_ids.len()),
+    }
+}
+
+fn format_review_task_status(review_task_ids: &[u32]) -> String {
+    match review_task_ids {
+        [] => String::new(),
+        [task_id] => format!(" #[fg=blue,bold]review {task_id}#[default]"),
+        _ => format!(" #[fg=blue,bold]review {}#[default]", review_task_ids.len()),
+    }
+}
+
+fn compose_pane_status_label(
+    state: MemberState,
+    pending_inbox: usize,
+    triage_backlog: usize,
+    active_task_ids: &[u32],
+    review_task_ids: &[u32],
+    globally_paused: bool,
+    nudge_status: &str,
+    standup_status: &str,
+) -> String {
+    let state_str = match state {
+        MemberState::Idle => "#[fg=yellow]idle#[default]",
+        MemberState::Working => "#[fg=cyan]working#[default]",
+    };
+    let inbox_str = format_inbox_status(pending_inbox);
+    let triage_str = if triage_backlog > 0 {
+        format!(" #[fg=red,bold]triage {triage_backlog}#[default]")
+    } else {
+        String::new()
+    };
+    let active_task_str = format_active_task_status(active_task_ids);
+    let review_task_str = format_review_task_status(review_task_ids);
+
+    if globally_paused {
+        return format!(
+            "{state_str}{inbox_str}{triage_str}{active_task_str}{review_task_str} #[fg=red]PAUSED#[default]"
+        );
+    }
+
+    format!(
+        "{state_str}{inbox_str}{triage_str}{active_task_str}{review_task_str}{nudge_status}{standup_status}"
+    )
+}
+
+fn task_needs_owned_intervention(status: &str) -> bool {
+    !matches!(status, "review" | "done" | "archived")
+}
+
+fn manager_dispatch_intervention_key(member_name: &str) -> String {
+    format!("dispatch::{member_name}")
+}
+
+fn manager_dispatch_intervention_signature(
+    idle_active_reports: &[&ReportDispatchSnapshot],
+    idle_unassigned_reports: &[&ReportDispatchSnapshot],
+    unassigned_open_tasks: &[&crate::task::Task],
+) -> String {
+    let mut parts = Vec::new();
+    for snapshot in idle_active_reports {
+        let task_ids = snapshot
+            .active_task_ids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        parts.push(format!("active:{}:{task_ids}", snapshot.name));
+    }
+    for snapshot in idle_unassigned_reports {
+        parts.push(format!("idle:{}", snapshot.name));
+    }
+    for task in unassigned_open_tasks {
+        parts.push(format!("open:{}:{}", task.id, task.status));
+    }
+    parts.sort();
+    parts.join("|")
+}
+
+fn owned_task_intervention_signature(tasks: &[&crate::task::Task]) -> String {
+    let mut parts = tasks
+        .iter()
+        .map(|task| format!("{}:{}", task.id, task.status))
+        .collect::<Vec<_>>();
+    parts.sort();
+    parts.join("|")
+}
+
+fn review_backlog_owner_for_task(
+    task: &crate::task::Task,
+    members: &[MemberInstance],
+) -> Option<String> {
+    if task.status != "review" {
+        return None;
+    }
+    let claimed_by = task.claimed_by.as_deref()?;
+    Some(
+        members
+            .iter()
+            .find(|member| member.name == claimed_by)
+            .and_then(|member| member.reports_to.clone())
+            .unwrap_or_else(|| claimed_by.to_string()),
+    )
+}
+
+fn review_intervention_key(member_name: &str) -> String {
+    format!("review::{member_name}")
+}
+
+fn architect_utilization_intervention_key(member_name: &str) -> String {
+    format!("utilization::{member_name}")
+}
+
+fn architect_utilization_intervention_signature(
+    working_engineers: &[String],
+    idle_active_engineers: &[(String, Vec<u32>)],
+    idle_unassigned_engineers: &[String],
+    unassigned_open_tasks: &[&crate::task::Task],
+) -> String {
+    let mut parts = Vec::new();
+    for engineer in working_engineers {
+        parts.push(format!("working:{engineer}"));
+    }
+    for (engineer, task_ids) in idle_active_engineers {
+        let ids = task_ids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        parts.push(format!("idle-active:{engineer}:{ids}"));
+    }
+    for engineer in idle_unassigned_engineers {
+        parts.push(format!("idle-free:{engineer}"));
+    }
+    for task in unassigned_open_tasks {
+        parts.push(format!("open:{}:{}", task.id, task.status));
+    }
+    parts.sort();
+    parts.join("|")
+}
+
+fn review_task_intervention_signature(tasks: &[&crate::task::Task]) -> String {
+    let mut parts = tasks
+        .iter()
+        .map(|task| {
+            format!(
+                "{}:{}:{}",
+                task.id,
+                task.status,
+                task.claimed_by.as_deref().unwrap_or("unknown")
+            )
+        })
+        .collect::<Vec<_>>();
+    parts.sort();
+    parts.join("|")
 }
 
 fn format_standup_status(
@@ -2638,6 +3995,7 @@ fn resolve_binary(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::team::config::AutomationConfig;
     use std::collections::HashMap;
     use std::io;
     use std::path::{Path, PathBuf};
@@ -2741,6 +4099,28 @@ mod tests {
             tasks_dir.join(format!("{id:03}-{title}.md")),
             format!(
                 "---\nid: {id}\ntitle: {title}\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\n---\n\nTask description.\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn write_owned_task_file(
+        project_root: &Path,
+        id: u32,
+        title: &str,
+        status: &str,
+        claimed_by: &str,
+    ) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join(format!("{id:03}-{title}.md")),
+            format!(
+                "---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: critical\nclaimed_by: {claimed_by}\nclass: standard\n---\n\nTask description.\n"
             ),
         )
         .unwrap();
@@ -3026,6 +4406,34 @@ mod tests {
     }
 
     #[test]
+    fn compose_pane_status_label_shows_pending_inbox_count() {
+        let label = compose_pane_status_label(
+            MemberState::Idle,
+            3,
+            2,
+            &[191],
+            &[193, 194],
+            false,
+            " #[fg=magenta]nudge 0:30#[default]",
+            "",
+        );
+        assert!(label.contains("idle"));
+        assert!(label.contains("inbox 3"));
+        assert!(label.contains("triage 2"));
+        assert!(label.contains("task 191"));
+        assert!(label.contains("review 2"));
+        assert!(label.contains("nudge 0:30"));
+    }
+
+    #[test]
+    fn compose_pane_status_label_shows_zero_inbox_and_pause_state() {
+        let label = compose_pane_status_label(MemberState::Working, 0, 0, &[], &[], true, "", "");
+        assert!(label.contains("working"));
+        assert!(label.contains("inbox 0"));
+        assert!(label.contains("PAUSED"));
+    }
+
+    #[test]
     fn canonical_agent_name_normalizes_aliases() {
         assert_eq!(canonical_agent_name("claude"), "claude-code");
         assert_eq!(canonical_agent_name("claude-code"), "claude-code");
@@ -3271,6 +4679,8 @@ mod tests {
                     name: "test".to_string(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -3282,6 +4692,9 @@ mod tests {
             states: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -3318,6 +4731,8 @@ mod tests {
                     name: "test".to_string(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -3329,6 +4744,9 @@ mod tests {
             states: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -3391,6 +4809,8 @@ mod tests {
                     name: "test".to_string(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
                     layout: None,
                     roles: vec![RoleDef {
                         name: "human".to_string(),
@@ -3429,6 +4849,9 @@ mod tests {
             states: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
             channels: HashMap::from([(
                 "human".to_string(),
                 Box::new(FailingChannel) as Box<dyn Channel>,
@@ -3527,6 +4950,8 @@ mod tests {
                 name: "test".to_string(),
                 board: BoardConfig::default(),
                 standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
                 layout: None,
                 roles,
             },
@@ -3676,6 +5101,8 @@ mod tests {
                 name: "test".to_string(),
                 board: BoardConfig::default(),
                 standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
                 layout: None,
                 roles,
             },
@@ -3720,6 +5147,8 @@ mod tests {
                     name: "test".to_string(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -3731,6 +5160,9 @@ mod tests {
             states: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -3760,6 +5192,8 @@ mod tests {
                         ..BoardConfig::default()
                     },
                     standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -3771,6 +5205,9 @@ mod tests {
             states: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -3797,6 +5234,8 @@ mod tests {
                     name: "test".to_string(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -3808,6 +5247,9 @@ mod tests {
             states: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -3839,6 +5281,8 @@ mod tests {
                     name: "test".to_string(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -3850,6 +5294,9 @@ mod tests {
             states: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -3879,6 +5326,8 @@ mod tests {
                     name: "test".to_string(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -3890,6 +5339,9 @@ mod tests {
             states: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -3923,6 +5375,8 @@ mod tests {
                     name: "test".to_string(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -3934,6 +5388,9 @@ mod tests {
             states: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -3969,6 +5426,8 @@ mod tests {
                     name: "test".to_string(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -3980,6 +5439,9 @@ mod tests {
             states: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -4024,6 +5486,8 @@ mod tests {
                     name: "test".to_string(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -4035,6 +5499,9 @@ mod tests {
             states: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -4105,6 +5572,8 @@ mod tests {
                     name: "test".to_string(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -4116,6 +5585,9 @@ mod tests {
             states: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -4228,6 +5700,8 @@ mod tests {
                 name: "test".to_string(),
                 board: BoardConfig::default(),
                 standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
                 layout: None,
                 roles: Vec::new(),
             },
@@ -4312,6 +5786,8 @@ mod tests {
                     name: "test".to_string(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -4323,6 +5799,9 @@ mod tests {
             states: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -4380,6 +5859,8 @@ mod tests {
                     name: "test".to_string(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
                     layout: None,
                     roles: vec![role],
                 },
@@ -4391,6 +5872,9 @@ mod tests {
             states: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::from([(
                 "manager".to_string(),
@@ -4440,6 +5924,7 @@ mod tests {
 
         crate::tmux::create_session(session, "cat", &[], "/tmp").unwrap();
         let pane_id = crate::tmux::pane_id(session).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
 
         let tmp = tempfile::tempdir().unwrap();
         let member = MemberInstance {
@@ -4463,6 +5948,8 @@ mod tests {
                     name: "test".to_string(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -4474,6 +5961,9 @@ mod tests {
             states: HashMap::from([("scientist".to_string(), MemberState::Idle)]),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::from([(
                 "scientist".to_string(),
@@ -4506,6 +5996,1022 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn maybe_intervene_triage_backlog_marks_member_working_after_live_delivery() {
+        let session = "batty-test-triage-live-delivery";
+        let _ = crate::tmux::kill_session(session);
+
+        crate::tmux::create_session(session, "cat", &[], "/tmp").unwrap();
+        let pane_id = crate::tmux::pane_id(session).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let lead = MemberInstance {
+            name: "lead".to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("lead".to_string()),
+            use_worktrees: false,
+        };
+        let mut watchers = HashMap::new();
+        watchers.insert(
+            "lead".to_string(),
+            SessionWatcher::new(&pane_id, "lead", 300, None),
+        );
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: session.to_string(),
+                members: vec![lead, engineer],
+                pane_map: HashMap::from([("lead".to_string(), pane_id.clone())]),
+            },
+            watchers,
+            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        inbox::init_inbox(&root, "eng-1").unwrap();
+        let mut result = inbox::InboxMessage::new_send("eng-1", "lead", "Task complete.");
+        result.timestamp = 42;
+        let id = inbox::deliver_to_inbox(&root, &result).unwrap();
+        inbox::mark_delivered(&root, "lead", &id).unwrap();
+
+        daemon.update_automation_timers_for_state("lead", MemberState::Working);
+        daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        daemon.maybe_intervene_triage_backlog().unwrap();
+
+        assert_eq!(daemon.states.get("lead"), Some(&MemberState::Working));
+        assert_eq!(daemon.triage_interventions.get("lead"), Some(&1));
+        let pane = tmux::capture_pane(&pane_id).unwrap_or_default();
+        assert!(pane.contains("batty inbox lead"));
+        assert!(pane.contains("batty read lead <ref>"));
+        assert!(pane.contains("batty send eng-1"));
+        assert!(pane.contains("batty assign eng-1"));
+        assert!(pane.contains("batty send architect"));
+        assert!(pane.contains("next time you become idle"));
+
+        crate::tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn maybe_intervene_triage_backlog_queues_when_live_delivery_falls_back_to_inbox() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lead = MemberInstance {
+            name: "lead".to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("lead".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![lead, engineer],
+                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        inbox::init_inbox(&root, "eng-1").unwrap();
+        let mut result = inbox::InboxMessage::new_send("eng-1", "lead", "Task complete.");
+        result.timestamp = 42;
+        let id = inbox::deliver_to_inbox(&root, &result).unwrap();
+        inbox::mark_delivered(&root, "lead", &id).unwrap();
+
+        daemon.update_automation_timers_for_state("lead", MemberState::Working);
+        daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        daemon.maybe_intervene_triage_backlog().unwrap();
+
+        assert_eq!(daemon.states.get("lead"), Some(&MemberState::Idle));
+        assert_eq!(daemon.triage_interventions.get("lead"), Some(&1));
+        let pending = inbox::pending_messages(&root, "lead").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "architect");
+        assert!(pending[0].body.contains("Triage backlog detected"));
+        assert!(pending[0].body.contains("batty inbox lead"));
+        assert!(pending[0].body.contains("batty read lead <ref>"));
+        assert!(pending[0].body.contains("batty send eng-1"));
+        assert!(pending[0].body.contains("batty assign eng-1"));
+        assert!(pending[0].body.contains("batty send architect"));
+        assert!(pending[0].body.contains("next time you become idle"));
+    }
+
+    #[test]
+    fn maybe_intervene_triage_backlog_does_not_fire_on_startup_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lead = MemberInstance {
+            name: "lead".to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("lead".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![lead, engineer],
+                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        inbox::init_inbox(&root, "eng-1").unwrap();
+        let mut result = inbox::InboxMessage::new_send("eng-1", "lead", "Task complete.");
+        result.timestamp = 42;
+        let id = inbox::deliver_to_inbox(&root, &result).unwrap();
+        inbox::mark_delivered(&root, "lead", &id).unwrap();
+
+        daemon.maybe_intervene_triage_backlog().unwrap();
+
+        assert!(daemon.triage_interventions.get("lead").is_none());
+        assert!(inbox::pending_messages(&root, "lead").unwrap().is_empty());
+        assert_eq!(daemon.states.get("lead"), Some(&MemberState::Idle));
+    }
+
+    #[test]
+    fn maybe_intervene_owned_tasks_queues_when_idle_member_owns_unfinished_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lead = MemberInstance {
+            name: "lead".to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("lead".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![lead, engineer],
+                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        write_owned_task_file(tmp.path(), 191, "owned-task", "in-progress", "lead");
+
+        daemon.update_automation_timers_for_state("lead", MemberState::Working);
+        daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        assert_eq!(daemon.states.get("lead"), Some(&MemberState::Idle));
+        assert_eq!(
+            daemon
+                .owned_task_interventions
+                .get("lead")
+                .map(|state| state.idle_epoch),
+            Some(1)
+        );
+        let pending = inbox::pending_messages(&root, "lead").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "architect");
+        assert!(pending[0].body.contains("Task #191"));
+        assert!(
+            pending[0]
+                .body
+                .contains("Owned active task backlog detected")
+        );
+        assert!(pending[0].body.contains("kanban-md list --dir"));
+        assert!(pending[0].body.contains("kanban-md show --dir"));
+        assert!(pending[0].body.contains("191"));
+        assert!(pending[0].body.contains("sed -n '1,220p'"));
+        assert!(pending[0].body.contains("batty assign eng-1"));
+        assert!(pending[0].body.contains("batty send architect"));
+        assert!(pending[0].body.contains("kanban-md move --dir"));
+        assert!(pending[0].body.contains("next time you become idle"));
+    }
+
+    #[test]
+    fn maybe_intervene_owned_tasks_fires_for_persistent_startup_idle_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lead = MemberInstance {
+            name: "lead".to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("lead".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![lead, engineer],
+                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        write_owned_task_file(tmp.path(), 191, "owned-task", "in-progress", "lead");
+
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        let pending = inbox::pending_messages(&root, "lead").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "architect");
+        assert!(pending[0].body.contains("Task #191"));
+        assert_eq!(
+            daemon
+                .owned_task_interventions
+                .get("lead")
+                .map(|state| state.idle_epoch),
+            Some(0)
+        );
+        assert_eq!(daemon.states.get("lead"), Some(&MemberState::Idle));
+    }
+
+    #[test]
+    fn maybe_intervene_owned_tasks_ignores_review_only_claims() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lead = MemberInstance {
+            name: "lead".to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![lead],
+                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        write_owned_task_file(tmp.path(), 191, "review-task", "review", "lead");
+
+        daemon.update_automation_timers_for_state("lead", MemberState::Working);
+        daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        assert!(daemon.owned_task_interventions.get("lead").is_none());
+        assert!(inbox::pending_messages(&root, "lead").unwrap().is_empty());
+    }
+
+    #[test]
+    fn maybe_intervene_owned_tasks_dedupes_same_active_signature_across_idle_epochs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lead = MemberInstance {
+            name: "lead".to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![lead],
+                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        write_owned_task_file(tmp.path(), 191, "owned-task", "in-progress", "lead");
+
+        daemon.update_automation_timers_for_state("lead", MemberState::Working);
+        daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        daemon
+            .states
+            .insert("lead".to_string(), MemberState::Working);
+        daemon.update_automation_timers_for_state("lead", MemberState::Working);
+        daemon.states.insert("lead".to_string(), MemberState::Idle);
+        daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        let pending = inbox::pending_messages(&root, "lead").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            daemon
+                .owned_task_interventions
+                .get("lead")
+                .map(|state| state.idle_epoch),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn maybe_intervene_review_backlog_queues_for_idle_manager_with_branch_and_worktree_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+        write_owned_task_file(&repo, 191, "review-task", "review", "eng-1");
+
+        let lead = MemberInstance {
+            name: "lead".to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("lead".to_string()),
+            use_worktrees: true,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: repo.clone(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![lead, engineer],
+                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(
+                &repo.join(".batty").join("team_config").join("events.jsonl"),
+            )
+            .unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(&repo);
+        inbox::init_inbox(&root, "lead").unwrap();
+
+        daemon.update_automation_timers_for_state("lead", MemberState::Working);
+        daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        daemon.maybe_intervene_review_backlog().unwrap();
+
+        let pending = inbox::pending_messages(&root, "lead").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "architect");
+        assert!(pending[0].body.contains("Review backlog detected"));
+        assert!(pending[0].body.contains("#191 by eng-1"));
+        assert!(pending[0].body.contains("batty inbox lead"));
+        assert!(pending[0].body.contains("batty read lead <ref>"));
+        assert!(pending[0].body.contains("batty merge eng-1"));
+        assert!(pending[0].body.contains("kanban-md move --dir"));
+        assert!(pending[0].body.contains("191 done"));
+        assert!(pending[0].body.contains("191 archived"));
+        assert!(pending[0].body.contains("191 in-progress"));
+        assert!(pending[0].body.contains("batty assign eng-1"));
+        assert!(pending[0].body.contains("batty send architect"));
+        assert!(
+            pending[0]
+                .body
+                .contains(worktree_dir.to_string_lossy().as_ref())
+        );
+        assert!(pending[0].body.contains("branch: eng-1"));
+        assert_eq!(
+            daemon
+                .owned_task_interventions
+                .get("review::lead")
+                .map(|state| state.idle_epoch),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn maybe_intervene_review_backlog_does_not_fire_on_startup_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_owned_task_file(tmp.path(), 191, "review-task", "review", "eng-1");
+
+        let lead = MemberInstance {
+            name: "lead".to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("lead".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![lead, engineer],
+                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+
+        daemon.maybe_intervene_review_backlog().unwrap();
+
+        assert!(inbox::pending_messages(&root, "lead").unwrap().is_empty());
+        assert!(
+            daemon
+                .owned_task_interventions
+                .get("review::lead")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn maybe_intervene_manager_dispatch_gap_queues_for_idle_lead_with_idle_reports() {
+        let tmp = tempfile::tempdir().unwrap();
+        let architect = MemberInstance {
+            name: "architect".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let lead = MemberInstance {
+            name: "lead".to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let eng_1 = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("lead".to_string()),
+            use_worktrees: false,
+        };
+        let eng_2 = MemberInstance {
+            name: "eng-2".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("lead".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![architect, lead, eng_1, eng_2],
+                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([
+                ("lead".to_string(), MemberState::Idle),
+                ("eng-1".to_string(), MemberState::Idle),
+                ("eng-2".to_string(), MemberState::Idle),
+            ]),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        inbox::init_inbox(&root, "eng-1").unwrap();
+        inbox::init_inbox(&root, "eng-2").unwrap();
+        write_owned_task_file(tmp.path(), 191, "active-task", "in-progress", "eng-1");
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::write(
+            tasks_dir.join("192-open-task.md"),
+            "---\nid: 192\ntitle: open-task\nstatus: todo\npriority: high\nclass: standard\n---\n\nTask description.\n",
+        )
+        .unwrap();
+
+        daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+        let pending = inbox::pending_messages(&root, "lead").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "architect");
+        assert!(pending[0].body.contains("Dispatch recovery needed"));
+        assert!(pending[0].body.contains("eng-1 on #191"));
+        assert!(pending[0].body.contains("eng-2"));
+        assert!(pending[0].body.contains("batty status"));
+        assert!(pending[0].body.contains("batty send eng-1"));
+        assert!(pending[0].body.contains("batty assign eng-2"));
+        assert!(pending[0].body.contains("batty send architect"));
+        assert!(
+            daemon
+                .owned_task_interventions
+                .contains_key("dispatch::lead")
+        );
+    }
+
+    #[test]
+    fn maybe_intervene_architect_utilization_queues_for_underloaded_idle_architect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let architect = MemberInstance {
+            name: "architect".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let lead = MemberInstance {
+            name: "lead".to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let eng_1 = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("lead".to_string()),
+            use_worktrees: false,
+        };
+        let eng_2 = MemberInstance {
+            name: "eng-2".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("lead".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![architect, lead, eng_1, eng_2],
+                pane_map: HashMap::from([("architect".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([
+                ("architect".to_string(), MemberState::Idle),
+                ("lead".to_string(), MemberState::Idle),
+                ("eng-1".to_string(), MemberState::Idle),
+                ("eng-2".to_string(), MemberState::Idle),
+            ]),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "architect").unwrap();
+        write_owned_task_file(tmp.path(), 191, "active-task", "in-progress", "eng-1");
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::write(
+            tasks_dir.join("192-open-task.md"),
+            "---\nid: 192\ntitle: open-task\nstatus: backlog\npriority: high\nclass: standard\n---\n\nTask description.\n",
+        )
+        .unwrap();
+
+        daemon.maybe_intervene_architect_utilization().unwrap();
+
+        let pending = inbox::pending_messages(&root, "architect").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "daemon");
+        assert!(pending[0].body.contains("Utilization recovery needed"));
+        assert!(pending[0].body.contains("eng-1 on #191"));
+        assert!(pending[0].body.contains("eng-2"));
+        assert!(pending[0].body.contains("batty status"));
+        assert!(pending[0].body.contains("batty send lead"));
+        assert!(pending[0].body.contains("Start Task #192 on eng-2"));
+        assert!(
+            daemon
+                .owned_task_interventions
+                .contains_key("utilization::architect")
+        );
+    }
+
+    #[test]
+    fn maybe_intervene_triage_backlog_refires_on_next_idle_epoch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lead = MemberInstance {
+            name: "lead".to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("lead".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![lead, engineer],
+                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        inbox::init_inbox(&root, "eng-1").unwrap();
+        let mut result = inbox::InboxMessage::new_send("eng-1", "lead", "Task complete.");
+        result.timestamp = 42;
+        let id = inbox::deliver_to_inbox(&root, &result).unwrap();
+        inbox::mark_delivered(&root, "lead", &id).unwrap();
+
+        daemon.update_automation_timers_for_state("lead", MemberState::Working);
+        daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        daemon.maybe_intervene_triage_backlog().unwrap();
+
+        daemon
+            .states
+            .insert("lead".to_string(), MemberState::Working);
+        daemon.update_automation_timers_for_state("lead", MemberState::Working);
+        daemon.states.insert("lead".to_string(), MemberState::Idle);
+        daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        daemon.maybe_intervene_triage_backlog().unwrap();
+
+        assert_eq!(daemon.triage_interventions.get("lead"), Some(&2));
+        let pending = inbox::pending_messages(&root, "lead").unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().all(|message| message.from == "architect"));
+    }
+
+    #[test]
     fn maybe_fire_nudges_keeps_member_idle_when_delivery_falls_back_to_inbox() {
         let tmp = tempfile::tempdir().unwrap();
         let member = MemberInstance {
@@ -4524,6 +7030,8 @@ mod tests {
                     name: "test".to_string(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -4535,6 +7043,9 @@ mod tests {
             states: HashMap::from([("scientist".to_string(), MemberState::Idle)]),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::from([(
                 "scientist".to_string(),
@@ -4569,6 +7080,79 @@ mod tests {
         assert!(messages[0].body.contains("Please make progress."));
     }
 
+    #[test]
+    fn automation_sender_prefers_direct_manager_and_config_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: Some("human".to_string()),
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![
+                    MemberInstance {
+                        name: "architect".to_string(),
+                        role_name: "architect".to_string(),
+                        role_type: RoleType::Architect,
+                        agent: Some("claude".to_string()),
+                        prompt: None,
+                        reports_to: None,
+                        use_worktrees: false,
+                    },
+                    MemberInstance {
+                        name: "lead".to_string(),
+                        role_name: "lead".to_string(),
+                        role_type: RoleType::Manager,
+                        agent: Some("claude".to_string()),
+                        prompt: None,
+                        reports_to: Some("architect".to_string()),
+                        use_worktrees: false,
+                    },
+                    MemberInstance {
+                        name: "eng-1".to_string(),
+                        role_name: "eng".to_string(),
+                        role_type: RoleType::Engineer,
+                        agent: Some("codex".to_string()),
+                        prompt: None,
+                        reports_to: Some("lead".to_string()),
+                        use_worktrees: false,
+                    },
+                ],
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        assert_eq!(daemon.automation_sender_for("eng-1"), "lead");
+        assert_eq!(daemon.automation_sender_for("lead"), "architect");
+        assert_eq!(daemon.automation_sender_for("architect"), "human");
+
+        daemon.config.team_config.automation_sender = None;
+        assert_eq!(daemon.automation_sender_for("architect"), "daemon");
+    }
+
     /// Helper: build a minimal DaemonConfig with the given roles.
     fn daemon_config_with_roles(tmp: &tempfile::TempDir, roles: Vec<RoleDef>) -> DaemonConfig {
         DaemonConfig {
@@ -4577,6 +7161,8 @@ mod tests {
                 name: "test".to_string(),
                 board: BoardConfig::default(),
                 standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
                 layout: None,
                 roles,
             },

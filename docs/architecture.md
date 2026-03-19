@@ -38,6 +38,7 @@ batty start
             poll inbox    -- deliver pending messages via tmux send-keys
             poll watchers -- capture agent output, detect state changes
             poll standups -- periodic standup reports
+            poll automation -- state-driven recovery interventions
             poll board    -- task rotation when threshold reached
             emit events   -- structured JSONL event log
 ```
@@ -77,10 +78,28 @@ The daemon runs as a detached background process (`batty daemon --project-root <
 - **Records assignment outcomes** so callers can see whether delivery launched
   successfully or failed
 - **Monitors output** via `SessionWatcher` (tmux `capture-pane`)
-- **Runs standups** on configurable intervals per role
-- **Nudges agents** by re-injecting prompt sections on a timer
+- **Runs reactive interventions** when system state implies stalled ownership,
+  triage backlog, review backlog, dispatch gaps, or low utilization
+- **Runs standups** on configurable intervals per role as a fallback safety net
+- **Nudges agents** by re-injecting prompt sections on a timer as a fallback safety net
 - **Rotates the board** when completed task count hits the threshold
 - **Emits events** to `events.jsonl` for debugging and audit
+
+The `automation` block in `team.yaml` controls these daemon behaviors:
+
+```yaml
+automation:
+  timeout_nudges: true
+  standups: true
+  triage_interventions: true
+  review_interventions: true
+  owned_task_interventions: true
+  manager_dispatch_interventions: true
+  architect_utilization_interventions: true
+```
+
+These switches let a project keep periodic timers enabled while turning specific
+reactive recovery paths on or off per team.
 
 When started with `--resume`, the daemon launches agents with session continuation flags (`claude --continue`, `codex resume --last`) so prior context is preserved.
 

@@ -149,6 +149,29 @@ pub fn pending_messages(inboxes_root: &Path, member: &str) -> Result<Vec<InboxMe
     Ok(messages)
 }
 
+/// Count undelivered messages in `new/` for a member.
+pub fn pending_message_count(inboxes_root: &Path, member: &str) -> Result<usize> {
+    let new_dir = inboxes_root.join(member).join("new");
+    if !new_dir.is_dir() {
+        return Ok(0);
+    }
+
+    let mut count = 0usize;
+    for entry in std::fs::read_dir(&new_dir)
+        .with_context(|| format!("failed to read {}", new_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to read {}", new_dir.display()))?;
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect {}", entry.path().display()))?;
+        if file_type.is_file() {
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
 /// Mark a message as delivered (move from `new/` to `cur/`).
 pub fn mark_delivered(inboxes_root: &Path, member: &str, id: &str) -> Result<()> {
     let md = member_maildir(inboxes_root, member);
@@ -318,6 +341,23 @@ mod tests {
         let all = all_messages(root, "eng-1").unwrap();
         assert_eq!(all.len(), 1);
         assert!(all[0].1); // delivered = true
+    }
+
+    #[test]
+    fn pending_message_count_tracks_new_messages_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        init_inbox(root, "eng-1").unwrap();
+
+        let msg1 = InboxMessage::new_send("manager", "eng-1", "first");
+        let msg2 = InboxMessage::new_send("manager", "eng-1", "second");
+        let id1 = deliver_to_inbox(root, &msg1).unwrap();
+        deliver_to_inbox(root, &msg2).unwrap();
+
+        assert_eq!(pending_message_count(root, "eng-1").unwrap(), 2);
+
+        mark_delivered(root, "eng-1", &id1).unwrap();
+        assert_eq!(pending_message_count(root, "eng-1").unwrap(), 1);
     }
 
     #[test]

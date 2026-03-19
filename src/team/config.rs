@@ -14,6 +14,10 @@ pub struct TeamConfig {
     #[serde(default)]
     pub standup: StandupConfig,
     #[serde(default)]
+    pub automation: AutomationConfig,
+    #[serde(default)]
+    pub automation_sender: Option<String>,
+    #[serde(default)]
     pub layout: Option<LayoutConfig>,
     pub roles: Vec<RoleDef>,
 }
@@ -48,6 +52,38 @@ impl Default for StandupConfig {
         Self {
             interval_secs: default_standup_interval(),
             output_lines: default_output_lines(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AutomationConfig {
+    #[serde(default = "default_enabled")]
+    pub timeout_nudges: bool,
+    #[serde(default = "default_enabled")]
+    pub standups: bool,
+    #[serde(default = "default_enabled")]
+    pub triage_interventions: bool,
+    #[serde(default = "default_enabled")]
+    pub review_interventions: bool,
+    #[serde(default = "default_enabled")]
+    pub owned_task_interventions: bool,
+    #[serde(default = "default_enabled")]
+    pub manager_dispatch_interventions: bool,
+    #[serde(default = "default_enabled")]
+    pub architect_utilization_interventions: bool,
+}
+
+impl Default for AutomationConfig {
+    fn default() -> Self {
+        Self {
+            timeout_nudges: default_enabled(),
+            standups: default_enabled(),
+            triage_interventions: default_enabled(),
+            review_interventions: default_enabled(),
+            owned_task_interventions: default_enabled(),
+            manager_dispatch_interventions: default_enabled(),
+            architect_utilization_interventions: default_enabled(),
         }
     }
 }
@@ -139,6 +175,10 @@ fn default_output_lines() -> u32 {
 
 fn default_instances() -> u32 {
     1
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 impl TeamConfig {
@@ -242,6 +282,13 @@ impl TeamConfig {
             }
         }
 
+        if let Some(sender) = &self.automation_sender
+            && !role_names.contains(sender.as_str())
+            && sender != "human"
+        {
+            bail!("automation_sender references unknown role '{}'", sender);
+        }
+
         // Validate layout zones if present
         if let Some(layout) = &self.layout {
             let total_pct: u32 = layout.zones.iter().map(|z| z.width_pct).sum();
@@ -326,6 +373,14 @@ board:
 standup:
   interval_secs: 1200
   output_lines: 30
+automation:
+  timeout_nudges: true
+  standups: true
+  triage_interventions: true
+  review_interventions: true
+  owned_task_interventions: true
+  manager_dispatch_interventions: true
+  architect_utilization_interventions: true
 layout:
   zones:
     - name: architect
@@ -384,7 +439,37 @@ roles:
         assert!(config.board.auto_dispatch);
         assert_eq!(config.standup.interval_secs, 1200);
         assert_eq!(config.standup.output_lines, 30);
+        assert!(config.automation.timeout_nudges);
+        assert!(config.automation.standups);
+        assert!(config.automation.triage_interventions);
         assert_eq!(config.roles[0].instances, 1);
+    }
+
+    #[test]
+    fn parse_explicit_automation_config() {
+        let yaml = r#"
+name: test
+automation:
+  timeout_nudges: false
+  standups: true
+  triage_interventions: true
+  review_interventions: false
+  owned_task_interventions: true
+  manager_dispatch_interventions: false
+  architect_utilization_interventions: true
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.automation.timeout_nudges);
+        assert!(config.automation.standups);
+        assert!(config.automation.triage_interventions);
+        assert!(!config.automation.review_interventions);
+        assert!(config.automation.owned_task_interventions);
+        assert!(!config.automation.manager_dispatch_interventions);
+        assert!(config.automation.architect_utilization_interventions);
     }
 
     #[test]
@@ -458,6 +543,42 @@ roles:
         let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("unknown role"));
+    }
+
+    #[test]
+    fn validate_rejects_unknown_automation_sender() {
+        let yaml = r#"
+name: test
+automation_sender: nonexistent
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("automation_sender"));
+        assert!(err.contains("unknown role"));
+    }
+
+    #[test]
+    fn validate_accepts_known_automation_sender() {
+        let yaml = r#"
+name: test
+automation_sender: human
+roles:
+  - name: human
+    role_type: user
+    channel: telegram
+    channel_config:
+      target: "12345"
+      provider: openclaw
+  - name: architect
+    role_type: architect
+    agent: claude
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        config.validate().unwrap();
     }
 
     #[test]
