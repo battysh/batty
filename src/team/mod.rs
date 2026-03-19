@@ -18,6 +18,7 @@ pub mod task_loop;
 pub mod telegram;
 pub mod watcher;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -35,6 +36,7 @@ pub const TEAM_CONFIG_FILE: &str = "team.yaml";
 /// Default duration window for load graph rendering, in seconds (1 hour).
 const LOAD_GRAPH_WINDOW_SECONDS: u64 = 3_600;
 const LOAD_GRAPH_WIDTH: usize = 30;
+const INBOX_BODY_PREVIEW_CHARS: usize = 140;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -557,8 +559,24 @@ struct TeamStatusRow {
     agent: Option<String>,
     reports_to: Option<String>,
     state: String,
+    pending_inbox: usize,
+    triage_backlog: usize,
+    active_owned_tasks: Vec<u32>,
+    review_owned_tasks: Vec<u32>,
     signal: Option<String>,
     runtime_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TriageBacklogState {
+    count: usize,
+    newest_result_ts: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct OwnedTaskBuckets {
+    active: Vec<u32>,
+    review: Vec<u32>,
 }
 
 fn list_runtime_member_statuses(
@@ -685,11 +703,23 @@ fn build_team_status_rows(
     members: &[hierarchy::MemberInstance],
     session_running: bool,
     runtime_statuses: &std::collections::HashMap<String, RuntimeMemberStatus>,
+    pending_inbox_counts: &std::collections::HashMap<String, usize>,
+    triage_backlog_counts: &std::collections::HashMap<String, usize>,
+    owned_task_buckets: &std::collections::HashMap<String, OwnedTaskBuckets>,
 ) -> Vec<TeamStatusRow> {
     members
         .iter()
         .map(|member| {
             let runtime = runtime_statuses.get(&member.name);
+            let pending_inbox = pending_inbox_counts.get(&member.name).copied().unwrap_or(0);
+            let triage_backlog = triage_backlog_counts
+                .get(&member.name)
+                .copied()
+                .unwrap_or(0);
+            let owned_tasks = owned_task_buckets
+                .get(&member.name)
+                .cloned()
+                .unwrap_or_default();
             let (state, signal, runtime_label) = if member.role_type == config::RoleType::User {
                 ("user".to_string(), None, None)
             } else if !session_running {
@@ -704,6 +734,17 @@ fn build_team_status_rows(
                 ("starting".to_string(), None, None)
             };
 
+            let review_backlog = owned_tasks.review.len();
+            let state = if session_running && state == "idle" && review_backlog > 0 {
+                "reviewing".to_string()
+            } else if session_running && state == "idle" && triage_backlog > 0 {
+                "triaging".to_string()
+            } else {
+                state
+            };
+
+            let signal = merge_status_signal(signal, triage_backlog, review_backlog);
+
             TeamStatusRow {
                 name: member.name.clone(),
                 role: member.role_name.clone(),
@@ -711,11 +752,222 @@ fn build_team_status_rows(
                 agent: member.agent.clone(),
                 reports_to: member.reports_to.clone(),
                 state,
+                pending_inbox,
+                triage_backlog,
+                active_owned_tasks: owned_tasks.active,
+                review_owned_tasks: owned_tasks.review,
                 signal,
                 runtime_label,
             }
         })
         .collect()
+}
+
+fn merge_status_signal(
+    signal: Option<String>,
+    triage_backlog: usize,
+    review_backlog: usize,
+) -> Option<String> {
+    let triage_signal = (triage_backlog > 0).then(|| format!("needs triage ({triage_backlog})"));
+    let review_signal = (review_backlog > 0).then(|| format!("needs review ({review_backlog})"));
+    let mut signals = Vec::new();
+    if let Some(existing) = signal {
+        signals.push(existing);
+    }
+    if let Some(triage) = triage_signal {
+        signals.push(triage);
+    }
+    if let Some(review) = review_signal {
+        signals.push(review);
+    }
+    if signals.is_empty() {
+        None
+    } else {
+        Some(signals.join(", "))
+    }
+}
+
+fn triage_backlog_counts(
+    project_root: &Path,
+    members: &[hierarchy::MemberInstance],
+) -> std::collections::HashMap<String, usize> {
+    let root = inbox::inboxes_root(project_root);
+    let direct_reports = direct_reports_by_member(members);
+    direct_reports
+        .into_iter()
+        .filter_map(|(member_name, reports)| {
+            match delivered_direct_report_triage_state(&root, &member_name, &reports) {
+                Ok(state) => Some((member_name, state.count)),
+                Err(error) => {
+                    warn!(member = %member_name, error = %error, "failed to compute lead triage backlog");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+fn direct_reports_by_member(
+    members: &[hierarchy::MemberInstance],
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut direct_reports: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for member in members {
+        if let Some(parent) = &member.reports_to {
+            direct_reports
+                .entry(parent.clone())
+                .or_default()
+                .push(member.name.clone());
+        }
+    }
+    direct_reports
+}
+
+fn delivered_direct_report_triage_count(
+    inbox_root: &Path,
+    member_name: &str,
+    direct_reports: &[String],
+) -> Result<usize> {
+    Ok(delivered_direct_report_triage_state(inbox_root, member_name, direct_reports)?.count)
+}
+
+fn delivered_direct_report_triage_state(
+    inbox_root: &Path,
+    member_name: &str,
+    direct_reports: &[String],
+) -> Result<TriageBacklogState> {
+    if direct_reports.is_empty() {
+        return Ok(TriageBacklogState {
+            count: 0,
+            newest_result_ts: 0,
+        });
+    }
+
+    let mut latest_outbound_by_report = std::collections::HashMap::new();
+    for report in direct_reports {
+        let report_messages = inbox::all_messages(inbox_root, report)?;
+        let latest_outbound = report_messages
+            .iter()
+            .filter_map(|(msg, _)| (msg.from == member_name).then_some(msg.timestamp))
+            .max()
+            .unwrap_or(0);
+        latest_outbound_by_report.insert(report.as_str(), latest_outbound);
+    }
+
+    let member_messages = inbox::all_messages(inbox_root, member_name)?;
+    let mut count = 0usize;
+    let mut newest_result_ts = 0u64;
+    for (msg, delivered) in &member_messages {
+        let needs_triage = *delivered
+            && direct_reports.iter().any(|report| report == &msg.from)
+            && msg.timestamp
+                > *latest_outbound_by_report
+                    .get(msg.from.as_str())
+                    .unwrap_or(&0);
+        if needs_triage {
+            count += 1;
+            newest_result_ts = newest_result_ts.max(msg.timestamp);
+        }
+    }
+
+    Ok(TriageBacklogState {
+        count,
+        newest_result_ts,
+    })
+}
+
+fn pending_inbox_counts(
+    project_root: &Path,
+    members: &[hierarchy::MemberInstance],
+) -> std::collections::HashMap<String, usize> {
+    let root = inbox::inboxes_root(project_root);
+    members
+        .iter()
+        .filter_map(|member| match inbox::pending_message_count(&root, &member.name) {
+            Ok(count) => Some((member.name.clone(), count)),
+            Err(error) => {
+                warn!(member = %member.name, error = %error, "failed to count pending inbox messages");
+                None
+            }
+        })
+        .collect()
+}
+
+fn classify_owned_task_status(status: &str) -> Option<bool> {
+    match status {
+        "done" | "archived" => None,
+        "review" => Some(false),
+        _ => Some(true),
+    }
+}
+
+fn owned_task_buckets(
+    project_root: &Path,
+    members: &[hierarchy::MemberInstance],
+) -> std::collections::HashMap<String, OwnedTaskBuckets> {
+    let tasks_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    if !tasks_dir.is_dir() {
+        return std::collections::HashMap::new();
+    }
+
+    let member_names: std::collections::HashSet<&str> =
+        members.iter().map(|member| member.name.as_str()).collect();
+    let mut owned = std::collections::HashMap::<String, OwnedTaskBuckets>::new();
+    let tasks = match crate::task::load_tasks_from_dir(&tasks_dir) {
+        Ok(tasks) => tasks,
+        Err(error) => {
+            warn!(path = %tasks_dir.display(), error = %error, "failed to load board tasks for status");
+            return std::collections::HashMap::new();
+        }
+    };
+
+    for task in tasks {
+        let Some(claimed_by) = task.claimed_by else {
+            continue;
+        };
+        if !member_names.contains(claimed_by.as_str()) {
+            continue;
+        }
+        let Some(is_active) = classify_owned_task_status(task.status.as_str()) else {
+            continue;
+        };
+        let owner = if is_active {
+            claimed_by
+        } else {
+            members
+                .iter()
+                .find(|member| member.name == claimed_by)
+                .and_then(|member| member.reports_to.as_deref())
+                .unwrap_or(claimed_by.as_str())
+                .to_string()
+        };
+        let entry = owned.entry(owner).or_default();
+        if is_active {
+            entry.active.push(task.id);
+        } else {
+            entry.review.push(task.id);
+        }
+    }
+
+    for buckets in owned.values_mut() {
+        buckets.active.sort_unstable();
+        buckets.review.sort_unstable();
+    }
+
+    owned
+}
+
+fn format_owned_tasks_summary(task_ids: &[u32]) -> String {
+    match task_ids {
+        [] => "-".to_string(),
+        [task_id] => format!("#{task_id}"),
+        [first, second] => format!("#{first},#{second}"),
+        [first, second, rest @ ..] => format!("#{first},#{second},+{}", rest.len()),
+    }
 }
 
 /// Path to the resume marker file. Presence indicates agents have prior sessions.
@@ -870,7 +1122,17 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
     } else {
         std::collections::HashMap::new()
     };
-    let rows = build_team_status_rows(&members, session_running, &runtime_statuses);
+    let pending_inbox_counts = pending_inbox_counts(project_root, &members);
+    let triage_backlog_counts = triage_backlog_counts(project_root, &members);
+    let owned_task_buckets = owned_task_buckets(project_root, &members);
+    let rows = build_team_status_rows(
+        &members,
+        session_running,
+        &runtime_statuses,
+        &pending_inbox_counts,
+        &triage_backlog_counts,
+        &owned_task_buckets,
+    );
 
     if json {
         let status = serde_json::json!({
@@ -885,6 +1147,11 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
                     "agent": row.agent,
                     "reports_to": row.reports_to,
                     "state": row.state,
+                    "pending_inbox": row.pending_inbox,
+                    "triage_backlog": row.triage_backlog,
+                    "owned_tasks": row.active_owned_tasks,
+                    "active_owned_tasks": row.active_owned_tasks,
+                    "review_owned_tasks": row.review_owned_tasks,
                     "signal": row.signal,
                     "runtime_label": row.runtime_label,
                 })
@@ -904,17 +1171,30 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
         );
         println!();
         println!(
-            "{:<20} {:<12} {:<10} {:<12} {:<24} {:<20}",
-            "MEMBER", "ROLE", "AGENT", "STATE", "SIGNAL", "REPORTS TO"
+            "{:<20} {:<12} {:<10} {:<12} {:>5} {:>6} {:<14} {:<14} {:<24} {:<20}",
+            "MEMBER",
+            "ROLE",
+            "AGENT",
+            "STATE",
+            "INBOX",
+            "TRIAGE",
+            "ACTIVE",
+            "REVIEW",
+            "SIGNAL",
+            "REPORTS TO"
         );
-        println!("{}", "-".repeat(104));
+        println!("{}", "-".repeat(160));
         for row in &rows {
             println!(
-                "{:<20} {:<12} {:<10} {:<12} {:<24} {:<20}",
+                "{:<20} {:<12} {:<10} {:<12} {:>5} {:>6} {:<14} {:<14} {:<24} {:<20}",
                 row.name,
                 row.role,
                 row.agent.as_deref().unwrap_or("-"),
                 row.state,
+                row.pending_inbox,
+                row.triage_backlog,
+                format_owned_tasks_summary(&row.active_owned_tasks),
+                format_owned_tasks_summary(&row.review_owned_tasks),
                 row.signal.as_deref().unwrap_or("-"),
                 row.reports_to.as_deref().unwrap_or("-"),
             );
@@ -995,7 +1275,16 @@ fn capture_team_load(project_root: &Path) -> Result<TeamLoadSnapshot> {
         std::collections::HashMap::new()
     };
 
-    let rows = build_team_status_rows(&members, session_running, &runtime_statuses);
+    let triage_backlog_counts = triage_backlog_counts(project_root, &members);
+    let owned_task_buckets = owned_task_buckets(project_root, &members);
+    let rows = build_team_status_rows(
+        &members,
+        session_running,
+        &runtime_statuses,
+        &Default::default(),
+        &triage_backlog_counts,
+        &owned_task_buckets,
+    );
     let mut total_members = 0usize;
     let mut working_members = 0usize;
 
@@ -1004,7 +1293,7 @@ fn capture_team_load(project_root: &Path) -> Result<TeamLoadSnapshot> {
             continue;
         }
         total_members += 1;
-        if row.state == "working" {
+        if counts_as_active_load(row) {
             working_members += 1;
         }
     }
@@ -1022,6 +1311,10 @@ fn capture_team_load(project_root: &Path) -> Result<TeamLoadSnapshot> {
         load,
         session_running,
     })
+}
+
+fn counts_as_active_load(row: &TeamStatusRow) -> bool {
+    matches!(row.state.as_str(), "working" | "triaging" | "reviewing")
 }
 
 fn log_team_load_snapshot(project_root: &Path, snapshot: &TeamLoadSnapshot) -> Result<()> {
@@ -1281,62 +1574,120 @@ pub fn assign_task(project_root: &Path, engineer: &str, task: &str) -> Result<St
 }
 
 /// List inbox messages for a member.
-pub fn list_inbox(project_root: &Path, member: &str) -> Result<()> {
+pub fn list_inbox(project_root: &Path, member: &str, limit: Option<usize>) -> Result<()> {
     let member = resolve_member_name(project_root, member)?;
     let root = inbox::inboxes_root(project_root);
     let messages = inbox::all_messages(&root, &member)?;
-
-    if messages.is_empty() {
-        println!("No messages for {member}.");
-        return Ok(());
-    }
-
-    println!(
-        "{:<8} {:<12} {:<12} {:<8} BODY",
-        "STATUS", "FROM", "TYPE", "ID"
-    );
-    println!("{}", "-".repeat(72));
-    for (msg, delivered) in &messages {
-        let status = if *delivered { "delivered" } else { "pending" };
-        let id_short = if msg.id.len() > 8 {
-            &msg.id[..8]
-        } else {
-            &msg.id
-        };
-        let body_short = if msg.body.len() > 40 {
-            format!("{}...", &msg.body[..40])
-        } else {
-            msg.body.clone()
-        };
-        println!(
-            "{:<8} {:<12} {:<12} {:<8} {}",
-            status,
-            msg.from,
-            format!("{:?}", msg.msg_type).to_lowercase(),
-            id_short,
-            body_short,
-        );
-    }
-
+    print!("{}", format_inbox_listing(&member, &messages, limit));
     Ok(())
 }
 
-/// Read a specific message from a member's inbox by ID or prefix.
+fn format_inbox_listing(
+    member: &str,
+    messages: &[(inbox::InboxMessage, bool)],
+    limit: Option<usize>,
+) -> String {
+    if messages.is_empty() {
+        return format!("No messages for {member}.\n");
+    }
+
+    let start = match limit {
+        Some(0) => messages.len(),
+        Some(n) => messages.len().saturating_sub(n),
+        None => 0,
+    };
+    let shown = &messages[start..];
+    let refs = inbox_message_refs(messages);
+    let shown_refs = &refs[start..];
+
+    let mut out = String::new();
+    if shown.len() < messages.len() {
+        out.push_str(&format!(
+            "Showing {} of {} messages for {member}. Use `-n <N>` or `--all` to see more.\n",
+            shown.len(),
+            messages.len()
+        ));
+    }
+    out.push_str(&format!(
+        "{:<10} {:<12} {:<12} {:<14} BODY\n",
+        "STATUS", "FROM", "TYPE", "REF"
+    ));
+    out.push_str(&format!("{}\n", "-".repeat(96)));
+    for ((msg, delivered), msg_ref) in shown.iter().zip(shown_refs.iter()) {
+        let status = if *delivered { "delivered" } else { "pending" };
+        let body_short = truncate_chars(&msg.body, INBOX_BODY_PREVIEW_CHARS);
+        out.push_str(&format!(
+            "{:<10} {:<12} {:<12} {:<14} {}\n",
+            status,
+            msg.from,
+            format!("{:?}", msg.msg_type).to_lowercase(),
+            msg_ref,
+            body_short,
+        ));
+    }
+    out
+}
+
+fn inbox_message_refs(messages: &[(inbox::InboxMessage, bool)]) -> Vec<String> {
+    let mut totals = HashMap::new();
+    for (msg, _) in messages {
+        *totals.entry(msg.timestamp).or_insert(0usize) += 1;
+    }
+
+    let mut seen = HashMap::new();
+    messages
+        .iter()
+        .map(|(msg, _)| {
+            let ordinal = seen.entry(msg.timestamp).or_insert(0usize);
+            *ordinal += 1;
+            if totals.get(&msg.timestamp).copied().unwrap_or(0) <= 1 {
+                msg.timestamp.to_string()
+            } else {
+                format!("{}-{}", msg.timestamp, ordinal)
+            }
+        })
+        .collect()
+}
+
+fn resolve_inbox_message_indices(
+    messages: &[(inbox::InboxMessage, bool)],
+    selector: &str,
+) -> Vec<usize> {
+    let refs = inbox_message_refs(messages);
+    messages
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, (msg, _))| {
+            if msg.id == selector || msg.id.starts_with(selector) || refs[idx] == selector {
+                Some(idx)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn truncate_chars(input: &str, max_chars: usize) -> String {
+    if input.chars().count() <= max_chars {
+        return input.to_string();
+    }
+    let mut truncated: String = input.chars().take(max_chars).collect();
+    truncated.push_str("...");
+    truncated
+}
+
+/// Read a specific message from a member's inbox by ID, ID prefix, or REF.
 pub fn read_message(project_root: &Path, member: &str, id: &str) -> Result<()> {
     let member = resolve_member_name(project_root, member)?;
     let root = inbox::inboxes_root(project_root);
     let messages = inbox::all_messages(&root, &member)?;
 
-    // Find message by exact ID or prefix match
-    let matching: Vec<_> = messages
-        .iter()
-        .filter(|(msg, _)| msg.id == id || msg.id.starts_with(id))
-        .collect();
+    let matching = resolve_inbox_message_indices(&messages, id);
 
     match matching.len() {
         0 => bail!("no message matching '{id}' in {member}'s inbox"),
         1 => {
-            let (msg, delivered) = matching[0];
+            let (msg, delivered) = &messages[matching[0]];
             let status = if *delivered { "delivered" } else { "pending" };
             println!("ID:     {}", msg.id);
             println!("From:   {}", msg.from);
@@ -1348,19 +1699,30 @@ pub fn read_message(project_root: &Path, member: &str, id: &str) -> Result<()> {
             println!("{}", msg.body);
         }
         n => {
-            bail!("'{id}' matches {n} messages — use a longer prefix");
+            bail!(
+                "'{id}' matches {n} messages — use a longer prefix or the REF column from `batty inbox`"
+            );
         }
     }
 
     Ok(())
 }
 
-/// Acknowledge (mark delivered) a message in a member's inbox.
+/// Acknowledge (mark delivered) a message in a member's inbox by ID, prefix, or REF.
 pub fn ack_message(project_root: &Path, member: &str, id: &str) -> Result<()> {
     let member = resolve_member_name(project_root, member)?;
     let root = inbox::inboxes_root(project_root);
-    inbox::mark_delivered(&root, &member, id)?;
-    info!(member, id, "message acknowledged");
+    let messages = inbox::all_messages(&root, &member)?;
+    let matching = resolve_inbox_message_indices(&messages, id);
+    let resolved_id = match matching.len() {
+        0 => bail!("no message matching '{id}' in {member}'s inbox"),
+        1 => messages[matching[0]].0.id.clone(),
+        n => bail!(
+            "'{id}' matches {n} messages — use a longer prefix or the REF column from `batty inbox`"
+        ),
+    };
+    inbox::mark_delivered(&root, &member, &resolved_id)?;
+    info!(member, id = %resolved_id, "message acknowledged");
     Ok(())
 }
 
@@ -1715,6 +2077,156 @@ roles:
     }
 
     #[test]
+    fn truncate_chars_handles_unicode_boundaries() {
+        let body = "Task #109 confirmed complete on main. I’m available for next assignment.";
+        let truncated = truncate_chars(body, 40);
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.starts_with("Task #109 confirmed complete on main."));
+    }
+
+    #[test]
+    fn format_inbox_listing_shows_most_recent_messages_by_default_limit() {
+        let messages: Vec<_> = (0..25)
+            .map(|idx| {
+                (
+                    inbox::InboxMessage {
+                        id: format!("msg{idx:05}"),
+                        from: "architect".to_string(),
+                        to: "black-lead".to_string(),
+                        body: format!("message {idx}"),
+                        msg_type: inbox::MessageType::Send,
+                        timestamp: idx,
+                    },
+                    true,
+                )
+            })
+            .collect();
+
+        let rendered = format_inbox_listing("black-lead", &messages, Some(20));
+        assert!(rendered.contains("Showing 20 of 25 messages for black-lead."));
+        assert!(!rendered.contains("message 0"));
+        assert!(rendered.contains("message 5"));
+        assert!(rendered.contains("message 24"));
+        assert!(!rendered.contains("msg00005"));
+        assert!(!rendered.contains("msg00024"));
+    }
+
+    #[test]
+    fn format_inbox_listing_allows_showing_all_messages() {
+        let messages: Vec<_> = (0..3)
+            .map(|idx| {
+                (
+                    inbox::InboxMessage {
+                        id: format!("msg{idx:05}"),
+                        from: "architect".to_string(),
+                        to: "black-lead".to_string(),
+                        body: format!("message {idx}"),
+                        msg_type: inbox::MessageType::Send,
+                        timestamp: idx,
+                    },
+                    idx % 2 == 0,
+                )
+            })
+            .collect();
+
+        let rendered = format_inbox_listing("black-lead", &messages, None);
+        assert!(!rendered.contains("Showing 20"));
+        assert!(rendered.contains("REF"));
+        assert!(rendered.contains("BODY"));
+        assert!(rendered.contains("message 0"));
+        assert!(rendered.contains("message 1"));
+        assert!(rendered.contains("message 2"));
+        assert!(!rendered.contains("msg00000"));
+        assert!(!rendered.contains("msg00001"));
+        assert!(!rendered.contains("msg00002"));
+    }
+
+    #[test]
+    fn format_inbox_listing_hides_internal_message_ids() {
+        let messages = vec![(
+            inbox::InboxMessage {
+                id: "1773930387654321.M123456P7890Q42.example".to_string(),
+                from: "architect".to_string(),
+                to: "black-lead".to_string(),
+                body: "message body".to_string(),
+                msg_type: inbox::MessageType::Send,
+                timestamp: 1_773_930_725,
+            },
+            true,
+        )];
+
+        let rendered = format_inbox_listing("black-lead", &messages, None);
+        assert!(rendered.contains("1773930725"));
+        assert!(!rendered.contains("1773930387654321.M123456P7890Q42.example"));
+        assert!(!rendered.contains("ID BODY"));
+    }
+
+    #[test]
+    fn inbox_message_refs_use_timestamp_when_unique() {
+        let messages = vec![(
+            inbox::InboxMessage {
+                id: "msg-1".to_string(),
+                from: "architect".to_string(),
+                to: "black-lead".to_string(),
+                body: "message body".to_string(),
+                msg_type: inbox::MessageType::Send,
+                timestamp: 1_773_930_725,
+            },
+            true,
+        )];
+
+        let refs = inbox_message_refs(&messages);
+        assert_eq!(refs, vec!["1773930725".to_string()]);
+        assert_eq!(
+            resolve_inbox_message_indices(&messages, "1773930725"),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn inbox_message_refs_suffix_same_second_collisions() {
+        let messages = vec![
+            (
+                inbox::InboxMessage {
+                    id: "msg-1".to_string(),
+                    from: "architect".to_string(),
+                    to: "black-lead".to_string(),
+                    body: "first".to_string(),
+                    msg_type: inbox::MessageType::Send,
+                    timestamp: 1_773_930_725,
+                },
+                true,
+            ),
+            (
+                inbox::InboxMessage {
+                    id: "msg-2".to_string(),
+                    from: "architect".to_string(),
+                    to: "black-lead".to_string(),
+                    body: "second".to_string(),
+                    msg_type: inbox::MessageType::Send,
+                    timestamp: 1_773_930_725,
+                },
+                true,
+            ),
+        ];
+
+        let refs = inbox_message_refs(&messages);
+        assert_eq!(
+            refs,
+            vec!["1773930725-1".to_string(), "1773930725-2".to_string()]
+        );
+        assert!(resolve_inbox_message_indices(&messages, "1773930725").is_empty());
+        assert_eq!(
+            resolve_inbox_message_indices(&messages, "1773930725-1"),
+            vec![0]
+        );
+        assert_eq!(
+            resolve_inbox_message_indices(&messages, "1773930725-2"),
+            vec![1]
+        );
+    }
+
+    #[test]
     fn assignment_result_round_trip_and_format() {
         let tmp = tempfile::tempdir().unwrap();
         let result = AssignmentDeliveryResult {
@@ -1835,25 +2347,190 @@ roles:
             use_worktrees: false,
         };
 
-        let rows = build_team_status_rows(&[architect.clone(), human], false, &Default::default());
+        let pending = std::collections::HashMap::from([
+            (architect.name.clone(), 3usize),
+            (human.name.clone(), 1usize),
+        ]);
+        let triage = std::collections::HashMap::from([(architect.name.clone(), 2usize)]);
+        let owned = std::collections::HashMap::from([(
+            architect.name.clone(),
+            OwnedTaskBuckets {
+                active: vec![191u32],
+                review: vec![193u32],
+            },
+        )]);
+        let rows = build_team_status_rows(
+            &[architect.clone(), human.clone()],
+            false,
+            &Default::default(),
+            &pending,
+            &triage,
+            &owned,
+        );
         assert_eq!(rows[0].state, "stopped");
+        assert_eq!(rows[0].pending_inbox, 3);
+        assert_eq!(rows[0].triage_backlog, 2);
+        assert_eq!(rows[0].active_owned_tasks, vec![191]);
+        assert_eq!(rows[0].review_owned_tasks, vec![193]);
         assert_eq!(rows[1].state, "user");
+        assert_eq!(rows[1].pending_inbox, 1);
+        assert_eq!(rows[1].triage_backlog, 0);
+        assert!(rows[1].active_owned_tasks.is_empty());
+        assert!(rows[1].review_owned_tasks.is_empty());
 
         let runtime = std::collections::HashMap::from([(
             architect.name.clone(),
             RuntimeMemberStatus {
-                state: "working".to_string(),
+                state: "idle".to_string(),
                 signal: Some("standup".to_string()),
-                label: Some("working standup 2:00".to_string()),
+                label: Some("idle standup 2:00".to_string()),
             },
         )]);
-        let rows = build_team_status_rows(&[architect], true, &runtime);
-        assert_eq!(rows[0].state, "working");
-        assert_eq!(rows[0].signal.as_deref(), Some("standup"));
+        let rows = build_team_status_rows(&[architect], true, &runtime, &pending, &triage, &owned);
+        assert_eq!(rows[0].state, "reviewing");
+        assert_eq!(rows[0].pending_inbox, 3);
+        assert_eq!(rows[0].triage_backlog, 2);
+        assert_eq!(rows[0].active_owned_tasks, vec![191]);
+        assert_eq!(rows[0].review_owned_tasks, vec![193]);
         assert_eq!(
-            rows[0].runtime_label.as_deref(),
-            Some("working standup 2:00")
+            rows[0].signal.as_deref(),
+            Some("standup, needs triage (2), needs review (1)")
         );
+        assert_eq!(rows[0].runtime_label.as_deref(), Some("idle standup 2:00"));
+    }
+
+    #[test]
+    fn delivered_direct_report_triage_count_only_counts_results_newer_than_lead_response() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        inbox::init_inbox(&root, "eng-1").unwrap();
+        inbox::init_inbox(&root, "eng-2").unwrap();
+
+        let mut old_result = inbox::InboxMessage::new_send("eng-1", "lead", "old result");
+        old_result.timestamp = 10;
+        let old_result_id = inbox::deliver_to_inbox(&root, &old_result).unwrap();
+        inbox::mark_delivered(&root, "lead", &old_result_id).unwrap();
+
+        let mut lead_reply = inbox::InboxMessage::new_send("lead", "eng-1", "next task");
+        lead_reply.timestamp = 20;
+        let lead_reply_id = inbox::deliver_to_inbox(&root, &lead_reply).unwrap();
+        inbox::mark_delivered(&root, "eng-1", &lead_reply_id).unwrap();
+
+        let mut new_result = inbox::InboxMessage::new_send("eng-1", "lead", "new result");
+        new_result.timestamp = 30;
+        let new_result_id = inbox::deliver_to_inbox(&root, &new_result).unwrap();
+        inbox::mark_delivered(&root, "lead", &new_result_id).unwrap();
+
+        let mut other_result = inbox::InboxMessage::new_send("eng-2", "lead", "parallel result");
+        other_result.timestamp = 40;
+        let other_result_id = inbox::deliver_to_inbox(&root, &other_result).unwrap();
+        inbox::mark_delivered(&root, "lead", &other_result_id).unwrap();
+
+        let triage_count = delivered_direct_report_triage_count(
+            &root,
+            "lead",
+            &["eng-1".to_string(), "eng-2".to_string()],
+        )
+        .unwrap();
+        assert_eq!(triage_count, 2);
+    }
+
+    #[test]
+    fn counts_as_active_load_treats_triaging_as_working() {
+        let triaging = TeamStatusRow {
+            name: "lead".to_string(),
+            role: "lead".to_string(),
+            role_type: "Manager".to_string(),
+            agent: Some("codex".to_string()),
+            reports_to: Some("architect".to_string()),
+            state: "triaging".to_string(),
+            pending_inbox: 0,
+            triage_backlog: 2,
+            active_owned_tasks: vec![191],
+            review_owned_tasks: vec![193],
+            signal: Some("needs triage (2)".to_string()),
+            runtime_label: Some("idle".to_string()),
+        };
+        let reviewing = TeamStatusRow {
+            state: "reviewing".to_string(),
+            triage_backlog: 0,
+            signal: Some("needs review (1)".to_string()),
+            runtime_label: Some("idle".to_string()),
+            ..triaging.clone()
+        };
+        let idle = TeamStatusRow {
+            state: "idle".to_string(),
+            triage_backlog: 0,
+            signal: None,
+            runtime_label: Some("idle".to_string()),
+            ..triaging.clone()
+        };
+
+        assert!(counts_as_active_load(&triaging));
+        assert!(counts_as_active_load(&reviewing));
+        assert!(!counts_as_active_load(&idle));
+    }
+
+    #[test]
+    fn format_owned_tasks_summary_compacts_multiple_ids() {
+        assert_eq!(format_owned_tasks_summary(&[]), "-");
+        assert_eq!(format_owned_tasks_summary(&[191]), "#191");
+        assert_eq!(format_owned_tasks_summary(&[191, 192]), "#191,#192");
+        assert_eq!(format_owned_tasks_summary(&[191, 192, 193]), "#191,#192,+1");
+    }
+
+    #[test]
+    fn owned_task_buckets_split_active_and_review_claims() {
+        let tmp = tempfile::tempdir().unwrap();
+        let members = vec![
+            make_member("lead", "lead", RoleType::Manager),
+            hierarchy::MemberInstance {
+                name: "eng-1".to_string(),
+                role_name: "eng".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("codex".to_string()),
+                prompt: None,
+                reports_to: Some("lead".to_string()),
+                use_worktrees: false,
+            },
+        ];
+        std::fs::create_dir_all(
+            tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks"),
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("191-active.md"),
+            "---\nid: 191\ntitle: Active\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("193-review.md"),
+            "---\nid: 193\ntitle: Review\nstatus: review\npriority: high\nclaimed_by: eng-1\nclass: standard\n---\n",
+        )
+        .unwrap();
+
+        let owned = owned_task_buckets(tmp.path(), &members);
+        let buckets = owned.get("eng-1").unwrap();
+        assert_eq!(buckets.active, vec![191]);
+        assert!(buckets.review.is_empty());
+        let review_buckets = owned.get("lead").unwrap();
+        assert!(review_buckets.active.is_empty());
+        assert_eq!(review_buckets.review, vec![193]);
     }
 
     #[test]

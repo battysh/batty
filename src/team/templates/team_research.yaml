@@ -8,6 +8,17 @@ standup:
   interval_secs: 1800
   output_lines: 40
 
+automation:
+  timeout_nudges: true
+  standups: true
+  triage_interventions: true
+  review_interventions: true
+  owned_task_interventions: true
+  manager_dispatch_interventions: true
+  architect_utilization_interventions: true
+
+automation_sender: human
+
 layout:
   zones:
     - name: architect

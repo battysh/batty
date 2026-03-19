@@ -12,7 +12,7 @@ A YAML config defines your team hierarchy:
 - **Manager** -- Breaks work into tasks, assigns to engineers, reports progress up
 - **Engineers** -- Execute tasks in isolated worktrees, report back to their manager
 
-Agents communicate through Maildir-based inboxes using `batty send` and `batty inbox`. A background daemon monitors all panes, delivers messages, runs periodic standups, and emits structured events.
+Agents communicate through Maildir-based inboxes using `batty send` and `batty inbox`. A background daemon monitors all panes, delivers messages, runs state-driven interventions, keeps periodic standups/timeouts as fallback safety nets, and emits structured events.
 
 Everything is files. Config is YAML. Messages are JSON. Events are JSONL. All git-versioned.
 

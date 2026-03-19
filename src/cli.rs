@@ -77,13 +77,24 @@ pub enum Command {
     Inbox {
         /// Member name (e.g., "architect", "manager-1", "eng-1-1")
         member: String,
+        /// Maximum number of recent messages to show
+        #[arg(
+            short = 'n',
+            long = "limit",
+            default_value_t = 20,
+            conflicts_with = "all"
+        )]
+        limit: usize,
+        /// Show all messages
+        #[arg(long, default_value_t = false)]
+        all: bool,
     },
 
     /// Read a specific message from a member's inbox
     Read {
         /// Member name
         member: String,
-        /// Message ID (or prefix) from `batty inbox` output
+        /// Message REF, ID, or ID prefix from `batty inbox` output
         id: String,
     },
 
@@ -91,7 +102,7 @@ pub enum Command {
     Ack {
         /// Member name
         member: String,
-        /// Message ID (from `batty inbox` output)
+        /// Message REF, ID, or ID prefix from `batty inbox` output
         id: String,
     },
 
@@ -287,10 +298,40 @@ mod tests {
     }
 
     #[test]
-    fn inbox_subcommand_parses_member() {
+    fn inbox_subcommand_parses_defaults() {
         let cli = Cli::parse_from(["batty", "inbox", "architect"]);
         match cli.command {
-            Command::Inbox { member } => assert_eq!(member, "architect"),
+            Command::Inbox { member, limit, all } => {
+                assert_eq!(member, "architect");
+                assert_eq!(limit, 20);
+                assert!(!all);
+            }
+            other => panic!("expected inbox command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inbox_subcommand_parses_limit_flag() {
+        let cli = Cli::parse_from(["batty", "inbox", "architect", "-n", "50"]);
+        match cli.command {
+            Command::Inbox { member, limit, all } => {
+                assert_eq!(member, "architect");
+                assert_eq!(limit, 50);
+                assert!(!all);
+            }
+            other => panic!("expected inbox command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inbox_subcommand_parses_all_flag() {
+        let cli = Cli::parse_from(["batty", "inbox", "architect", "--all"]);
+        match cli.command {
+            Command::Inbox { member, limit, all } => {
+                assert_eq!(member, "architect");
+                assert_eq!(limit, 20);
+                assert!(all);
+            }
             other => panic!("expected inbox command, got {other:?}"),
         }
     }

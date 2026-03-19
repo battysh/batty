@@ -163,6 +163,15 @@ fn main() -> Result<()> {
                         "interval_secs": team_config.standup.interval_secs,
                         "output_lines": team_config.standup.output_lines,
                     },
+                    "automation": {
+                        "timeout_nudges": team_config.automation.timeout_nudges,
+                        "standups": team_config.automation.standups,
+                        "triage_interventions": team_config.automation.triage_interventions,
+                        "review_interventions": team_config.automation.review_interventions,
+                        "owned_task_interventions": team_config.automation.owned_task_interventions,
+                        "manager_dispatch_interventions": team_config.automation.manager_dispatch_interventions,
+                        "architect_utilization_interventions": team_config.automation.architect_utilization_interventions,
+                    },
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
@@ -177,6 +186,16 @@ fn main() -> Result<()> {
                 );
                 println!("Board auto-dispatch: {}", team_config.board.auto_dispatch);
                 println!("Standup interval: {}s", team_config.standup.interval_secs);
+                println!(
+                    "Automation: timeout_nudges={}, standups={}, triage={}, review={}, owned_tasks={}, manager_dispatch={}, architect_utilization={}",
+                    team_config.automation.timeout_nudges,
+                    team_config.automation.standups,
+                    team_config.automation.triage_interventions,
+                    team_config.automation.review_interventions,
+                    team_config.automation.owned_task_interventions,
+                    team_config.automation.manager_dispatch_interventions,
+                    team_config.automation.architect_utilization_interventions,
+                );
             }
         }
 
@@ -198,8 +217,9 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Inbox { member } => {
-            team::list_inbox(&root, &member)?;
+        Command::Inbox { member, limit, all } => {
+            let limit = if all { None } else { Some(limit) };
+            team::list_inbox(&root, &member, limit)?;
         }
 
         Command::Read { member, id } => {
