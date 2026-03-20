@@ -8,19 +8,9 @@ use serde::Deserialize;
 
 use crate::task::{Task, load_tasks_from_dir};
 
+use super::capability::WorkflowCapability;
 use super::config::RoleType;
 use super::hierarchy::MemberInstance;
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkflowCapability {
-    Planner,
-    Dispatcher,
-    Executor,
-    Reviewer,
-    Orchestrator,
-    Operator,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolutionStatus {
@@ -35,12 +25,16 @@ pub struct TaskResolution {
     pub task_id: u32,
     pub title: String,
     pub status: ResolutionStatus,
+    pub execution_owner: Option<String>,
+    pub review_owner: Option<String>,
     pub blocking_reason: Option<String>,
     pub acting_capability: Option<WorkflowCapability>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct WorkflowMetadata {
+    #[serde(default)]
+    execution_owner: Option<String>,
     #[serde(default)]
     blocked_on: Option<String>,
     #[serde(default)]
@@ -51,19 +45,26 @@ pub fn resolve_board(board_dir: &Path, members: &[MemberInstance]) -> Result<Vec
     let tasks = load_tasks_from_dir(&board_dir.join("tasks"))?;
     let done: HashSet<u32> = tasks
         .iter()
-        .filter(|task| task.status == "done")
+        .filter(|task| matches!(task.status.as_str(), "done" | "archived"))
         .map(|task| task.id)
         .collect();
 
     let mut resolutions = Vec::new();
-    for task in tasks.iter().filter(|task| task.status != "done") {
+    for task in tasks
+        .iter()
+        .filter(|task| !matches!(task.status.as_str(), "done" | "archived"))
+    {
         let metadata = load_workflow_metadata(task)?;
+        let execution_owner = metadata.execution_owner.clone().or(task.claimed_by.clone());
         let blocking_reason = blocking_reason(task, &metadata, &done);
         let status = if blocking_reason.is_some() {
             ResolutionStatus::Blocked
         } else if task.status == "review" {
             ResolutionStatus::NeedsReview
-        } else if task.status == "todo" {
+        } else if matches!(
+            task.status.as_str(),
+            "todo" | "backlog" | "in-progress" | "runnable"
+        ) {
             ResolutionStatus::Runnable
         } else {
             ResolutionStatus::NeedsAction
@@ -72,8 +73,10 @@ pub fn resolve_board(board_dir: &Path, members: &[MemberInstance]) -> Result<Vec
             task_id: task.id,
             title: task.title.clone(),
             status,
+            execution_owner: execution_owner.clone(),
+            review_owner: metadata.review_owner.clone(),
             blocking_reason,
-            acting_capability: acting_capability(task, &metadata, status, members),
+            acting_capability: acting_capability(task, &metadata, status, members, execution_owner),
         });
     }
 
@@ -94,6 +97,7 @@ fn acting_capability(
     metadata: &WorkflowMetadata,
     status: ResolutionStatus,
     members: &[MemberInstance],
+    execution_owner: Option<String>,
 ) -> Option<WorkflowCapability> {
     match status {
         ResolutionStatus::Blocked => None,
@@ -105,7 +109,7 @@ fn acting_capability(
             }
         }
         ResolutionStatus::Runnable => {
-            if task.claimed_by.is_some() {
+            if execution_owner.is_some() {
                 Some(WorkflowCapability::Executor)
             } else if has_dispatcher(members) {
                 Some(WorkflowCapability::Dispatcher)
@@ -323,6 +327,8 @@ roles:
                 task_id: 1,
                 title: "Task 1".to_string(),
                 status: ResolutionStatus::Runnable,
+                execution_owner: None,
+                review_owner: None,
                 blocking_reason: None,
                 acting_capability: Some(WorkflowCapability::Dispatcher),
             },
@@ -330,6 +336,8 @@ roles:
                 task_id: 2,
                 title: "Task 2".to_string(),
                 status: ResolutionStatus::Blocked,
+                execution_owner: None,
+                review_owner: None,
                 blocking_reason: Some("waiting".to_string()),
                 acting_capability: None,
             },
@@ -337,6 +345,8 @@ roles:
                 task_id: 3,
                 title: "Task 3".to_string(),
                 status: ResolutionStatus::NeedsReview,
+                execution_owner: None,
+                review_owner: None,
                 blocking_reason: None,
                 acting_capability: Some(WorkflowCapability::Reviewer),
             },
