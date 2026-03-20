@@ -68,6 +68,7 @@ pub(crate) fn next_unclaimed_task(board_dir: &Path) -> Result<Option<crate::task
         .filter(|task| matches!(task.status.as_str(), "backlog" | "todo"))
         .filter(|task| task.claimed_by.is_none())
         .filter(|task| task.blocked.is_none())
+        .filter(|task| task.blocked_on.is_none())
         .filter(|task| {
             task.depends_on.iter().all(|dep_id| {
                 task_status_by_id
@@ -763,6 +764,23 @@ mod tests {
         std::fs::write(tasks_dir.join(format!("{id:03}-{title}.md")), content).unwrap();
     }
 
+    fn write_task_file_with_workflow_frontmatter(
+        dir: &Path,
+        id: u32,
+        title: &str,
+        extra_frontmatter: &str,
+    ) {
+        let tasks_dir = dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join(format!("{id:03}-{title}.md")),
+            format!(
+                "---\nid: {id}\ntitle: {title}\nstatus: todo\npriority: critical\n{extra_frontmatter}class: standard\n---\n\nTask description.\n"
+            ),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn merge_rejects_missing_worktree() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1236,6 +1254,22 @@ mod tests {
         let task = next_unclaimed_task(tmp.path()).unwrap().unwrap();
         assert_eq!(task.id, 1);
         assert_eq!(task.title, "first-task");
+    }
+
+    #[test]
+    fn test_next_unclaimed_task_skips_blocked_on_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_file_with_workflow_frontmatter(
+            tmp.path(),
+            1,
+            "blocked-task",
+            "blocked_on: waiting-for-review\n",
+        );
+        write_task_file(tmp.path(), 2, "open-task", "todo", "high", None, &[]);
+
+        let task = next_unclaimed_task(tmp.path()).unwrap().unwrap();
+        assert_eq!(task.id, 2);
+        assert_eq!(task.title, "open-task");
     }
 
     #[test]
