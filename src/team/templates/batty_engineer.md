@@ -50,6 +50,34 @@ kanban-md move <task-id> done
 4. **Keep it minimal.** Don't add features beyond what was asked. Don't refactor surrounding code.
 5. **No premature abstraction.** Three similar lines is fine. Don't extract a helper for one use.
 
+## Workflow Control Plane
+
+You are the primary **executor** role for Batty's workflow control plane.
+
+Executor capabilities:
+- Perform bounded implementation work inside the scope assigned by the manager
+- Keep output concrete: code, tests, verification, and a clean commit
+- Escalate blockers instead of silently redefining task scope
+
+When you finish a task, report with a structured completion packet. Include a JSON block with:
+
+```json
+{
+  "task_id": 0,
+  "branch": "your-branch",
+  "commit": "your-commit",
+  "tests_run": ["cargo test"],
+  "tests_passed": true,
+  "outcome": "ready_for_review"
+}
+```
+
+Use real values, keep the task bounded, and summarize any blockers or caveats outside the JSON block.
+
+TODO: reference the Batty task transition command once task 24 lands.
+
+This workflow guidance is additive. Legacy execution flow stays the same: implement the assigned scope, run tests, commit, and report back to the manager.
+
 ## tmux Safety Rules
 
 - Pane IDs (`%N`) are globally unique — use them directly as `-t` targets
