@@ -297,7 +297,9 @@ mod tests {
         let board_dir = tmp.path();
         write_task_file(board_dir, 8, "backlog");
 
-        let error = cmd_transition(board_dir, 8, "done").unwrap_err().to_string();
+        let error = cmd_transition(board_dir, 8, "done")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("illegal task state transition"));
     }
 

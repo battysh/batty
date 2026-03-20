@@ -12,10 +12,11 @@ mod worktree;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::debug;
 
-use cli::{Cli, Command};
+use cli::{Cli, Command, ReviewDispositionArg, TaskCommand, TaskStateArg};
 
 /// Resolve the project root directory.
 ///
@@ -65,6 +66,26 @@ fn setup_tracing(verbose: u8) {
         )
         .with_writer(std::io::stderr)
         .init();
+}
+
+fn task_state_arg_name(state: TaskStateArg) -> &'static str {
+    match state {
+        TaskStateArg::Backlog => "backlog",
+        TaskStateArg::Todo => "todo",
+        TaskStateArg::InProgress => "in-progress",
+        TaskStateArg::Review => "review",
+        TaskStateArg::Blocked => "blocked",
+        TaskStateArg::Done => "done",
+        TaskStateArg::Archived => "archived",
+    }
+}
+
+fn review_disposition_arg_name(disposition: ReviewDispositionArg) -> &'static str {
+    match disposition {
+        ReviewDispositionArg::Approved => "approved",
+        ReviewDispositionArg::ChangesRequested => "changes_requested",
+        ReviewDispositionArg::Rejected => "rejected",
+    }
 }
 
 fn main() -> Result<()> {
@@ -244,8 +265,58 @@ fn main() -> Result<()> {
             team::merge_worktree(&root, &engineer)?;
         }
 
-        Command::Task { .. } => {
-            bail!("task commands are not implemented in this build");
+        Command::Task { command } => {
+            let board_dir = team::team_config_dir(&root).join("board");
+            match command {
+                TaskCommand::Transition {
+                    task_id,
+                    target_state,
+                } => team::task_cmd::cmd_transition(
+                    &board_dir,
+                    task_id,
+                    task_state_arg_name(target_state),
+                )?,
+                TaskCommand::Assign {
+                    task_id,
+                    execution_owner,
+                    review_owner,
+                } => team::task_cmd::cmd_assign(
+                    &board_dir,
+                    task_id,
+                    execution_owner.as_deref(),
+                    review_owner.as_deref(),
+                )?,
+                TaskCommand::Review {
+                    task_id,
+                    disposition,
+                } => team::task_cmd::cmd_review(
+                    &board_dir,
+                    task_id,
+                    review_disposition_arg_name(disposition),
+                )?,
+                TaskCommand::Update {
+                    task_id,
+                    branch,
+                    commit,
+                    blocked_on,
+                    clear_blocked,
+                } => {
+                    let mut fields = HashMap::new();
+                    if let Some(branch) = branch {
+                        fields.insert("branch".to_string(), branch);
+                    }
+                    if let Some(commit) = commit {
+                        fields.insert("commit".to_string(), commit);
+                    }
+                    if let Some(blocked_on) = blocked_on {
+                        fields.insert("blocked_on".to_string(), blocked_on);
+                    }
+                    if clear_blocked {
+                        fields.insert("clear_blocked".to_string(), "true".to_string());
+                    }
+                    team::task_cmd::cmd_update(&board_dir, task_id, fields)?;
+                }
+            }
         }
 
         Command::Daemon {
