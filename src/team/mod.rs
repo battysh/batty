@@ -25,6 +25,7 @@ pub mod standup;
 pub mod task_cmd;
 pub mod task_loop;
 pub mod telegram;
+pub mod validation;
 pub mod watcher;
 pub mod workflow;
 
