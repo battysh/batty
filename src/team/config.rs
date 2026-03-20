@@ -680,6 +680,7 @@ roles:
         std::fs::write(&path, minimal_yaml()).unwrap();
         let config = TeamConfig::load(&path).unwrap();
         assert_eq!(config.name, "test-team");
+        assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
     }
 
     #[test]

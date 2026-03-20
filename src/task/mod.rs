@@ -346,6 +346,45 @@ Just a description.
     }
 
     #[test]
+    fn parse_task_without_workflow_metadata_uses_safe_defaults() {
+        let content = r#"---
+id: 100
+title: legacy task
+priority: high
+class: standard
+---
+
+Older task file without workflow metadata.
+"#;
+        let task = Task::parse(content).unwrap();
+        assert_eq!(task.id, 100);
+        assert_eq!(task.status, "backlog");
+        assert!(task.depends_on.is_empty());
+        assert!(task.batty_config.is_none());
+    }
+
+    #[test]
+    fn parse_task_ignores_future_workflow_frontmatter_fields() {
+        let content = r#"---
+id: 101
+title: workflow task
+status: todo
+priority: high
+workflow_state: in_review
+workflow_owner: architect
+class: standard
+---
+
+Task description.
+"#;
+        let task = Task::parse(content).unwrap();
+        assert_eq!(task.id, 101);
+        assert_eq!(task.status, "todo");
+        assert_eq!(task.priority, "high");
+        assert!(task.batty_config.is_none());
+    }
+
+    #[test]
     fn parse_task_with_claimed_by_and_blocked() {
         let content = r#"---
 id: 17

@@ -4071,7 +4071,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use crate::team::comms::Channel;
-    use crate::team::config::{BoardConfig, ChannelConfig, RoleDef, StandupConfig};
+    use crate::team::config::{BoardConfig, ChannelConfig, RoleDef, StandupConfig, WorkflowMode};
     use crate::team::events::EventSink;
     use crate::team::watcher::WatcherState;
     use serial_test::serial;
