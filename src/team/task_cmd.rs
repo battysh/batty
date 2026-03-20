@@ -374,4 +374,34 @@ mod tests {
             .to_string();
         assert!(error.contains("no workflow fields provided"));
     }
+
+    #[test]
+    fn task_commands_work_without_orchestrator_runtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        let task_path = write_task_file(board_dir, 13, "todo");
+
+        cmd_assign(board_dir, 13, Some("eng-1-2"), Some("manager-1")).unwrap();
+        cmd_transition(board_dir, 13, "in-progress").unwrap();
+        cmd_transition(board_dir, 13, "review").unwrap();
+        cmd_update(
+            board_dir,
+            13,
+            HashMap::from([
+                ("branch".to_string(), "eng-1-2/task-13".to_string()),
+                ("commit".to_string(), "deadbeef".to_string()),
+            ]),
+        )
+        .unwrap();
+        cmd_review(board_dir, 13, "approved").unwrap();
+
+        let task = Task::from_file(&task_path).unwrap();
+        let metadata = read_workflow_metadata(&task_path).unwrap();
+        assert_eq!(task.status, "done");
+        assert_eq!(task.claimed_by.as_deref(), Some("eng-1-2"));
+        assert_eq!(task.review_owner.as_deref(), Some("manager-1"));
+        assert_eq!(metadata.branch.as_deref(), Some("eng-1-2/task-13"));
+        assert_eq!(metadata.commit.as_deref(), Some("deadbeef"));
+        assert_eq!(metadata.outcome.as_deref(), Some("approved"));
+    }
 }

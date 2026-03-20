@@ -449,7 +449,7 @@ pub fn start_team(project_root: &Path, attach: bool) -> Result<String> {
         &team_config.layout,
         project_root,
         team_config.workflow_mode,
-        team_config.orchestrator_pane,
+        team_config.orchestrator_enabled(),
     )?;
 
     // Initialize Maildir inboxes for all members

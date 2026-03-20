@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use super::board;
 use super::comms::{self, Channel};
-use super::config::{RoleType, TeamConfig, WorkflowMode};
+use super::config::{RoleType, TeamConfig};
 use super::events::{EventSink, TeamEvent};
 use super::hierarchy::MemberInstance;
 use super::inbox;
@@ -391,15 +391,12 @@ impl TeamDaemon {
         }
     }
 
-    fn workflow_runtime_enabled(&self) -> bool {
-        self.config
-            .team_config
-            .workflow_mode
-            .enables_runtime_surface()
+    fn orchestrator_enabled(&self) -> bool {
+        self.config.team_config.orchestrator_enabled()
     }
 
     fn record_orchestrator_action(&self, action: impl AsRef<str>) {
-        if !self.workflow_runtime_enabled() {
+        if !self.orchestrator_enabled() {
             return;
         }
         let path = super::orchestrator_log_path(&self.config.project_root);
@@ -7622,6 +7619,62 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("dispatch: assigned task #18"));
         assert!(content.starts_with('['));
+    }
+
+    #[test]
+    fn record_orchestrator_action_is_noop_when_orchestrator_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode: WorkflowMode::Legacy,
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                orchestrator_pane: true,
+                layout: None,
+                roles: Vec::new(),
+            },
+            session: "test".to_string(),
+            members: Vec::new(),
+            pane_map: HashMap::new(),
+        })
+        .unwrap();
+
+        daemon.record_orchestrator_action("dispatch: no-op");
+
+        assert!(!tmp.path().join(".batty").join("orchestrator.log").exists());
+    }
+
+    #[test]
+    fn record_orchestrator_action_writes_when_orchestrator_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode: WorkflowMode::Hybrid,
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                orchestrator_pane: true,
+                layout: None,
+                roles: Vec::new(),
+            },
+            session: "test".to_string(),
+            members: Vec::new(),
+            pane_map: HashMap::new(),
+        })
+        .unwrap();
+
+        daemon.record_orchestrator_action("dispatch: active");
+
+        let content =
+            fs::read_to_string(tmp.path().join(".batty").join("orchestrator.log")).unwrap();
+        assert!(content.contains("dispatch: active"));
     }
 
     /// Helper: build a minimal DaemonConfig with the given roles.
