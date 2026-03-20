@@ -4,6 +4,7 @@
 //! session. The daemon monitors panes, routes messages between roles, and
 //! manages agent lifecycles.
 
+pub mod artifact;
 pub mod board;
 pub mod capability;
 pub mod comms;
