@@ -148,4 +148,17 @@ mod tests {
         let err = validate_review_readiness(&meta).expect_err("todo should not be review-ready");
         assert!(err.contains("Review state"));
     }
+
+    #[test]
+    fn review_state_uses_merge_disposition() {
+        let state = ReviewState {
+            reviewer: "manager-1".to_string(),
+            packet_ref: Some("packet-42".to_string()),
+            disposition: MergeDisposition::MergeReady,
+            notes: Some("ready to merge".to_string()),
+        };
+
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"disposition\":\"merge_ready\""));
+    }
 }
