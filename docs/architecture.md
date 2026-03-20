@@ -96,6 +96,7 @@ automation:
   owned_task_interventions: true
   manager_dispatch_interventions: true
   architect_utilization_interventions: true
+  intervention_idle_grace_secs: 60
 ```
 
 These switches let a project keep periodic timers enabled while turning specific

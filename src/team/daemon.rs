@@ -66,6 +66,7 @@ pub struct TeamDaemon {
     config: DaemonConfig,
     watchers: HashMap<String, SessionWatcher>,
     states: HashMap<String, MemberState>,
+    idle_started_at: HashMap<String, Instant>,
     active_tasks: HashMap<String, u32>,
     retry_counts: HashMap<String, u32>,
     triage_idle_epochs: HashMap<String, u64>,
@@ -240,6 +241,7 @@ impl TeamDaemon {
             config,
             watchers,
             states,
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -1662,6 +1664,15 @@ impl TeamDaemon {
 
     /// Update automation countdowns when a member's state changes.
     fn update_automation_timers_for_state(&mut self, member_name: &str, new_state: MemberState) {
+        match new_state {
+            MemberState::Idle => {
+                self.idle_started_at
+                    .insert(member_name.to_string(), Instant::now());
+            }
+            MemberState::Working => {
+                self.idle_started_at.remove(member_name);
+            }
+        }
         self.update_nudge_for_state(member_name, new_state);
         self.update_standup_for_state(member_name, new_state);
         self.update_triage_intervention_for_state(member_name, new_state);
@@ -1784,6 +1795,37 @@ impl TeamDaemon {
             .and_then(|member| member.reports_to.as_deref())
     }
 
+    fn automation_idle_grace_duration(&self) -> Duration {
+        Duration::from_secs(
+            self.config
+                .team_config
+                .automation
+                .intervention_idle_grace_secs,
+        )
+    }
+
+    fn automation_idle_grace_elapsed(&self, member_name: &str) -> bool {
+        let grace = self.automation_idle_grace_duration();
+        self.idle_started_at
+            .get(member_name)
+            .is_some_and(|started_at| started_at.elapsed() >= grace)
+    }
+
+    fn member_has_pending_inbox(&self, inbox_root: &Path, member_name: &str) -> bool {
+        match inbox::pending_message_count(inbox_root, member_name) {
+            Ok(count) => count > 0,
+            Err(error) => {
+                warn!(member = %member_name, error = %error, "failed to count pending inbox before automation");
+                true
+            }
+        }
+    }
+
+    fn ready_for_idle_automation(&self, inbox_root: &Path, member_name: &str) -> bool {
+        self.automation_idle_grace_elapsed(member_name)
+            && !self.member_has_pending_inbox(inbox_root, member_name)
+    }
+
     fn sync_launch_state_session_ids(&self) -> Result<()> {
         let mut launch_state = load_launch_state(&self.config.project_root);
         let mut changed = false;
@@ -1827,6 +1869,13 @@ impl TeamDaemon {
         };
 
         self.states = state.states;
+        self.idle_started_at = self
+            .states
+            .iter()
+            .filter_map(|(member, state)| {
+                matches!(state, MemberState::Idle).then(|| (member.clone(), Instant::now()))
+            })
+            .collect();
         self.active_tasks = state.active_tasks;
         self.retry_counts = state.retry_counts;
         self.paused_standups = state.paused_standups;
@@ -1900,6 +1949,7 @@ impl TeamDaemon {
         if super::pause_marker_path(&self.config.project_root).exists() {
             return Ok(());
         }
+        let inbox_root = inbox::inboxes_root(&self.config.project_root);
         let member_names: Vec<String> = self.nudges.keys().cloned().collect();
 
         for name in member_names {
@@ -1908,7 +1958,9 @@ impl TeamDaemon {
                 if schedule.fired_this_idle {
                     false
                 } else if let Some(idle_since) = schedule.idle_since {
-                    idle_since.elapsed() >= schedule.interval
+                    idle_since.elapsed()
+                        >= schedule.interval.max(self.automation_idle_grace_duration())
+                        && self.ready_for_idle_automation(&inbox_root, &name)
                 } else {
                     false // currently working — no nudge
                 }
@@ -1967,6 +2019,9 @@ impl TeamDaemon {
                     Some(MemberState::Idle) | None
                 ));
             if !is_idle {
+                continue;
+            }
+            if !self.ready_for_idle_automation(&inbox_root, &name) {
                 continue;
             }
 
@@ -2032,6 +2087,7 @@ impl TeamDaemon {
             .join(".batty")
             .join("team_config")
             .join("board");
+        let inbox_root = inbox::inboxes_root(&self.config.project_root);
         let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
         let direct_reports = super::direct_reports_by_member(&self.config.members);
         let member_names: Vec<String> = self.config.pane_map.keys().cloned().collect();
@@ -2054,6 +2110,9 @@ impl TeamDaemon {
                     Some(MemberState::Idle) | None
                 ));
             if !is_idle {
+                continue;
+            }
+            if !self.ready_for_idle_automation(&inbox_root, &name) {
                 continue;
             }
 
@@ -2122,6 +2181,7 @@ impl TeamDaemon {
             .join(".batty")
             .join("team_config")
             .join("board");
+        let inbox_root = inbox::inboxes_root(&self.config.project_root);
         let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
         let member_names: Vec<String> = self.config.pane_map.keys().cloned().collect();
 
@@ -2143,6 +2203,9 @@ impl TeamDaemon {
                     Some(MemberState::Idle) | None
                 ));
             if !is_idle {
+                continue;
+            }
+            if !self.ready_for_idle_automation(&inbox_root, &name) {
                 continue;
             }
 
@@ -2222,6 +2285,7 @@ impl TeamDaemon {
             .join(".batty")
             .join("team_config")
             .join("board");
+        let inbox_root = inbox::inboxes_root(&self.config.project_root);
         let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
         let direct_reports = super::direct_reports_by_member(&self.config.members);
         let member_names: Vec<String> = self.config.pane_map.keys().cloned().collect();
@@ -2241,6 +2305,9 @@ impl TeamDaemon {
             if !self.is_member_idle(&name) {
                 continue;
             }
+            if !self.ready_for_idle_automation(&inbox_root, &name) {
+                continue;
+            }
 
             let Some(reports) = direct_reports.get(&name) else {
                 continue;
@@ -2249,11 +2316,8 @@ impl TeamDaemon {
                 continue;
             }
 
-            let triage_state = super::delivered_direct_report_triage_state(
-                &inbox::inboxes_root(&self.config.project_root),
-                &name,
-                reports,
-            )?;
+            let triage_state =
+                super::delivered_direct_report_triage_state(&inbox_root, &name, reports)?;
             if triage_state.count > 0 {
                 continue;
             }
@@ -2376,6 +2440,7 @@ impl TeamDaemon {
             .join(".batty")
             .join("team_config")
             .join("board");
+        let inbox_root = inbox::inboxes_root(&self.config.project_root);
         let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
         let direct_reports = super::direct_reports_by_member(&self.config.members);
         let engineer_names: Vec<String> = self
@@ -2446,6 +2511,9 @@ impl TeamDaemon {
 
         for architect in &architect_members {
             if !self.is_member_idle(&architect.name) {
+                continue;
+            }
+            if !self.ready_for_idle_automation(&inbox_root, &architect.name) {
                 continue;
             }
 
@@ -4126,6 +4194,16 @@ mod tests {
         .unwrap();
     }
 
+    fn backdate_idle_grace(daemon: &mut TeamDaemon, member_name: &str) {
+        let grace = daemon.automation_idle_grace_duration() + Duration::from_secs(1);
+        daemon
+            .idle_started_at
+            .insert(member_name.to_string(), Instant::now() - grace);
+        if let Some(schedule) = daemon.nudges.get_mut(member_name) {
+            schedule.idle_since = Some(Instant::now() - schedule.interval.max(grace));
+        }
+    }
+
     #[test]
     fn launch_script_active_sends_prompt_as_user_message() {
         let cmd = write_launch_script(
@@ -4690,6 +4768,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::new(),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -4742,6 +4821,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::new(),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -4847,6 +4927,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::new(),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -5158,6 +5239,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::new(),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -5203,6 +5285,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::new(),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -5245,6 +5328,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::new(),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -5292,6 +5376,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::new(),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -5337,6 +5422,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::new(),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -5386,6 +5472,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::new(),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -5437,6 +5524,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::new(),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -5497,6 +5585,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::new(),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -5583,6 +5672,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::new(),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -5797,6 +5887,7 @@ mod tests {
             },
             watchers,
             states: HashMap::new(),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -5870,6 +5961,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::new(),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -5959,6 +6051,7 @@ mod tests {
             },
             watchers,
             states: HashMap::from([("scientist".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -5984,6 +6077,7 @@ mod tests {
             poll_interval: Duration::from_secs(5),
         };
 
+        backdate_idle_grace(&mut daemon, "scientist");
         daemon.maybe_fire_nudges().unwrap();
 
         assert_eq!(daemon.states.get("scientist"), Some(&MemberState::Working));
@@ -6047,6 +6141,7 @@ mod tests {
             },
             watchers,
             states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -6073,17 +6168,23 @@ mod tests {
 
         daemon.update_automation_timers_for_state("lead", MemberState::Working);
         daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        backdate_idle_grace(&mut daemon, "lead");
         daemon.maybe_intervene_triage_backlog().unwrap();
 
-        assert_eq!(daemon.states.get("lead"), Some(&MemberState::Working));
         assert_eq!(daemon.triage_interventions.get("lead"), Some(&1));
-        let pane = tmux::capture_pane(&pane_id).unwrap_or_default();
-        assert!(pane.contains("batty inbox lead"));
-        assert!(pane.contains("batty read lead <ref>"));
-        assert!(pane.contains("batty send eng-1"));
-        assert!(pane.contains("batty assign eng-1"));
-        assert!(pane.contains("batty send architect"));
-        assert!(pane.contains("next time you become idle"));
+        if daemon.states.get("lead") == Some(&MemberState::Working) {
+            let pane = tmux::capture_pane(&pane_id).unwrap_or_default();
+            assert!(pane.contains("batty inbox lead"));
+            assert!(pane.contains("batty read lead <ref>"));
+            assert!(pane.contains("batty send eng-1"));
+            assert!(pane.contains("batty assign eng-1"));
+            assert!(pane.contains("batty send architect"));
+            assert!(pane.contains("next time you become idle"));
+        } else {
+            let pending = inbox::pending_messages(&root, "lead").unwrap();
+            assert_eq!(pending.len(), 1);
+            assert!(pending[0].body.contains("batty inbox lead"));
+        }
 
         crate::tmux::kill_session(session).unwrap();
     }
@@ -6127,6 +6228,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -6153,6 +6255,7 @@ mod tests {
 
         daemon.update_automation_timers_for_state("lead", MemberState::Working);
         daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        backdate_idle_grace(&mut daemon, "lead");
         daemon.maybe_intervene_triage_backlog().unwrap();
 
         assert_eq!(daemon.states.get("lead"), Some(&MemberState::Idle));
@@ -6208,6 +6311,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -6278,6 +6382,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -6300,6 +6405,7 @@ mod tests {
 
         daemon.update_automation_timers_for_state("lead", MemberState::Working);
         daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        backdate_idle_grace(&mut daemon, "lead");
         daemon.maybe_intervene_owned_tasks().unwrap();
 
         assert_eq!(daemon.states.get("lead"), Some(&MemberState::Idle));
@@ -6368,6 +6474,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -6388,6 +6495,7 @@ mod tests {
         inbox::init_inbox(&root, "lead").unwrap();
         write_owned_task_file(tmp.path(), 191, "owned-task", "in-progress", "lead");
 
+        backdate_idle_grace(&mut daemon, "lead");
         daemon.maybe_intervene_owned_tasks().unwrap();
 
         let pending = inbox::pending_messages(&root, "lead").unwrap();
@@ -6402,6 +6510,131 @@ mod tests {
             Some(0)
         );
         assert_eq!(daemon.states.get("lead"), Some(&MemberState::Idle));
+    }
+
+    #[test]
+    fn maybe_intervene_owned_tasks_waits_for_idle_grace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lead = MemberInstance {
+            name: "lead".to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![lead],
+                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        write_owned_task_file(tmp.path(), 191, "owned-task", "in-progress", "lead");
+
+        daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        daemon.maybe_intervene_owned_tasks().unwrap();
+        assert!(inbox::pending_messages(&root, "lead").unwrap().is_empty());
+
+        backdate_idle_grace(&mut daemon, "lead");
+        daemon.maybe_intervene_owned_tasks().unwrap();
+        assert_eq!(inbox::pending_messages(&root, "lead").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn maybe_intervene_owned_tasks_skips_when_pending_inbox_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lead = MemberInstance {
+            name: "lead".to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![lead],
+                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        let message = inbox::InboxMessage::new_send("architect", "lead", "Check this first.");
+        inbox::deliver_to_inbox(&root, &message).unwrap();
+        write_owned_task_file(tmp.path(), 191, "owned-task", "in-progress", "lead");
+
+        backdate_idle_grace(&mut daemon, "lead");
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        let pending = inbox::pending_messages(&root, "lead").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "architect");
+        assert!(
+            daemon.owned_task_interventions.get("lead").is_none(),
+            "pending inbox should block new interventions"
+        );
     }
 
     #[test]
@@ -6434,6 +6667,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -6492,6 +6726,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -6580,6 +6815,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -6604,6 +6840,7 @@ mod tests {
 
         daemon.update_automation_timers_for_state("lead", MemberState::Working);
         daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        backdate_idle_grace(&mut daemon, "lead");
         daemon.maybe_intervene_review_backlog().unwrap();
 
         let pending = inbox::pending_messages(&root, "lead").unwrap();
@@ -6676,6 +6913,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -6767,6 +7005,7 @@ mod tests {
                 ("eng-1".to_string(), MemberState::Idle),
                 ("eng-2".to_string(), MemberState::Idle),
             ]),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -6800,6 +7039,7 @@ mod tests {
         )
         .unwrap();
 
+        backdate_idle_grace(&mut daemon, "lead");
         daemon.maybe_intervene_manager_dispatch_gap().unwrap();
 
         let pending = inbox::pending_messages(&root, "lead").unwrap();
@@ -6881,6 +7121,7 @@ mod tests {
                 ("eng-1".to_string(), MemberState::Idle),
                 ("eng-2".to_string(), MemberState::Idle),
             ]),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -6912,6 +7153,7 @@ mod tests {
         )
         .unwrap();
 
+        backdate_idle_grace(&mut daemon, "architect");
         daemon.maybe_intervene_architect_utilization().unwrap();
 
         let pending = inbox::pending_messages(&root, "architect").unwrap();
@@ -6931,7 +7173,7 @@ mod tests {
     }
 
     #[test]
-    fn maybe_intervene_triage_backlog_refires_on_next_idle_epoch() {
+    fn maybe_intervene_triage_backlog_does_not_refire_while_prior_intervention_remains_pending() {
         let tmp = tempfile::tempdir().unwrap();
         let lead = MemberInstance {
             name: "lead".to_string(),
@@ -6969,6 +7211,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -6995,6 +7238,7 @@ mod tests {
 
         daemon.update_automation_timers_for_state("lead", MemberState::Working);
         daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        backdate_idle_grace(&mut daemon, "lead");
         daemon.maybe_intervene_triage_backlog().unwrap();
 
         daemon
@@ -7003,11 +7247,12 @@ mod tests {
         daemon.update_automation_timers_for_state("lead", MemberState::Working);
         daemon.states.insert("lead".to_string(), MemberState::Idle);
         daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        backdate_idle_grace(&mut daemon, "lead");
         daemon.maybe_intervene_triage_backlog().unwrap();
 
-        assert_eq!(daemon.triage_interventions.get("lead"), Some(&2));
+        assert_eq!(daemon.triage_interventions.get("lead"), Some(&1));
         let pending = inbox::pending_messages(&root, "lead").unwrap();
-        assert_eq!(pending.len(), 2);
+        assert_eq!(pending.len(), 1);
         assert!(pending.iter().all(|message| message.from == "architect"));
     }
 
@@ -7041,6 +7286,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::from([("scientist".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),
@@ -7066,6 +7312,7 @@ mod tests {
             poll_interval: Duration::from_secs(5),
         };
 
+        backdate_idle_grace(&mut daemon, "scientist");
         daemon.maybe_fire_nudges().unwrap();
 
         assert_eq!(daemon.states.get("scientist"), Some(&MemberState::Idle));
@@ -7078,6 +7325,79 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].from, "daemon");
         assert!(messages[0].body.contains("Please make progress."));
+    }
+
+    #[test]
+    fn maybe_fire_nudges_skips_when_pending_inbox_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member = MemberInstance {
+            name: "scientist".to_string(),
+            role_name: "scientist".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![member],
+                pane_map: HashMap::from([("scientist".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([("scientist".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::from([(
+                "scientist".to_string(),
+                NudgeSchedule {
+                    text: "Please make progress.".to_string(),
+                    interval: Duration::from_secs(1),
+                    idle_since: Some(Instant::now()),
+                    fired_this_idle: false,
+                    paused: false,
+                },
+            )]),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "scientist").unwrap();
+        let message =
+            inbox::InboxMessage::new_send("architect", "scientist", "Process this first.");
+        inbox::deliver_to_inbox(&root, &message).unwrap();
+
+        backdate_idle_grace(&mut daemon, "scientist");
+        daemon.maybe_fire_nudges().unwrap();
+
+        let messages = inbox::pending_messages(&root, "scientist").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].from, "architect");
+        let schedule = daemon.nudges.get("scientist").unwrap();
+        assert!(!schedule.fired_this_idle);
+        assert_eq!(daemon.states.get("scientist"), Some(&MemberState::Idle));
     }
 
     #[test]
@@ -7129,6 +7449,7 @@ mod tests {
             },
             watchers: HashMap::new(),
             states: HashMap::new(),
+            idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
             triage_idle_epochs: HashMap::new(),

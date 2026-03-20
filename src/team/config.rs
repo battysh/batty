@@ -72,6 +72,8 @@ pub struct AutomationConfig {
     pub manager_dispatch_interventions: bool,
     #[serde(default = "default_enabled")]
     pub architect_utilization_interventions: bool,
+    #[serde(default = "default_intervention_idle_grace_secs")]
+    pub intervention_idle_grace_secs: u64,
 }
 
 impl Default for AutomationConfig {
@@ -84,6 +86,7 @@ impl Default for AutomationConfig {
             owned_task_interventions: default_enabled(),
             manager_dispatch_interventions: default_enabled(),
             architect_utilization_interventions: default_enabled(),
+            intervention_idle_grace_secs: default_intervention_idle_grace_secs(),
         }
     }
 }
@@ -179,6 +182,10 @@ fn default_instances() -> u32 {
 
 fn default_enabled() -> bool {
     true
+}
+
+fn default_intervention_idle_grace_secs() -> u64 {
+    60
 }
 
 impl TeamConfig {
@@ -381,6 +388,7 @@ automation:
   owned_task_interventions: true
   manager_dispatch_interventions: true
   architect_utilization_interventions: true
+  intervention_idle_grace_secs: 60
 layout:
   zones:
     - name: architect
@@ -442,6 +450,7 @@ roles:
         assert!(config.automation.timeout_nudges);
         assert!(config.automation.standups);
         assert!(config.automation.triage_interventions);
+        assert_eq!(config.automation.intervention_idle_grace_secs, 60);
         assert_eq!(config.roles[0].instances, 1);
     }
 
@@ -457,6 +466,7 @@ automation:
   owned_task_interventions: true
   manager_dispatch_interventions: false
   architect_utilization_interventions: true
+  intervention_idle_grace_secs: 90
 roles:
   - name: worker
     role_type: engineer
@@ -470,6 +480,7 @@ roles:
         assert!(config.automation.owned_task_interventions);
         assert!(!config.automation.manager_dispatch_interventions);
         assert!(config.automation.architect_utilization_interventions);
+        assert_eq!(config.automation.intervention_idle_grace_secs, 90);
     }
 
     #[test]
