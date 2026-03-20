@@ -6332,7 +6332,7 @@ mod tests {
                 },
                 session: "test".to_string(),
                 members: vec![lead, engineer],
-                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
+                pane_map: HashMap::from([("lead".to_string(), "%9999999".to_string())]),
             },
             watchers: HashMap::new(),
             states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
