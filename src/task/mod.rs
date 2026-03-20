@@ -16,6 +16,13 @@ pub struct Task {
     pub blocked: Option<String>,
     pub tags: Vec<String>,
     pub depends_on: Vec<u32>,
+    pub review_owner: Option<String>,
+    pub blocked_on: Option<String>,
+    pub worktree_path: Option<String>,
+    pub branch: Option<String>,
+    pub commit: Option<String>,
+    pub artifacts: Vec<String>,
+    pub next_action: Option<String>,
     pub description: String,
     pub batty_config: Option<TaskBattyConfig>,
     pub source_path: PathBuf,
@@ -48,6 +55,20 @@ struct Frontmatter {
     tags: Vec<String>,
     #[serde(default)]
     depends_on: Vec<u32>,
+    #[serde(default)]
+    review_owner: Option<String>,
+    #[serde(default)]
+    blocked_on: Option<String>,
+    #[serde(default)]
+    worktree_path: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    commit: Option<String>,
+    #[serde(default)]
+    artifacts: Vec<String>,
+    #[serde(default)]
+    next_action: Option<String>,
 }
 
 fn default_status() -> String {
@@ -83,6 +104,13 @@ impl Task {
             blocked: fm.blocked,
             tags: fm.tags,
             depends_on: fm.depends_on,
+            review_owner: fm.review_owner,
+            blocked_on: fm.blocked_on,
+            worktree_path: fm.worktree_path,
+            branch: fm.branch,
+            commit: fm.commit,
+            artifacts: fm.artifacts,
+            next_action: fm.next_action,
             description,
             batty_config,
             source_path: PathBuf::new(),
@@ -200,6 +228,13 @@ Read task files from kanban/phase-N/tasks/ directory.
         assert!(task.blocked.is_none());
         assert_eq!(task.tags, vec!["core"]);
         assert_eq!(task.depends_on, vec![1]);
+        assert!(task.review_owner.is_none());
+        assert!(task.blocked_on.is_none());
+        assert!(task.worktree_path.is_none());
+        assert!(task.branch.is_none());
+        assert!(task.commit.is_none());
+        assert!(task.artifacts.is_empty());
+        assert!(task.next_action.is_none());
         assert!(task.description.contains("Read task files"));
         assert!(task.batty_config.is_none());
     }
@@ -300,6 +335,14 @@ Just a description.
         assert!(task.claimed_by.is_none());
         assert!(task.blocked.is_none());
         assert!(task.tags.is_empty());
+        assert!(task.depends_on.is_empty());
+        assert!(task.review_owner.is_none());
+        assert!(task.blocked_on.is_none());
+        assert!(task.worktree_path.is_none());
+        assert!(task.branch.is_none());
+        assert!(task.commit.is_none());
+        assert!(task.artifacts.is_empty());
+        assert!(task.next_action.is_none());
     }
 
     #[test]
@@ -319,6 +362,51 @@ Task description.
         let task = Task::parse(content).unwrap();
         assert_eq!(task.claimed_by.as_deref(), Some("eng-1-1"));
         assert_eq!(task.blocked.as_deref(), Some("waiting-on-review"));
+    }
+
+    #[test]
+    fn parse_task_with_workflow_metadata() {
+        let content = r#"---
+id: 20
+title: workflow metadata
+status: review
+priority: critical
+claimed_by: eng-1-3
+depends_on:
+    - 18
+    - 19
+review_owner: manager
+blocked_on: waiting-for-tests
+worktree_path: .batty/worktrees/eng-1-3
+branch: eng-1-3/task-20
+commit: abc1234
+artifacts:
+    - target/debug/batty
+    - docs/workflow.md
+next_action: Hand off to manager for review
+class: standard
+---
+
+Workflow description.
+"#;
+        let task = Task::parse(content).unwrap();
+        assert_eq!(task.depends_on, vec![18, 19]);
+        assert_eq!(task.review_owner.as_deref(), Some("manager"));
+        assert_eq!(task.blocked_on.as_deref(), Some("waiting-for-tests"));
+        assert_eq!(
+            task.worktree_path.as_deref(),
+            Some(".batty/worktrees/eng-1-3")
+        );
+        assert_eq!(task.branch.as_deref(), Some("eng-1-3/task-20"));
+        assert_eq!(task.commit.as_deref(), Some("abc1234"));
+        assert_eq!(
+            task.artifacts,
+            vec!["target/debug/batty", "docs/workflow.md"]
+        );
+        assert_eq!(
+            task.next_action.as_deref(),
+            Some("Hand off to manager for review")
+        );
     }
 
     #[test]

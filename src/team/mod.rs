@@ -2037,6 +2037,7 @@ roles:
     }
 
     #[test]
+    #[serial]
     fn send_message_delivers_to_unique_instance_inbox() {
         let tmp = tempfile::tempdir().unwrap();
         write_team_config(
@@ -2061,7 +2062,20 @@ roles:
 "#,
         );
 
-        send_message(tmp.path(), "sam-designer", "hello").unwrap();
+        let original_tmux_pane = std::env::var_os("TMUX_PANE");
+        unsafe {
+            std::env::remove_var("TMUX_PANE");
+        }
+        let send_result = send_message(tmp.path(), "sam-designer", "hello");
+        match original_tmux_pane {
+            Some(value) => unsafe {
+                std::env::set_var("TMUX_PANE", value);
+            },
+            None => unsafe {
+                std::env::remove_var("TMUX_PANE");
+            },
+        }
+        send_result.unwrap();
 
         let root = inbox::inboxes_root(tmp.path());
         assert!(
