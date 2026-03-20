@@ -232,6 +232,10 @@ fn default_intervention_idle_grace_secs() -> u64 {
 }
 
 impl TeamConfig {
+    pub fn orchestrator_enabled(&self) -> bool {
+        self.workflow_mode.enables_runtime_surface() && self.orchestrator_pane
+    }
+
     /// Check if a role is allowed to send messages to another role.
     ///
     /// Uses `talks_to` if configured. If `talks_to` is empty for a role,
@@ -607,6 +611,33 @@ roles:
         )
         .unwrap();
         assert_eq!(workflow_first.workflow_mode, WorkflowMode::WorkflowFirst);
+    }
+
+    #[test]
+    fn orchestrator_enabled_respects_mode_and_pane_flag() {
+        let legacy: TeamConfig = serde_yaml::from_str(minimal_yaml()).unwrap();
+        assert!(!legacy.orchestrator_enabled());
+
+        let hybrid_enabled: TeamConfig = serde_yaml::from_str(&format!(
+            "workflow_mode: hybrid\norchestrator_pane: true\n{}",
+            minimal_yaml()
+        ))
+        .unwrap();
+        assert!(hybrid_enabled.orchestrator_enabled());
+
+        let hybrid_disabled: TeamConfig = serde_yaml::from_str(&format!(
+            "workflow_mode: hybrid\norchestrator_pane: false\n{}",
+            minimal_yaml()
+        ))
+        .unwrap();
+        assert!(!hybrid_disabled.orchestrator_enabled());
+
+        let workflow_first_enabled: TeamConfig = serde_yaml::from_str(&format!(
+            "workflow_mode: workflow_first\norchestrator_pane: true\n{}",
+            minimal_yaml()
+        ))
+        .unwrap();
+        assert!(workflow_first_enabled.orchestrator_enabled());
     }
 
     #[test]
