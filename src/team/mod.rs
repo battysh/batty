@@ -15,6 +15,7 @@ pub mod hierarchy;
 pub mod inbox;
 pub mod layout;
 pub mod message;
+pub mod resolver;
 pub mod standup;
 pub mod task_loop;
 pub mod telegram;
