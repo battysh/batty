@@ -19,8 +19,6 @@ pub struct TeamConfig {
     pub automation: AutomationConfig,
     #[serde(default)]
     pub automation_sender: Option<String>,
-    #[serde(default)]
-    pub workflow_mode: WorkflowMode,
     #[serde(default = "default_orchestrator_pane")]
     pub orchestrator_pane: bool,
     #[serde(default)]
@@ -28,9 +26,10 @@ pub struct TeamConfig {
     pub roles: Vec<RoleDef>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowMode {
+    #[default]
     Legacy,
     Hybrid,
     WorkflowFirst,
@@ -43,6 +42,18 @@ impl WorkflowMode {
 
     pub fn workflow_state_primary(self) -> bool {
         matches!(self, Self::WorkflowFirst)
+    }
+
+    pub fn enables_runtime_surface(self) -> bool {
+        matches!(self, Self::Hybrid | Self::WorkflowFirst)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Hybrid => "hybrid",
+            Self::WorkflowFirst => "workflow_first",
+        }
     }
 }
 
@@ -182,29 +193,6 @@ pub enum RoleType {
     Architect,
     Manager,
     Engineer,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkflowMode {
-    #[default]
-    Legacy,
-    Hybrid,
-    WorkflowFirst,
-}
-
-impl WorkflowMode {
-    pub fn enables_runtime_surface(self) -> bool {
-        matches!(self, Self::Hybrid | Self::WorkflowFirst)
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Legacy => "legacy",
-            Self::Hybrid => "hybrid",
-            Self::WorkflowFirst => "workflow_first",
-        }
-    }
 }
 
 fn default_rotation_threshold() -> u32 {
