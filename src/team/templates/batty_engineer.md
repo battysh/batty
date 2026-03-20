@@ -64,3 +64,21 @@ kanban-md move <task-id> done
 - When done, clearly state: what was built, what tests were added, test results (pass/fail), any issues or concerns
 - If you're blocked, explain what's missing and what you need
 - Check your inbox: `batty inbox <your-name>`
+
+## Completion Packet
+
+When reporting completion, include a `## Completion Packet` section containing JSON or YAML with:
+
+```yaml
+task_id: 27
+branch: eng-1-4/task-27
+worktree_path: .batty/worktrees/eng-1-4
+commit: abc1234
+changed_paths:
+  - src/team/completion.rs
+tests_run: true
+tests_passed: true
+artifacts:
+  - docs/workflow.md
+outcome: ready_for_review
+```
