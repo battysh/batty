@@ -4136,7 +4136,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use crate::team::comms::Channel;
-    use crate::team::config::{BoardConfig, ChannelConfig, RoleDef, StandupConfig, WorkflowMode};
+    use crate::team::config::{BoardConfig, ChannelConfig, RoleDef, StandupConfig, WorkflowMode, WorkflowPolicy};
     use crate::team::events::EventSink;
     use crate::team::watcher::WatcherState;
     use serial_test::serial;
@@ -4821,6 +4821,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -4876,6 +4877,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -4957,6 +4959,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -5101,6 +5104,7 @@ mod tests {
             team_config: TeamConfig {
                 name: "test".to_string(),
                 workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
                 standup: StandupConfig::default(),
                 automation: AutomationConfig::default(),
@@ -5254,6 +5258,7 @@ mod tests {
             team_config: TeamConfig {
                 name: "test".to_string(),
                 workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
                 standup: StandupConfig::default(),
                 automation: AutomationConfig::default(),
@@ -5302,6 +5307,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -5347,6 +5353,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig {
                         auto_dispatch: false,
                         ..BoardConfig::default()
@@ -5395,6 +5402,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -5445,6 +5453,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -5493,6 +5502,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -5545,6 +5555,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -5599,6 +5610,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -5662,6 +5674,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -5751,6 +5764,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -5882,6 +5896,7 @@ mod tests {
             team_config: TeamConfig {
                 name: "test".to_string(),
                 workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
                 standup: StandupConfig::default(),
                 automation: AutomationConfig::default(),
@@ -5970,6 +5985,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -6046,6 +6062,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -6138,6 +6155,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -6230,6 +6248,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -6319,6 +6338,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -6404,6 +6424,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -6477,6 +6498,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -6571,6 +6593,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -6641,6 +6664,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -6703,6 +6727,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -6770,6 +6795,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -6831,6 +6857,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -6924,6 +6951,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -7024,6 +7052,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -7114,6 +7143,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -7231,6 +7261,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -7328,6 +7359,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -7405,6 +7437,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -7478,6 +7511,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -7544,6 +7578,7 @@ mod tests {
                 team_config: TeamConfig {
                     name: "test".to_string(),
                     workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
@@ -7629,6 +7664,7 @@ mod tests {
             team_config: TeamConfig {
                 name: "test".to_string(),
                 workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
                 standup: StandupConfig::default(),
                 automation: AutomationConfig::default(),
@@ -7656,6 +7692,7 @@ mod tests {
             team_config: TeamConfig {
                 name: "test".to_string(),
                 workflow_mode: WorkflowMode::Hybrid,
+                workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
                 standup: StandupConfig::default(),
                 automation: AutomationConfig::default(),
@@ -7684,6 +7721,7 @@ mod tests {
             team_config: TeamConfig {
                 name: "test".to_string(),
                 workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
                 standup: StandupConfig::default(),
                 automation: AutomationConfig::default(),

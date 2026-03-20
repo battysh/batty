@@ -1,6 +1,6 @@
 //! Team configuration parsed from `.batty/team_config/team.yaml`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -23,7 +23,38 @@ pub struct TeamConfig {
     pub orchestrator_pane: bool,
     #[serde(default)]
     pub layout: Option<LayoutConfig>,
+    #[serde(default)]
+    pub workflow_policy: WorkflowPolicy,
     pub roles: Vec<RoleDef>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkflowPolicy {
+    #[serde(default)]
+    pub wip_limit_per_engineer: Option<u32>,
+    #[serde(default)]
+    pub wip_limit_per_reviewer: Option<u32>,
+    #[serde(default = "default_escalation_threshold_secs")]
+    pub escalation_threshold_secs: u64,
+    #[serde(default = "default_review_timeout_secs")]
+    pub review_timeout_secs: u64,
+    #[serde(default)]
+    pub auto_archive_done_after_secs: Option<u64>,
+    #[serde(default)]
+    pub capability_overrides: HashMap<String, Vec<String>>,
+}
+
+impl Default for WorkflowPolicy {
+    fn default() -> Self {
+        Self {
+            wip_limit_per_engineer: None,
+            wip_limit_per_reviewer: None,
+            escalation_threshold_secs: default_escalation_threshold_secs(),
+            review_timeout_secs: default_review_timeout_secs(),
+            auto_archive_done_after_secs: None,
+            capability_overrides: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -217,6 +248,14 @@ fn default_output_lines() -> u32 {
 
 fn default_instances() -> u32 {
     1
+}
+
+fn default_escalation_threshold_secs() -> u64 {
+    3600
+}
+
+fn default_review_timeout_secs() -> u64 {
+    7200
 }
 
 fn default_enabled() -> bool {

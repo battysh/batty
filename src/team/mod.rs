@@ -17,6 +17,7 @@ pub mod inbox;
 pub mod layout;
 pub mod message;
 pub mod metrics;
+pub mod policy;
 pub mod resolver;
 pub mod review;
 pub mod standup;
