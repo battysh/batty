@@ -18,6 +18,7 @@ nav:
   - Home: index.md
   - Demo: demo.md
   - Getting Started: getting-started.md
+  - Workflow Migration: workflow-migration.md
   - Reference:
       - CLI Reference: reference/cli.md
       - Runtime Config: reference/config.md

@@ -295,6 +295,41 @@ pub(crate) fn daemon_state_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("daemon-state.json")
 }
 
+fn workflow_mode_declared(config_path: &Path) -> Result<bool> {
+    let content = std::fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let value: serde_yaml::Value = serde_yaml::from_str(&content)
+        .with_context(|| format!("failed to parse {}", config_path.display()))?;
+    let Some(mapping) = value.as_mapping() else {
+        return Ok(false);
+    };
+
+    Ok(mapping.contains_key(serde_yaml::Value::String("workflow_mode".to_string())))
+}
+
+fn migration_validation_notes(
+    team_config: &config::TeamConfig,
+    workflow_mode_is_explicit: bool,
+) -> Vec<String> {
+    if !workflow_mode_is_explicit {
+        return vec![
+            "Migration: workflow_mode omitted; defaulting to legacy so existing teams and boards run unchanged.".to_string(),
+        ];
+    }
+
+    match team_config.workflow_mode {
+        config::WorkflowMode::Legacy => vec![
+            "Migration: legacy mode selected; Batty keeps current runtime behavior and treats workflow metadata as optional.".to_string(),
+        ],
+        config::WorkflowMode::Hybrid => vec![
+            "Migration: hybrid mode selected; workflow adoption is incremental and legacy runtime behavior remains available.".to_string(),
+        ],
+        config::WorkflowMode::WorkflowFirst => vec![
+            "Migration: workflow_first mode selected; complete board metadata and orchestrator rollout before treating workflow state as primary truth.".to_string(),
+        ],
+    }
+}
+
 /// Spawn the daemon as a detached background process.
 ///
 /// The daemon runs in its own process group with stdio redirected to a log
@@ -1432,13 +1467,25 @@ pub fn validate_team(project_root: &Path) -> Result<()> {
 
     let team_config = config::TeamConfig::load(&config_path)?;
     team_config.validate()?;
+    let workflow_mode_is_explicit = workflow_mode_declared(&config_path)?;
 
     let members = hierarchy::resolve_hierarchy(&team_config)?;
 
     println!("Config: {}", config_path.display());
     println!("Team: {}", team_config.name);
+    println!(
+        "Workflow mode: {}",
+        match team_config.workflow_mode {
+            config::WorkflowMode::Legacy => "legacy",
+            config::WorkflowMode::Hybrid => "hybrid",
+            config::WorkflowMode::WorkflowFirst => "workflow_first",
+        }
+    );
     println!("Roles: {}", team_config.roles.len());
     println!("Total members: {}", members.len());
+    for note in migration_validation_notes(&team_config, workflow_mode_is_explicit) {
+        println!("{note}");
+    }
     println!("Valid.");
     Ok(())
 }
@@ -1970,6 +2017,72 @@ mod tests {
     fn write_team_config(project_root: &Path, yaml: &str) {
         std::fs::create_dir_all(team_config_dir(project_root)).unwrap();
         std::fs::write(team_config_path(project_root), yaml).unwrap();
+    }
+
+    #[test]
+    fn workflow_mode_declared_detects_absent_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_team_config(
+            tmp.path(),
+            r#"
+name: test
+roles:
+  - name: engineer
+    role_type: engineer
+    agent: codex
+"#,
+        );
+
+        assert!(!workflow_mode_declared(&team_config_path(tmp.path())).unwrap());
+    }
+
+    #[test]
+    fn workflow_mode_declared_detects_present_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_team_config(
+            tmp.path(),
+            r#"
+name: test
+workflow_mode: hybrid
+roles:
+  - name: engineer
+    role_type: engineer
+    agent: codex
+"#,
+        );
+
+        assert!(workflow_mode_declared(&team_config_path(tmp.path())).unwrap());
+    }
+
+    #[test]
+    fn migration_validation_notes_explain_legacy_default_for_older_configs() {
+        let config =
+            config::TeamConfig::load(Path::new("src/team/templates/team_pair.yaml")).unwrap();
+        let notes = migration_validation_notes(&config, false);
+
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("workflow_mode omitted"));
+        assert!(notes[0].contains("run unchanged"));
+    }
+
+    #[test]
+    fn migration_validation_notes_warn_about_workflow_first_partial_rollout() {
+        let config: config::TeamConfig = serde_yaml::from_str(
+            r#"
+name: test
+workflow_mode: workflow_first
+roles:
+  - name: engineer
+    role_type: engineer
+    agent: codex
+"#,
+        )
+        .unwrap();
+        let notes = migration_validation_notes(&config, true);
+
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("workflow_first mode selected"));
+        assert!(notes[0].contains("primary truth"));
     }
 
     #[test]
