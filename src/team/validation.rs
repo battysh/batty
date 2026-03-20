@@ -1,22 +1,23 @@
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashMap};
     use std::fs;
+    use std::path::Path;
 
-    use serde::Deserialize;
-
-    use crate::task::load_tasks_from_dir;
-
-    use super::super::config::{RoleType, TeamConfig};
+    use super::super::board::read_workflow_metadata;
+    use super::super::capability::{
+        CapabilityMap, CapabilitySubject, WorkflowCapability, resolve_capability_map,
+    };
+    use super::super::completion::ingest_completion_message;
+    use super::super::config::{RoleType, TeamConfig, WorkflowMode, WorkflowPolicy};
     use super::super::hierarchy::{MemberInstance, resolve_hierarchy};
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-    enum PrepCapability {
-        Planner,
-        Dispatcher,
-        Reviewer,
-        Executor,
-    }
+    use super::super::nudge::compute_nudges;
+    use super::super::policy::{check_wip_limit, is_review_stale, should_escalate};
+    use super::super::resolver::{ResolutionStatus, resolve_board, runnable_tasks};
+    use super::super::review::{MergeDisposition, ReviewState, apply_review};
+    use super::super::standup::MemberState;
+    use super::super::team_config_dir;
+    use super::super::workflow::{TaskState, WorkflowMeta};
 
     #[derive(Debug)]
     struct TemplateExpectation {
@@ -24,85 +25,23 @@ mod tests {
         architects: usize,
         managers: usize,
         engineers: usize,
-        workflow_mode: &'static str,
+        role_capabilities: Vec<(&'static str, &'static [WorkflowCapability])>,
+        operator_caps: &'static [WorkflowCapability],
     }
 
-    #[derive(Debug, PartialEq, Eq)]
-    struct PrepBoardResolution {
-        task_id: u32,
-        runnable: bool,
-        blocked_reason: Option<String>,
+    fn capability_set(values: &[WorkflowCapability]) -> BTreeSet<WorkflowCapability> {
+        values.iter().copied().collect()
     }
 
-    #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-    #[serde(rename_all = "snake_case")]
-    enum ArtifactTypeScaffold {
-        TestResult,
-        BuildOutput,
-        Documentation,
-        Other,
+    fn capability_subject_set(
+        map: &CapabilityMap,
+        subject: CapabilitySubject,
+    ) -> BTreeSet<WorkflowCapability> {
+        map.get(&subject).cloned().unwrap_or_default()
     }
 
-    #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-    struct ArtifactRecordScaffold {
-        path: String,
-        artifact_type: ArtifactTypeScaffold,
-        created_at: Option<u64>,
-        verified: bool,
-    }
-
-    #[derive(Debug, Default, PartialEq, Eq)]
-    struct WorkflowMetadataScaffold {
-        worktree_path: Option<String>,
-        branch: Option<String>,
-        commit: Option<String>,
-        artifacts: Vec<String>,
-        next_action: Option<String>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct CompletionPacket {
-        task_id: u32,
-        branch: String,
-        commit: String,
-        tests_run: Vec<String>,
-        tests_passed: bool,
-        outcome: String,
-        #[serde(default)]
-        worktree_path: Option<String>,
-        #[serde(default)]
-        artifacts: Vec<ArtifactRecordScaffold>,
-    }
-
-    fn workflow_mode_from_template(yaml: &str) -> String {
-        yaml.lines()
-            .map(str::trim)
-            .find_map(|line| line.strip_prefix("workflow_mode:"))
-            .map(str::trim)
-            .unwrap_or("legacy")
-            .to_string()
-    }
-
-    fn inferred_capabilities(member: &MemberInstance) -> BTreeSet<PrepCapability> {
-        match member.role_type {
-            RoleType::User => BTreeSet::new(),
-            RoleType::Architect => BTreeSet::from([PrepCapability::Planner]),
-            RoleType::Manager => {
-                BTreeSet::from([PrepCapability::Dispatcher, PrepCapability::Reviewer])
-            }
-            RoleType::Engineer => BTreeSet::from([PrepCapability::Executor]),
-        }
-    }
-
-    fn expected_capabilities(role_type: RoleType) -> BTreeSet<PrepCapability> {
-        match role_type {
-            RoleType::User => BTreeSet::new(),
-            RoleType::Architect => BTreeSet::from([PrepCapability::Planner]),
-            RoleType::Manager => {
-                BTreeSet::from([PrepCapability::Dispatcher, PrepCapability::Reviewer])
-            }
-            RoleType::Engineer => BTreeSet::from([PrepCapability::Executor]),
-        }
+    fn member_capabilities(map: &CapabilityMap, member_name: &str) -> BTreeSet<WorkflowCapability> {
+        capability_subject_set(map, CapabilitySubject::Member(member_name.to_string()))
     }
 
     fn load_template(yaml: &str) -> TeamConfig {
@@ -114,119 +53,100 @@ mod tests {
         expectation: &TemplateExpectation,
     ) -> Vec<MemberInstance> {
         let config = load_template(yaml);
+        assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
+        assert!(!config.orchestrator_enabled());
+
         let members = resolve_hierarchy(&config).unwrap();
+        let capability_map = resolve_capability_map(&members);
 
-        assert_eq!(
-            workflow_mode_from_template(yaml),
-            expectation.workflow_mode.to_string(),
-            "template should default to legacy workflow mode"
-        );
-
-        let mut users = 0;
-        let mut architects = 0;
-        let mut managers = 0;
-        let mut engineers = 0;
-        for member in &members {
-            match member.role_type {
-                RoleType::User => users += 1,
-                RoleType::Architect => architects += 1,
-                RoleType::Manager => managers += 1,
-                RoleType::Engineer => engineers += 1,
-            }
-
-            // TODO(task-25): Replace inferred capabilities with capability::resolve_capability_map.
-            assert_eq!(
-                inferred_capabilities(member),
-                expected_capabilities(member.role_type),
-                "unexpected capability set for {}",
-                member.name
-            );
-        }
+        let users = members
+            .iter()
+            .filter(|member| member.role_type == RoleType::User)
+            .count();
+        let architects = members
+            .iter()
+            .filter(|member| member.role_type == RoleType::Architect)
+            .count();
+        let managers = members
+            .iter()
+            .filter(|member| member.role_type == RoleType::Manager)
+            .count();
+        let engineers = members
+            .iter()
+            .filter(|member| member.role_type == RoleType::Engineer)
+            .count();
 
         assert_eq!(users, expectation.users);
         assert_eq!(architects, expectation.architects);
         assert_eq!(managers, expectation.managers);
         assert_eq!(engineers, expectation.engineers);
 
+        for (role_name, expected_caps) in &expectation.role_capabilities {
+            let expected = capability_set(expected_caps);
+            let role_members: Vec<_> = members
+                .iter()
+                .filter(|member| member.role_name == *role_name)
+                .collect();
+            assert!(
+                !role_members.is_empty(),
+                "expected at least one member for role `{role_name}`"
+            );
+            for member in role_members {
+                assert_eq!(
+                    member_capabilities(&capability_map, &member.name),
+                    expected,
+                    "unexpected capabilities for {}",
+                    member.name
+                );
+            }
+        }
+
+        assert_eq!(
+            capability_subject_set(&capability_map, CapabilitySubject::Operator),
+            capability_set(expectation.operator_caps)
+        );
+        assert_eq!(
+            capability_subject_set(&capability_map, CapabilitySubject::Orchestrator),
+            capability_set(&[WorkflowCapability::Orchestrator])
+        );
+
         members
     }
 
-    fn classify_board_for_validation_prep(tasks_dir: &std::path::Path) -> Vec<PrepBoardResolution> {
-        let tasks = load_tasks_from_dir(tasks_dir).unwrap();
-        let status_by_id: std::collections::HashMap<u32, String> = tasks
+    fn idle_states(members: &[MemberInstance]) -> HashMap<String, MemberState> {
+        members
             .iter()
-            .map(|task| (task.id, task.status.clone()))
-            .collect();
-
-        tasks
-            .into_iter()
-            .filter(|task| task.status != "done")
-            .map(|task| {
-                let blocked_reason = task.blocked.clone().or_else(|| {
-                    task.depends_on.iter().find_map(|dep_id| {
-                        let status = status_by_id.get(dep_id)?;
-                        (status != "done").then(|| format!("dependency #{dep_id} not done"))
-                    })
-                });
-
-                PrepBoardResolution {
-                    task_id: task.id,
-                    runnable: blocked_reason.is_none()
-                        && matches!(task.status.as_str(), "backlog" | "todo" | "in-progress"),
-                    blocked_reason,
-                }
-            })
+            .filter(|member| member.role_type != RoleType::User)
+            .map(|member| (member.name.clone(), MemberState::Idle))
             .collect()
     }
 
-    fn track_artifact_scaffold(metadata: &mut WorkflowMetadataScaffold, artifact: &str) {
-        let artifact = artifact.trim();
-        if artifact.is_empty() {
-            return;
-        }
-        if !metadata
-            .artifacts
-            .iter()
-            .any(|existing| existing == artifact)
-        {
-            metadata.artifacts.push(artifact.to_string());
-        }
+    fn write_task(tasks_dir: &Path, id: u32, extra_frontmatter: &str) {
+        fs::write(
+            tasks_dir.join(format!("{id:03}-task-{id}.md")),
+            format!(
+                "---\nid: {id}\ntitle: Task {id}\npriority: medium\n{extra_frontmatter}class: standard\n---\n\nBody.\n"
+            ),
+        )
+        .unwrap();
     }
 
-    fn apply_stage(status: &str, metadata: &mut WorkflowMetadataScaffold) {
-        metadata.next_action = match status {
-            "todo" => Some("execute".to_string()),
-            "in-progress" => Some("finish_execution".to_string()),
-            "review" => Some("review".to_string()),
-            "done" => None,
-            other => Some(other.to_string()),
-        };
-    }
-
-    fn parse_completion_packet(body: &str) -> CompletionPacket {
-        let start = body.find("```json").unwrap();
-        let after_fence = &body[start + "```json".len()..];
-        let inner = after_fence.strip_prefix('\n').unwrap_or(after_fence);
-        let end = inner.find("```").unwrap();
-        serde_json::from_str(inner[..end].trim()).unwrap()
-    }
-
-    fn apply_completion_packet(metadata: &mut WorkflowMetadataScaffold, packet: &CompletionPacket) {
-        let _ = packet.task_id;
-        let _ = &packet.tests_run;
-        let _ = packet.tests_passed;
-
-        metadata.branch = Some(packet.branch.clone());
-        metadata.commit = Some(packet.commit.clone());
-        metadata.worktree_path = packet.worktree_path.clone();
-        metadata.next_action = Some(packet.outcome.clone());
-        for artifact in &packet.artifacts {
-            track_artifact_scaffold(metadata, &artifact.path);
-        }
+    fn create_task(project_root: &Path, id: u32, extra_frontmatter: &str) -> std::path::PathBuf {
+        let tasks_dir = team_config_dir(project_root).join("board").join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        let task_path = tasks_dir.join(format!("{id:03}-task-{id}.md"));
+        fs::write(
+            &task_path,
+            format!(
+                "---\nid: {id}\ntitle: Task {id}\nstatus: review\npriority: medium\n{extra_frontmatter}class: standard\n---\n\nBody.\n"
+            ),
+        )
+        .unwrap();
+        task_path
     }
 
     #[test]
-    fn team_solo_template_validation_prep() {
+    fn team_solo_template_validation_uses_real_capabilities() {
         let members = assert_template_topology(
             include_str!("templates/team_solo.yaml"),
             &TemplateExpectation {
@@ -234,15 +154,24 @@ mod tests {
                 architects: 0,
                 managers: 0,
                 engineers: 1,
-                workflow_mode: "legacy",
+                role_capabilities: vec![(
+                    "engineer",
+                    &[
+                        WorkflowCapability::Planner,
+                        WorkflowCapability::Dispatcher,
+                        WorkflowCapability::Executor,
+                    ],
+                )],
+                operator_caps: &[WorkflowCapability::Operator, WorkflowCapability::Reviewer],
             },
         );
 
-        assert!(members.iter().all(|member| !member.use_worktrees));
+        assert_eq!(members[0].name, "engineer");
+        assert!(!members[0].use_worktrees);
     }
 
     #[test]
-    fn team_pair_template_validation_prep() {
+    fn team_pair_template_validation_uses_real_capabilities() {
         let members = assert_template_topology(
             include_str!("templates/team_pair.yaml"),
             &TemplateExpectation {
@@ -250,19 +179,27 @@ mod tests {
                 architects: 1,
                 managers: 0,
                 engineers: 1,
-                workflow_mode: "legacy",
+                role_capabilities: vec![
+                    (
+                        "architect",
+                        &[
+                            WorkflowCapability::Planner,
+                            WorkflowCapability::Dispatcher,
+                            WorkflowCapability::Reviewer,
+                        ],
+                    ),
+                    ("engineer", &[WorkflowCapability::Executor]),
+                ],
+                operator_caps: &[WorkflowCapability::Operator],
             },
         );
 
-        assert!(
-            members
-                .iter()
-                .any(|member| member.role_type == RoleType::Engineer && member.use_worktrees)
-        );
+        assert!(members.iter().any(|member| member.name == "architect"));
+        assert!(members.iter().any(|member| member.name == "engineer"));
     }
 
     #[test]
-    fn team_simple_template_validation_prep() {
+    fn team_simple_template_validation_uses_real_capabilities() {
         let members = assert_template_topology(
             include_str!("templates/team_simple.yaml"),
             &TemplateExpectation {
@@ -270,15 +207,33 @@ mod tests {
                 architects: 1,
                 managers: 1,
                 engineers: 3,
-                workflow_mode: "legacy",
+                role_capabilities: vec![
+                    (
+                        "architect",
+                        &[WorkflowCapability::Planner, WorkflowCapability::Reviewer],
+                    ),
+                    (
+                        "manager",
+                        &[WorkflowCapability::Dispatcher, WorkflowCapability::Reviewer],
+                    ),
+                    ("engineer", &[WorkflowCapability::Executor]),
+                ],
+                operator_caps: &[WorkflowCapability::Operator],
             },
         );
 
         assert!(members.iter().any(|member| member.name == "human"));
+        assert_eq!(
+            members
+                .iter()
+                .filter(|member| member.role_name == "engineer")
+                .count(),
+            3
+        );
     }
 
     #[test]
-    fn team_squad_template_validation_prep() {
+    fn team_squad_template_validation_uses_real_capabilities() {
         let members = assert_template_topology(
             include_str!("templates/team_squad.yaml"),
             &TemplateExpectation {
@@ -286,21 +241,32 @@ mod tests {
                 architects: 1,
                 managers: 1,
                 engineers: 5,
-                workflow_mode: "legacy",
+                role_capabilities: vec![
+                    (
+                        "architect",
+                        &[WorkflowCapability::Planner, WorkflowCapability::Reviewer],
+                    ),
+                    (
+                        "manager",
+                        &[WorkflowCapability::Dispatcher, WorkflowCapability::Reviewer],
+                    ),
+                    ("engineer", &[WorkflowCapability::Executor]),
+                ],
+                operator_caps: &[WorkflowCapability::Operator],
             },
         );
 
         assert_eq!(
             members
                 .iter()
-                .filter(|member| member.role_type == RoleType::Engineer)
+                .filter(|member| member.role_name == "engineer")
                 .count(),
             5
         );
     }
 
     #[test]
-    fn team_research_template_validation_prep() {
+    fn team_research_template_validation_uses_real_capabilities() {
         let members = assert_template_topology(
             include_str!("templates/team_research.yaml"),
             &TemplateExpectation {
@@ -308,15 +274,33 @@ mod tests {
                 architects: 1,
                 managers: 3,
                 engineers: 6,
-                workflow_mode: "legacy",
+                role_capabilities: vec![
+                    (
+                        "principal",
+                        &[WorkflowCapability::Planner, WorkflowCapability::Reviewer],
+                    ),
+                    (
+                        "sub-lead",
+                        &[WorkflowCapability::Dispatcher, WorkflowCapability::Reviewer],
+                    ),
+                    ("researcher", &[WorkflowCapability::Executor]),
+                ],
+                operator_caps: &[WorkflowCapability::Operator],
             },
         );
 
-        assert!(members.iter().any(|member| member.role_name == "principal"));
+        assert!(members.iter().any(|member| member.name == "principal"));
+        assert_eq!(
+            members
+                .iter()
+                .filter(|member| member.role_name == "researcher")
+                .count(),
+            6
+        );
     }
 
     #[test]
-    fn team_software_template_validation_prep() {
+    fn team_software_template_validation_uses_real_capabilities() {
         let members = assert_template_topology(
             include_str!("templates/team_software.yaml"),
             &TemplateExpectation {
@@ -324,190 +308,382 @@ mod tests {
                 architects: 1,
                 managers: 2,
                 engineers: 8,
-                workflow_mode: "legacy",
+                role_capabilities: vec![
+                    (
+                        "tech-lead",
+                        &[WorkflowCapability::Planner, WorkflowCapability::Reviewer],
+                    ),
+                    (
+                        "backend-mgr",
+                        &[WorkflowCapability::Dispatcher, WorkflowCapability::Reviewer],
+                    ),
+                    (
+                        "frontend-mgr",
+                        &[WorkflowCapability::Dispatcher, WorkflowCapability::Reviewer],
+                    ),
+                    ("developer", &[WorkflowCapability::Executor]),
+                ],
+                operator_caps: &[WorkflowCapability::Operator],
             },
         );
 
-        assert!(members.iter().any(|member| member.role_name == "tech-lead"));
+        assert!(members.iter().any(|member| member.name == "human"));
+        assert_eq!(
+            members
+                .iter()
+                .filter(|member| member.role_name == "developer")
+                .count(),
+            8
+        );
     }
 
     #[test]
-    fn board_classification_scaffold_marks_runnable_and_blocked_tasks() {
+    fn orchestrator_enabled_uses_real_workflow_modes() {
+        let legacy: TeamConfig = serde_yaml::from_str(
+            r#"
+name: legacy
+workflow_mode: legacy
+orchestrator_pane: true
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+"#,
+        )
+        .unwrap();
+        let hybrid: TeamConfig = serde_yaml::from_str(
+            r#"
+name: hybrid
+workflow_mode: hybrid
+orchestrator_pane: true
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+"#,
+        )
+        .unwrap();
+        let workflow_first: TeamConfig = serde_yaml::from_str(
+            r#"
+name: wf
+workflow_mode: workflow_first
+orchestrator_pane: true
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+"#,
+        )
+        .unwrap();
+        let workflow_first_hidden: TeamConfig = serde_yaml::from_str(
+            r#"
+name: wf-hidden
+workflow_mode: workflow_first
+orchestrator_pane: false
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+"#,
+        )
+        .unwrap();
+
+        assert!(!legacy.orchestrator_enabled());
+        assert!(hybrid.orchestrator_enabled());
+        assert!(workflow_first.orchestrator_enabled());
+        assert!(!workflow_first_hidden.orchestrator_enabled());
+    }
+
+    #[test]
+    fn resolve_board_and_runnable_tasks_use_real_workflow_resolver() {
         let tmp = tempfile::tempdir().unwrap();
         let tasks_dir = tmp.path().join("tasks");
         fs::create_dir_all(&tasks_dir).unwrap();
 
-        fs::write(
-            tasks_dir.join("001-done.md"),
-            r#"---
-id: 1
-title: done
-status: done
-priority: medium
-depends_on: []
----
-done
+        write_task(&tasks_dir, 1, "status: done\n");
+        write_task(
+            &tasks_dir,
+            2,
+            "status: todo\nexecution_owner: eng-1-1\nclaimed_by: eng-1-1\n",
+        );
+        write_task(&tasks_dir, 3, "status: review\nreview_owner: manager\n");
+        write_task(&tasks_dir, 4, "status: todo\nblocked_on: waiting for api\n");
+        write_task(&tasks_dir, 5, "status: todo\ndepends_on: [6]\n");
+        write_task(&tasks_dir, 6, "status: backlog\n");
+
+        let members = resolve_hierarchy(
+            &serde_yaml::from_str::<TeamConfig>(
+                r#"
+name: team
+roles:
+  - name: manager
+    role_type: manager
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
 "#,
+            )
+            .unwrap(),
         )
         .unwrap();
 
-        fs::write(
-            tasks_dir.join("002-runnable.md"),
-            r#"---
-id: 2
-title: runnable
-status: todo
-priority: medium
-depends_on: []
----
-runnable
-"#,
-        )
-        .unwrap();
-
-        fs::write(
-            tasks_dir.join("003-blocked-dep.md"),
-            r#"---
-id: 3
-title: blocked dep
-status: todo
-priority: medium
-depends_on: [4]
----
-blocked
-"#,
-        )
-        .unwrap();
-
-        fs::write(
-            tasks_dir.join("004-open-dep.md"),
-            r#"---
-id: 4
-title: open dep
-status: backlog
-priority: medium
-depends_on: []
----
-open dep
-"#,
-        )
-        .unwrap();
-
-        fs::write(
-            tasks_dir.join("005-blocked-flag.md"),
-            r#"---
-id: 5
-title: blocked flag
-status: in-progress
-priority: medium
-blocked: waiting on review
-depends_on: []
----
-blocked flag
-"#,
-        )
-        .unwrap();
-
-        // TODO(task-25): Replace scaffold classifier with resolver::resolve_board once workflow APIs land on main.
-        let results = classify_board_for_validation_prep(&tasks_dir);
+        let resolutions = resolve_board(tmp.path(), &members).unwrap();
+        let runnable = runnable_tasks(&resolutions);
 
         assert_eq!(
-            results,
-            vec![
-                PrepBoardResolution {
-                    task_id: 2,
-                    runnable: true,
-                    blocked_reason: None,
-                },
-                PrepBoardResolution {
-                    task_id: 3,
-                    runnable: false,
-                    blocked_reason: Some("dependency #4 not done".to_string()),
-                },
-                PrepBoardResolution {
-                    task_id: 4,
-                    runnable: true,
-                    blocked_reason: None,
-                },
-                PrepBoardResolution {
-                    task_id: 5,
-                    runnable: false,
-                    blocked_reason: Some("waiting on review".to_string()),
-                },
-            ]
+            runnable.iter().map(|task| task.task_id).collect::<Vec<_>>(),
+            vec![2, 6]
+        );
+        assert_eq!(
+            resolutions
+                .iter()
+                .find(|task| task.task_id == 2)
+                .map(|task| task.status),
+            Some(ResolutionStatus::Runnable)
+        );
+        assert_eq!(
+            resolutions
+                .iter()
+                .find(|task| task.task_id == 3)
+                .map(|task| task.status),
+            Some(ResolutionStatus::NeedsReview)
+        );
+        assert_eq!(
+            resolutions
+                .iter()
+                .find(|task| task.task_id == 4)
+                .and_then(|task| task.blocking_reason.as_deref()),
+            Some("waiting for api")
+        );
+        assert_eq!(
+            resolutions
+                .iter()
+                .find(|task| task.task_id == 5)
+                .and_then(|task| task.blocking_reason.as_deref()),
+            Some("unmet dependency #6")
         );
     }
 
     #[test]
-    fn workflow_metadata_transition_scaffold_covers_basic_lifecycle() {
-        let mut metadata = WorkflowMetadataScaffold::default();
+    fn compute_nudges_uses_real_planner_path_for_each_shipped_topology() {
+        let templates = [
+            include_str!("templates/team_solo.yaml"),
+            include_str!("templates/team_pair.yaml"),
+            include_str!("templates/team_simple.yaml"),
+            include_str!("templates/team_squad.yaml"),
+            include_str!("templates/team_research.yaml"),
+            include_str!("templates/team_software.yaml"),
+        ];
 
-        apply_stage("todo", &mut metadata);
-        assert_eq!(metadata.next_action.as_deref(), Some("execute"));
+        for yaml in templates {
+            let config = load_template(yaml);
+            let members = resolve_hierarchy(&config).unwrap();
+            let capability_map = resolve_capability_map(&members);
 
-        metadata.worktree_path = Some("/tmp/eng-1-1".to_string());
-        metadata.branch = Some("eng-1-1/task-34".to_string());
-        apply_stage("in-progress", &mut metadata);
-        assert_eq!(metadata.next_action.as_deref(), Some("finish_execution"));
+            let tmp = tempfile::tempdir().unwrap();
+            let tasks_dir = tmp.path().join("tasks");
+            fs::create_dir_all(&tasks_dir).unwrap();
+            write_task(
+                &tasks_dir,
+                1,
+                "status: blocked\nblocked_on: waiting on dependency\n",
+            );
 
-        metadata.commit = Some("abc1234".to_string());
-        track_artifact_scaffold(&mut metadata, "target/nextest/default.xml");
-        apply_stage("review", &mut metadata);
-        assert_eq!(metadata.next_action.as_deref(), Some("review"));
-        assert_eq!(metadata.artifacts, vec!["target/nextest/default.xml"]);
+            let nudges = compute_nudges(
+                tmp.path(),
+                &members,
+                &idle_states(&members),
+                &HashMap::new(),
+            )
+            .unwrap();
 
-        apply_stage("done", &mut metadata);
-        assert!(metadata.next_action.is_none());
-        assert_eq!(metadata.branch.as_deref(), Some("eng-1-1/task-34"));
-        assert_eq!(metadata.commit.as_deref(), Some("abc1234"));
+            assert!(
+                nudges
+                    .iter()
+                    .any(|target| target.capability == WorkflowCapability::Planner),
+                "expected planner nudge for topology {:?}",
+                config.name
+            );
+
+            for planner in nudges
+                .iter()
+                .filter(|target| target.capability == WorkflowCapability::Planner)
+            {
+                assert!(
+                    member_capabilities(&capability_map, &planner.member)
+                        .contains(&WorkflowCapability::Planner),
+                    "planner nudge targeted non-planner {}",
+                    planner.member
+                );
+            }
+        }
     }
 
     #[test]
-    fn completion_packet_scaffold_updates_workflow_metadata() {
-        let packet = parse_completion_packet(
-            r#"
-Completed task 34.
+    fn compute_nudges_uses_real_dispatch_path_for_each_shipped_topology() {
+        let templates = [
+            include_str!("templates/team_solo.yaml"),
+            include_str!("templates/team_pair.yaml"),
+            include_str!("templates/team_simple.yaml"),
+            include_str!("templates/team_squad.yaml"),
+            include_str!("templates/team_research.yaml"),
+            include_str!("templates/team_software.yaml"),
+        ];
+
+        for yaml in templates {
+            let config = load_template(yaml);
+            let members = resolve_hierarchy(&config).unwrap();
+            let capability_map = resolve_capability_map(&members);
+
+            let tmp = tempfile::tempdir().unwrap();
+            let tasks_dir = tmp.path().join("tasks");
+            fs::create_dir_all(&tasks_dir).unwrap();
+            write_task(&tasks_dir, 1, "status: todo\n");
+
+            let nudges = compute_nudges(
+                tmp.path(),
+                &members,
+                &idle_states(&members),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+            assert!(
+                nudges
+                    .iter()
+                    .any(|target| target.capability == WorkflowCapability::Dispatcher),
+                "expected dispatcher nudge for topology {:?}",
+                config.name
+            );
+
+            for dispatcher in nudges
+                .iter()
+                .filter(|target| target.capability == WorkflowCapability::Dispatcher)
+            {
+                assert!(
+                    member_capabilities(&capability_map, &dispatcher.member)
+                        .contains(&WorkflowCapability::Dispatcher),
+                    "dispatcher nudge targeted non-dispatcher {}",
+                    dispatcher.member
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn workflow_meta_transitions_end_to_end_with_real_review_flow() {
+        let mut meta = WorkflowMeta {
+            state: TaskState::Todo,
+            execution_owner: Some("eng-1-1".to_string()),
+            review_owner: Some("manager".to_string()),
+            worktree_path: Some(".batty/worktrees/eng-1-1".to_string()),
+            branch: Some("eng-1-1/task-34".to_string()),
+            commit: Some("abc1234".to_string()),
+            artifacts: vec!["target/nextest/default.xml".to_string()],
+            ..WorkflowMeta::default()
+        };
+
+        meta.transition(TaskState::InProgress).unwrap();
+        meta.next_action = Some("run tests".to_string());
+        meta.transition(TaskState::Review).unwrap();
+        meta.review = Some(ReviewState {
+            reviewer: "manager".to_string(),
+            packet_ref: Some("review/packet-34.json".to_string()),
+            disposition: MergeDisposition::MergeReady,
+            notes: Some("ready for merge".to_string()),
+        });
+
+        apply_review(&mut meta, MergeDisposition::MergeReady, "manager").unwrap();
+
+        assert_eq!(meta.state, TaskState::Done);
+        assert_eq!(meta.review_owner.as_deref(), Some("manager"));
+        assert_eq!(
+            meta.review_disposition,
+            Some(super::super::workflow::ReviewDisposition::Approved)
+        );
+        assert_eq!(
+            meta.review
+                .as_ref()
+                .and_then(|review| review.packet_ref.as_deref()),
+            Some("review/packet-34.json")
+        );
+        assert_eq!(meta.branch.as_deref(), Some("eng-1-1/task-34"));
+        assert_eq!(meta.commit.as_deref(), Some("abc1234"));
+        assert_eq!(meta.artifacts, vec!["target/nextest/default.xml"]);
+    }
+
+    #[test]
+    fn completion_packet_ingestion_uses_real_parser_and_metadata_writer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let task_path = create_task(tmp.path(), 34, "");
+
+        let message = r#"Done.
+
+## Completion Packet
 
 ```json
 {
   "task_id": 34,
   "branch": "eng-1-1/task-34",
+  "worktree_path": ".batty/worktrees/eng-1-1",
   "commit": "def5678",
-  "tests_run": ["cargo test validation"],
+  "changed_paths": ["src/team/validation.rs"],
+  "tests_run": true,
   "tests_passed": true,
-  "outcome": "ready_for_review",
-  "worktree_path": "/tmp/eng-1-1",
-  "artifacts": [
-    {
-      "path": "target/nextest/default.xml",
-      "artifact_type": "test_result",
-      "created_at": 1777000000,
-      "verified": true
-    }
-  ]
+  "artifacts": ["target/nextest/default.xml"],
+  "outcome": "ready_for_review"
 }
-```
-"#,
-        );
+```"#;
 
-        let mut metadata = WorkflowMetadataScaffold::default();
-        apply_completion_packet(&mut metadata, &packet);
+        let task_id = ingest_completion_message(tmp.path(), message).unwrap();
+        let metadata = read_workflow_metadata(&task_path).unwrap();
 
+        assert_eq!(task_id, Some(34));
         assert_eq!(metadata.branch.as_deref(), Some("eng-1-1/task-34"));
+        assert_eq!(
+            metadata.worktree_path.as_deref(),
+            Some(".batty/worktrees/eng-1-1")
+        );
         assert_eq!(metadata.commit.as_deref(), Some("def5678"));
-        assert_eq!(metadata.worktree_path.as_deref(), Some("/tmp/eng-1-1"));
-        assert_eq!(metadata.next_action.as_deref(), Some("ready_for_review"));
+        assert_eq!(metadata.changed_paths, vec!["src/team/validation.rs"]);
+        assert_eq!(metadata.tests_run, Some(true));
+        assert_eq!(metadata.tests_passed, Some(true));
         assert_eq!(metadata.artifacts, vec!["target/nextest/default.xml"]);
+        assert_eq!(metadata.outcome.as_deref(), Some("ready_for_review"));
+        assert!(metadata.review_blockers.is_empty());
     }
 
-    // TODO(task-25): Test orchestrator_enabled in both modes.
-    // TODO(task-30): Test nudge computation for each topology.
-    // TODO(task-32): Test policy enforcement (WIP limits, escalation thresholds).
     #[test]
-    fn workflow_validation_todo_markers_are_captured_in_prep_module() {
-        assert_eq!(
-            workflow_mode_from_template(include_str!("templates/team_simple.yaml")),
-            "legacy"
-        );
+    fn workflow_policy_enforcement_uses_real_policy_helpers() {
+        let config: TeamConfig = serde_yaml::from_str(
+            r#"
+name: policy-team
+workflow_policy:
+  wip_limit_per_engineer: 2
+  wip_limit_per_reviewer: 1
+  escalation_threshold_secs: 120
+  review_timeout_secs: 300
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+"#,
+        )
+        .unwrap();
+
+        let policy: &WorkflowPolicy = &config.workflow_policy;
+
+        assert!(check_wip_limit(policy, RoleType::Engineer, 1));
+        assert!(!check_wip_limit(policy, RoleType::Engineer, 2));
+        assert!(check_wip_limit(policy, RoleType::Manager, 0));
+        assert!(!check_wip_limit(policy, RoleType::Manager, 1));
+        assert!(!should_escalate(policy, 119));
+        assert!(should_escalate(policy, 120));
+        assert!(!is_review_stale(policy, 299));
+        assert!(is_review_stale(policy, 300));
     }
 }
