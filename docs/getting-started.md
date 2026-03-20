@@ -72,6 +72,7 @@ automation:
   owned_task_interventions: true
   manager_dispatch_interventions: true
   architect_utilization_interventions: true
+  intervention_idle_grace_secs: 60
 layout:
   zones:
     - name: architect
