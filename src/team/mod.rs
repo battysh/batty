@@ -17,6 +17,7 @@ pub mod standup;
 pub mod task_loop;
 pub mod telegram;
 pub mod watcher;
+pub mod workflow;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
