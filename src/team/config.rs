@@ -9,6 +9,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub struct TeamConfig {
     pub name: String,
+    #[serde(default = "default_workflow_mode")]
+    pub workflow_mode: WorkflowMode,
     #[serde(default)]
     pub board: BoardConfig,
     #[serde(default)]
@@ -20,6 +22,24 @@ pub struct TeamConfig {
     #[serde(default)]
     pub layout: Option<LayoutConfig>,
     pub roles: Vec<RoleDef>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowMode {
+    Legacy,
+    Hybrid,
+    WorkflowFirst,
+}
+
+impl WorkflowMode {
+    pub fn keeps_legacy_runtime(self) -> bool {
+        matches!(self, Self::Legacy | Self::Hybrid)
+    }
+
+    pub fn requires_workflow_primary(self) -> bool {
+        matches!(self, Self::WorkflowFirst)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -162,6 +182,10 @@ pub enum RoleType {
 
 fn default_rotation_threshold() -> u32 {
     20
+}
+
+fn default_workflow_mode() -> WorkflowMode {
+    WorkflowMode::Legacy
 }
 
 fn default_board_auto_dispatch() -> bool {
@@ -338,6 +362,7 @@ roles:
     fn parse_minimal_config() {
         let config: TeamConfig = serde_yaml::from_str(minimal_yaml()).unwrap();
         assert_eq!(config.name, "test-team");
+        assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
         assert_eq!(config.roles.len(), 3);
         assert_eq!(config.roles[0].role_type, RoleType::Architect);
         assert_eq!(config.roles[2].instances, 3);
@@ -443,6 +468,7 @@ roles:
     agent: codex
 "#;
         let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
         assert_eq!(config.board.rotation_threshold, 20);
         assert!(config.board.auto_dispatch);
         assert_eq!(config.standup.interval_secs, 1200);
@@ -625,6 +651,36 @@ roles:
         std::fs::write(&path, minimal_yaml()).unwrap();
         let config = TeamConfig::load(&path).unwrap();
         assert_eq!(config.name, "test-team");
+        assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
+    }
+
+    #[test]
+    fn parse_workflow_mode_defaults_to_legacy_when_absent() {
+        let config: TeamConfig = serde_yaml::from_str(minimal_yaml()).unwrap();
+
+        assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
+        assert!(config.workflow_mode.keeps_legacy_runtime());
+        assert!(!config.workflow_mode.requires_workflow_primary());
+    }
+
+    #[test]
+    fn parse_workflow_mode_hybrid_from_yaml() {
+        let yaml = format!("workflow_mode: hybrid\n{}", minimal_yaml());
+        let config: TeamConfig = serde_yaml::from_str(&yaml).unwrap();
+
+        assert_eq!(config.workflow_mode, WorkflowMode::Hybrid);
+        assert!(config.workflow_mode.keeps_legacy_runtime());
+        assert!(!config.workflow_mode.requires_workflow_primary());
+    }
+
+    #[test]
+    fn parse_workflow_mode_workflow_first_from_yaml() {
+        let yaml = format!("workflow_mode: workflow_first\n{}", minimal_yaml());
+        let config: TeamConfig = serde_yaml::from_str(&yaml).unwrap();
+
+        assert_eq!(config.workflow_mode, WorkflowMode::WorkflowFirst);
+        assert!(!config.workflow_mode.keeps_legacy_runtime());
+        assert!(config.workflow_mode.requires_workflow_primary());
     }
 
     #[test]
