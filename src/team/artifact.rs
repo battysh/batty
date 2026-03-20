@@ -46,8 +46,12 @@ pub fn record_merge(log_path: &Path, record: &MergeRecord) -> Result<()> {
         .open(log_path)
         .with_context(|| format!("failed to open {}", log_path.display()))?;
 
-    serde_json::to_writer(&mut file, record)
-        .with_context(|| format!("failed to serialize merge record for {}", log_path.display()))?;
+    serde_json::to_writer(&mut file, record).with_context(|| {
+        format!(
+            "failed to serialize merge record for {}",
+            log_path.display()
+        )
+    })?;
     file.write_all(b"\n")
         .with_context(|| format!("failed to append newline to {}", log_path.display()))?;
     Ok(())
@@ -58,12 +62,19 @@ pub fn read_merge_log(log_path: &Path) -> Result<Vec<MergeRecord>> {
         return Ok(Vec::new());
     }
 
-    let file = File::open(log_path).with_context(|| format!("failed to open {}", log_path.display()))?;
+    let file =
+        File::open(log_path).with_context(|| format!("failed to open {}", log_path.display()))?;
     let reader = BufReader::new(file);
     let mut records = Vec::new();
 
     for (index, line) in reader.lines().enumerate() {
-        let line = line.with_context(|| format!("failed to read line {} from {}", index + 1, log_path.display()))?;
+        let line = line.with_context(|| {
+            format!(
+                "failed to read line {} from {}",
+                index + 1,
+                log_path.display()
+            )
+        })?;
         if line.trim().is_empty() {
             continue;
         }
