@@ -82,6 +82,54 @@ Orchestrated code integration from multiple engineers working in parallel.
 
 ---
 
+## Workflow Control Plane Rework (Done)
+
+Move Batty from message-inferred coordination to explicit workflow state, visible orchestration, and deterministic recovery. Preserves current team model as supported legacy mode. PRD: [tasks/prd-batty-workflow-control-plane-rework.md](../tasks/prd-batty-workflow-control-plane-rework.md).
+
+### Wave 1: Foundation Models & Board Extensions (T-001, T-002, T-003, T-007, T-016)
+
+Establish the conceptual and data foundations before building runtime behavior.
+
+- **Capability model** — define planner/dispatcher/executor/reviewer/orchestrator/operator responsibilities and how they resolve from role type + hierarchy across all topologies (`T-001`)
+- **Workflow state model** — define task lifecycle states, ownership types, dependency semantics, and runnable/blocked criteria (`T-002`)
+- **Board metadata extensions** — add workflow fields (`depends_on`, `review_owner`, `blocked_on`, `branch`, `commit`, `artifacts`, `next_action`) to task frontmatter without breaking kanban-md (`T-003`)
+- **Rollout mode definitions** — define legacy/hybrid/workflow-first modes and backward-compatible adoption path (`T-007`)
+- **Migration and backward compatibility** — older task files handled with safe defaults, existing configs run unchanged (`T-016`)
+
+**Exit:** Written capability model, state model, extended board format, rollout modes, and migration behavior. All existing tests still pass.
+
+### Wave 2: Runtime Engine (T-004, T-005, T-006, T-008, T-009, T-010, T-012)
+
+Build the workflow engine and expose it through CLI/API.
+
+- **Orchestrator runtime surface** — visible tmux pane for workflow decisions and activity (`T-004`)
+- **CLI/API control surface** — explicit commands for task create, update state, assign, record review, trigger merge/archive/rework (`T-005`)
+- **Orchestrated and non-orchestrated modes** — workflow works with or without built-in orchestrator (`T-006`)
+- **Runnable-work resolver** — compute runnable/blocked/review tasks from board state without pane text (`T-008`)
+- **Structured completion packets** — standardized engineer output with branch/commit/test/artifact evidence (`T-009`)
+- **Review and merge state machine** — explicit review disposition driving task transitions (`T-010`)
+- **Merge/artifact lifecycle tracking** — branch/artifact lifetime from execution through merge (`T-012`)
+
+**Exit:** Orchestrator pane running, workflow mutations via CLI, review/merge state machine operational, completion packets parsed. Unit tests cover all new paths.
+
+### Wave 3: Intelligence & Polish (T-011, T-013, T-014, T-015, T-017)
+
+Wire up smart interventions, observability, and align prompts.
+
+- **Dependency-aware nudges** — state-based interventions targeting the correct role (`T-011`)
+- **Workflow observability metrics** — runnable count, blocked count, review age, idle-with-runnable signals (`T-013`)
+- **Config-driven workflow policies** — WIP limits, escalation thresholds, intervention toggles, capability overrides (`T-014`)
+- **Role prompt rewrite** — align prompts with capability model and control plane contracts (`T-015`)
+- **Topology validation** — validate across solo, pair, manager-led, multi-manager, renamed-role topologies (`T-017`)
+
+**Exit:** Batty drives execution, review, merge, recovery, and escalation from structured workflow state. Orchestrator visible in tmux. All mutations available through stable CLI/API. Prompts aligned. Metrics observable.
+
+**Result:** 17 tasks shipped, 12 new modules, 593 tests (231 new). Validated across solo, pair, manager-led, multi-manager, and renamed-role topologies.
+
+---
+
+---
+
 ## Future: Intelligence Layer
 
 Make the team smarter over time.

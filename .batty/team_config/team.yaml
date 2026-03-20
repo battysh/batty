@@ -28,7 +28,6 @@ layout:
       width_pct: 20
     - name: engineers
       width_pct: 60
-      split: { horizontal: 4 }
 
 roles:
   - name: human
@@ -45,7 +44,7 @@ roles:
     instances: 1
     prompt: batty_architect.md
     talks_to: [human, manager]
-    nudge_interval_secs: 1800
+    nudge_interval_secs: 600
     standup_interval_secs: 1800
     owns: ["planning/**", "docs/**", "CLAUDE.md"]
 

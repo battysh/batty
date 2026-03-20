@@ -89,6 +89,35 @@ kanban-md move <id> done
 - Engineers must run `cargo test` and all tests must pass before reporting done
 - Keep tasks small: add a function, fix a bug, add a field — not "rewrite the module"
 
+## Branch-Per-Task Discipline
+
+**CRITICAL**: Every task MUST be worked on a dedicated branch. When assigning work, instruct the engineer to create a new branch:
+
+```bash
+# Include this in EVERY assignment message:
+# "First, create a new branch: git checkout -b task-<id>-<short-desc>"
+```
+
+Before assigning a new task to an engineer, verify their worktree is clean:
+
+```bash
+# Check worktree state BEFORE assigning
+cd <worktree-path>
+git status          # Must be clean — no uncommitted changes
+git log --oneline -3  # Must be on main or a completed task branch
+```
+
+If the worktree has uncommitted changes from a prior task, **do NOT reset without checking if the work should be saved first**. If the prior task is complete, commit and merge before resetting. If not, stash or create a WIP commit.
+
+After verifying clean state:
+
+```bash
+cd <worktree-path>
+git checkout main
+git pull --rebase
+# Then assign — the engineer creates their own task branch
+```
+
 ## Merge Workflow
 
 When an engineer completes a task:
