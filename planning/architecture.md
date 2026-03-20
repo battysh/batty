@@ -81,6 +81,48 @@ The tmux layout builder creates zones for each role tier:
 - Engineer panes are partitioned by their managing manager
 - Pane IDs (`%N`) are globally unique and used as direct tmux targets
 
+## Workflow Control Plane
+
+The workflow control plane adds structured task lifecycle management on top of the existing team model. Instead of inferring orchestration truth from chat messages, the control plane treats board/task metadata as the primary source of truth for task state, dependencies, ownership, review, and merge disposition.
+
+### Capability Model
+
+Workflow responsibilities are resolved from role type, hierarchy, and optional config overrides — not hardcoded role names:
+
+- **Planner** — defines or prioritizes frontier work (typically architect-type roles)
+- **Dispatcher** — decomposes runnable work and routes it to executors (typically manager-type roles)
+- **Executor** — performs bounded implementation work (typically engineer-type roles)
+- **Reviewer** — accepts, rejects, merges, or escalates completed work (typically manager or architect-type roles)
+- **Orchestrator** — monitors workflow state, computes next actions, drives automatic interventions (daemon + visible pane)
+- **Operator** — external human endpoint when one exists (user-type roles)
+
+One role may hold multiple capabilities depending on topology. In a solo topology, one role plans, executes, and reviews. In a manager topology, architect plans, manager dispatches/reviews, engineers execute.
+
+### Task Lifecycle
+
+Tasks flow through explicit states: `backlog` → `todo` → `in-progress` → `review` → `done` (or `blocked`, `archived` at any point). Each task tracks:
+
+- Execution ownership (who builds it)
+- Review ownership (who reviews it)
+- Dependencies (`depends_on` other task IDs)
+- Artifacts (branch, worktree, commit, test results)
+- Review disposition (merge, rework, discard, escalate)
+- Next action (which capability should act next)
+
+### Orchestrator Surface
+
+The orchestrator is a visible tmux pane showing workflow decisions, not just a hidden daemon. It uses the same CLI/API surface as agents and humans — no hidden mutation paths. Teams can disable the built-in orchestrator and drive workflow manually through CLI commands.
+
+### Operating Modes
+
+- **Legacy** — current Batty behavior, message-driven coordination, optional nudges
+- **Hybrid** — workflow features enabled selectively alongside current runtime
+- **Workflow-first** — workflow state is the primary orchestration truth, messaging is assistive
+
+### Data Extensions
+
+Task markdown files gain workflow metadata in YAML frontmatter: `depends_on`, `review_owner`, `blocked_on`, `worktree_path`, `branch`, `commit`, `artifacts`, `next_action`. Older files without these fields are handled with safe defaults. kanban-md compatibility is preserved.
+
 ## Key Design Decisions
 
 **Why tmux?** Output capture (pipe-pane), input injection (send-keys/paste-buffer), status bar, panes, session persistence — all for free. No custom terminal code.
