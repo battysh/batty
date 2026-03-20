@@ -20,6 +20,10 @@ pub struct TeamConfig {
     #[serde(default)]
     pub automation_sender: Option<String>,
     #[serde(default)]
+    pub workflow_mode: WorkflowMode,
+    #[serde(default = "default_orchestrator_pane")]
+    pub orchestrator_pane: bool,
+    #[serde(default)]
     pub layout: Option<LayoutConfig>,
     pub roles: Vec<RoleDef>,
 }
@@ -180,6 +184,29 @@ pub enum RoleType {
     Engineer,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowMode {
+    #[default]
+    Legacy,
+    Hybrid,
+    WorkflowFirst,
+}
+
+impl WorkflowMode {
+    pub fn enables_runtime_surface(self) -> bool {
+        matches!(self, Self::Hybrid | Self::WorkflowFirst)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Hybrid => "hybrid",
+            Self::WorkflowFirst => "workflow_first",
+        }
+    }
+}
+
 fn default_rotation_threshold() -> u32 {
     20
 }
@@ -205,6 +232,10 @@ fn default_instances() -> u32 {
 }
 
 fn default_enabled() -> bool {
+    true
+}
+
+fn default_orchestrator_pane() -> bool {
     true
 }
 
@@ -366,6 +397,8 @@ roles:
         assert_eq!(config.roles.len(), 3);
         assert_eq!(config.roles[0].role_type, RoleType::Architect);
         assert_eq!(config.roles[2].instances, 3);
+        assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
+        assert!(config.orchestrator_pane);
     }
 
     #[test]
@@ -393,6 +426,8 @@ roles:
             config.roles[0].channel_config.as_ref().unwrap().provider,
             "openclaw"
         );
+        assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
+        assert!(config.orchestrator_pane);
     }
 
     #[test]
@@ -402,6 +437,8 @@ name: mafia-solver
 board:
   rotation_threshold: 20
   auto_dispatch: false
+workflow_mode: hybrid
+orchestrator_pane: false
 standup:
   interval_secs: 1200
   output_lines: 30
@@ -451,6 +488,8 @@ roles:
         assert_eq!(config.name, "mafia-solver");
         assert_eq!(config.board.rotation_threshold, 20);
         assert!(!config.board.auto_dispatch);
+        assert_eq!(config.workflow_mode, WorkflowMode::Hybrid);
+        assert!(!config.orchestrator_pane);
         assert_eq!(config.standup.interval_secs, 1200);
         let layout = config.layout.as_ref().unwrap();
         assert_eq!(layout.zones.len(), 3);
@@ -478,6 +517,8 @@ roles:
         assert!(config.automation.triage_interventions);
         assert_eq!(config.automation.intervention_idle_grace_secs, 60);
         assert_eq!(config.roles[0].instances, 1);
+        assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
+        assert!(config.orchestrator_pane);
     }
 
     #[test]
@@ -536,6 +577,48 @@ roles:
         assert!(!config.automation.manager_dispatch_interventions);
         assert!(config.automation.architect_utilization_interventions);
         assert_eq!(config.automation.intervention_idle_grace_secs, 90);
+    }
+
+    #[test]
+    fn parse_workflow_mode_variants() {
+        let legacy: TeamConfig = serde_yaml::from_str(
+            r#"
+name: test
+workflow_mode: legacy
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.workflow_mode, WorkflowMode::Legacy);
+
+        let hybrid: TeamConfig = serde_yaml::from_str(
+            r#"
+name: test
+workflow_mode: hybrid
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#,
+        )
+        .unwrap();
+        assert_eq!(hybrid.workflow_mode, WorkflowMode::Hybrid);
+
+        let workflow_first: TeamConfig = serde_yaml::from_str(
+            r#"
+name: test
+workflow_mode: workflow_first
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#,
+        )
+        .unwrap();
+        assert_eq!(workflow_first.workflow_mode, WorkflowMode::WorkflowFirst);
     }
 
     #[test]

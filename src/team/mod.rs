@@ -73,6 +73,10 @@ pub fn team_events_path(project_root: &Path) -> PathBuf {
     team_config_dir(project_root).join("events.jsonl")
 }
 
+pub(crate) fn orchestrator_log_path(project_root: &Path) -> PathBuf {
+    project_root.join(".batty").join("orchestrator.log")
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct TeamLoadSnapshot {
     pub timestamp: u64,
@@ -433,7 +437,14 @@ pub fn start_team(project_root: &Path, attach: bool) -> Result<String> {
         bail!("session '{session}' already exists; use `batty attach` or `batty stop` first");
     }
 
-    layout::build_layout(&session, &members, &team_config.layout, project_root)?;
+    layout::build_layout(
+        &session,
+        &members,
+        &team_config.layout,
+        project_root,
+        team_config.workflow_mode,
+        team_config.orchestrator_pane,
+    )?;
 
     // Initialize Maildir inboxes for all members
     let inboxes = inbox::inboxes_root(project_root);

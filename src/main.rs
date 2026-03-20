@@ -172,6 +172,10 @@ fn main() -> Result<()> {
                         "manager_dispatch_interventions": team_config.automation.manager_dispatch_interventions,
                         "architect_utilization_interventions": team_config.automation.architect_utilization_interventions,
                     },
+                    "workflow": {
+                        "mode": team_config.workflow_mode.as_str(),
+                        "orchestrator_pane": team_config.orchestrator_pane,
+                    },
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
@@ -195,6 +199,11 @@ fn main() -> Result<()> {
                     team_config.automation.owned_task_interventions,
                     team_config.automation.manager_dispatch_interventions,
                     team_config.automation.architect_utilization_interventions,
+                );
+                println!(
+                    "Workflow: mode={}, orchestrator_pane={}",
+                    team_config.workflow_mode.as_str(),
+                    team_config.orchestrator_pane
                 );
             }
         }

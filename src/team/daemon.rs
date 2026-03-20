@@ -266,6 +266,10 @@ impl TeamDaemon {
     pub fn run(&mut self, resume: bool) -> Result<()> {
         self.emit_event(TeamEvent::daemon_started());
         info!(session = %self.config.session, resume, "daemon started");
+        self.record_orchestrator_action(format!(
+            "runtime: orchestrator started (mode={}, resume={resume})",
+            self.config.team_config.workflow_mode.as_str()
+        ));
 
         // Install signal handler so we log clean shutdowns
         let shutdown_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -384,6 +388,23 @@ impl TeamDaemon {
     fn emit_event(&mut self, event: TeamEvent) {
         if let Err(error) = self.event_sink.emit(event) {
             warn!(error = %error, "failed to write daemon event; continuing");
+        }
+    }
+
+    fn workflow_runtime_enabled(&self) -> bool {
+        self.config
+            .team_config
+            .workflow_mode
+            .enables_runtime_surface()
+    }
+
+    fn record_orchestrator_action(&self, action: impl AsRef<str>) {
+        if !self.workflow_runtime_enabled() {
+            return;
+        }
+        let path = super::orchestrator_log_path(&self.config.project_root);
+        if let Err(error) = append_orchestrator_log_line(&path, action.as_ref()) {
+            warn!(log = %path.display(), error = %error, "failed to append orchestrator log");
         }
     }
 
@@ -1544,6 +1565,10 @@ impl TeamDaemon {
             self.assign_task_with_task_id(&engineer_name, &assignment_message, Some(task.id))?;
             self.active_tasks.insert(engineer_name.clone(), task.id);
             self.retry_counts.remove(&engineer_name);
+            self.record_orchestrator_action(format!(
+                "dependency resolution: selected runnable task #{} ({}) and dispatched it to {}",
+                task.id, task.title, engineer_name
+            ));
             info!(
                 engineer = %engineer_name,
                 task_id = task.id,
@@ -2064,6 +2089,10 @@ impl TeamDaemon {
                     continue;
                 }
             };
+            self.record_orchestrator_action(format!(
+                "recovery: triage intervention for {} with {} pending direct-report result(s)",
+                name, triage_state.count
+            ));
             self.triage_interventions.insert(name.clone(), idle_epoch);
             if delivered_live {
                 self.mark_member_working(&name);
@@ -2152,6 +2181,11 @@ impl TeamDaemon {
                     continue;
                 }
             };
+            self.record_orchestrator_action(format!(
+                "recovery: owned-task intervention for {} covering {} active task(s)",
+                name,
+                owned_tasks.len()
+            ));
             self.owned_task_interventions.insert(
                 name.clone(),
                 OwnedTaskInterventionState {
@@ -2251,6 +2285,11 @@ impl TeamDaemon {
                     continue;
                 }
             };
+            self.record_orchestrator_action(format!(
+                "recovery: review intervention for {} covering {} queued review task(s)",
+                name,
+                review_tasks.len()
+            ));
             self.owned_task_interventions.insert(
                 review_key,
                 OwnedTaskInterventionState {
@@ -2405,6 +2444,13 @@ impl TeamDaemon {
                     continue;
                 }
             };
+            self.record_orchestrator_action(format!(
+                "recovery: dispatch-gap intervention for {} (idle reports with active work: {}, unassigned reports: {}, open tasks: {})",
+                name,
+                idle_active_reports.len(),
+                idle_unassigned_reports.len(),
+                unassigned_open_tasks.len()
+            ));
             let idle_epoch = self.triage_idle_epochs.get(&name).copied().unwrap_or(0);
             self.owned_task_interventions.insert(
                 dispatch_key,
@@ -2555,6 +2601,14 @@ impl TeamDaemon {
                     continue;
                 }
             };
+            self.record_orchestrator_action(format!(
+                "recovery: utilization intervention for {} (working engineers: {}, idle active: {}, idle unassigned: {}, open tasks: {})",
+                architect.name,
+                working_engineers.len(),
+                idle_active_engineers.len(),
+                idle_unassigned_engineers.len(),
+                unassigned_open_tasks.len()
+            ));
             let idle_epoch = self
                 .triage_idle_epochs
                 .get(&architect.name)
@@ -3575,6 +3629,20 @@ fn review_task_intervention_signature(tasks: &[&crate::task::Task]) -> String {
         .collect::<Vec<_>>();
     parts.sort();
     parts.join("|")
+}
+
+fn append_orchestrator_log_line(path: &Path, message: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "[{}] {}", now_unix(), message)?;
+    file.flush()?;
+    Ok(())
 }
 
 fn format_standup_status(
@@ -4760,6 +4828,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -4814,6 +4884,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -4894,6 +4966,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: vec![RoleDef {
                         name: "human".to_string(),
@@ -5037,6 +5111,8 @@ mod tests {
                 standup: StandupConfig::default(),
                 automation: AutomationConfig::default(),
                 automation_sender: None,
+                workflow_mode: WorkflowMode::Legacy,
+                orchestrator_pane: true,
                 layout: None,
                 roles,
             },
@@ -5189,6 +5265,8 @@ mod tests {
                 standup: StandupConfig::default(),
                 automation: AutomationConfig::default(),
                 automation_sender: None,
+                workflow_mode: WorkflowMode::Legacy,
+                orchestrator_pane: true,
                 layout: None,
                 roles,
             },
@@ -5236,6 +5314,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5283,6 +5363,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5327,6 +5409,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5376,6 +5460,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5423,6 +5509,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5474,6 +5562,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5527,6 +5617,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5589,6 +5681,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5677,6 +5771,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5807,6 +5903,8 @@ mod tests {
                 standup: StandupConfig::default(),
                 automation: AutomationConfig::default(),
                 automation_sender: None,
+                workflow_mode: WorkflowMode::Legacy,
+                orchestrator_pane: true,
                 layout: None,
                 roles: Vec::new(),
             },
@@ -5894,6 +5992,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5969,6 +6069,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: vec![role],
                 },
@@ -6060,6 +6162,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -6151,6 +6255,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -6239,6 +6345,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -6323,6 +6431,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -6395,6 +6505,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -6488,6 +6600,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -6557,6 +6671,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -6618,6 +6734,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -6684,6 +6802,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -6744,6 +6864,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -6836,6 +6958,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -6935,6 +7059,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7024,6 +7150,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7140,6 +7268,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7236,6 +7366,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7312,6 +7444,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7384,6 +7518,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7449,6 +7585,8 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: Some("human".to_string()),
+                    workflow_mode: WorkflowMode::Legacy,
+                    orchestrator_pane: true,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7511,6 +7649,16 @@ mod tests {
         assert_eq!(daemon.automation_sender_for("architect"), "daemon");
     }
 
+    #[test]
+    fn append_orchestrator_log_line_writes_timestamped_activity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".batty").join("orchestrator.log");
+        append_orchestrator_log_line(&path, "dispatch: assigned task #18").unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("dispatch: assigned task #18"));
+        assert!(content.starts_with('['));
+    }
+
     /// Helper: build a minimal DaemonConfig with the given roles.
     fn daemon_config_with_roles(tmp: &tempfile::TempDir, roles: Vec<RoleDef>) -> DaemonConfig {
         DaemonConfig {
@@ -7522,6 +7670,8 @@ mod tests {
                 standup: StandupConfig::default(),
                 automation: AutomationConfig::default(),
                 automation_sender: None,
+                workflow_mode: WorkflowMode::Legacy,
+                orchestrator_pane: true,
                 layout: None,
                 roles,
             },
