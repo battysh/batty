@@ -15,6 +15,7 @@ pub mod hierarchy;
 pub mod inbox;
 pub mod layout;
 pub mod message;
+pub mod metrics;
 pub mod resolver;
 pub mod review;
 pub mod standup;
@@ -1185,12 +1186,22 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
         &triage_backlog_counts,
         &owned_task_buckets,
     );
+    let workflow_metrics = workflow_metrics_section(project_root, &members);
 
     if json {
         let status = serde_json::json!({
             "team": team_config.name,
             "session": session,
             "running": session_running,
+            "workflow_metrics": workflow_metrics.as_ref().map(|(_, metrics)| serde_json::json!({
+                "runnable_count": metrics.runnable_count,
+                "blocked_count": metrics.blocked_count,
+                "in_review_count": metrics.in_review_count,
+                "in_progress_count": metrics.in_progress_count,
+                "idle_with_runnable": metrics.idle_with_runnable,
+                "oldest_review_age_secs": metrics.oldest_review_age_secs,
+                "oldest_assignment_age_secs": metrics.oldest_assignment_age_secs,
+            })),
             "members": rows.iter().map(|row| {
                 serde_json::json!({
                     "name": row.name,
@@ -1251,9 +1262,53 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
                 row.reports_to.as_deref().unwrap_or("-"),
             );
         }
+        if let Some((formatted, _)) = workflow_metrics {
+            println!();
+            println!("{formatted}");
+        }
     }
 
     Ok(())
+}
+
+fn workflow_metrics_section(
+    project_root: &Path,
+    members: &[hierarchy::MemberInstance],
+) -> Option<(String, metrics::WorkflowMetrics)> {
+    let config_path = team_config_path(project_root);
+    if !workflow_metrics_enabled(&config_path) {
+        return None;
+    }
+
+    let board_dir = team_config_dir(project_root).join("board");
+    match metrics::compute_metrics(&board_dir, members) {
+        Ok(metrics) => {
+            let formatted = metrics::format_metrics(&metrics);
+            Some((formatted, metrics))
+        }
+        Err(error) => {
+            warn!(path = %board_dir.display(), error = %error, "failed to compute workflow metrics");
+            None
+        }
+    }
+}
+
+fn workflow_metrics_enabled(config_path: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(config_path) else {
+        return false;
+    };
+
+    content.lines().any(|line| {
+        let line = line.trim();
+        if !line.starts_with("workflow_mode:") {
+            return false;
+        }
+        let value = line
+            .split_once(':')
+            .map(|(_, value)| value.trim().trim_matches('"').trim_matches('\''))
+            .unwrap_or("");
+        matches!(value, "hybrid" | "workflow_first")
+    })
 }
 
 /// Show an estimated team load value from live state, store it, and show recent load trends.
@@ -2716,6 +2771,55 @@ roles:
         let review_buckets = owned.get("lead").unwrap();
         assert!(review_buckets.active.is_empty());
         assert_eq!(review_buckets.review, vec![193]);
+    }
+
+    #[test]
+    fn workflow_metrics_enabled_detects_supported_modes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("team.yaml");
+
+        std::fs::write(
+            &config_path,
+            "name: test\nworkflow_mode: hybrid\nroles: []\n",
+        )
+        .unwrap();
+        assert!(workflow_metrics_enabled(&config_path));
+
+        std::fs::write(
+            &config_path,
+            "name: test\nworkflow_mode: workflow_first\nroles: []\n",
+        )
+        .unwrap();
+        assert!(workflow_metrics_enabled(&config_path));
+
+        std::fs::write(&config_path, "name: test\nroles: []\n").unwrap();
+        assert!(!workflow_metrics_enabled(&config_path));
+    }
+
+    #[test]
+    fn team_status_metrics_section_renders_when_workflow_mode_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let team_dir = tmp.path().join(".batty").join("team_config");
+        let board_dir = team_dir.join("board");
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            team_dir.join("team.yaml"),
+            "name: test\nworkflow_mode: hybrid\nroles:\n  - name: engineer\n    role_type: engineer\n    agent: codex\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tasks_dir.join("031-runnable.md"),
+            "---\nid: 31\ntitle: Runnable\nstatus: todo\npriority: medium\nclass: standard\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        let members = vec![make_member("eng-1-1", "engineer", RoleType::Engineer)];
+        let section = workflow_metrics_section(tmp.path(), &members).unwrap();
+
+        assert!(section.0.contains("Workflow Metrics"));
+        assert_eq!(section.1.runnable_count, 1);
+        assert_eq!(section.1.idle_with_runnable, vec!["eng-1-1"]);
     }
 
     #[test]
