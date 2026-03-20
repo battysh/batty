@@ -5,14 +5,18 @@
 //! manager-aligned subcolumns to preserve the reporting hierarchy.
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::path::Path;
 
 use anyhow::{Result, bail};
 use tracing::{debug, info};
 
-use super::config::{LayoutConfig, RoleType};
+use super::config::{LayoutConfig, RoleType, WorkflowMode};
 use super::hierarchy::MemberInstance;
 use crate::tmux;
+
+const ORCHESTRATOR_PANE_HEIGHT_PCT: u32 = 20;
+const ORCHESTRATOR_ROLE: &str = "orchestrator";
 
 #[derive(Debug, Clone)]
 struct ZonePlan<'a> {
@@ -30,6 +34,8 @@ pub fn build_layout(
     members: &[MemberInstance],
     layout: &Option<LayoutConfig>,
     project_root: &Path,
+    workflow_mode: WorkflowMode,
+    orchestrator_pane: bool,
 ) -> Result<HashMap<String, String>> {
     let pane_members: Vec<_> = members
         .iter()
@@ -61,12 +67,18 @@ pub fn build_layout(
         .output();
 
     let mut pane_map: HashMap<String, String> = HashMap::new();
+    let orchestrator_enabled = should_launch_orchestrator_pane(workflow_mode, orchestrator_pane);
+    let initial_pane = tmux::pane_id(session)?;
+    let agent_root_pane = if orchestrator_enabled {
+        launch_orchestrator_pane(session, &initial_pane, project_root)?
+    } else {
+        initial_pane
+    };
 
     if pane_members.len() == 1 {
         // Single pane — just use the initial pane
-        let pane_id = tmux::pane_id(session)?;
-        set_pane_title(session, &pane_id, &pane_members[0].name)?;
-        pane_map.insert(pane_members[0].name.clone(), pane_id);
+        set_pane_title(session, &agent_root_pane, &pane_members[0].name)?;
+        pane_map.insert(pane_members[0].name.clone(), agent_root_pane);
         return Ok(pane_map);
     }
 
@@ -76,10 +88,6 @@ pub fn build_layout(
     } else {
         build_zones_auto(&pane_members)
     };
-
-    // Keep the initial pane unlabeled until the per-zone vertical layout is
-    // built, so multi-member zones can use it as the remaining container.
-    let initial_pane = tmux::pane_id(session)?;
 
     // Create remaining zone columns by splitting the previous zone's pane.
     // Left-to-right: each split carves the next zone off the right side.
@@ -91,7 +99,7 @@ pub fn build_layout(
     // Example: zones [20%, 20%, 60%]:
     //   Split 1: source = zones [0,1,2] = 100%. New pane gets (20+60)/100 = 80%.
     //   Split 2: source = zones [1,2] = 80%.  New pane gets 60/80 = 75%.
-    let mut zone_panes: Vec<String> = vec![initial_pane.clone()];
+    let mut zone_panes: Vec<String> = vec![agent_root_pane.clone()];
     let mut remaining_pct: u32 = zones.iter().map(|zone| zone.width_pct).sum();
     for (i, _zone) in zones.iter().enumerate().skip(1) {
         let right_side: u32 = zones[i..].iter().map(|zone| zone.width_pct).sum();
@@ -137,6 +145,57 @@ pub fn build_layout(
     info!(session, panes = pane_map.len(), "team layout created");
 
     Ok(pane_map)
+}
+
+fn should_launch_orchestrator_pane(workflow_mode: WorkflowMode, orchestrator_pane: bool) -> bool {
+    workflow_mode.enables_runtime_surface() && orchestrator_pane
+}
+
+fn launch_orchestrator_pane(
+    session: &str,
+    agent_root_pane: &str,
+    project_root: &Path,
+) -> Result<String> {
+    let log_path = super::orchestrator_log_path(project_root);
+    ensure_orchestrator_log(&log_path)?;
+
+    let orchestrator_pane = tmux::split_window_vertical_in_pane(
+        session,
+        agent_root_pane,
+        ORCHESTRATOR_PANE_HEIGHT_PCT,
+    )?;
+    let tail_command = format!(
+        "bash -lc 'touch {path}; exec tail -n 200 -F {path}'",
+        path = shell_single_quote(log_path.to_string_lossy().as_ref())
+    );
+    tmux::respawn_pane(&orchestrator_pane, &tail_command)?;
+    set_pane_title(session, &orchestrator_pane, ORCHESTRATOR_ROLE)?;
+    let _ = std::process::Command::new("tmux")
+        .args([
+            "set-option",
+            "-p",
+            "-t",
+            orchestrator_pane.as_str(),
+            "@batty_status",
+            "workflow stream",
+        ])
+        .output();
+    let _ = std::process::Command::new("tmux")
+        .args(["select-pane", "-t", agent_root_pane])
+        .output();
+    Ok(agent_root_pane.to_string())
+}
+
+fn ensure_orchestrator_log(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    OpenOptions::new().create(true).append(true).open(path)?;
+    Ok(())
+}
+
+fn shell_single_quote(value: &str) -> String {
+    value.replace('\'', "'\"'\"'")
 }
 
 fn split_off_current_member_pct(total_slots: usize) -> u32 {
@@ -548,7 +607,15 @@ roles:
             ],
         });
 
-        let pane_map = build_layout(session, &members, &layout, Path::new("/tmp")).unwrap();
+        let pane_map = build_layout(
+            session,
+            &members,
+            &layout,
+            Path::new("/tmp"),
+            WorkflowMode::Legacy,
+            true,
+        )
+        .unwrap();
         assert_eq!(pane_map.len(), 9);
 
         let pane_count_output = Command::new("tmux")
@@ -787,6 +854,118 @@ roles:
     }
 
     #[test]
+    fn workflow_mode_controls_orchestrator_pane_launch() {
+        assert!(!should_launch_orchestrator_pane(WorkflowMode::Legacy, true));
+        assert!(should_launch_orchestrator_pane(WorkflowMode::Hybrid, true));
+        assert!(should_launch_orchestrator_pane(
+            WorkflowMode::WorkflowFirst,
+            true,
+        ));
+        assert!(!should_launch_orchestrator_pane(
+            WorkflowMode::Hybrid,
+            false
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn build_layout_adds_orchestrator_pane_when_enabled() {
+        let session = "batty-test-team-layout-orchestrator";
+        let _ = crate::tmux::kill_session(session);
+        let tmp = tempfile::tempdir().unwrap();
+
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+"#,
+        );
+
+        let pane_map = build_layout(
+            session,
+            &members,
+            &None,
+            tmp.path(),
+            WorkflowMode::Hybrid,
+            true,
+        )
+        .unwrap();
+        assert_eq!(pane_map.len(), 2);
+
+        let panes_output = Command::new("tmux")
+            .args([
+                "list-panes",
+                "-t",
+                session,
+                "-F",
+                "#{pane_id} #{@batty_role}",
+            ])
+            .output()
+            .unwrap();
+        assert!(panes_output.status.success());
+        let pane_roles = String::from_utf8_lossy(&panes_output.stdout);
+        assert!(
+            pane_roles
+                .lines()
+                .any(|line| line.ends_with(" orchestrator"))
+        );
+        assert_eq!(pane_roles.lines().count(), 3);
+        assert!(tmp.path().join(".batty").join("orchestrator.log").exists());
+
+        crate::tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn build_layout_skips_orchestrator_pane_when_disabled() {
+        let session = "batty-test-team-layout-no-orchestrator";
+        let _ = crate::tmux::kill_session(session);
+        let tmp = tempfile::tempdir().unwrap();
+
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+"#,
+        );
+
+        let pane_map = build_layout(
+            session,
+            &members,
+            &None,
+            tmp.path(),
+            WorkflowMode::Hybrid,
+            false,
+        )
+        .unwrap();
+        assert_eq!(pane_map.len(), 2);
+
+        let pane_count_output = Command::new("tmux")
+            .args(["list-panes", "-t", session, "-F", "#{pane_id}"])
+            .output()
+            .unwrap();
+        assert!(pane_count_output.status.success());
+        let pane_count = String::from_utf8_lossy(&pane_count_output.stdout)
+            .lines()
+            .count();
+        assert_eq!(pane_count, 2);
+
+        crate::tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
     fn split_members_into_columns_balances_contiguous_groups() {
         let members = make_members(
             r#"
@@ -834,7 +1013,15 @@ roles:
             }],
         });
 
-        let pane_map = build_layout(session, &members, &layout, Path::new("/tmp")).unwrap();
+        let pane_map = build_layout(
+            session,
+            &members,
+            &layout,
+            Path::new("/tmp"),
+            WorkflowMode::Legacy,
+            true,
+        )
+        .unwrap();
         assert_eq!(pane_map.len(), 2);
 
         let geometry_output = Command::new("tmux")
