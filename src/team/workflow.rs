@@ -87,6 +87,7 @@ pub fn can_transition(from: TaskState, to: TaskState) -> Result<(), String> {
             | (TaskState::Review, TaskState::InProgress)
             | (TaskState::Review, TaskState::Blocked)
             | (TaskState::Review, TaskState::Done)
+            | (TaskState::Review, TaskState::Archived)
             | (TaskState::Blocked, TaskState::Todo)
             | (TaskState::Blocked, TaskState::InProgress)
             | (TaskState::Blocked, TaskState::Archived)
@@ -144,6 +145,7 @@ mod tests {
             (TaskState::InProgress, TaskState::Blocked),
             (TaskState::Review, TaskState::Done),
             (TaskState::Review, TaskState::InProgress),
+            (TaskState::Review, TaskState::Archived),
             (TaskState::Blocked, TaskState::Todo),
             (TaskState::Done, TaskState::Archived),
         ];
