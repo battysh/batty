@@ -6776,6 +6776,7 @@ mod tests {
 
         daemon.update_automation_timers_for_state("lead", MemberState::Working);
         daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        backdate_idle_grace(&mut daemon, "lead");
         daemon.maybe_intervene_owned_tasks().unwrap();
 
         daemon
@@ -6784,6 +6785,7 @@ mod tests {
         daemon.update_automation_timers_for_state("lead", MemberState::Working);
         daemon.states.insert("lead".to_string(), MemberState::Idle);
         daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        backdate_idle_grace(&mut daemon, "lead");
         daemon.maybe_intervene_owned_tasks().unwrap();
 
         let pending = inbox::pending_messages(&root, "lead").unwrap();
