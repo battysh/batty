@@ -5,6 +5,7 @@
 //! manages agent lifecycles.
 
 pub mod board;
+pub mod capability;
 pub mod comms;
 pub mod config;
 pub mod daemon;
