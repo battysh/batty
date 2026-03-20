@@ -7,6 +7,7 @@
 pub mod board;
 pub mod capability;
 pub mod comms;
+pub mod completion;
 pub mod config;
 pub mod daemon;
 pub mod events;
@@ -1587,6 +1588,9 @@ pub fn send_message(project_root: &Path, role: &str, msg: &str) -> Result<()> {
     let root = inbox::inboxes_root(project_root);
     let inbox_msg = inbox::InboxMessage::new_send(&from, &recipient, msg);
     let id = inbox::deliver_to_inbox(&root, &inbox_msg)?;
+    if let Err(error) = completion::ingest_completion_message(project_root, msg) {
+        warn!(from, to = %recipient, error = %error, "failed to ingest completion packet");
+    }
     info!(to = %recipient, id = %id, "message delivered to inbox");
     Ok(())
 }
@@ -2009,6 +2013,44 @@ mod tests {
         assert_eq!(pending[0].from, expected_from);
         assert_eq!(pending[0].to, "architect");
         assert_eq!(pending[0].body, "hello");
+    }
+
+    #[test]
+    fn send_message_ingests_completion_packet_into_workflow_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = team_config_dir(tmp.path()).join("board").join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let task_path = tasks_dir.join("027-completion-packets.md");
+        std::fs::write(
+            &task_path,
+            "---\nid: 27\ntitle: Completion packets\nstatus: review\npriority: medium\nclaimed_by: human\nclass: standard\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        send_message(
+            tmp.path(),
+            "architect",
+            r#"Done.
+
+## Completion Packet
+
+```json
+{"task_id":27,"branch":"eng-1-4/task-27","worktree_path":".batty/worktrees/eng-1-4","commit":"abc1234","changed_paths":["src/team/completion.rs"],"tests_run":true,"tests_passed":true,"artifacts":["docs/workflow.md"],"outcome":"ready_for_review"}
+```"#,
+        )
+        .unwrap();
+
+        let metadata = board::read_workflow_metadata(&task_path).unwrap();
+        assert_eq!(metadata.branch.as_deref(), Some("eng-1-4/task-27"));
+        assert_eq!(
+            metadata.worktree_path.as_deref(),
+            Some(".batty/worktrees/eng-1-4")
+        );
+        assert_eq!(metadata.commit.as_deref(), Some("abc1234"));
+        assert_eq!(metadata.tests_run, Some(true));
+        assert_eq!(metadata.tests_passed, Some(true));
+        assert_eq!(metadata.outcome.as_deref(), Some("ready_for_review"));
+        assert!(metadata.review_blockers.is_empty());
     }
 
     #[test]
