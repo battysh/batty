@@ -244,6 +244,10 @@ fn main() -> Result<()> {
             team::merge_worktree(&root, &engineer)?;
         }
 
+        Command::Task { .. } => {
+            bail!("task commands are not implemented in this build");
+        }
+
         Command::Daemon {
             project_root,
             resume,

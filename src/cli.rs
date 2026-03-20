@@ -112,6 +112,12 @@ pub enum Command {
         engineer: String,
     },
 
+    /// Manage workflow task state and metadata
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completion script for
@@ -143,6 +149,57 @@ pub enum Command {
     },
 }
 
+#[derive(Subcommand, Debug)]
+pub enum TaskCommand {
+    /// Transition a task to a new workflow state
+    Transition {
+        /// Task id
+        task_id: u32,
+        /// Target state
+        #[arg(value_enum)]
+        target_state: TaskStateArg,
+    },
+
+    /// Assign execution and/or review ownership
+    Assign {
+        /// Task id
+        task_id: u32,
+        /// Execution owner
+        #[arg(long = "execution-owner")]
+        execution_owner: Option<String>,
+        /// Review owner
+        #[arg(long = "review-owner")]
+        review_owner: Option<String>,
+    },
+
+    /// Record a review disposition for a task
+    Review {
+        /// Task id
+        task_id: u32,
+        /// Review disposition
+        #[arg(long, value_enum)]
+        disposition: ReviewDispositionArg,
+    },
+
+    /// Update workflow metadata fields
+    Update {
+        /// Task id
+        task_id: u32,
+        /// Worktree branch
+        #[arg(long)]
+        branch: Option<String>,
+        /// Commit sha
+        #[arg(long)]
+        commit: Option<String>,
+        /// Blocking reason
+        #[arg(long = "blocked-on")]
+        blocked_on: Option<String>,
+        /// Clear blocking fields
+        #[arg(long = "clear-blocked", default_value_t = false)]
+        clear_blocked: bool,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum InitTemplate {
     /// Single agent, no hierarchy (1 pane)
@@ -168,6 +225,26 @@ pub enum CompletionShell {
     Bash,
     Zsh,
     Fish,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TaskStateArg {
+    Backlog,
+    Todo,
+    #[value(name = "in-progress")]
+    InProgress,
+    Review,
+    Blocked,
+    Done,
+    Archived,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReviewDispositionArg {
+    Approved,
+    #[value(name = "changes_requested")]
+    ChangesRequested,
+    Rejected,
 }
 
 #[cfg(test)]
@@ -388,5 +465,113 @@ mod tests {
     fn verbose_flag_is_global() {
         let cli = Cli::parse_from(["batty", "-vv", "status"]);
         assert_eq!(cli.verbose, 2);
+    }
+
+    #[test]
+    fn task_transition_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "task", "transition", "24", "in-progress"]);
+        match cli.command {
+            Command::Task {
+                command:
+                    TaskCommand::Transition {
+                        task_id,
+                        target_state,
+                    },
+            } => {
+                assert_eq!(task_id, 24);
+                assert_eq!(target_state, TaskStateArg::InProgress);
+            }
+            other => panic!("expected task transition command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn task_assign_subcommand_parses() {
+        let cli = Cli::parse_from([
+            "batty",
+            "task",
+            "assign",
+            "24",
+            "--execution-owner",
+            "eng-1-2",
+            "--review-owner",
+            "manager-1",
+        ]);
+        match cli.command {
+            Command::Task {
+                command:
+                    TaskCommand::Assign {
+                        task_id,
+                        execution_owner,
+                        review_owner,
+                    },
+            } => {
+                assert_eq!(task_id, 24);
+                assert_eq!(execution_owner.as_deref(), Some("eng-1-2"));
+                assert_eq!(review_owner.as_deref(), Some("manager-1"));
+            }
+            other => panic!("expected task assign command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn task_review_subcommand_parses() {
+        let cli = Cli::parse_from([
+            "batty",
+            "task",
+            "review",
+            "24",
+            "--disposition",
+            "changes_requested",
+        ]);
+        match cli.command {
+            Command::Task {
+                command:
+                    TaskCommand::Review {
+                        task_id,
+                        disposition,
+                    },
+            } => {
+                assert_eq!(task_id, 24);
+                assert_eq!(disposition, ReviewDispositionArg::ChangesRequested);
+            }
+            other => panic!("expected task review command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn task_update_subcommand_parses() {
+        let cli = Cli::parse_from([
+            "batty",
+            "task",
+            "update",
+            "24",
+            "--branch",
+            "eng-1-2/task-24",
+            "--commit",
+            "abc1234",
+            "--blocked-on",
+            "waiting for review",
+            "--clear-blocked",
+        ]);
+        match cli.command {
+            Command::Task {
+                command:
+                    TaskCommand::Update {
+                        task_id,
+                        branch,
+                        commit,
+                        blocked_on,
+                        clear_blocked,
+                    },
+            } => {
+                assert_eq!(task_id, 24);
+                assert_eq!(branch.as_deref(), Some("eng-1-2/task-24"));
+                assert_eq!(commit.as_deref(), Some("abc1234"));
+                assert_eq!(blocked_on.as_deref(), Some("waiting for review"));
+                assert!(clear_blocked);
+            }
+            other => panic!("expected task update command, got {other:?}"),
+        }
     }
 }
