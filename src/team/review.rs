@@ -16,8 +16,10 @@ pub enum MergeDisposition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewState {
     pub reviewer: String,
+    #[serde(default)]
     pub packet_ref: Option<String>,
     pub disposition: MergeDisposition,
+    #[serde(default)]
     pub notes: Option<String>,
 }
 
@@ -27,6 +29,12 @@ pub fn apply_review(
     reviewer: &str,
 ) -> Result<(), String> {
     validate_review_readiness(meta)?;
+
+    let packet_ref = meta
+        .review
+        .as_ref()
+        .and_then(|review| review.packet_ref.clone());
+    let notes = meta.review.as_ref().and_then(|review| review.notes.clone());
 
     let (next_state, review_disposition, blocked_on) = match disposition {
         MergeDisposition::MergeReady => (TaskState::Done, Some(ReviewDisposition::Approved), None),
@@ -47,7 +55,14 @@ pub fn apply_review(
 
     can_transition(meta.state, next_state)?;
     meta.state = next_state;
+    meta.review_owner = Some(reviewer.to_string());
     meta.review_disposition = review_disposition;
+    meta.review = Some(ReviewState {
+        reviewer: reviewer.to_string(),
+        packet_ref,
+        disposition,
+        notes,
+    });
     meta.blocked_on = blocked_on;
 
     Ok(())
@@ -71,6 +86,12 @@ mod tests {
     fn review_meta() -> WorkflowMeta {
         WorkflowMeta {
             state: TaskState::Review,
+            review: Some(ReviewState {
+                reviewer: "manager-0".to_string(),
+                packet_ref: Some("review/packet-1.json".to_string()),
+                disposition: MergeDisposition::MergeReady,
+                notes: Some("initial packet".to_string()),
+            }),
             ..WorkflowMeta::default()
         }
     }
@@ -82,8 +103,12 @@ mod tests {
         apply_review(&mut meta, MergeDisposition::MergeReady, "manager-1").unwrap();
 
         assert_eq!(meta.state, TaskState::Done);
+        assert_eq!(meta.review_owner.as_deref(), Some("manager-1"));
         assert_eq!(meta.review_disposition, Some(ReviewDisposition::Approved));
         assert_eq!(meta.blocked_on, None);
+        let review = meta.review.unwrap();
+        assert_eq!(review.disposition, MergeDisposition::MergeReady);
+        assert_eq!(review.packet_ref.as_deref(), Some("review/packet-1.json"));
     }
 
     #[test]
@@ -98,6 +123,10 @@ mod tests {
             Some(ReviewDisposition::ChangesRequested)
         );
         assert_eq!(meta.blocked_on, None);
+        assert_eq!(
+            meta.review.as_ref().map(|review| review.disposition),
+            Some(MergeDisposition::ReworkRequired)
+        );
     }
 
     #[test]
@@ -109,6 +138,10 @@ mod tests {
         assert_eq!(meta.state, TaskState::Archived);
         assert_eq!(meta.review_disposition, Some(ReviewDisposition::Rejected));
         assert_eq!(meta.blocked_on, None);
+        assert_eq!(
+            meta.review.as_ref().map(|review| review.disposition),
+            Some(MergeDisposition::Discarded)
+        );
     }
 
     #[test]
@@ -120,6 +153,10 @@ mod tests {
         assert_eq!(meta.state, TaskState::Blocked);
         assert_eq!(meta.review_disposition, None);
         assert_eq!(meta.blocked_on.as_deref(), Some("escalated by manager-1"));
+        assert_eq!(
+            meta.review.as_ref().map(|review| review.disposition),
+            Some(MergeDisposition::Escalated)
+        );
     }
 
     #[test]
@@ -136,6 +173,7 @@ mod tests {
         assert_eq!(meta.state, TaskState::InProgress);
         assert_eq!(meta.review_disposition, None);
         assert_eq!(meta.blocked_on, None);
+        assert!(meta.review.is_none());
     }
 
     #[test]
