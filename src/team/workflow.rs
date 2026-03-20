@@ -4,6 +4,8 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use super::review::{MergeDisposition, ReviewState};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskState {
@@ -48,6 +50,8 @@ pub struct WorkflowMeta {
     pub artifacts: Vec<String>,
     #[serde(default)]
     pub review_disposition: Option<ReviewDisposition>,
+    #[serde(default)]
+    pub review: Option<ReviewState>,
     #[serde(default)]
     pub next_action: Option<String>,
 }
@@ -197,12 +201,20 @@ mod tests {
             commit: Some("abc1234".to_string()),
             artifacts: vec!["artifacts/test.log".to_string()],
             review_disposition: Some(ReviewDisposition::ChangesRequested),
+            review: Some(ReviewState {
+                reviewer: "manager-1".to_string(),
+                packet_ref: Some("review/packet-7.json".to_string()),
+                disposition: MergeDisposition::ReworkRequired,
+                notes: Some("needs another pass".to_string()),
+            }),
             next_action: Some("address review feedback".to_string()),
         };
 
         let json = serde_json::to_string(&meta).unwrap();
         assert!(json.contains("\"state\":\"in_progress\""));
         assert!(json.contains("\"review_disposition\":\"changes_requested\""));
+        assert!(json.contains("\"packet_ref\":\"review/packet-7.json\""));
+        assert!(json.contains("\"disposition\":\"rework_required\""));
 
         let decoded: WorkflowMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, meta);
