@@ -1532,11 +1532,19 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             bail!("no pane found for engineer '{engineer}'");
         };
 
-        let member = self.config.members.iter().find(|m| m.name == engineer);
-        let agent_name = member.and_then(|m| m.agent.as_deref()).unwrap_or("claude");
+        let member = self
+            .config
+            .members
+            .iter()
+            .find(|m| m.name == engineer)
+            .cloned();
+        let agent_name = member
+            .as_ref()
+            .and_then(|m| m.agent.as_deref())
+            .unwrap_or("claude");
 
         let team_config_dir = self.config.project_root.join(".batty").join("team_config");
-        let use_worktrees = member.map(|m| m.use_worktrees).unwrap_or(false);
+        let use_worktrees = member.as_ref().map(|m| m.use_worktrees).unwrap_or(false);
         let task_branch = use_worktrees.then(|| engineer_task_branch_name(engineer, task, task_id));
         let work_dir = if let Some(task_branch) = task_branch.as_deref() {
             let work_dir = self
@@ -1566,8 +1574,11 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             }
         }
 
-        let role_context =
-            member.map(|m| strip_nudge_section(&self.load_prompt(m, &team_config_dir)));
+        self.ensure_assignment_pane_cwd(engineer, &pane_id, &work_dir)?;
+
+        let role_context = member
+            .as_ref()
+            .map(|m| strip_nudge_section(&self.load_prompt(m, &team_config_dir)));
         let normalized_agent = canonical_agent_name(agent_name);
         let session_id = new_member_session_id(&normalized_agent);
 
@@ -1601,6 +1612,49 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             branch: task_branch,
             work_dir,
         })
+    }
+
+    fn ensure_assignment_pane_cwd(
+        &mut self,
+        member_name: &str,
+        pane_id: &str,
+        expected_dir: &Path,
+    ) -> Result<()> {
+        let current_path = PathBuf::from(tmux::pane_current_path(pane_id)?);
+        let normalized_expected = normalized_assignment_dir(expected_dir);
+        if normalized_assignment_dir(&current_path) == normalized_expected {
+            return Ok(());
+        }
+
+        warn!(
+            member = %member_name,
+            pane = %pane_id,
+            current = %current_path.display(),
+            expected = %expected_dir.display(),
+            "correcting pane cwd before assignment"
+        );
+
+        let command = format!(
+            "cd '{}'",
+            shell_single_quote(expected_dir.to_string_lossy().as_ref())
+        );
+        tmux::send_keys(pane_id, &command, true)?;
+        std::thread::sleep(Duration::from_millis(200));
+
+        let corrected_path = PathBuf::from(tmux::pane_current_path(pane_id)?);
+        if normalized_assignment_dir(&corrected_path) != normalized_expected {
+            bail!(
+                "failed to correct pane cwd for '{member_name}': expected {}, got {}",
+                expected_dir.display(),
+                corrected_path.display()
+            );
+        }
+
+        self.emit_event(TeamEvent::cwd_corrected(
+            member_name,
+            &expected_dir.display().to_string(),
+        ));
+        Ok(())
     }
 
     pub(super) fn increment_retry(&mut self, engineer: &str) -> u32 {
@@ -3191,6 +3245,14 @@ fn save_daemon_state(project_root: &Path, state: &PersistedDaemonState) -> Resul
 
 fn new_member_session_id(agent_name: &str) -> Option<String> {
     (agent_name == "claude-code").then(|| Uuid::new_v4().to_string())
+}
+
+fn normalized_assignment_dir(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn shell_single_quote(value: &str) -> String {
+    value.replace('\'', "'\"'\"'")
 }
 
 fn summarize_assignment(task: &str) -> String {
@@ -6102,6 +6164,152 @@ mod tests {
                 .map(|watcher| watcher.state),
             Some(WatcherState::Active)
         );
+    }
+
+    #[test]
+    #[serial]
+    fn pre_assignment_health_check_corrects_mismatched_cwd() {
+        let session = format!("batty-test-health-check-cwd-correct-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wrong_dir = tmp.path().join("wrong");
+        let expected_dir = tmp.path().join("expected");
+        std::fs::create_dir_all(&wrong_dir).unwrap();
+        std::fs::create_dir_all(&expected_dir).unwrap();
+
+        crate::tmux::create_session(&session, "bash", &[], wrong_dir.to_string_lossy().as_ref())
+            .unwrap();
+        let pane_id = crate::tmux::pane_id(&session).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: true,
+        };
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                roles: Vec::new(),
+            },
+            session: session.clone(),
+            members: vec![engineer],
+            pane_map: HashMap::from([("eng-1".to_string(), pane_id.clone())]),
+        })
+        .unwrap();
+
+        daemon
+            .ensure_assignment_pane_cwd("eng-1", &pane_id, &expected_dir)
+            .unwrap();
+
+        let current = crate::tmux::pane_current_path(&pane_id).unwrap();
+        assert_eq!(
+            normalized_assignment_dir(Path::new(&current)),
+            normalized_assignment_dir(&expected_dir)
+        );
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        let corrected = events
+            .iter()
+            .find(|event| event.event == "cwd_corrected")
+            .expect("expected cwd_corrected event");
+        assert_eq!(corrected.role.as_deref(), Some("eng-1"));
+        assert_eq!(
+            corrected.reason.as_deref(),
+            Some(expected_dir.to_string_lossy().as_ref())
+        );
+
+        crate::tmux::kill_session(&session).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn pre_assignment_health_check_cwd_matching_path_passes_silently() {
+        let session = format!("batty-test-health-check-cwd-match-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let expected_dir = tmp.path().join("expected");
+        std::fs::create_dir_all(&expected_dir).unwrap();
+
+        crate::tmux::create_session(
+            &session,
+            "bash",
+            &[],
+            expected_dir.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        let pane_id = crate::tmux::pane_id(&session).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: true,
+        };
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                roles: Vec::new(),
+            },
+            session: session.clone(),
+            members: vec![engineer],
+            pane_map: HashMap::from([("eng-1".to_string(), pane_id.clone())]),
+        })
+        .unwrap();
+
+        daemon
+            .ensure_assignment_pane_cwd("eng-1", &pane_id, &expected_dir)
+            .unwrap();
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(
+            events.iter().all(|event| event.event != "cwd_corrected"),
+            "did not expect cwd_corrected event when pane cwd already matched"
+        );
+
+        crate::tmux::kill_session(&session).unwrap();
     }
 
     #[test]

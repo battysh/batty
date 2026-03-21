@@ -7,12 +7,12 @@ use tracing::{info, warn};
 use super::*;
 
 #[derive(Debug, Clone)]
-pub(super) struct NudgeSchedule {
-    pub(super) text: String,
-    pub(super) interval: Duration,
-    pub(super) idle_since: Option<Instant>,
-    pub(super) fired_this_idle: bool,
-    pub(super) paused: bool,
+pub(crate) struct NudgeSchedule {
+    pub(crate) text: String,
+    pub(crate) interval: Duration,
+    pub(crate) idle_since: Option<Instant>,
+    pub(crate) fired_this_idle: bool,
+    pub(crate) paused: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -183,7 +183,7 @@ impl TeamDaemon {
         }
 
         let inbox_root = inbox::inboxes_root(&self.config.project_root);
-        let direct_reports = super::super::direct_reports_by_member(&self.config.members);
+        let direct_reports = super::super::status::direct_reports_by_member(&self.config.members);
         let member_names: Vec<String> = self.config.pane_map.keys().cloned().collect();
 
         for name in member_names {
@@ -207,7 +207,7 @@ impl TeamDaemon {
                 continue;
             };
 
-            let triage_state = match super::super::delivered_direct_report_triage_state(
+            let triage_state = match super::super::status::delivered_direct_report_triage_state(
                 &inbox_root,
                 &name,
                 reports,
@@ -278,7 +278,7 @@ impl TeamDaemon {
             .join("board");
         let inbox_root = inbox::inboxes_root(&self.config.project_root);
         let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
-        let direct_reports = super::super::direct_reports_by_member(&self.config.members);
+        let direct_reports = super::super::status::direct_reports_by_member(&self.config.members);
         let member_names: Vec<String> = self.config.pane_map.keys().cloned().collect();
 
         for name in member_names {
@@ -536,7 +536,7 @@ impl TeamDaemon {
             .join("board");
         let inbox_root = inbox::inboxes_root(&self.config.project_root);
         let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
-        let direct_reports = super::super::direct_reports_by_member(&self.config.members);
+        let direct_reports = super::super::status::direct_reports_by_member(&self.config.members);
         let member_names: Vec<String> = self.config.pane_map.keys().cloned().collect();
 
         for name in member_names {
@@ -566,7 +566,7 @@ impl TeamDaemon {
             }
 
             let triage_state =
-                super::super::delivered_direct_report_triage_state(&inbox_root, &name, reports)?;
+                super::super::status::delivered_direct_report_triage_state(&inbox_root, &name, reports)?;
             if triage_state.count > 0 {
                 continue;
             }
@@ -705,7 +705,7 @@ impl TeamDaemon {
             .join("board");
         let inbox_root = inbox::inboxes_root(&self.config.project_root);
         let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
-        let direct_reports = super::super::direct_reports_by_member(&self.config.members);
+        let direct_reports = super::super::status::direct_reports_by_member(&self.config.members);
         let engineer_names: Vec<String> = self
             .config
             .members

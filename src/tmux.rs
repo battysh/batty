@@ -315,6 +315,31 @@ pub fn pane_id(target: &str) -> Result<String> {
     Ok(pane)
 }
 
+/// Get the current working directory for a pane target.
+pub fn pane_current_path(target: &str) -> Result<String> {
+    let output = Command::new("tmux")
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            target,
+            "#{pane_current_path}",
+        ])
+        .output()
+        .with_context(|| format!("failed to resolve pane current path for target '{target}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux display-message pane_current_path failed: {stderr}");
+    }
+
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        bail!("tmux returned empty pane current path for target '{target}'");
+    }
+    Ok(path)
+}
+
 /// Get the configured session working directory path.
 pub fn session_path(session: &str) -> Result<String> {
     let output = Command::new("tmux")
@@ -1189,6 +1214,23 @@ mod tests {
         create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
         let path = session_path(session).unwrap();
         assert_eq!(path, "/tmp");
+
+        kill_session(session).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn pane_current_path_returns_working_directory() {
+        let session = "batty-test-pane-current-path";
+        let _ = kill_session(session);
+
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+        let pane = pane_id(session).unwrap();
+        let path = pane_current_path(&pane).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(&path).unwrap(),
+            std::fs::canonicalize("/tmp").unwrap()
+        );
 
         kill_session(session).unwrap();
     }
