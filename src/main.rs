@@ -404,8 +404,8 @@ fn main() -> Result<()> {
             team::show_load(&root)?;
         }
 
-        Command::Doctor => {
-            print!("{}", team::doctor::build_report(&root)?);
+        Command::Doctor { fix } => {
+            print!("{}", team::doctor::run(&root, fix)?);
         }
 
         Command::Telegram => {

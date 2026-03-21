@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -12,6 +13,7 @@ use super::config::{RoleType, TeamConfig};
 use super::git_cmd;
 use super::hierarchy::{self, MemberInstance};
 use super::standup::MemberState;
+use crate::task::load_tasks_from_dir;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct LaunchIdentityRecord {
@@ -63,6 +65,53 @@ enum CheckLevel {
 struct CheckLine {
     level: CheckLevel,
     message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OrphanStatus {
+    branches: Vec<String>,
+    worktrees: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CleanupSummary {
+    branches_removed: usize,
+    worktrees_removed: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveTaskTargets {
+    branches: HashSet<String>,
+    worktrees: HashSet<PathBuf>,
+}
+
+pub fn run(project_root: &Path, fix: bool) -> Result<String> {
+    let mut report = build_report(project_root)?;
+    if !fix {
+        return Ok(report);
+    }
+
+    let orphan_status = detect_orphans(project_root)?;
+    if orphan_status.branches.is_empty() && orphan_status.worktrees.is_empty() {
+        report.push_str("\nNo orphan branches or worktrees to clean up.\n");
+        return Ok(report);
+    }
+
+    if !prompt_yes_no(
+        "Delete the orphan branches and worktrees listed above? [y/N] ",
+        false,
+    )? {
+        report.push_str("\nCleanup aborted.\n");
+        return Ok(report);
+    }
+
+    let summary = cleanup_orphans(project_root, &orphan_status)?;
+    report.push_str("\n== Cleanup ==\n");
+    report.push_str(&format!(
+        "removed_branches: {}\nremoved_worktrees: {}\n",
+        summary.branches_removed, summary.worktrees_removed
+    ));
+    Ok(report)
 }
 
 pub fn build_report(project_root: &Path) -> Result<String> {
@@ -347,7 +396,7 @@ fn build_board_git_checks(project_root: &Path) -> Vec<CheckLine> {
         )];
     }
 
-    let tasks = match crate::task::load_tasks_from_dir(&tasks_dir) {
+    let tasks = match load_tasks_from_dir(&tasks_dir) {
         Ok(tasks) => tasks,
         Err(error) => {
             return vec![check_line(
@@ -375,11 +424,12 @@ fn build_board_git_checks(project_root: &Path) -> Vec<CheckLine> {
         )];
     }
 
+    let active_targets = active_task_targets(project_root, &active_tasks);
     let mut lines = Vec::new();
     lines.extend(branch_consistency_checks(project_root, &active_tasks));
     lines.extend(worktree_consistency_checks(project_root, &active_tasks));
-    lines.extend(orphan_branch_checks(project_root, &active_tasks));
-    lines.extend(orphan_worktree_checks(project_root, &active_tasks));
+    lines.extend(orphan_branch_checks(project_root, &active_targets));
+    lines.extend(orphan_worktree_checks(project_root, &active_targets));
     lines
 }
 
@@ -542,15 +592,7 @@ fn worktree_consistency_checks(
     }
 }
 
-fn orphan_branch_checks(project_root: &Path, tasks: &[&crate::task::Task]) -> Vec<CheckLine> {
-    let active_branches: std::collections::HashSet<_> = tasks
-        .iter()
-        .filter_map(|task| task.branch.as_deref())
-        .map(str::trim)
-        .filter(|branch| !branch.is_empty())
-        .map(ToOwned::to_owned)
-        .collect();
-
+fn orphan_branch_checks(project_root: &Path, active_targets: &ActiveTaskTargets) -> Vec<CheckLine> {
     let branches = match git_cmd::for_each_ref_branches(project_root) {
         Ok(branches) => branches,
         Err(error) => {
@@ -564,7 +606,7 @@ fn orphan_branch_checks(project_root: &Path, tasks: &[&crate::task::Task]) -> Ve
     let orphans: Vec<_> = branches
         .into_iter()
         .filter(|branch| is_task_branch(branch))
-        .filter(|branch| !active_branches.contains(branch))
+        .filter(|branch| !active_targets.branches.contains(branch))
         .collect();
 
     if orphans.is_empty() {
@@ -585,50 +627,37 @@ fn orphan_branch_checks(project_root: &Path, tasks: &[&crate::task::Task]) -> Ve
     }
 }
 
-fn orphan_worktree_checks(project_root: &Path, tasks: &[&crate::task::Task]) -> Vec<CheckLine> {
-    let active_worktrees: std::collections::HashSet<_> = tasks
-        .iter()
-        .filter_map(|task| task.worktree_path.as_deref())
-        .map(|path| resolve_task_worktree(project_root, path))
-        .collect();
-    let active_branches: std::collections::HashSet<_> = tasks
-        .iter()
-        .filter_map(|task| task.branch.as_deref())
-        .map(ToOwned::to_owned)
-        .collect();
+fn orphan_worktree_checks(
+    project_root: &Path,
+    active_targets: &ActiveTaskTargets,
+) -> Vec<CheckLine> {
+    let worktrees = match list_worktree_dirs(project_root) {
+        Ok(worktrees) => worktrees,
+        Err(error) => {
+            return vec![check_line(
+                CheckLevel::Warn,
+                format!("failed to read worktree directory for orphan detection: {error}"),
+            )];
+        }
+    };
 
-    let worktrees_root = project_root.join(".batty").join("worktrees");
-    if !worktrees_root.exists() {
+    if worktrees.is_empty() {
         return vec![check_line(
             CheckLevel::Pass,
             "no worktree directory exists for orphan detection",
         )];
     }
 
-    let entries = match fs::read_dir(&worktrees_root) {
-        Ok(entries) => entries,
-        Err(error) => {
-            return vec![check_line(
-                CheckLevel::Warn,
-                format!(
-                    "failed to read worktree directory '{}': {error}",
-                    worktrees_root.display()
-                ),
-            )];
-        }
-    };
-
     let mut orphans = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() || active_worktrees.contains(&path) {
+    for path in worktrees {
+        if active_targets.worktrees.contains(&path) {
             continue;
         }
 
         let Ok(branch) = git_cmd::rev_parse_branch(&path) else {
             continue;
         };
-        if is_task_branch(&branch) && !active_branches.contains(&branch) {
+        if is_task_branch(&branch) && !active_targets.branches.contains(&branch) {
             orphans.push(check_line(
                 CheckLevel::Warn,
                 format!(
@@ -650,6 +679,143 @@ fn orphan_worktree_checks(project_root: &Path, tasks: &[&crate::task::Task]) -> 
     }
 }
 
+fn active_task_targets(project_root: &Path, tasks: &[&crate::task::Task]) -> ActiveTaskTargets {
+    let mut branches = HashSet::new();
+    let mut worktrees = HashSet::new();
+
+    for task in tasks {
+        if let Some(branch) = task
+            .branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|branch| is_task_branch(branch))
+        {
+            branches.insert(branch.to_string());
+        } else if let Some(claimed_by) = task
+            .claimed_by
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| is_engineer_name(name))
+        {
+            branches.insert(format!("{claimed_by}/task-{}", task.id));
+        }
+
+        if let Some(worktree_path) = task
+            .worktree_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            worktrees.insert(resolve_task_worktree(project_root, worktree_path));
+        } else if let Some(claimed_by) = task
+            .claimed_by
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| is_engineer_name(name))
+        {
+            worktrees.insert(
+                project_root
+                    .join(".batty")
+                    .join("worktrees")
+                    .join(claimed_by),
+            );
+        }
+    }
+
+    ActiveTaskTargets {
+        branches,
+        worktrees,
+    }
+}
+
+fn detect_orphans(project_root: &Path) -> Result<OrphanStatus> {
+    let tasks_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    if !tasks_dir.is_dir() {
+        return Ok(OrphanStatus {
+            branches: Vec::new(),
+            worktrees: Vec::new(),
+        });
+    }
+
+    let tasks = load_tasks_from_dir(&tasks_dir)?;
+    let active_tasks: Vec<_> = tasks
+        .iter()
+        .filter(|task| matches!(task.status.as_str(), "in-progress" | "review"))
+        .collect();
+    let active_targets = active_task_targets(project_root, &active_tasks);
+
+    let mut branches: Vec<_> = list_task_branches(project_root)?
+        .into_iter()
+        .filter(|branch| !active_targets.branches.contains(branch))
+        .collect();
+    branches.sort();
+
+    let mut worktrees: Vec<_> = list_worktree_dirs(project_root)?
+        .into_iter()
+        .filter(|path| !active_targets.worktrees.contains(path))
+        .collect();
+    worktrees.sort();
+
+    Ok(OrphanStatus {
+        branches,
+        worktrees,
+    })
+}
+
+fn list_task_branches(project_root: &Path) -> Result<Vec<String>> {
+    Ok(git_cmd::for_each_ref_branches(project_root)?
+        .into_iter()
+        .filter(|branch| is_task_branch(branch))
+        .collect())
+}
+
+fn list_worktree_dirs(project_root: &Path) -> Result<Vec<PathBuf>> {
+    let worktrees_root = project_root.join(".batty").join("worktrees");
+    if !worktrees_root.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(&worktrees_root)
+        .with_context(|| format!("failed to read {}", worktrees_root.display()))?
+    {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            paths.push(entry.path());
+        }
+    }
+    Ok(paths)
+}
+
+fn cleanup_orphans(project_root: &Path, orphan_status: &OrphanStatus) -> Result<CleanupSummary> {
+    let mut worktrees_removed = 0usize;
+    for worktree in &orphan_status.worktrees {
+        git_cmd::worktree_remove(project_root, worktree, true).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to remove worktree '{}': {error}",
+                worktree.display()
+            )
+        })?;
+        worktrees_removed += 1;
+    }
+
+    let mut branches_removed = 0usize;
+    for branch in &orphan_status.branches {
+        git_cmd::branch_delete(project_root, branch)
+            .map_err(|error| anyhow::anyhow!("failed to delete branch '{branch}': {error}"))?;
+        branches_removed += 1;
+    }
+
+    Ok(CleanupSummary {
+        branches_removed,
+        worktrees_removed,
+    })
+}
+
 fn check_line(level: CheckLevel, message: impl Into<String>) -> CheckLine {
     CheckLine {
         level,
@@ -668,6 +834,22 @@ fn resolve_task_worktree(project_root: &Path, worktree_path: &str) -> PathBuf {
 
 fn is_task_branch(branch: &str) -> bool {
     branch.starts_with("eng-") && branch.contains("/task-")
+}
+
+fn is_engineer_name(name: &str) -> bool {
+    name.starts_with("eng-")
+}
+
+fn prompt_yes_no(msg: &str, default_yes: bool) -> Result<bool> {
+    print!("{msg}");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(default_yes);
+    }
+    Ok(trimmed.starts_with('y') || trimmed.starts_with('Y'))
 }
 
 fn current_prompt(member: &MemberInstance, config_dir: &Path) -> String {
@@ -889,6 +1071,19 @@ roles:
             content.push_str(&format!("worktree_path: {worktree_path}\n"));
         }
         content.push_str("---\n\nTask body.\n");
+        fs::write(tasks_dir.join(format!("{id:03}-task-{id}.md")), content).unwrap();
+    }
+
+    fn write_claimed_task(root: &Path, id: u32, status: &str, claimed_by: &str) {
+        let tasks_dir = root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        let content = format!(
+            "---\nid: {id}\ntitle: Task {id}\nstatus: {status}\npriority: medium\nclaimed_by: {claimed_by}\nclass: standard\n---\n\nTask body.\n"
+        );
         fs::write(tasks_dir.join(format!("{id:03}-task-{id}.md")), content).unwrap();
     }
 
@@ -1121,5 +1316,65 @@ roles:
         );
         assert!(report.contains("WARN: orphan worktree"));
         assert!(report.contains("eng-9/task-100"));
+    }
+
+    #[test]
+    fn detect_orphans_ignores_active_claimed_task_targets() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        write_claimed_task(tmp.path(), 72, "in-progress", "eng-1");
+
+        git_ok(tmp.path(), &["branch", "eng-1/task-72"]);
+        fs::create_dir_all(tmp.path().join(".batty").join("worktrees").join("eng-1")).unwrap();
+
+        let orphan_worktree = tmp.path().join(".batty").join("worktrees").join("eng-9");
+        git_ok(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-9/task-9",
+                orphan_worktree.to_string_lossy().as_ref(),
+                "main",
+            ],
+        );
+
+        let orphans = detect_orphans(tmp.path()).unwrap();
+        assert_eq!(orphans.branches, vec!["eng-9/task-9".to_string()]);
+        assert_eq!(orphans.worktrees, vec![orphan_worktree]);
+    }
+
+    #[test]
+    fn cleanup_orphans_removes_detected_branch_and_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        write_claimed_task(tmp.path(), 72, "review", "eng-1");
+
+        git_ok(tmp.path(), &["branch", "eng-1/task-72"]);
+        fs::create_dir_all(tmp.path().join(".batty").join("worktrees").join("eng-1")).unwrap();
+
+        let orphan_worktree = tmp.path().join(".batty").join("worktrees").join("eng-9");
+        git_ok(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-9/task-9",
+                orphan_worktree.to_string_lossy().as_ref(),
+                "main",
+            ],
+        );
+
+        let summary = cleanup_orphans(tmp.path(), &detect_orphans(tmp.path()).unwrap()).unwrap();
+
+        assert_eq!(summary.branches_removed, 1);
+        assert_eq!(summary.worktrees_removed, 1);
+        assert!(!orphan_worktree.exists());
+        assert_eq!(
+            list_task_branches(tmp.path()).unwrap(),
+            vec!["eng-1/task-72".to_string()]
+        );
     }
 }

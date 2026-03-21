@@ -159,7 +159,11 @@ pub enum Command {
     Load,
 
     /// Dump diagnostic state from Batty state files
-    Doctor,
+    Doctor {
+        /// Remove orphan branches and worktrees after confirmation
+        #[arg(long, default_value_t = false)]
+        fix: bool,
+    },
 
     /// Internal: run the daemon loop (spawned by `batty start`)
     #[command(hide = true)]
@@ -622,7 +626,13 @@ mod tests {
     #[test]
     fn doctor_subcommand_parses() {
         let cli = Cli::parse_from(["batty", "doctor"]);
-        assert!(matches!(cli.command, Command::Doctor));
+        assert!(matches!(cli.command, Command::Doctor { fix: false }));
+    }
+
+    #[test]
+    fn doctor_subcommand_parses_fix_flag() {
+        let cli = Cli::parse_from(["batty", "doctor", "--fix"]);
+        assert!(matches!(cli.command, Command::Doctor { fix: true }));
     }
 
     #[test]
