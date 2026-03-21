@@ -12,6 +12,7 @@ pub mod comms;
 pub mod completion;
 pub mod config;
 pub mod daemon;
+pub mod delivery;
 pub mod doctor;
 pub mod events;
 pub mod failure_patterns;
@@ -2162,17 +2163,16 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn send_message_delivers_to_inbox() {
         let tmp = tempfile::tempdir().unwrap();
+        let _tmux_pane = EnvVarGuard::unset("TMUX_PANE");
         send_message(tmp.path(), "architect", "hello").unwrap();
 
         let root = inbox::inboxes_root(tmp.path());
         let pending = inbox::pending_messages(&root, "architect").unwrap();
         assert_eq!(pending.len(), 1);
-        // detect_sender() returns the tmux pane role if running inside a batty
-        // session, or "human" otherwise. Accept either.
-        let expected_from = detect_sender().unwrap_or_else(|| "human".to_string());
-        assert_eq!(pending[0].from, expected_from);
+        assert_eq!(pending[0].from, "human");
         assert_eq!(pending[0].to, "architect");
         assert_eq!(pending[0].body, "hello");
     }
@@ -2216,16 +2216,17 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn assign_task_delivers_to_inbox() {
         let tmp = tempfile::tempdir().unwrap();
+        let _tmux_pane = EnvVarGuard::unset("TMUX_PANE");
         let id = assign_task(tmp.path(), "eng-1-1", "fix bug").unwrap();
         assert!(!id.is_empty());
 
         let root = inbox::inboxes_root(tmp.path());
         let pending = inbox::pending_messages(&root, "eng-1-1").unwrap();
         assert_eq!(pending.len(), 1);
-        let expected_from = detect_sender().unwrap_or_else(|| "human".to_string());
-        assert_eq!(pending[0].from, expected_from);
+        assert_eq!(pending[0].from, "human");
         assert_eq!(pending[0].to, "eng-1-1");
         assert_eq!(pending[0].body, "fix bug");
         assert_eq!(pending[0].msg_type, inbox::MessageType::Assign);
