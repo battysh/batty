@@ -120,6 +120,19 @@ impl TeamDaemon {
             return Ok(());
         }
 
+        // Codex agents run from {worktree}/.batty/codex-context/{member_name} by
+        // design.  Accept that path as a valid CWD so we don't fail assignments
+        // when the agent is already running in the correct codex context directory.
+        let codex_context_dir = expected_dir
+            .join(".batty")
+            .join("codex-context")
+            .join(member_name);
+        if normalized_assignment_dir(&current_path)
+            == normalized_assignment_dir(&codex_context_dir)
+        {
+            return Ok(());
+        }
+
         warn!(
             member = %member_name,
             pane = %pane_id,
@@ -136,7 +149,10 @@ impl TeamDaemon {
         std::thread::sleep(Duration::from_millis(200));
 
         let corrected_path = PathBuf::from(tmux::pane_current_path(pane_id)?);
-        if normalized_assignment_dir(&corrected_path) != normalized_expected {
+        let normalized_corrected = normalized_assignment_dir(&corrected_path);
+        if normalized_corrected != normalized_expected
+            && normalized_corrected != normalized_assignment_dir(&codex_context_dir)
+        {
             bail!(
                 "failed to correct pane cwd for '{member_name}': expected {}, got {}",
                 expected_dir.display(),

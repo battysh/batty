@@ -163,6 +163,24 @@ Agents can exhaust their context window, crash, or silently stall. The daemon de
 
 Board state and git state can diverge: tasks marked done with unmerged branches, in-progress tasks with no active agent, blocked tasks whose dependencies are already resolved. The `batty doctor` command validates cross-referencing board metadata against actual branch/worktree state and reports inconsistencies. The daemon automatically unblocks tasks whose `blocked_on` dependencies have reached done state.
 
+## Stability & Predictability
+
+The system must be deterministic and resilient across multi-hour autonomous runs. Three pillars:
+
+### Testing Strategy
+
+Unit tests cover individual functions. Integration tests cover cross-module workflows: daemon poll → intervention fires → message delivered → board state updated → orchestrator logged. The `tests/` directory houses integration tests that construct mock daemon/board state without tmux, exercising the full intervention→delivery→board pipeline.
+
+Every intervention type (triage, owned-task, review, dispatch, utilization) has dedicated tests covering: trigger conditions, cooldown, signature deduplication, escalation, and ordering relative to other interventions.
+
+### Error Model
+
+Production code uses typed domain errors (`GitError`, `BoardError`, `TmuxError`, `DeliveryError`) instead of bare `unwrap()` or string-based `bail!()`. Shell-outs include full context: command, args, stderr, and what operation was attempted. The daemon poll loop isolates subsystem failures — a standup generation crash does not take down the daemon.
+
+### Prompt-Sourced Nudges
+
+Each role prompt may contain a `## Nudge` section with role-specific reminders. The daemon extracts this at startup and prepends it to system-generated intervention messages. This combines human-authored role guidance ("check the board for review items") with machine-generated context ("3 tasks waiting, eng-1-2 idle 5 min"). Nudge intervals are configurable per role via `nudge_interval_secs` in team.yaml.
+
 ## Key Design Decisions
 
 **Why tmux?** Output capture (pipe-pane), input injection (send-keys/paste-buffer), status bar, panes, session persistence — all for free. No custom terminal code.
