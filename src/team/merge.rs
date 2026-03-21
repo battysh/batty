@@ -17,7 +17,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
-use super::artifact::{append_test_timing_record, read_test_timing_log};
+use super::artifact::append_test_timing_record;
+#[cfg(test)]
+use super::artifact::read_test_timing_log;
 use super::daemon::TeamDaemon;
 use super::task_loop::{
     branch_is_merged_into, checkout_worktree_branch_from_main, current_worktree_branch,
