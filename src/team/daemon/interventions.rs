@@ -13,6 +13,9 @@ use anyhow::Result;
 use tracing::{info, warn};
 
 use super::*;
+use crate::team::config::{PlanningDirectiveFile, load_planning_directive};
+
+const DIRECTIVE_MAX_CHARS: usize = 2_000;
 
 #[derive(Debug, Clone)]
 pub(crate) struct NudgeSchedule {
@@ -39,6 +42,22 @@ struct ReportDispatchSnapshot {
 }
 
 impl TeamDaemon {
+    fn prepend_planning_directive(
+        &self,
+        directive: PlanningDirectiveFile,
+        heading: &str,
+        message: String,
+    ) -> String {
+        match load_planning_directive(&self.config.project_root, directive, DIRECTIVE_MAX_CHARS) {
+            Ok(Some(content)) => format!("{heading}\n{content}\n\n{message}"),
+            Ok(None) => message,
+            Err(error) => {
+                warn!(directive = directive.file_name(), error = %error, "failed to load planning directive");
+                message
+            }
+        }
+    }
+
     pub(super) fn update_nudge_for_state(&mut self, member_name: &str, new_state: MemberState) {
         if let Some(schedule) = self.nudges.get_mut(member_name) {
             match new_state {
@@ -1107,7 +1126,11 @@ Review and disposition it now:\n\
         message.push_str(
             "\nDo not leave completed direct-report work parked in review. Merge it, discard it, or send exact rework now. Batty will remind you again if review backlog remains unchanged.",
         );
-        self.prepend_member_nudge(member, message)
+        self.prepend_planning_directive(
+            PlanningDirectiveFile::ReviewPolicy,
+            "Review policy context:",
+            message,
+        )
     }
 
     fn build_stuck_task_escalation_message(
@@ -1182,7 +1205,11 @@ Intervene now:\n\
         message.push_str(
             "\nDo not leave the task parked. Re-dispatch it, block it with a specific reason, or escalate the exact decision needed now.",
         );
-        self.prepend_member_nudge(member, message)
+        self.prepend_planning_directive(
+            PlanningDirectiveFile::EscalationPolicy,
+            "Escalation policy context:",
+            message,
+        )
     }
 
     fn build_manager_dispatch_gap_message(
@@ -1369,7 +1396,11 @@ Recover throughput now:\n\
                 "\n8. Report the recovery decision upward with `batty send {parent} \"utilization recovery: <what was dispatched or why the board is blocked>\"`."
             ));
         }
-        self.prepend_member_nudge(member, message)
+        self.prepend_planning_directive(
+            PlanningDirectiveFile::ReplenishmentContext,
+            "Replenishment context:",
+            message,
+        )
     }
 }
 
@@ -2673,6 +2704,35 @@ mod tests {
     }
 
     #[test]
+    fn build_review_intervention_message_prepends_review_policy() {
+        let harness = triage_harness().with_board_task(171, "task-171", "review", Some("eng-1"));
+        fs::write(
+            harness
+                .project_root()
+                .join(".batty")
+                .join("team_config")
+                .join("review_policy.md"),
+            "Review must confirm tests and scope.",
+        )
+        .unwrap();
+        let daemon = harness.build_daemon().unwrap();
+        let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+        let member = daemon
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == "lead")
+            .unwrap()
+            .clone();
+
+        let message = daemon.build_review_intervention_message(&member, &[&tasks[0]]);
+
+        assert!(
+            message.starts_with("Review policy context:\nReview must confirm tests and scope.")
+        );
+    }
+
+    #[test]
     fn build_stuck_task_escalation_message_uses_assign_for_engineer() {
         let harness = triage_harness().with_board_task(72, "task-72", "in-progress", Some("eng-1"));
         write_prompt_nudge(
@@ -2693,10 +2753,40 @@ mod tests {
         let message = daemon.build_stuck_task_escalation_message(&member, &[&tasks[0]], 125);
 
         assert!(message.contains("Stuck task escalation"));
-        assert!(message.starts_with("Engineer nudge text.\n\n"));
         assert!(message.contains("2m"));
         assert!(message.contains("batty assign eng-1"));
         assert!(message.contains("batty send lead"));
+    }
+
+    #[test]
+    fn build_stuck_task_escalation_message_prepends_escalation_policy() {
+        let harness =
+            triage_harness().with_board_task(172, "task-172", "in-progress", Some("eng-1"));
+        fs::write(
+            harness
+                .project_root()
+                .join(".batty")
+                .join("team_config")
+                .join("escalation_policy.md"),
+            "Escalate only with exact blocker text.",
+        )
+        .unwrap();
+        let daemon = harness.build_daemon().unwrap();
+        let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+        let member = daemon
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == "eng-1")
+            .unwrap()
+            .clone();
+
+        let message = daemon.build_stuck_task_escalation_message(&member, &[&tasks[0]], 125);
+
+        assert!(
+            message
+                .starts_with("Escalation policy context:\nEscalate only with exact blocker text.")
+        );
     }
 
     #[test]
@@ -2756,5 +2846,73 @@ mod tests {
         assert!(message.contains("batty send lead"));
         assert!(message.contains("Task #90"));
         assert!(message.contains("batty send"));
+    }
+
+    #[test]
+    fn build_architect_utilization_message_reloads_replenishment_context() {
+        let harness = triage_harness().with_board_task(190, "task-190", "todo", None);
+        let directive_path = harness
+            .project_root()
+            .join(".batty")
+            .join("team_config")
+            .join("replenishment_context.md");
+        fs::write(&directive_path, "First directive").unwrap();
+        let daemon = harness.build_daemon().unwrap();
+        let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+        let architect = daemon
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == "architect")
+            .unwrap();
+
+        let first = daemon.build_architect_utilization_message(
+            architect,
+            &["eng-2".to_string()],
+            &[("eng-1".to_string(), vec![11])],
+            &["eng-2".to_string()],
+            &[&tasks[0]],
+        );
+
+        fs::write(&directive_path, "Updated directive").unwrap();
+
+        let second = daemon.build_architect_utilization_message(
+            architect,
+            &["eng-2".to_string()],
+            &[("eng-1".to_string(), vec![11])],
+            &["eng-2".to_string()],
+            &[&tasks[0]],
+        );
+
+        assert!(first.contains("First directive"));
+        assert!(second.contains("Updated directive"));
+        assert!(!second.contains("First directive"));
+    }
+
+    #[test]
+    fn build_review_intervention_message_truncates_long_policy() {
+        let harness = triage_harness().with_board_task(173, "task-173", "review", Some("eng-1"));
+        fs::write(
+            harness
+                .project_root()
+                .join(".batty")
+                .join("team_config")
+                .join("review_policy.md"),
+            "x".repeat(DIRECTIVE_MAX_CHARS + 50),
+        )
+        .unwrap();
+        let daemon = harness.build_daemon().unwrap();
+        let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+        let member = daemon
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == "lead")
+            .unwrap()
+            .clone();
+
+        let message = daemon.build_review_intervention_message(&member, &[&tasks[0]]);
+
+        assert!(message.contains("[truncated to 2000 chars from review_policy.md]"));
     }
 }
