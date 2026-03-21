@@ -1867,4 +1867,327 @@ mod tests {
         assert!(harness.pending_inbox_messages("eng-1").unwrap().is_empty());
         assert!(daemon.owned_task_interventions.get("eng-1").is_none());
     }
+
+    #[test]
+    fn task_needs_owned_intervention_excludes_terminal_and_review_states() {
+        assert!(task_needs_owned_intervention("backlog"));
+        assert!(task_needs_owned_intervention("todo"));
+        assert!(task_needs_owned_intervention("in-progress"));
+        assert!(!task_needs_owned_intervention("review"));
+        assert!(!task_needs_owned_intervention("done"));
+        assert!(!task_needs_owned_intervention("archived"));
+    }
+
+    #[test]
+    fn intervention_key_helpers_use_expected_prefixes() {
+        assert_eq!(manager_dispatch_intervention_key("lead"), "dispatch::lead");
+        assert_eq!(review_intervention_key("lead"), "review::lead");
+        assert_eq!(
+            architect_utilization_intervention_key("architect"),
+            "utilization::architect"
+        );
+    }
+
+    #[test]
+    fn owned_task_intervention_signature_sorts_tasks() {
+        let harness = triage_harness()
+            .with_board_task(20, "task-20", "todo", Some("lead"))
+            .with_board_task(10, "task-10", "in-progress", Some("lead"));
+        let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+        let refs = vec![&tasks[0], &tasks[1]];
+
+        let signature = owned_task_intervention_signature(&refs);
+
+        assert_eq!(signature, "10:in-progress|20:todo");
+    }
+
+    #[test]
+    fn review_task_intervention_signature_sorts_and_includes_owner() {
+        let harness = triage_harness()
+            .with_board_task(22, "task-22", "review", Some("eng-2"))
+            .with_board_task(11, "task-11", "review", Some("eng-1"));
+        let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+        let refs = vec![&tasks[0], &tasks[1]];
+
+        let signature = review_task_intervention_signature(&refs);
+
+        assert_eq!(signature, "11:review:eng-1|22:review:eng-2");
+    }
+
+    #[test]
+    fn manager_dispatch_intervention_signature_sorts_all_components() {
+        let active = vec![
+            ReportDispatchSnapshot {
+                name: "eng-2".to_string(),
+                is_working: false,
+                active_task_ids: vec![9, 11],
+            },
+            ReportDispatchSnapshot {
+                name: "eng-1".to_string(),
+                is_working: false,
+                active_task_ids: vec![3],
+            },
+        ];
+        let idle = vec![ReportDispatchSnapshot {
+            name: "eng-3".to_string(),
+            is_working: false,
+            active_task_ids: vec![],
+        }];
+        let harness = triage_harness()
+            .with_board_task(50, "task-50", "todo", None)
+            .with_board_task(51, "task-51", "backlog", None);
+        let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+        let task_refs = vec![&tasks[0], &tasks[1]];
+        let active_refs = vec![&active[0], &active[1]];
+        let idle_refs = vec![&idle[0]];
+
+        let signature =
+            manager_dispatch_intervention_signature(&active_refs, &idle_refs, &task_refs);
+
+        assert_eq!(
+            signature,
+            "active:eng-1:3|active:eng-2:9,11|idle:eng-3|open:50:todo|open:51:backlog"
+        );
+    }
+
+    #[test]
+    fn architect_utilization_intervention_signature_sorts_all_inputs() {
+        let harness = triage_harness()
+            .with_board_task(60, "task-60", "todo", None)
+            .with_board_task(61, "task-61", "backlog", None);
+        let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+        let task_refs = vec![&tasks[0], &tasks[1]];
+
+        let signature = architect_utilization_intervention_signature(
+            &["eng-2".to_string(), "eng-1".to_string()],
+            &[
+                ("eng-3".to_string(), vec![80, 81]),
+                ("eng-4".to_string(), vec![70]),
+            ],
+            &["eng-5".to_string(), "eng-6".to_string()],
+            &task_refs,
+        );
+
+        assert_eq!(
+            signature,
+            "idle-active:eng-3:80,81|idle-active:eng-4:70|idle-free:eng-5|idle-free:eng-6|open:60:todo|open:61:backlog|working:eng-1|working:eng-2"
+        );
+    }
+
+    #[test]
+    fn review_backlog_owner_for_task_prefers_reporting_manager() {
+        let task = crate::task::Task {
+            id: 42,
+            title: "Review task".to_string(),
+            status: "review".to_string(),
+            priority: "high".to_string(),
+            claimed_by: Some("eng-1".to_string()),
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            description: "Task body".to_string(),
+            batty_config: None,
+            source_path: std::path::PathBuf::from("task-42.md"),
+        };
+        let members = vec![
+            architect_member("architect"),
+            manager_member("lead", Some("architect")),
+            engineer_member("eng-1", Some("lead"), false),
+        ];
+
+        let owner = review_backlog_owner_for_task(&task, &members);
+
+        assert_eq!(owner, Some("lead".to_string()));
+    }
+
+    #[test]
+    fn review_backlog_owner_for_task_falls_back_to_claimed_by_when_member_missing() {
+        let task = crate::task::Task {
+            id: 43,
+            title: "Review task".to_string(),
+            status: "review".to_string(),
+            priority: "high".to_string(),
+            claimed_by: Some("eng-9".to_string()),
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            description: "Task body".to_string(),
+            batty_config: None,
+            source_path: std::path::PathBuf::from("task-43.md"),
+        };
+
+        let owner = review_backlog_owner_for_task(&task, &[manager_member("lead", None)]);
+
+        assert_eq!(owner, Some("eng-9".to_string()));
+    }
+
+    #[test]
+    fn review_backlog_owner_for_task_ignores_non_review_tasks() {
+        let task = crate::task::Task {
+            id: 44,
+            title: "Work task".to_string(),
+            status: "in-progress".to_string(),
+            priority: "high".to_string(),
+            claimed_by: Some("eng-1".to_string()),
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            description: "Task body".to_string(),
+            batty_config: None,
+            source_path: std::path::PathBuf::from("task-44.md"),
+        };
+
+        let owner = review_backlog_owner_for_task(&task, &[engineer_member("eng-1", None, false)]);
+
+        assert_eq!(owner, None);
+    }
+
+    #[test]
+    fn build_owned_task_intervention_message_includes_parent_escalation() {
+        let harness = triage_harness().with_board_task(70, "task-70", "in-progress", Some("lead"));
+        let daemon = harness.build_daemon().unwrap();
+        let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+        let member = daemon
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == "lead")
+            .unwrap()
+            .clone();
+
+        let message = daemon.build_owned_task_intervention_message(
+            &member,
+            &[&tasks[0]],
+            &["eng-1".to_string()],
+        );
+
+        assert!(message.contains("Owned active task backlog detected"));
+        assert!(message.contains("kanban-md list --dir"));
+        assert!(message.contains("batty assign eng-1"));
+        assert!(message.contains("batty send architect"));
+        assert!(message.contains("kanban-md move --dir"));
+    }
+
+    #[test]
+    fn build_review_intervention_message_includes_merge_and_rework_paths() {
+        let harness = triage_harness().with_board_task(71, "task-71", "review", Some("eng-1"));
+        let daemon = harness.build_daemon().unwrap();
+        let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+        let member = daemon
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == "lead")
+            .unwrap()
+            .clone();
+
+        let message = daemon.build_review_intervention_message(&member, &[&tasks[0]]);
+
+        assert!(message.contains("Review backlog detected"));
+        assert!(message.contains("batty merge eng-1"));
+        assert!(message.contains("kanban-md move --dir"));
+        assert!(message.contains("batty assign eng-1"));
+        assert!(message.contains("batty send architect"));
+    }
+
+    #[test]
+    fn build_stuck_task_escalation_message_uses_assign_for_engineer() {
+        let harness = triage_harness().with_board_task(72, "task-72", "in-progress", Some("eng-1"));
+        let daemon = harness.build_daemon().unwrap();
+        let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+        let member = daemon
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == "eng-1")
+            .unwrap()
+            .clone();
+
+        let message = daemon.build_stuck_task_escalation_message(&member, &[&tasks[0]], 125);
+
+        assert!(message.contains("Stuck task escalation"));
+        assert!(message.contains("2m"));
+        assert!(message.contains("batty assign eng-1"));
+        assert!(message.contains("batty send lead"));
+    }
+
+    #[test]
+    fn build_manager_dispatch_gap_message_includes_active_and_unassigned_paths() {
+        let harness = triage_harness()
+            .with_board_task(80, "task-80", "todo", None)
+            .with_board_task(81, "task-81", "backlog", None);
+        let daemon = harness.build_daemon().unwrap();
+        let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+        let member = daemon
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == "lead")
+            .unwrap();
+        let active = ReportDispatchSnapshot {
+            name: "eng-1".to_string(),
+            is_working: false,
+            active_task_ids: vec![77],
+        };
+        let idle = ReportDispatchSnapshot {
+            name: "eng-2".to_string(),
+            is_working: false,
+            active_task_ids: vec![],
+        };
+
+        let message =
+            daemon.build_manager_dispatch_gap_message(member, &[&active], &[&idle], &[&tasks[0]]);
+
+        assert!(message.contains("Dispatch recovery needed"));
+        assert!(message.contains("batty send eng-1"));
+        assert!(message.contains("batty assign eng-2"));
+        assert!(message.contains("batty send architect"));
+    }
+
+    #[test]
+    fn build_architect_utilization_message_includes_recovery_commands() {
+        let harness = triage_harness().with_board_task(90, "task-90", "todo", None);
+        let daemon = harness.build_daemon().unwrap();
+        let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+        let architect = daemon
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == "architect")
+            .unwrap();
+
+        let message = daemon.build_architect_utilization_message(
+            architect,
+            &["eng-2".to_string()],
+            &[("eng-1".to_string(), vec![11])],
+            &["eng-2".to_string()],
+            &[&tasks[0]],
+        );
+
+        assert!(message.contains("Utilization recovery needed"));
+        assert!(message.contains("batty send lead"));
+        assert!(message.contains("Task #90"));
+        assert!(message.contains("batty send"));
+    }
 }
