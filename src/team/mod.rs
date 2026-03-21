@@ -993,6 +993,7 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
     let triage_backlog_counts = status::triage_backlog_counts(project_root, &members);
     let owned_task_buckets = status::owned_task_buckets(project_root, &members);
     let agent_health = status::agent_health_by_member(project_root, &members);
+    let paused = pause_marker_path(project_root).exists();
     let rows = status::build_team_status_rows(
         &members,
         session_running,
@@ -1003,47 +1004,28 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
         &agent_health,
     );
     let workflow_metrics = status::workflow_metrics_section(project_root, &members);
+    let (active_tasks, review_queue) = match status::board_status_task_queues(project_root) {
+        Ok(queues) => queues,
+        Err(error) => {
+            warn!(error = %error, "failed to load board task queues for status json");
+            (Vec::new(), Vec::new())
+        }
+    };
 
     if json {
-        let status = serde_json::json!({
-            "team": team_config.name,
-            "session": session,
-            "running": session_running,
-            "workflow_metrics": workflow_metrics.as_ref().map(|(_, metrics)| serde_json::json!({
-                "runnable_count": metrics.runnable_count,
-                "blocked_count": metrics.blocked_count,
-                "in_review_count": metrics.in_review_count,
-                "in_progress_count": metrics.in_progress_count,
-                "idle_with_runnable": metrics.idle_with_runnable,
-                "oldest_review_age_secs": metrics.oldest_review_age_secs,
-                "oldest_assignment_age_secs": metrics.oldest_assignment_age_secs,
-            })),
-            "members": rows.iter().map(|row| {
-                serde_json::json!({
-                    "name": row.name,
-                    "role": row.role,
-                    "role_type": row.role_type,
-                    "agent": row.agent,
-                    "reports_to": row.reports_to,
-                    "state": row.state,
-                    "pending_inbox": row.pending_inbox,
-                    "triage_backlog": row.triage_backlog,
-                    "owned_tasks": row.active_owned_tasks,
-                    "active_owned_tasks": row.active_owned_tasks,
-                    "review_owned_tasks": row.review_owned_tasks,
-                    "signal": row.signal,
-                    "runtime_label": row.runtime_label,
-                    "health_summary": row.health_summary,
-                    "health": {
-                        "restart_count": row.health.restart_count,
-                        "context_exhaustion_count": row.health.context_exhaustion_count,
-                        "delivery_failure_count": row.health.delivery_failure_count,
-                        "task_elapsed_secs": row.health.task_elapsed_secs,
-                    },
-                })
-            }).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&status)?);
+        let report = status::build_team_status_json_report(
+            &team_config.name,
+            &session,
+            session_running,
+            paused,
+            workflow_metrics
+                .as_ref()
+                .map(|(_, metrics)| metrics.clone()),
+            active_tasks,
+            review_queue,
+            rows,
+        );
+        println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!("Team: {}", team_config.name);
         println!(

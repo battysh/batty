@@ -4,7 +4,7 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::task;
@@ -20,14 +20,14 @@ use super::{
     team_config_dir, team_config_path, team_events_path,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct RuntimeMemberStatus {
     pub(crate) state: String,
     pub(crate) signal: Option<String>,
     pub(crate) label: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct TeamStatusRow {
     pub(crate) name: String,
     pub(crate) role: String,
@@ -57,7 +57,7 @@ pub(crate) struct OwnedTaskBuckets {
     pub(crate) review: Vec<u32>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct AgentHealthSummary {
     pub(crate) restart_count: u32,
     pub(crate) context_exhaustion_count: u32,
@@ -73,7 +73,7 @@ struct PersistedDaemonHealthState {
     retry_counts: HashMap<String, u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct WorkflowMetrics {
     pub runnable_count: u32,
     pub blocked_count: u32,
@@ -82,6 +82,45 @@ pub struct WorkflowMetrics {
     pub idle_with_runnable: Vec<String>,
     pub oldest_review_age_secs: Option<u64>,
     pub oldest_assignment_age_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct StatusTaskEntry {
+    pub(crate) id: u32,
+    pub(crate) title: String,
+    pub(crate) status: String,
+    pub(crate) priority: String,
+    pub(crate) claimed_by: Option<String>,
+    pub(crate) review_owner: Option<String>,
+    pub(crate) blocked_on: Option<String>,
+    pub(crate) branch: Option<String>,
+    pub(crate) worktree_path: Option<String>,
+    pub(crate) commit: Option<String>,
+    pub(crate) next_action: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct TeamStatusHealth {
+    pub(crate) session_running: bool,
+    pub(crate) paused: bool,
+    pub(crate) member_count: usize,
+    pub(crate) active_member_count: usize,
+    pub(crate) pending_inbox_count: usize,
+    pub(crate) triage_backlog_count: usize,
+    pub(crate) unhealthy_members: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct TeamStatusJsonReport {
+    pub(crate) team: String,
+    pub(crate) session: String,
+    pub(crate) running: bool,
+    pub(crate) paused: bool,
+    pub(crate) health: TeamStatusHealth,
+    pub(crate) workflow_metrics: Option<WorkflowMetrics>,
+    pub(crate) active_tasks: Vec<StatusTaskEntry>,
+    pub(crate) review_queue: Vec<StatusTaskEntry>,
+    pub(crate) members: Vec<TeamStatusRow>,
 }
 
 pub(crate) fn list_runtime_member_statuses(
@@ -665,6 +704,101 @@ pub(crate) fn format_owned_tasks_summary(task_ids: &[u32]) -> String {
     }
 }
 
+pub(crate) fn board_status_task_queues(
+    project_root: &Path,
+) -> Result<(Vec<StatusTaskEntry>, Vec<StatusTaskEntry>)> {
+    let tasks_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    if !tasks_dir.is_dir() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let mut active_tasks = Vec::new();
+    let mut review_queue = Vec::new();
+    for task in task::load_tasks_from_dir(&tasks_dir)? {
+        let entry = StatusTaskEntry {
+            id: task.id,
+            title: task.title,
+            status: task.status.clone(),
+            priority: task.priority,
+            claimed_by: task.claimed_by,
+            review_owner: task.review_owner,
+            blocked_on: task.blocked_on,
+            branch: task.branch,
+            worktree_path: task.worktree_path,
+            commit: task.commit,
+            next_action: task.next_action,
+        };
+
+        match task.status.as_str() {
+            "in-progress" | "in_progress" => active_tasks.push(entry),
+            "review" => review_queue.push(entry),
+            _ => {}
+        }
+    }
+
+    Ok((active_tasks, review_queue))
+}
+
+pub(crate) fn build_team_status_health(
+    rows: &[TeamStatusRow],
+    session_running: bool,
+    paused: bool,
+) -> TeamStatusHealth {
+    let member_rows: Vec<&TeamStatusRow> =
+        rows.iter().filter(|row| row.role_type != "User").collect();
+    let mut unhealthy_members = member_rows
+        .iter()
+        .filter(|row| {
+            row.health.restart_count > 0
+                || row.health.context_exhaustion_count > 0
+                || row.health.delivery_failure_count > 0
+        })
+        .map(|row| row.name.clone())
+        .collect::<Vec<_>>();
+    unhealthy_members.sort();
+
+    TeamStatusHealth {
+        session_running,
+        paused,
+        member_count: member_rows.len(),
+        active_member_count: member_rows
+            .iter()
+            .filter(|row| matches!(row.state.as_str(), "working" | "triaging" | "reviewing"))
+            .count(),
+        pending_inbox_count: member_rows.iter().map(|row| row.pending_inbox).sum(),
+        triage_backlog_count: member_rows.iter().map(|row| row.triage_backlog).sum(),
+        unhealthy_members,
+    }
+}
+
+pub(crate) fn build_team_status_json_report(
+    team: &str,
+    session: &str,
+    session_running: bool,
+    paused: bool,
+    workflow_metrics: Option<WorkflowMetrics>,
+    active_tasks: Vec<StatusTaskEntry>,
+    review_queue: Vec<StatusTaskEntry>,
+    members: Vec<TeamStatusRow>,
+) -> TeamStatusJsonReport {
+    let health = build_team_status_health(&members, session_running, paused);
+    TeamStatusJsonReport {
+        team: team.to_string(),
+        session: session.to_string(),
+        running: session_running,
+        paused,
+        health,
+        workflow_metrics,
+        active_tasks,
+        review_queue,
+        members,
+    }
+}
+
 pub fn compute_metrics(board_dir: &Path, members: &[MemberInstance]) -> Result<WorkflowMetrics> {
     let tasks_dir = board_dir.join("tasks");
     if !tasks_dir.is_dir() {
@@ -1065,6 +1199,138 @@ mod tests {
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
         }
+    }
+
+    #[test]
+    fn board_status_task_queues_split_active_and_review_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(
+            tasks_dir.join("041-active.md"),
+            "---\nid: 41\ntitle: Active task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nbranch: eng-1/task-41\nclass: standard\n---\n",
+        )
+        .unwrap();
+        fs::write(
+            tasks_dir.join("042-review.md"),
+            "---\nid: 42\ntitle: Review task\nstatus: review\npriority: medium\nclaimed_by: eng-2\nreview_owner: manager\nnext_action: review now\nclass: standard\n---\n",
+        )
+        .unwrap();
+        fs::write(
+            tasks_dir.join("043-done.md"),
+            "---\nid: 43\ntitle: Done task\nstatus: done\npriority: low\nclass: standard\n---\n",
+        )
+        .unwrap();
+
+        let (active_tasks, review_queue) = board_status_task_queues(tmp.path()).unwrap();
+
+        assert_eq!(active_tasks.len(), 1);
+        assert_eq!(active_tasks[0].id, 41);
+        assert_eq!(active_tasks[0].branch.as_deref(), Some("eng-1/task-41"));
+        assert_eq!(review_queue.len(), 1);
+        assert_eq!(review_queue[0].id, 42);
+        assert_eq!(review_queue[0].review_owner.as_deref(), Some("manager"));
+        assert_eq!(review_queue[0].next_action.as_deref(), Some("review now"));
+    }
+
+    #[test]
+    fn build_team_status_json_report_includes_health_and_queues() {
+        let report = build_team_status_json_report(
+            "test",
+            "batty-test",
+            true,
+            true,
+            Some(WorkflowMetrics {
+                runnable_count: 2,
+                blocked_count: 1,
+                in_review_count: 1,
+                in_progress_count: 3,
+                idle_with_runnable: vec!["eng-2".to_string()],
+                oldest_review_age_secs: Some(60),
+                oldest_assignment_age_secs: Some(120),
+            }),
+            vec![StatusTaskEntry {
+                id: 41,
+                title: "Active task".to_string(),
+                status: "in-progress".to_string(),
+                priority: "high".to_string(),
+                claimed_by: Some("eng-1".to_string()),
+                review_owner: None,
+                blocked_on: None,
+                branch: Some("eng-1/task-41".to_string()),
+                worktree_path: None,
+                commit: None,
+                next_action: None,
+            }],
+            vec![StatusTaskEntry {
+                id: 42,
+                title: "Review task".to_string(),
+                status: "review".to_string(),
+                priority: "medium".to_string(),
+                claimed_by: Some("eng-2".to_string()),
+                review_owner: Some("manager".to_string()),
+                blocked_on: None,
+                branch: None,
+                worktree_path: None,
+                commit: None,
+                next_action: Some("review now".to_string()),
+            }],
+            vec![
+                TeamStatusRow {
+                    name: "eng-1".to_string(),
+                    role: "engineer".to_string(),
+                    role_type: "Engineer".to_string(),
+                    agent: Some("codex".to_string()),
+                    reports_to: Some("manager".to_string()),
+                    state: "working".to_string(),
+                    pending_inbox: 2,
+                    triage_backlog: 0,
+                    active_owned_tasks: vec![41],
+                    review_owned_tasks: vec![],
+                    signal: None,
+                    runtime_label: Some("working".to_string()),
+                    health: AgentHealthSummary {
+                        restart_count: 1,
+                        context_exhaustion_count: 0,
+                        delivery_failure_count: 0,
+                        task_elapsed_secs: Some(30),
+                    },
+                    health_summary: "r1 t30s".to_string(),
+                },
+                TeamStatusRow {
+                    name: "eng-2".to_string(),
+                    role: "engineer".to_string(),
+                    role_type: "Engineer".to_string(),
+                    agent: Some("codex".to_string()),
+                    reports_to: Some("manager".to_string()),
+                    state: "idle".to_string(),
+                    pending_inbox: 1,
+                    triage_backlog: 2,
+                    active_owned_tasks: vec![],
+                    review_owned_tasks: vec![42],
+                    signal: Some("needs review (1)".to_string()),
+                    runtime_label: Some("idle".to_string()),
+                    health: AgentHealthSummary::default(),
+                    health_summary: "-".to_string(),
+                },
+            ],
+        );
+
+        assert_eq!(report.team, "test");
+        assert_eq!(report.active_tasks.len(), 1);
+        assert_eq!(report.review_queue.len(), 1);
+        assert!(report.paused);
+        assert_eq!(report.health.member_count, 2);
+        assert_eq!(report.health.active_member_count, 1);
+        assert_eq!(report.health.pending_inbox_count, 3);
+        assert_eq!(report.health.triage_backlog_count, 2);
+        assert_eq!(report.health.unhealthy_members, vec!["eng-1".to_string()]);
+        assert_eq!(report.workflow_metrics.unwrap().runnable_count, 2);
     }
 
     #[test]
