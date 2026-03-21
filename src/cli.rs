@@ -166,6 +166,9 @@ pub enum Command {
         /// Remove orphan branches and worktrees after confirmation
         #[arg(long, default_value_t = false)]
         fix: bool,
+        /// Skip the cleanup confirmation prompt
+        #[arg(long, default_value_t = false, requires = "fix")]
+        yes: bool,
     },
 
     /// Internal: run the daemon loop (spawned by `batty start`)
@@ -629,13 +632,37 @@ mod tests {
     #[test]
     fn doctor_subcommand_parses() {
         let cli = Cli::parse_from(["batty", "doctor"]);
-        assert!(matches!(cli.command, Command::Doctor { fix: false }));
+        assert!(matches!(
+            cli.command,
+            Command::Doctor {
+                fix: false,
+                yes: false
+            }
+        ));
     }
 
     #[test]
     fn doctor_subcommand_parses_fix_flag() {
         let cli = Cli::parse_from(["batty", "doctor", "--fix"]);
-        assert!(matches!(cli.command, Command::Doctor { fix: true }));
+        assert!(matches!(
+            cli.command,
+            Command::Doctor {
+                fix: true,
+                yes: false
+            }
+        ));
+    }
+
+    #[test]
+    fn doctor_subcommand_parses_fix_yes_flags() {
+        let cli = Cli::parse_from(["batty", "doctor", "--fix", "--yes"]);
+        assert!(matches!(
+            cli.command,
+            Command::Doctor {
+                fix: true,
+                yes: true
+            }
+        ));
     }
 
     #[test]

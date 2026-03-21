@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracing::info;
 
 use super::artifact::read_test_timing_log;
 use super::config::{RoleType, TeamConfig};
@@ -78,6 +79,14 @@ struct OrphanStatus {
 struct CleanupSummary {
     branches_removed: usize,
     worktrees_removed: usize,
+    stale_state_removed: usize,
+    actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CleanupPlan {
+    orphan_status: OrphanStatus,
+    stale_state: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,33 +95,43 @@ struct ActiveTaskTargets {
     worktrees: HashSet<PathBuf>,
 }
 
-pub fn run(project_root: &Path, fix: bool) -> Result<String> {
+impl CleanupPlan {
+    fn is_empty(&self) -> bool {
+        self.orphan_status.branches.is_empty()
+            && self.orphan_status.worktrees.is_empty()
+            && self.stale_state.is_empty()
+    }
+}
+
+pub fn run(project_root: &Path, fix: bool, yes: bool) -> Result<String> {
     let mut report = build_report(project_root)?;
     if !fix {
         return Ok(report);
     }
 
-    let orphan_status = detect_orphans(project_root)?;
-    if orphan_status.branches.is_empty() && orphan_status.worktrees.is_empty() {
-        report.push_str("\nNo orphan branches or worktrees to clean up.\n");
+    let cleanup_plan = detect_cleanup_plan(project_root)?;
+    report.push('\n');
+    report.push_str(&render_cleanup_plan(project_root, &cleanup_plan));
+
+    if cleanup_plan.is_empty() {
         return Ok(report);
     }
 
-    if !prompt_yes_no(
-        "Delete the orphan branches and worktrees listed above? [y/N] ",
-        false,
-    )? {
-        report.push_str("\nCleanup aborted.\n");
+    if yes {
+        let summary = apply_cleanup_plan(project_root, &cleanup_plan)?;
+        report.push('\n');
+        report.push_str(&render_cleanup_summary(&summary));
         return Ok(report);
     }
 
-    let summary = cleanup_orphans(project_root, &orphan_status)?;
-    report.push_str("\n== Cleanup ==\n");
-    report.push_str(&format!(
-        "removed_branches: {}\nremoved_worktrees: {}\n",
-        summary.branches_removed, summary.worktrees_removed
-    ));
-    Ok(report)
+    print!("{report}");
+    io::stdout().flush()?;
+    if !prompt_yes_no("Apply the safe cleanup actions listed above? [y/N] ", false)? {
+        return Ok("\nCleanup aborted.\n".to_string());
+    }
+
+    let summary = apply_cleanup_plan(project_root, &cleanup_plan)?;
+    Ok(format!("\n{}", render_cleanup_summary(&summary)))
 }
 
 pub fn build_report(project_root: &Path) -> Result<String> {
@@ -990,6 +1009,42 @@ fn detect_orphans(project_root: &Path) -> Result<OrphanStatus> {
     })
 }
 
+fn detect_cleanup_plan(project_root: &Path) -> Result<CleanupPlan> {
+    let orphan_status = detect_orphans(project_root)?;
+    let team_config = load_team_config(project_root)?;
+    let mut stale_state = detect_stale_state(project_root, team_config.as_ref());
+    stale_state.sort();
+
+    Ok(CleanupPlan {
+        orphan_status,
+        stale_state,
+    })
+}
+
+fn detect_stale_state(project_root: &Path, team_config: Option<&TeamConfig>) -> Vec<PathBuf> {
+    let Some(team_config) = team_config else {
+        return Vec::new();
+    };
+
+    let session = format!("batty-{}", team_config.name);
+    if crate::tmux::session_exists(&session) {
+        return Vec::new();
+    }
+
+    stale_state_candidates(project_root)
+        .into_iter()
+        .filter(|path| path.exists())
+        .collect()
+}
+
+fn stale_state_candidates(project_root: &Path) -> Vec<PathBuf> {
+    vec![
+        launch_state_path(project_root),
+        super::daemon_state_path(project_root),
+        project_root.join(".batty").join("merge.lock"),
+    ]
+}
+
 fn list_task_branches(project_root: &Path) -> Result<Vec<String>> {
     Ok(git_cmd::for_each_ref_branches(project_root)?
         .into_iter()
@@ -1017,6 +1072,7 @@ fn list_worktree_dirs(project_root: &Path) -> Result<Vec<PathBuf>> {
 
 fn cleanup_orphans(project_root: &Path, orphan_status: &OrphanStatus) -> Result<CleanupSummary> {
     let mut worktrees_removed = 0usize;
+    let mut actions = Vec::new();
     for worktree in &orphan_status.worktrees {
         git_cmd::worktree_remove(project_root, worktree, true).map_err(|error| {
             anyhow::anyhow!(
@@ -1024,6 +1080,11 @@ fn cleanup_orphans(project_root: &Path, orphan_status: &OrphanStatus) -> Result<
                 worktree.display()
             )
         })?;
+        info!(path = %worktree.display(), "doctor removed orphan worktree");
+        actions.push(format!(
+            "removed orphan worktree '{}'",
+            display_cleanup_path(project_root, worktree)
+        ));
         worktrees_removed += 1;
     }
 
@@ -1031,13 +1092,102 @@ fn cleanup_orphans(project_root: &Path, orphan_status: &OrphanStatus) -> Result<
     for branch in &orphan_status.branches {
         git_cmd::branch_delete(project_root, branch)
             .map_err(|error| anyhow::anyhow!("failed to delete branch '{branch}': {error}"))?;
+        info!(branch, "doctor deleted orphan branch");
+        actions.push(format!("deleted orphan branch '{branch}'"));
         branches_removed += 1;
     }
 
     Ok(CleanupSummary {
         branches_removed,
         worktrees_removed,
+        stale_state_removed: 0,
+        actions,
     })
+}
+
+fn cleanup_stale_state(project_root: &Path, stale_state: &[PathBuf]) -> Result<CleanupSummary> {
+    let mut stale_state_removed = 0usize;
+    let mut actions = Vec::new();
+
+    for path in stale_state {
+        fs::remove_file(path)
+            .with_context(|| format!("failed to remove stale state '{}'", path.display()))?;
+        info!(path = %path.display(), "doctor removed stale state file");
+        actions.push(format!(
+            "removed stale state '{}'",
+            display_cleanup_path(project_root, path)
+        ));
+        stale_state_removed += 1;
+    }
+
+    Ok(CleanupSummary {
+        branches_removed: 0,
+        worktrees_removed: 0,
+        stale_state_removed,
+        actions,
+    })
+}
+
+fn apply_cleanup_plan(project_root: &Path, cleanup_plan: &CleanupPlan) -> Result<CleanupSummary> {
+    let orphan_summary = cleanup_orphans(project_root, &cleanup_plan.orphan_status)?;
+    let stale_state_summary = cleanup_stale_state(project_root, &cleanup_plan.stale_state)?;
+
+    let mut actions = orphan_summary.actions;
+    actions.extend(stale_state_summary.actions);
+
+    Ok(CleanupSummary {
+        branches_removed: orphan_summary.branches_removed + stale_state_summary.branches_removed,
+        worktrees_removed: orphan_summary.worktrees_removed + stale_state_summary.worktrees_removed,
+        stale_state_removed: orphan_summary.stale_state_removed
+            + stale_state_summary.stale_state_removed,
+        actions,
+    })
+}
+
+fn render_cleanup_plan(project_root: &Path, cleanup_plan: &CleanupPlan) -> String {
+    let mut out = String::new();
+    out.push_str("== Cleanup Plan ==\n");
+    if cleanup_plan.is_empty() {
+        out.push_str("No orphan branches, worktrees, or stale state to clean up.\n");
+        return out;
+    }
+
+    for worktree in &cleanup_plan.orphan_status.worktrees {
+        out.push_str(&format!(
+            "remove_worktree: {}\n",
+            display_cleanup_path(project_root, worktree)
+        ));
+    }
+    for branch in &cleanup_plan.orphan_status.branches {
+        out.push_str(&format!("delete_branch: {branch}\n"));
+    }
+    for path in &cleanup_plan.stale_state {
+        out.push_str(&format!(
+            "remove_stale_state: {}\n",
+            display_cleanup_path(project_root, path)
+        ));
+    }
+
+    out
+}
+
+fn render_cleanup_summary(summary: &CleanupSummary) -> String {
+    let mut out = String::new();
+    out.push_str("== Cleanup ==\n");
+    out.push_str(&format!(
+        "removed_branches: {}\nremoved_worktrees: {}\nremoved_stale_state: {}\n",
+        summary.branches_removed, summary.worktrees_removed, summary.stale_state_removed
+    ));
+    for action in &summary.actions {
+        out.push_str(&format!("action: {action}\n"));
+    }
+    out
+}
+
+fn display_cleanup_path(project_root: &Path, path: &Path) -> String {
+    path.strip_prefix(project_root)
+        .map(|relative| relative.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string())
 }
 
 fn check_line(level: CheckLevel, message: impl Into<String>) -> CheckLine {
@@ -1215,12 +1365,17 @@ mod tests {
     use super::*;
 
     fn write_team_config(root: &Path) {
+        write_named_team_config(root, "test");
+    }
+
+    fn write_named_team_config(root: &Path, name: &str) {
         let team_dir = root.join(".batty").join("team_config");
         fs::create_dir_all(&team_dir).unwrap();
         fs::write(
             team_dir.join("team.yaml"),
-            r#"
-name: test
+            format!(
+                r#"
+name: {name}
 roles:
   - name: architect
     role_type: architect
@@ -1232,7 +1387,8 @@ roles:
     role_type: engineer
     agent: codex
     use_worktrees: true
-"#,
+"#
+            ),
         )
         .unwrap();
         fs::write(
@@ -1242,6 +1398,26 @@ roles:
         .unwrap();
         fs::write(team_dir.join("manager.md"), "Manager prompt").unwrap();
         fs::write(team_dir.join("engineer.md"), "Engineer prompt").unwrap();
+    }
+
+    fn write_stale_state_files(root: &Path) -> Vec<PathBuf> {
+        let batty_dir = root.join(".batty");
+        fs::create_dir_all(&batty_dir).unwrap();
+
+        let paths = vec![
+            launch_state_path(root),
+            super::super::daemon_state_path(root),
+            batty_dir.join("merge.lock"),
+        ];
+
+        fs::write(&paths[0], "{}").unwrap();
+        fs::write(
+            &paths[1],
+            r#"{"clean_shutdown":true,"saved_at":1,"states":{},"active_tasks":{}}"#,
+        )
+        .unwrap();
+        fs::write(&paths[2], "locked").unwrap();
+        paths
     }
 
     fn init_git_repo(root: &Path) {
@@ -1715,10 +1891,72 @@ roles:
 
         assert_eq!(summary.branches_removed, 1);
         assert_eq!(summary.worktrees_removed, 1);
+        assert_eq!(summary.stale_state_removed, 0);
+        assert!(
+            summary
+                .actions
+                .contains(&"deleted orphan branch 'eng-9/task-9'".to_string())
+        );
         assert!(!orphan_worktree.exists());
         assert_eq!(
             list_task_branches(tmp.path()).unwrap(),
             vec!["eng-1/task-72".to_string()]
         );
+    }
+
+    #[test]
+    fn detect_cleanup_plan_includes_stale_state_when_session_is_not_running() {
+        let tmp = tempfile::tempdir().unwrap();
+        let team_name = format!("doctor-cleanup-{}", std::process::id());
+        write_named_team_config(tmp.path(), &team_name);
+        let mut stale_paths = write_stale_state_files(tmp.path());
+        stale_paths.sort();
+
+        let cleanup_plan = detect_cleanup_plan(tmp.path()).unwrap();
+
+        assert!(cleanup_plan.orphan_status.branches.is_empty());
+        assert!(cleanup_plan.orphan_status.worktrees.is_empty());
+        assert_eq!(cleanup_plan.stale_state, stale_paths);
+    }
+
+    #[test]
+    fn run_fix_yes_cleans_orphans_and_stale_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let team_name = format!("doctor-run-fix-{}", std::process::id());
+        init_git_repo(tmp.path());
+        write_named_team_config(tmp.path(), &team_name);
+        write_claimed_task(tmp.path(), 72, "review", "eng-1");
+
+        git_ok(tmp.path(), &["branch", "eng-1/task-72"]);
+        fs::create_dir_all(tmp.path().join(".batty").join("worktrees").join("eng-1")).unwrap();
+
+        let orphan_worktree = tmp.path().join(".batty").join("worktrees").join("eng-9");
+        git_ok(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-9/task-9",
+                orphan_worktree.to_string_lossy().as_ref(),
+                "main",
+            ],
+        );
+        let stale_paths = write_stale_state_files(tmp.path());
+
+        let output = run(tmp.path(), true, true).unwrap();
+
+        assert!(output.contains("== Cleanup Plan =="));
+        assert!(output.contains("delete_branch: eng-9/task-9"));
+        assert!(output.contains("remove_worktree: .batty/worktrees/eng-9"));
+        assert!(output.contains("remove_stale_state: .batty/launch-state.json"));
+        assert!(output.contains("removed_branches: 1"));
+        assert!(output.contains("removed_worktrees: 1"));
+        assert!(output.contains("removed_stale_state: 3"));
+        assert!(output.contains("action: deleted orphan branch 'eng-9/task-9'"));
+        assert!(!orphan_worktree.exists());
+        for path in stale_paths {
+            assert!(!path.exists(), "{} should be removed", path.display());
+        }
     }
 }
