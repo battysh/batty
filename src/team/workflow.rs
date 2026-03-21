@@ -1,10 +1,13 @@
 //! Workflow state model for Batty-managed tasks.
+#![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use super::review::{MergeDisposition, ReviewState};
+#[cfg(test)]
+use super::review::MergeDisposition;
+use super::review::ReviewState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
