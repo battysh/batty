@@ -198,6 +198,7 @@ pub(crate) fn prepare_engineer_assignment_worktree(
     team_config_dir: &Path,
 ) -> Result<PathBuf> {
     let base_branch = engineer_base_branch_name(engineer_name);
+    ensure_engineer_worktree_health(project_root, worktree_dir, &base_branch)?;
     setup_engineer_worktree(project_root, worktree_dir, &base_branch, team_config_dir)?;
     maybe_migrate_legacy_engineer_worktree(
         project_root,
@@ -239,6 +240,25 @@ pub(crate) fn prepare_engineer_assignment_worktree(
     }
 
     Ok(worktree_dir.to_path_buf())
+}
+
+fn ensure_engineer_worktree_health(
+    project_root: &Path,
+    worktree_dir: &Path,
+    _base_branch: &str,
+) -> Result<()> {
+    if !worktree_dir.exists() {
+        return Ok(());
+    }
+
+    if !worktree_registered(project_root, worktree_dir)? {
+        bail!(
+            "engineer worktree path exists but is not registered in git worktree list: {}",
+            worktree_dir.display()
+        );
+    }
+
+    Ok(())
 }
 
 #[allow(dead_code)] // Retained for existing tests and as a lower-level helper.
@@ -647,6 +667,35 @@ fn branch_exists(project_root: &Path, branch_name: &str) -> Result<bool> {
         .output()
         .with_context(|| format!("failed to check whether branch '{branch_name}' exists"))?;
     Ok(output.status.success())
+}
+
+fn worktree_registered(project_root: &Path, worktree_dir: &Path) -> Result<bool> {
+    let output = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(project_root)
+        .output()
+        .context("failed to list git worktrees")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git worktree list --porcelain failed: {stderr}");
+    }
+
+    let target = worktree_dir
+        .canonicalize()
+        .unwrap_or_else(|_| worktree_dir.to_path_buf());
+
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some(candidate) = line.strip_prefix("worktree ") else {
+            continue;
+        };
+        let candidate = PathBuf::from(candidate.trim());
+        let candidate = candidate.canonicalize().unwrap_or(candidate);
+        if candidate == target {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn branch_is_checked_out_in_any_worktree(project_root: &Path, branch_name: &str) -> Result<bool> {
@@ -1251,6 +1300,30 @@ mod tests {
         assert_eq!(
             git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
             "eng-8/task-100"
+        );
+    }
+
+    #[test]
+    fn test_prepare_assignment_worktree_rejects_unregistered_existing_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-9");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        std::fs::create_dir_all(&worktree_dir).unwrap();
+
+        let err = prepare_engineer_assignment_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-9",
+            "eng-9/task-1",
+            &team_config_dir,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("not registered in git worktree list")
         );
     }
 

@@ -54,6 +54,7 @@ pub const TEAM_CONFIG_FILE: &str = "team.yaml";
 const LOAD_GRAPH_WINDOW_SECONDS: u64 = 3_600;
 const LOAD_GRAPH_WIDTH: usize = 30;
 const INBOX_BODY_PREVIEW_CHARS: usize = 140;
+const TRIAGE_RESULT_FRESHNESS_SECONDS: u64 = 300;
 const LOG_ROTATION_BYTES: u64 = 5 * 1024 * 1024;
 const LOG_ROTATION_KEEP: usize = 3;
 
@@ -1119,6 +1120,15 @@ fn delivered_direct_report_triage_state(
     member_name: &str,
     direct_reports: &[String],
 ) -> Result<TriageBacklogState> {
+    delivered_direct_report_triage_state_at(inbox_root, member_name, direct_reports, now_unix())
+}
+
+fn delivered_direct_report_triage_state_at(
+    inbox_root: &Path,
+    member_name: &str,
+    direct_reports: &[String],
+    now_ts: u64,
+) -> Result<TriageBacklogState> {
     if direct_reports.is_empty() {
         return Ok(TriageBacklogState {
             count: 0,
@@ -1141,7 +1151,9 @@ fn delivered_direct_report_triage_state(
     let mut count = 0usize;
     let mut newest_result_ts = 0u64;
     for (msg, delivered) in &member_messages {
+        let is_fresh = now_ts.saturating_sub(msg.timestamp) <= TRIAGE_RESULT_FRESHNESS_SECONDS;
         let needs_triage = *delivered
+            && is_fresh
             && direct_reports.iter().any(|report| report == &msg.from)
             && msg.timestamp
                 > *latest_outbound_by_report
@@ -3231,13 +3243,84 @@ roles:
         let other_result_id = inbox::deliver_to_inbox(&root, &other_result).unwrap();
         inbox::mark_delivered(&root, "lead", &other_result_id).unwrap();
 
-        let triage_count = delivered_direct_report_triage_count(
+        let triage_state = delivered_direct_report_triage_state_at(
             &root,
             "lead",
             &["eng-1".to_string(), "eng-2".to_string()],
+            100,
         )
         .unwrap();
-        assert_eq!(triage_count, 2);
+        assert_eq!(triage_state.count, 2);
+        assert_eq!(triage_state.newest_result_ts, 40);
+    }
+
+    #[test]
+    fn delivered_direct_report_triage_count_excludes_stale_delivered_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        inbox::init_inbox(&root, "eng-1").unwrap();
+
+        let mut stale_result = inbox::InboxMessage::new_send("eng-1", "lead", "stale result");
+        stale_result.timestamp = 10;
+        let stale_result_id = inbox::deliver_to_inbox(&root, &stale_result).unwrap();
+        inbox::mark_delivered(&root, "lead", &stale_result_id).unwrap();
+
+        let triage_state = delivered_direct_report_triage_state_at(
+            &root,
+            "lead",
+            &["eng-1".to_string()],
+            10 + TRIAGE_RESULT_FRESHNESS_SECONDS + 1,
+        )
+        .unwrap();
+
+        assert_eq!(triage_state.count, 0);
+        assert_eq!(triage_state.newest_result_ts, 0);
+    }
+
+    #[test]
+    fn delivered_direct_report_triage_count_keeps_fresh_delivered_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        inbox::init_inbox(&root, "eng-1").unwrap();
+
+        let mut fresh_result = inbox::InboxMessage::new_send("eng-1", "lead", "fresh result");
+        fresh_result.timestamp = 100;
+        let fresh_result_id = inbox::deliver_to_inbox(&root, &fresh_result).unwrap();
+        inbox::mark_delivered(&root, "lead", &fresh_result_id).unwrap();
+
+        let triage_state =
+            delivered_direct_report_triage_state_at(&root, "lead", &["eng-1".to_string()], 150)
+                .unwrap();
+
+        assert_eq!(triage_state.count, 1);
+        assert_eq!(triage_state.newest_result_ts, 100);
+    }
+
+    #[test]
+    fn delivered_direct_report_triage_count_excludes_acked_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        inbox::init_inbox(&root, "eng-1").unwrap();
+
+        let mut result = inbox::InboxMessage::new_send("eng-1", "lead", "task complete");
+        result.timestamp = 100;
+        let result_id = inbox::deliver_to_inbox(&root, &result).unwrap();
+        inbox::mark_delivered(&root, "lead", &result_id).unwrap();
+
+        let mut lead_reply = inbox::InboxMessage::new_send("lead", "eng-1", "acknowledged");
+        lead_reply.timestamp = 110;
+        let lead_reply_id = inbox::deliver_to_inbox(&root, &lead_reply).unwrap();
+        inbox::mark_delivered(&root, "eng-1", &lead_reply_id).unwrap();
+
+        let triage_state =
+            delivered_direct_report_triage_state_at(&root, "lead", &["eng-1".to_string()], 150)
+                .unwrap();
+
+        assert_eq!(triage_state.count, 0);
+        assert_eq!(triage_state.newest_result_ts, 0);
     }
 
     #[test]
