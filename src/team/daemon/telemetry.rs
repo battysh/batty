@@ -249,6 +249,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::team::LOG_ROTATION_BYTES;
     use crate::team::config::{
         AutomationConfig, BoardConfig, OrchestratorPosition, RoleDef, StandupConfig, TeamConfig,
         WorkflowMode, WorkflowPolicy,
@@ -256,6 +257,7 @@ mod tests {
     use crate::team::events::{EventSink, read_events};
     use crate::team::failure_patterns::FailureTracker;
     use crate::team::test_helpers::{RecordingChannel, daemon_config_with_roles};
+    use regex::Regex;
     use serial_test::serial;
 
     struct FailingWriter;
@@ -268,6 +270,35 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Err(io::Error::other("synthetic event sink failure"))
         }
+    }
+
+    fn daemon_for_orchestrator_logging(
+        project_root: &std::path::Path,
+        workflow_mode: WorkflowMode,
+        orchestrator_pane: bool,
+    ) -> TeamDaemon {
+        TeamDaemon::new(DaemonConfig {
+            project_root: project_root.to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                orchestrator_pane,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+                roles: Vec::new(),
+            },
+            session: "test".to_string(),
+            members: Vec::new(),
+            pane_map: HashMap::new(),
+        })
+        .unwrap()
     }
 
     #[test]
@@ -422,42 +453,17 @@ mod tests {
         let path = tmp.path().join(".batty").join("orchestrator.log");
         append_orchestrator_log_line(&path, "dispatch: assigned task #18").unwrap();
         let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("dispatch: assigned task #18"));
-        assert!(content.starts_with('['));
-        // Verify datetime format: [YYYY-MM-DD HH:MM:SS]
-        let bracket_end = content.find(']').unwrap();
-        let ts = &content[1..bracket_end];
-        assert_eq!(ts.len(), 19, "expected YYYY-MM-DD HH:MM:SS, got: {ts}");
-        assert_eq!(&ts[4..5], "-");
-        assert_eq!(&ts[10..11], " ");
-        assert_eq!(&ts[13..14], ":");
+        let line = content.trim_end();
+        let format =
+            Regex::new(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] dispatch: assigned task #18$")
+                .unwrap();
+        assert!(format.is_match(line), "unexpected log line: {line}");
     }
 
     #[test]
     fn record_orchestrator_action_is_noop_when_orchestrator_disabled() {
         let tmp = tempfile::tempdir().unwrap();
-        let daemon = TeamDaemon::new(DaemonConfig {
-            project_root: tmp.path().to_path_buf(),
-            team_config: TeamConfig {
-                name: "test".to_string(),
-                workflow_mode: WorkflowMode::Legacy,
-                workflow_policy: WorkflowPolicy::default(),
-                board: BoardConfig::default(),
-                standup: StandupConfig::default(),
-                automation: AutomationConfig::default(),
-                automation_sender: None,
-                orchestrator_pane: true,
-                orchestrator_position: OrchestratorPosition::Bottom,
-                layout: None,
-                cost: Default::default(),
-                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
-                roles: Vec::new(),
-            },
-            session: "test".to_string(),
-            members: Vec::new(),
-            pane_map: HashMap::new(),
-        })
-        .unwrap();
+        let daemon = daemon_for_orchestrator_logging(tmp.path(), WorkflowMode::Legacy, true);
 
         daemon.record_orchestrator_action("dispatch: no-op");
 
@@ -467,34 +473,84 @@ mod tests {
     #[test]
     fn record_orchestrator_action_writes_when_orchestrator_enabled() {
         let tmp = tempfile::tempdir().unwrap();
-        let daemon = TeamDaemon::new(DaemonConfig {
-            project_root: tmp.path().to_path_buf(),
-            team_config: TeamConfig {
-                name: "test".to_string(),
-                workflow_mode: WorkflowMode::Hybrid,
-                workflow_policy: WorkflowPolicy::default(),
-                board: BoardConfig::default(),
-                standup: StandupConfig::default(),
-                automation: AutomationConfig::default(),
-                automation_sender: None,
-                orchestrator_pane: true,
-                orchestrator_position: OrchestratorPosition::Bottom,
-                layout: None,
-                cost: Default::default(),
-                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
-                roles: Vec::new(),
-            },
-            session: "test".to_string(),
-            members: Vec::new(),
-            pane_map: HashMap::new(),
-        })
-        .unwrap();
+        let daemon = daemon_for_orchestrator_logging(tmp.path(), WorkflowMode::Hybrid, true);
 
         daemon.record_orchestrator_action("dispatch: active");
 
         let content =
             fs::read_to_string(tmp.path().join(".batty").join("orchestrator.log")).unwrap();
         assert!(content.contains("dispatch: active"));
+    }
+
+    #[test]
+    fn append_orchestrator_log_line_writes_to_fresh_log_after_rotation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".batty").join("orchestrator.log");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "stale log entry\n").unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(LOG_ROTATION_BYTES + 1)
+            .unwrap();
+
+        append_orchestrator_log_line(&path, "dispatch: after rotation").unwrap();
+
+        let rotated = fs::read_to_string(format!("{}.1", path.display())).unwrap();
+        assert!(rotated.contains("stale log entry"));
+
+        let fresh = fs::read_to_string(&path).unwrap();
+        assert!(fresh.contains("dispatch: after rotation"));
+        assert!(!fresh.contains("stale log entry"));
+    }
+
+    #[test]
+    fn record_orchestrator_action_handles_malformed_log_path_gracefully() {
+        let tmp = tempfile::tempdir().unwrap();
+        let malformed_path = tmp.path().join(".batty").join("orchestrator.log");
+        fs::create_dir_all(&malformed_path).unwrap();
+        let daemon = daemon_for_orchestrator_logging(tmp.path(), WorkflowMode::Hybrid, true);
+
+        daemon.record_orchestrator_action("dispatch: malformed");
+
+        assert!(malformed_path.is_dir());
+        assert!(
+            !tmp.path()
+                .join(".batty")
+                .join("orchestrator.log.1")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn record_orchestrator_action_appends_multiple_entries_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = daemon_for_orchestrator_logging(tmp.path(), WorkflowMode::Hybrid, true);
+
+        daemon.record_orchestrator_action("dispatch: first");
+        daemon.record_orchestrator_action("dispatch: second");
+
+        let content =
+            fs::read_to_string(tmp.path().join(".batty").join("orchestrator.log")).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+
+        let format =
+            Regex::new(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] dispatch: (first|second)$")
+                .unwrap();
+        assert!(
+            format.is_match(lines[0]),
+            "unexpected first line: {}",
+            lines[0]
+        );
+        assert!(
+            format.is_match(lines[1]),
+            "unexpected second line: {}",
+            lines[1]
+        );
+        assert!(lines[0].ends_with("dispatch: first"));
+        assert!(lines[1].ends_with("dispatch: second"));
     }
 
     #[test]
