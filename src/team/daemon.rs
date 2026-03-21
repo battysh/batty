@@ -109,6 +109,7 @@ pub struct TeamDaemon {
     pub(super) last_board_rotation: Instant,
     pub(super) last_auto_dispatch: Instant,
     pub(super) pipeline_starvation_fired: bool,
+    pub(super) pipeline_starvation_last_fired: Option<Instant>,
     pub(super) retro_generated: bool,
     pub(super) failed_deliveries: Vec<FailedDelivery>,
     pub(super) poll_interval: Duration,
@@ -328,6 +329,7 @@ impl TeamDaemon {
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
+            pipeline_starvation_last_fired: None,
             retro_generated: false,
             failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
@@ -1325,6 +1327,14 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             return Ok(());
         };
 
+        // Hard cooldown: never fire more than once per 5 minutes
+        const STARVATION_COOLDOWN: Duration = Duration::from_secs(300);
+        if let Some(last) = self.pipeline_starvation_last_fired {
+            if last.elapsed() < STARVATION_COOLDOWN {
+                return Ok(());
+            }
+        }
+
         // Already fired — stay suppressed until condition fully clears
         if self.pipeline_starvation_fired {
             // Only reset when enough unclaimed work exists for all idle engineers
@@ -1403,6 +1413,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             inbox::deliver_to_inbox(&inbox_root, &inbox_msg)?;
         }
         self.pipeline_starvation_fired = true;
+        self.pipeline_starvation_last_fired = Some(Instant::now());
         Ok(())
     }
 

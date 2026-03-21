@@ -638,6 +638,7 @@ mod tests {
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
+            pipeline_starvation_last_fired: None,
             retro_generated: false,
             failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
