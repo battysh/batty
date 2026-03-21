@@ -10,7 +10,9 @@ Your deliverables: `planning/architecture.md`, `planning/roadmap.md`.
 
 Batty reads a kanban board, dispatches tasks to coding agents, supervises their work via tmux, gates on tests, and merges results.
 
-Key modules: `src/team/` (daemon, config, hierarchy, layout, messaging, standup, board, comms), `src/tmux.rs`, `src/agent/`, `src/worktree.rs`, `src/cli.rs`.
+Key modules: `src/team/` (daemon, config, hierarchy, layout, message, standup, board, comms, capability, workflow, resolver, review, completion, nudge, metrics, policy, artifact, task_cmd, orchestrator surface, validation, failure_patterns, retrospective, templates), `src/tmux.rs`, `src/agent/`, `src/worktree.rs`, `src/cli.rs`.
+
+Key CLI surfaces: `batty doctor`, `batty retro`, `batty export-template`, `batty inbox purge`.
 
 Key docs: `planning/architecture.md`, `planning/roadmap.md`, `planning/dev-philosophy.md`, `CLAUDE.md`.
 

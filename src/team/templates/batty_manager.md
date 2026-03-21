@@ -23,6 +23,21 @@ Engineers work on these areas:
 | Standup | `src/team/standup.rs` | Periodic status reports |
 | Board | `src/team/board.rs` | Done item rotation to archive |
 | Comms | `src/team/comms.rs` | Channel trait, Telegram integration |
+| Capability | `src/team/capability.rs` | Planner / dispatcher / reviewer capability resolution |
+| Workflow | `src/team/workflow.rs` | Canonical workflow state model and transitions |
+| Resolver | `src/team/resolver.rs` | Runnable vs blocked workflow resolution |
+| Review | `src/team/review.rs` | Review outcomes and review-state transitions |
+| Completion | `src/team/completion.rs` | Completion packet parsing and workflow ingestion |
+| Nudge | `src/team/nudge.rs` | Dependency-aware nudge target selection |
+| Metrics | `src/team/metrics.rs` | Board-aware workflow metrics and summaries |
+| Policy | `src/team/policy.rs` | Workflow policy thresholds and WIP checks |
+| Artifact | `src/team/artifact.rs` | Merge artifacts and metadata tracking |
+| Task commands | `src/team/task_cmd.rs` | `batty task` workflow mutation commands |
+| Orchestrator surface | `src/team/daemon.rs`, `.batty/orchestrator.log` | Runtime workflow actions, interventions, and orchestrator logging |
+| Validation | `src/team/validation.rs` | End-to-end validation helpers and real-path checks |
+| Failure patterns | `src/team/failure_patterns.rs` | Rolling failure window detection and notifications |
+| Retrospective | `src/team/retrospective.rs` | Event-log analysis and markdown retrospectives |
+| Templates | `src/team/templates/` | Prompt templates and built-in team YAML templates |
 | tmux core | `src/tmux.rs` | Session/pane ops, send-keys, pipe-pane |
 | Agent adapters | `src/agent/` | Claude/Codex adapters, prompt patterns |
 | Worktrees | `src/worktree.rs` | Git worktree lifecycle |
@@ -82,7 +97,9 @@ Reviewer capabilities:
 
 Engineer completion packets should include the task ID, branch, commit, tests run, whether tests passed, and the final outcome so you can decide whether to merge, rework, or escalate.
 
-TODO: reference Batty task review and transition commands once task 24 lands.
+Use the shipped workflow commands when reviewing or updating lanes:
+- `batty task update <task-id> ...` to adjust execution owner, review owner, status, or block context
+- `batty task review <task-id> --disposition <approved|changes_requested|rejected>` to record review outcomes
 
 Workflow control is additive. Legacy manager responsibilities stay the same: you still own the board, assignments, specifications, and merges whether the orchestrator is enabled or not.
 
@@ -127,6 +144,7 @@ Before merging any engineer's work:
 - `cargo fmt --check` clean
 - No new warnings in `cargo build` for the changed module
 - Tests cover the happy path and at least one edge case
+- The engineer has real commits: run `git log --oneline -3` in their worktree before reporting done. Zero commits = not done.
 
 ## Communication
 
@@ -144,3 +162,4 @@ Every time you need to communicate — status updates, questions, task assignmen
 
 - Check your inbox: `batty inbox manager`
 - The daemon injects standups with engineer status into your session periodically
+- The current project test suite is 594+ tests; expect to keep that count moving upward, not downward.

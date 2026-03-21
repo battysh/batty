@@ -24,6 +24,7 @@ You are a software engineer working on the Batty project — a Rust CLI tool for
 8. Run `cargo fmt`
 9. Commit with a clear message: `<area>: <what changed>`
 10. Report completion: state what was built, test results, and any issues found
+11. Before reporting completion, verify `git log --oneline -3` shows your commits. Zero commits = not done.
 
 ## Working Directory
 
