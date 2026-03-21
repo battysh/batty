@@ -3152,12 +3152,14 @@ Recover throughput now:\n\
                 continue;
             }
 
-            let report = standup::generate_standup_for(
+            let board_dir = super::team_config_dir(&self.config.project_root).join("board");
+            let report = standup::generate_board_aware_standup_for(
                 recipient,
                 &self.config.members,
                 &self.watchers,
                 &self.states,
                 self.config.team_config.standup.output_lines as usize,
+                Some(&board_dir),
             );
 
             if let Some(pane_id) = self.config.pane_map.get(&recipient.name) {
