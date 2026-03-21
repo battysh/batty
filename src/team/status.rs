@@ -1188,6 +1188,7 @@ mod tests {
     use crate::team::config::RoleType;
     use crate::team::events::{EventSink, TeamEvent};
     use crate::team::hierarchy::MemberInstance;
+    use crate::team::inbox::InboxMessage;
 
     fn engineer(name: &str) -> MemberInstance {
         MemberInstance {
@@ -1199,6 +1200,488 @@ mod tests {
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
         }
+    }
+
+    fn manager(name: &str) -> MemberInstance {
+        MemberInstance {
+            name: name.to_string(),
+            role_name: name.to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        }
+    }
+
+    fn user_member(name: &str) -> MemberInstance {
+        MemberInstance {
+            name: name.to_string(),
+            role_name: name.to_string(),
+            role_type: RoleType::User,
+            agent: None,
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        }
+    }
+
+    fn board_dir(project_root: &Path) -> std::path::PathBuf {
+        project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+    }
+
+    fn write_board_task(project_root: &Path, filename: &str, frontmatter: &str) {
+        let tasks_dir = board_dir(project_root).join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(
+            tasks_dir.join(filename),
+            format!("---\n{frontmatter}class: standard\n---\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn build_team_status_rows_marks_user_and_stopped_session() {
+        let members = vec![engineer("eng-1"), user_member("human")];
+        let rows = build_team_status_rows(
+            &members,
+            false,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(rows[0].state, "stopped");
+        assert_eq!(rows[0].runtime_label, None);
+        assert_eq!(rows[1].state, "user");
+        assert_eq!(rows[1].role_type, "User");
+        assert_eq!(rows[1].agent, None);
+    }
+
+    #[test]
+    fn build_team_status_rows_promotes_idle_member_with_triage_backlog() {
+        let members = vec![manager("manager")];
+        let runtime_statuses = HashMap::from([(
+            "manager".to_string(),
+            RuntimeMemberStatus {
+                state: "idle".to_string(),
+                signal: None,
+                label: Some("idle".to_string()),
+            },
+        )]);
+        let triage_backlog_counts = HashMap::from([("manager".to_string(), 2usize)]);
+
+        let rows = build_team_status_rows(
+            &members,
+            true,
+            &runtime_statuses,
+            &HashMap::new(),
+            &triage_backlog_counts,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(rows[0].state, "triaging");
+        assert_eq!(rows[0].signal.as_deref(), Some("needs triage (2)"));
+    }
+
+    #[test]
+    fn build_team_status_rows_promotes_idle_member_with_review_backlog() {
+        let members = vec![manager("manager")];
+        let runtime_statuses = HashMap::from([(
+            "manager".to_string(),
+            RuntimeMemberStatus {
+                state: "idle".to_string(),
+                signal: Some("nudge paused".to_string()),
+                label: Some("idle".to_string()),
+            },
+        )]);
+        let owned_task_buckets = HashMap::from([(
+            "manager".to_string(),
+            OwnedTaskBuckets {
+                active: Vec::new(),
+                review: vec![41, 42],
+            },
+        )]);
+
+        let rows = build_team_status_rows(
+            &members,
+            true,
+            &runtime_statuses,
+            &HashMap::new(),
+            &HashMap::new(),
+            &owned_task_buckets,
+            &HashMap::new(),
+        );
+
+        assert_eq!(rows[0].state, "reviewing");
+        assert_eq!(
+            rows[0].signal.as_deref(),
+            Some("nudge paused, needs review (2)")
+        );
+    }
+
+    #[test]
+    fn build_team_status_rows_defaults_to_starting_when_runtime_missing() {
+        let members = vec![engineer("eng-1")];
+        let rows = build_team_status_rows(
+            &members,
+            true,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(rows[0].state, "starting");
+        assert_eq!(rows[0].runtime_label, None);
+    }
+
+    #[test]
+    fn build_team_status_health_counts_non_user_members_and_sorts_unhealthy() {
+        let rows = vec![
+            TeamStatusRow {
+                name: "human".to_string(),
+                role: "user".to_string(),
+                role_type: "User".to_string(),
+                agent: None,
+                reports_to: None,
+                state: "user".to_string(),
+                pending_inbox: 9,
+                triage_backlog: 9,
+                active_owned_tasks: Vec::new(),
+                review_owned_tasks: Vec::new(),
+                signal: None,
+                runtime_label: None,
+                health: AgentHealthSummary::default(),
+                health_summary: "-".to_string(),
+            },
+            TeamStatusRow {
+                name: "eng-2".to_string(),
+                role: "engineer".to_string(),
+                role_type: "Engineer".to_string(),
+                agent: Some("codex".to_string()),
+                reports_to: Some("manager".to_string()),
+                state: "working".to_string(),
+                pending_inbox: 1,
+                triage_backlog: 2,
+                active_owned_tasks: vec![2],
+                review_owned_tasks: Vec::new(),
+                signal: None,
+                runtime_label: Some("working".to_string()),
+                health: AgentHealthSummary {
+                    restart_count: 1,
+                    context_exhaustion_count: 0,
+                    delivery_failure_count: 0,
+                    task_elapsed_secs: None,
+                },
+                health_summary: "r1".to_string(),
+            },
+            TeamStatusRow {
+                name: "eng-1".to_string(),
+                role: "engineer".to_string(),
+                role_type: "Engineer".to_string(),
+                agent: Some("codex".to_string()),
+                reports_to: Some("manager".to_string()),
+                state: "reviewing".to_string(),
+                pending_inbox: 3,
+                triage_backlog: 1,
+                active_owned_tasks: Vec::new(),
+                review_owned_tasks: vec![1],
+                signal: None,
+                runtime_label: Some("idle".to_string()),
+                health: AgentHealthSummary {
+                    restart_count: 0,
+                    context_exhaustion_count: 1,
+                    delivery_failure_count: 1,
+                    task_elapsed_secs: None,
+                },
+                health_summary: "c1 d1".to_string(),
+            },
+        ];
+
+        let health = build_team_status_health(&rows, true, false);
+        assert_eq!(health.member_count, 2);
+        assert_eq!(health.active_member_count, 2);
+        assert_eq!(health.pending_inbox_count, 4);
+        assert_eq!(health.triage_backlog_count, 3);
+        assert_eq!(
+            health.unhealthy_members,
+            vec!["eng-1".to_string(), "eng-2".to_string()]
+        );
+    }
+
+    #[test]
+    fn board_status_task_queues_returns_empty_when_board_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (active_tasks, review_queue) = board_status_task_queues(tmp.path()).unwrap();
+
+        assert!(active_tasks.is_empty());
+        assert!(review_queue.is_empty());
+    }
+
+    #[test]
+    fn owned_task_buckets_routes_review_items_to_manager() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_board_task(
+            tmp.path(),
+            "003-review.md",
+            "id: 3\ntitle: Review one\nstatus: review\npriority: high\nclaimed_by: eng-2\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "004-review.md",
+            "id: 4\ntitle: Review two\nstatus: review\npriority: high\nclaimed_by: eng-1\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "005-active.md",
+            "id: 5\ntitle: Active task\nstatus: in-progress\npriority: high\nclaimed_by: eng-2\n",
+        );
+
+        let buckets = owned_task_buckets(
+            tmp.path(),
+            &[manager("manager"), engineer("eng-1"), engineer("eng-2")],
+        );
+
+        assert_eq!(
+            buckets.get("manager"),
+            Some(&OwnedTaskBuckets {
+                active: Vec::new(),
+                review: vec![3, 4],
+            })
+        );
+        assert_eq!(
+            buckets.get("eng-2"),
+            Some(&OwnedTaskBuckets {
+                active: vec![5],
+                review: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn compute_metrics_returns_default_when_board_is_missing() {
+        let metrics =
+            compute_metrics(&tempfile::tempdir().unwrap().path().join("board"), &[]).unwrap();
+
+        assert_eq!(metrics, WorkflowMetrics::default());
+    }
+
+    #[test]
+    fn compute_metrics_returns_default_when_board_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(board_dir(tmp.path()).join("tasks")).unwrap();
+
+        let metrics = compute_metrics(&board_dir(tmp.path()), &[]).unwrap();
+        assert_eq!(metrics, WorkflowMetrics::default());
+    }
+
+    #[test]
+    fn compute_metrics_counts_workflow_states_and_idle_runnable() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_board_task(
+            tmp.path(),
+            "001-runnable.md",
+            "id: 1\ntitle: Runnable\nstatus: todo\npriority: high\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "002-blocked.md",
+            "id: 2\ntitle: Blocked\nstatus: blocked\npriority: medium\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "003-review.md",
+            "id: 3\ntitle: Review\nstatus: review\npriority: medium\nclaimed_by: eng-1\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "004-in-progress.md",
+            "id: 4\ntitle: In progress\nstatus: in-progress\npriority: medium\nclaimed_by: eng-1\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "005-claimed.md",
+            "id: 5\ntitle: Claimed todo\nstatus: todo\npriority: low\nclaimed_by: eng-3\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "006-waiting.md",
+            "id: 6\ntitle: Waiting\nstatus: todo\npriority: low\ndepends_on:\n  - 7\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "007-parent.md",
+            "id: 7\ntitle: Parent\nstatus: in-progress\npriority: low\nclaimed_by: eng-3\n",
+        );
+
+        let inbox_root = crate::team::inbox::inboxes_root(tmp.path());
+        crate::team::inbox::deliver_to_inbox(
+            &inbox_root,
+            &InboxMessage::new_send("manager", "eng-2", "please pick this up"),
+        )
+        .unwrap();
+
+        let metrics = compute_metrics(
+            &board_dir(tmp.path()),
+            &[
+                engineer("eng-1"),
+                engineer("eng-2"),
+                engineer("eng-3"),
+                engineer("eng-4"),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(metrics.runnable_count, 1);
+        assert_eq!(metrics.blocked_count, 1);
+        assert_eq!(metrics.in_review_count, 1);
+        assert_eq!(metrics.in_progress_count, 2);
+        assert_eq!(metrics.idle_with_runnable, vec!["eng-4".to_string()]);
+        assert!(metrics.oldest_review_age_secs.is_some());
+        assert!(metrics.oldest_assignment_age_secs.is_some());
+    }
+
+    #[test]
+    fn workflow_metrics_section_returns_none_when_mode_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let team_config_dir = tmp.path().join(".batty").join("team_config");
+        fs::create_dir_all(&team_config_dir).unwrap();
+        fs::write(team_config_dir.join("team.yaml"), "team: test\n").unwrap();
+
+        assert!(workflow_metrics_section(tmp.path(), &[engineer("eng-1")]).is_none());
+    }
+
+    #[test]
+    fn workflow_metrics_section_returns_formatted_metrics_when_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let team_config_dir = tmp.path().join(".batty").join("team_config");
+        fs::create_dir_all(&team_config_dir).unwrap();
+        fs::write(
+            team_config_dir.join("team.yaml"),
+            "team: test\nworkflow_mode: hybrid\n",
+        )
+        .unwrap();
+        write_board_task(
+            tmp.path(),
+            "001-runnable.md",
+            "id: 1\ntitle: Runnable\nstatus: todo\npriority: high\n",
+        );
+
+        let (formatted, metrics) =
+            workflow_metrics_section(tmp.path(), &[engineer("eng-1")]).unwrap();
+
+        assert!(formatted.contains("Workflow Metrics"));
+        assert!(formatted.contains("Runnable: 1"));
+        assert_eq!(metrics.runnable_count, 1);
+    }
+
+    #[test]
+    fn build_team_status_json_report_serializes_machine_readable_json() {
+        let report = build_team_status_json_report(
+            "test",
+            "batty-test",
+            true,
+            false,
+            Some(WorkflowMetrics {
+                runnable_count: 1,
+                ..WorkflowMetrics::default()
+            }),
+            Vec::new(),
+            Vec::new(),
+            vec![TeamStatusRow {
+                name: "eng-1".to_string(),
+                role: "engineer".to_string(),
+                role_type: "Engineer".to_string(),
+                agent: Some("codex".to_string()),
+                reports_to: Some("manager".to_string()),
+                state: "idle".to_string(),
+                pending_inbox: 0,
+                triage_backlog: 0,
+                active_owned_tasks: Vec::new(),
+                review_owned_tasks: Vec::new(),
+                signal: None,
+                runtime_label: Some("idle".to_string()),
+                health: AgentHealthSummary::default(),
+                health_summary: "-".to_string(),
+            }],
+        );
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["team"], "test");
+        assert_eq!(json["running"], true);
+        assert_eq!(json["health"]["member_count"], 1);
+        assert_eq!(json["workflow_metrics"]["runnable_count"], 1);
+        assert!(json["members"].is_array());
+    }
+
+    #[test]
+    fn parse_assigned_task_id_accepts_plain_numeric_values() {
+        assert_eq!(parse_assigned_task_id("42"), Some(42));
+    }
+
+    #[test]
+    fn parse_assigned_task_id_extracts_task_hash_values() {
+        assert_eq!(
+            parse_assigned_task_id("Task #119: expand coverage"),
+            Some(119)
+        );
+        assert_eq!(parse_assigned_task_id("working on #508 next"), Some(508));
+    }
+
+    #[test]
+    fn parse_assigned_task_id_rejects_values_without_leading_digits() {
+        assert_eq!(parse_assigned_task_id("Task #abc"), None);
+        assert_eq!(parse_assigned_task_id("no task here"), None);
+    }
+
+    #[test]
+    fn format_health_duration_formats_seconds() {
+        assert_eq!(format_health_duration(59), "59s");
+    }
+
+    #[test]
+    fn format_health_duration_formats_minutes() {
+        assert_eq!(format_health_duration(60), "1m");
+    }
+
+    #[test]
+    fn format_health_duration_formats_hours() {
+        assert_eq!(format_health_duration(3_600), "1h");
+    }
+
+    #[test]
+    fn format_health_duration_formats_days() {
+        assert_eq!(format_health_duration(86_400), "1d");
+    }
+
+    #[test]
+    fn merge_status_signal_combines_existing_triage_and_review_signals() {
+        assert_eq!(
+            merge_status_signal(Some("nudged".to_string()), 2, 1),
+            Some("nudged, needs triage (2), needs review (1)".to_string())
+        );
+    }
+
+    #[test]
+    fn merge_status_signal_returns_none_when_no_signals_exist() {
+        assert_eq!(merge_status_signal(None, 0, 0), None);
+    }
+
+    #[test]
+    fn agent_health_by_member_defaults_without_events_or_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let health = agent_health_by_member(tmp.path(), &[engineer("eng-1"), engineer("eng-2")]);
+
+        assert_eq!(health.get("eng-1"), Some(&AgentHealthSummary::default()));
+        assert_eq!(health.get("eng-2"), Some(&AgentHealthSummary::default()));
     }
 
     #[test]
