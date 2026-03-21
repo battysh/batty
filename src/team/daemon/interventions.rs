@@ -1480,3 +1480,203 @@ fn review_task_intervention_signature(tasks: &[&crate::task::Task]) -> String {
     parts.sort();
     parts.join("|")
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::team::harness::{TestHarness, architect_member, engineer_member, manager_member};
+    use crate::team::inbox::{self, InboxMessage};
+
+    fn triage_harness() -> TestHarness {
+        TestHarness::new()
+            .with_member(architect_member("architect"))
+            .with_member(manager_member("lead", Some("architect")))
+            .with_member(engineer_member("eng-1", Some("lead"), false))
+            .with_member(engineer_member("eng-2", Some("lead"), false))
+            .with_member_state("lead", MemberState::Idle)
+            .with_pane("lead", "%999999")
+    }
+
+    fn delivered_result(from: &str, body: &str) -> InboxMessage {
+        let mut message = InboxMessage::new_send(from, "lead", body);
+        message.timestamp = super::super::now_unix();
+        message
+    }
+
+    fn delivered_reply(to: &str, body: &str) -> InboxMessage {
+        let mut message = InboxMessage::new_send("lead", to, body);
+        message.timestamp = super::super::now_unix();
+        message
+    }
+
+    fn enter_idle_epoch(daemon: &mut TeamDaemon, member: &str) {
+        daemon.update_automation_timers_for_state(member, MemberState::Working);
+        daemon.update_automation_timers_for_state(member, MemberState::Idle);
+        daemon.idle_started_at.insert(
+            member.to_string(),
+            Instant::now() - daemon.automation_idle_grace_duration() - Duration::from_secs(1),
+        );
+    }
+
+    fn expire_triage_cooldown(daemon: &mut TeamDaemon, member: &str) {
+        daemon.intervention_cooldowns.insert(
+            format!("triage::{member}"),
+            Instant::now()
+                - Duration::from_secs(
+                    daemon
+                        .config
+                        .team_config
+                        .automation
+                        .intervention_cooldown_secs
+                        + 1,
+                ),
+        );
+    }
+
+    fn mark_pending_delivered(harness: &TestHarness, member: &str) {
+        for message in harness.pending_inbox_messages(member).unwrap() {
+            inbox::mark_delivered(&harness.inbox_root(), member, &message.id).unwrap();
+        }
+    }
+
+    #[test]
+    fn maybe_intervene_triage_backlog_queues_expected_message_for_idle_manager() {
+        let harness =
+            triage_harness().with_inbox_message("lead", delivered_result("eng-1", "done"), true);
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "lead");
+        daemon.maybe_intervene_triage_backlog().unwrap();
+
+        assert_eq!(daemon.triage_interventions.get("lead"), Some(&1));
+        let pending = harness.pending_inbox_messages("lead").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "architect");
+        assert!(pending[0].body.contains("Triage backlog detected"));
+        assert!(
+            pending[0]
+                .body
+                .contains("1 delivered direct-report result packet")
+        );
+        assert!(pending[0].body.contains("Reports in scope: eng-1, eng-2."));
+        assert!(pending[0].body.contains("batty inbox lead"));
+        assert!(pending[0].body.contains("batty read lead <ref>"));
+        assert!(pending[0].body.contains("batty send eng-1"));
+        assert!(pending[0].body.contains("batty assign eng-1"));
+        assert!(pending[0].body.contains("batty send architect"));
+    }
+
+    #[test]
+    fn maybe_intervene_triage_backlog_does_not_fire_without_idle_epoch() {
+        let harness =
+            triage_harness().with_inbox_message("lead", delivered_result("eng-1", "done"), true);
+        let mut daemon = harness.build_daemon().unwrap();
+        daemon.idle_started_at.insert(
+            "lead".to_string(),
+            Instant::now() - daemon.automation_idle_grace_duration() - Duration::from_secs(1),
+        );
+
+        daemon.maybe_intervene_triage_backlog().unwrap();
+
+        assert!(daemon.triage_interventions.get("lead").is_none());
+        assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+    }
+
+    #[test]
+    fn maybe_intervene_triage_backlog_ignores_reports_already_answered_by_manager() {
+        let harness = triage_harness()
+            .with_inbox_message("lead", delivered_result("eng-1", "done"), true)
+            .with_inbox_message("eng-1", delivered_reply("eng-1", "accepted"), false);
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "lead");
+        daemon.maybe_intervene_triage_backlog().unwrap();
+
+        assert!(daemon.triage_interventions.get("lead").is_none());
+        assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+    }
+
+    #[test]
+    fn maybe_intervene_triage_backlog_respects_cooldown_after_new_idle_epoch() {
+        let harness =
+            triage_harness().with_inbox_message("lead", delivered_result("eng-1", "done"), true);
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "lead");
+        daemon.maybe_intervene_triage_backlog().unwrap();
+        mark_pending_delivered(&harness, "lead");
+
+        enter_idle_epoch(&mut daemon, "lead");
+        daemon.maybe_intervene_triage_backlog().unwrap();
+
+        assert_eq!(daemon.triage_interventions.get("lead"), Some(&1));
+        assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+    }
+
+    #[test]
+    fn maybe_intervene_triage_backlog_does_not_refire_while_prior_message_is_pending() {
+        let harness =
+            triage_harness().with_inbox_message("lead", delivered_result("eng-1", "done"), true);
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "lead");
+        daemon.maybe_intervene_triage_backlog().unwrap();
+        enter_idle_epoch(&mut daemon, "lead");
+        daemon.maybe_intervene_triage_backlog().unwrap();
+
+        let pending = harness.pending_inbox_messages("lead").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(daemon.triage_interventions.get("lead"), Some(&1));
+    }
+
+    #[test]
+    fn maybe_intervene_triage_backlog_refires_after_cooldown_expires() {
+        let harness =
+            triage_harness().with_inbox_message("lead", delivered_result("eng-1", "done"), true);
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "lead");
+        daemon.maybe_intervene_triage_backlog().unwrap();
+        mark_pending_delivered(&harness, "lead");
+
+        enter_idle_epoch(&mut daemon, "lead");
+        expire_triage_cooldown(&mut daemon, "lead");
+        daemon.maybe_intervene_triage_backlog().unwrap();
+
+        let pending = harness.pending_inbox_messages("lead").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(daemon.triage_interventions.get("lead"), Some(&2));
+    }
+
+    #[test]
+    fn maybe_intervene_triage_backlog_updates_count_when_new_report_arrives() {
+        let harness =
+            triage_harness().with_inbox_message("lead", delivered_result("eng-1", "done"), true);
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "lead");
+        daemon.maybe_intervene_triage_backlog().unwrap();
+        mark_pending_delivered(&harness, "lead");
+
+        let mut second_result = delivered_result("eng-2", "done too");
+        second_result.timestamp += 1;
+        let second_result_id =
+            inbox::deliver_to_inbox(&harness.inbox_root(), &second_result).unwrap();
+        inbox::mark_delivered(&harness.inbox_root(), "lead", &second_result_id).unwrap();
+
+        enter_idle_epoch(&mut daemon, "lead");
+        expire_triage_cooldown(&mut daemon, "lead");
+        daemon.maybe_intervene_triage_backlog().unwrap();
+
+        let pending = harness.pending_inbox_messages("lead").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(
+            pending[0]
+                .body
+                .contains("2 delivered direct-report result packet")
+        );
+        assert!(pending[0].body.contains("Reports in scope: eng-1, eng-2."));
+    }
+}
