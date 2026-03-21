@@ -3807,6 +3807,44 @@ exit 1
     }
 
     #[test]
+    fn maybe_intervene_owned_tasks_engineer_message_captures_initial_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .pane_map(HashMap::from([("eng-1".to_string(), "%999".to_string())]))
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "eng-1").unwrap();
+        write_owned_task_file(tmp.path(), 191, "owned-task", "in-progress", "eng-1");
+
+        daemon.update_automation_timers_for_state("eng-1", MemberState::Working);
+        daemon.update_automation_timers_for_state("eng-1", MemberState::Idle);
+        backdate_idle_grace(&mut daemon, "eng-1");
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        let pending = inbox::pending_messages(&root, "eng-1").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "lead");
+        assert!(
+            pending[0]
+                .body
+                .contains("Owned active task backlog detected")
+        );
+        assert!(pending[0].body.contains("Task #191"));
+        assert!(pending[0].body.contains("batty send lead"));
+
+        let state = daemon.owned_task_interventions.get("eng-1").unwrap();
+        assert_eq!(state.idle_epoch, 1);
+        assert_eq!(state.signature, "191:in-progress");
+        assert!(!state.escalation_sent);
+    }
+
+    #[test]
     fn maybe_intervene_owned_tasks_fires_for_persistent_startup_idle_state() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = TestDaemonBuilder::new(tmp.path())
@@ -3961,6 +3999,48 @@ exit 1
     }
 
     #[test]
+    fn owned_task_intervention_updates_signature_when_board_state_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .pane_map(HashMap::from([("eng-1".to_string(), "%999".to_string())]))
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "eng-1").unwrap();
+        write_owned_task_file(tmp.path(), 191, "first-task", "in-progress", "eng-1");
+
+        daemon.update_automation_timers_for_state("eng-1", MemberState::Working);
+        daemon.update_automation_timers_for_state("eng-1", MemberState::Idle);
+        backdate_idle_grace(&mut daemon, "eng-1");
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        let initial = daemon.owned_task_interventions.get("eng-1").unwrap();
+        assert_eq!(initial.signature, "191:in-progress");
+
+        for message in inbox::pending_messages(&root, "eng-1").unwrap() {
+            inbox::mark_delivered(&root, "eng-1", &message.id).unwrap();
+        }
+
+        write_owned_task_file(tmp.path(), 192, "second-task", "in-progress", "eng-1");
+        backdate_intervention_cooldown(&mut daemon, "eng-1");
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        let pending = inbox::pending_messages(&root, "eng-1").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].body.contains("Task #191"));
+        assert!(pending[0].body.contains("#192 (in-progress) second-task"));
+
+        let updated = daemon.owned_task_interventions.get("eng-1").unwrap();
+        assert_eq!(updated.signature, "191:in-progress|192:in-progress");
+        assert!(!updated.escalation_sent);
+    }
+
+    #[test]
     fn owned_task_intervention_respects_cooldown() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = TestDaemonBuilder::new(tmp.path())
@@ -4112,6 +4192,64 @@ exit 1
                     && event.task.as_deref() == Some("191")
             }),
             "expected task_escalated event for stuck owned task"
+        );
+    }
+
+    #[test]
+    fn maybe_intervene_owned_tasks_only_escalates_stuck_signature_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events_path = tmp.path().join("events.jsonl");
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .pane_map(HashMap::from([("eng-1".to_string(), "%999".to_string())]))
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .workflow_policy(WorkflowPolicy {
+                escalation_threshold_secs: 120,
+                ..WorkflowPolicy::default()
+            })
+            .build();
+        daemon.event_sink = EventSink::new(&events_path).unwrap();
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "eng-1").unwrap();
+        inbox::init_inbox(&root, "lead").unwrap();
+        write_owned_task_file(tmp.path(), 191, "owned-task", "in-progress", "eng-1");
+
+        daemon.update_automation_timers_for_state("eng-1", MemberState::Working);
+        daemon.update_automation_timers_for_state("eng-1", MemberState::Idle);
+        backdate_idle_grace(&mut daemon, "eng-1");
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        let state = daemon.owned_task_interventions.get_mut("eng-1").unwrap();
+        state.detected_at = Instant::now() - Duration::from_secs(121);
+
+        daemon.maybe_intervene_owned_tasks().unwrap();
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        let lead_pending = inbox::pending_messages(&root, "lead").unwrap();
+        assert_eq!(lead_pending.len(), 1);
+        assert!(lead_pending[0].body.contains("Stuck task escalation"));
+        assert!(
+            daemon
+                .owned_task_interventions
+                .get("eng-1")
+                .is_some_and(|state| state.escalation_sent)
+        );
+
+        let events = super::super::events::read_events(&events_path).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event.event == "task_escalated"
+                        && event.role.as_deref() == Some("eng-1")
+                        && event.task.as_deref() == Some("191")
+                })
+                .count(),
+            1
         );
     }
 
