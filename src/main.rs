@@ -16,7 +16,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::debug;
 
-use cli::{Cli, Command, InboxCommand, ReviewDispositionArg, TaskCommand, TaskStateArg};
+use cli::{
+    BoardCommand, Cli, Command, InboxCommand, ReviewDispositionArg, TaskCommand, TaskStateArg,
+};
 
 /// Resolve the project root directory.
 ///
@@ -86,6 +88,37 @@ fn review_disposition_arg_name(disposition: ReviewDispositionArg) -> &'static st
         ReviewDispositionArg::ChangesRequested => "changes_requested",
         ReviewDispositionArg::Rejected => "rejected",
     }
+}
+
+fn board_summary_counts(board_dir: &std::path::Path) -> Result<Vec<(&'static str, usize)>> {
+    const STATUSES: [&str; 7] = [
+        "backlog",
+        "todo",
+        "in-progress",
+        "review",
+        "blocked",
+        "done",
+        "archived",
+    ];
+
+    STATUSES
+        .into_iter()
+        .map(|status| {
+            let output = team::board_cmd::list_tasks(board_dir, Some(status))?;
+            Ok((status, count_board_list_rows(&output)))
+        })
+        .collect()
+}
+
+fn count_board_list_rows(output: &str) -> usize {
+    output
+        .lines()
+        .filter(|line| {
+            line.split_whitespace()
+                .next()
+                .is_some_and(|token| token.chars().all(|ch| ch.is_ascii_digit()))
+        })
+        .count()
 }
 
 fn main() -> Result<()> {
@@ -258,21 +291,36 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Board => {
+        Command::Board { command } => {
             let board_dir = root.join(".batty").join("team_config").join("board");
-            if board_dir.is_dir() {
-                let status = std::process::Command::new("kanban-md")
-                    .args(["tui", "--dir", &board_dir.to_string_lossy()])
-                    .status()
-                    .context("failed to run kanban-md — is it installed?")?;
-                if !status.success() {
-                    bail!("kanban-md tui failed");
-                }
-            } else {
+            if !board_dir.is_dir() {
                 bail!(
                     "no board found at {}; run `batty init` first",
                     board_dir.display()
                 );
+            }
+
+            match command {
+                Some(BoardCommand::List { status }) => {
+                    print!(
+                        "{}",
+                        team::board_cmd::list_tasks(&board_dir, status.as_deref())?
+                    );
+                }
+                Some(BoardCommand::Summary) => {
+                    for (status, count) in board_summary_counts(&board_dir)? {
+                        println!("{status:<11} {count}");
+                    }
+                }
+                None => {
+                    let status = std::process::Command::new("kanban-md")
+                        .args(["tui", "--dir", &board_dir.to_string_lossy()])
+                        .status()
+                        .context("failed to run kanban-md — is it installed?")?;
+                    if !status.success() {
+                        bail!("kanban-md tui failed");
+                    }
+                }
             }
         }
 
@@ -423,4 +471,30 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn board_list_counts_data_rows_only() {
+        let output = "\
+ID    STATUS        PRIORITY   TITLE    CLAIMED    TAGS    DUE
+1     todo          high       One      --         --      --
+12    review        medium     Two      @eng-1     dx      --
+";
+
+        assert_eq!(count_board_list_rows(output), 2);
+    }
+
+    #[test]
+    fn board_list_ignores_headers_and_empty_output() {
+        let output = "\
+ID    STATUS        PRIORITY   TITLE    CLAIMED    TAGS    DUE
+";
+
+        assert_eq!(count_board_list_rows(output), 0);
+        assert_eq!(count_board_list_rows(""), 0);
+    }
 }

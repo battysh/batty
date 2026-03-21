@@ -92,7 +92,10 @@ pub enum Command {
     },
 
     /// Show the kanban board
-    Board,
+    Board {
+        #[command(subcommand)]
+        command: Option<BoardCommand>,
+    },
 
     /// List inbox messages for a team member, or purge delivered inbox messages
     #[command(args_conflicts_with_subcommands = true)]
@@ -206,6 +209,18 @@ pub enum InboxCommand {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum BoardCommand {
+    /// List board tasks in a non-interactive table
+    List {
+        /// Filter tasks by status
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Show per-status task counts
+    Summary,
+}
+
+#[derive(Subcommand, Debug)]
 pub enum TaskCommand {
     /// Transition a task to a new workflow state
     Transition {
@@ -306,6 +321,48 @@ pub enum ReviewDispositionArg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn board_command_defaults_to_tui() {
+        let cli = Cli::parse_from(["batty", "board"]);
+        match cli.command {
+            Command::Board { command } => assert!(command.is_none()),
+            other => panic!("expected board command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn board_list_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "board", "list"]);
+        match cli.command {
+            Command::Board {
+                command: Some(BoardCommand::List { status }),
+            } => assert_eq!(status, None),
+            other => panic!("expected board list command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn board_list_subcommand_parses_status_filter() {
+        let cli = Cli::parse_from(["batty", "board", "list", "--status", "review"]);
+        match cli.command {
+            Command::Board {
+                command: Some(BoardCommand::List { status }),
+            } => assert_eq!(status.as_deref(), Some("review")),
+            other => panic!("expected board list command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn board_summary_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "board", "summary"]);
+        match cli.command {
+            Command::Board {
+                command: Some(BoardCommand::Summary),
+            } => {}
+            other => panic!("expected board summary command, got {other:?}"),
+        }
+    }
 
     #[test]
     fn init_subcommand_defaults_to_simple() {
