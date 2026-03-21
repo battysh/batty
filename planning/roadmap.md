@@ -176,6 +176,62 @@ Reusable team configurations for cross-project learning.
 
 ---
 
+## Operational Hardening (Done)
+
+Targeted reliability fixes based on dogfooding observations. Daemon tracing, resume logging, diagnostics, prompt refresh, test deflaking, pipeline starvation detection.
+
+**Result:** 8 tasks shipped across 2 waves. `batty doctor` diagnostics, daemon log rotation, structured resume logging, refreshed prompt templates, deflaked timing-sensitive tests, pipeline starvation detection. Build green: 668 tests passing.
+
+---
+
+## Hardened Runtime (Current)
+
+Make the system reliably complete multi-hour runs without human intervention. Addresses the failure modes observed during dogfooding: silent shell-out failures, unreliable message delivery, stale worktrees, and agent context exhaustion.
+
+**Architectural concern:** `daemon.rs` has grown to 9249 lines. Wave 1's command infrastructure extraction is the natural opportunity to decompose it — the typed git and board layers should live in dedicated modules, pulling substantial code out of daemon.rs.
+
+### Wave 1: Command Infrastructure (T-301, T-302, T-303)
+
+Wrap the raw shell-outs to git and kanban-md in a structured command layer with typed errors and retry.
+
+- **Typed git command layer** — replace scattered `Command::new("git")` calls with a structured interface that captures stderr, classifies errors (transient vs permanent), and returns typed results. Cover the ~8 git call patterns used across daemon, task loop, merge, and worktree modules. (`T-301`)
+- **Typed board command layer** — same treatment for kanban-md shell-outs: structured invocation, typed errors, stderr capture. Board reads, writes, and queries all flow through this layer. (`T-302`)
+- **Transient failure retry** — add configurable retry with backoff for transient errors (lock contention, network blips on git fetch). No retry on permanent errors (bad ref, permission denied). (`T-303`)
+
+**Exit:** All shell-outs to git and kanban-md flow through typed command layers. Transient failures retry automatically. Permanent failures surface structured error messages.
+
+### Wave 2: Delivery Reliability (T-304, T-305, T-306)
+
+Ensure messages actually reach agents and the board reflects reality.
+
+- **Message delivery confirmation** — after paste-buffer injection, sample the target pane output to verify the message appeared. Flag delivery failures to the daemon for retry. (`T-304`)
+- **Triage counter fix** — delivered messages that can no longer be acked cause phantom triage alerts. Fix the stale-message accounting so triage count reflects only actionable items. (`T-305`)
+- **Pre-assignment worktree health check** — before assigning a task, validate the target worktree is clean, on the correct base branch, and not mid-operation. Refuse assignment with a diagnostic message if unhealthy. (`T-306`)
+
+**Exit:** Message delivery has confirmation. Triage counter is accurate. Worktree problems are caught before assignment, not after.
+
+### Wave 3: Agent Lifecycle (T-307, T-308, T-309)
+
+Handle agent failures gracefully instead of leaving tasks stuck.
+
+- **Context exhaustion detection** — detect when an agent stops producing output or produces degraded output (repeated errors, empty responses) while marked as working. Surface this as a distinct agent state. (`T-307`)
+- **Agent restart with context re-injection** — when an agent is detected as exhausted or crashed, restart it with the original task prompt plus a summary of work completed so far (branch state, last commit, test results). (`T-308`)
+- **Stuck task detection** — if a task has been in-progress for longer than a configurable threshold with no commits or status changes, flag it to the manager as potentially stuck. (`T-309`)
+
+**Exit:** Context exhaustion is detected and surfaced. Stuck tasks are flagged automatically. Agent restart preserves enough context to continue work.
+
+### Wave 4: Board Integrity (T-310, T-311, T-312)
+
+Keep board state consistent with the actual state of the world.
+
+- **Board-git consistency check** — `batty doctor` extension that cross-references board task state with actual branch/worktree state. Detects: tasks marked in-progress with no active agent, done tasks with unmerged branches, claimed tasks with no worktree. (`T-310`)
+- **Orphan cleanup** — detect and report branches/worktrees that don't correspond to any active board task. Provide a `batty doctor --fix` option for safe cleanup with confirmation. (`T-311`)
+- **Auto-unblock stale tasks** — tasks blocked on dependencies that are already done (but whose board state wasn't updated) get automatically unblocked by the daemon. (`T-312`)
+
+**Exit:** Board state is validated against git/worktree reality. Orphaned resources are detected. Stale blocked-on references are resolved automatically.
+
+---
+
 ## Tech Stack
 
 | Layer | Choice |

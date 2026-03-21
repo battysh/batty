@@ -234,6 +234,7 @@ impl SessionWatcher {
     }
 
     fn poll_tracker(&mut self) -> Result<TrackerState> {
+        let current_state = self.state;
         let Some(tracker) = self.tracker.as_mut() else {
             return Ok(TrackerState::Unknown);
         };
@@ -259,11 +260,24 @@ impl SessionWatcher {
                     return Ok(TrackerState::Unknown);
                 }
 
-                if poll_codex_session_file(&session_file, &mut codex.offset)? {
-                    Ok(TrackerState::Completed)
-                } else {
-                    Ok(TrackerState::Unknown)
+                let state = poll_codex_session_file(&session_file, &mut codex.offset)?;
+
+                // When idle with no new events, check if a newer session file
+                // appeared (agent started a new task). Re-discover so the
+                // tracker picks up the latest session.
+                if state == TrackerState::Unknown && current_state == WatcherState::Idle {
+                    if let Some(latest) =
+                        discover_codex_session_file(&codex.sessions_root, &codex.cwd)?
+                    {
+                        if latest != session_file {
+                            codex.session_file = Some(latest.clone());
+                            codex.offset = 0;
+                            return poll_codex_session_file(&latest, &mut codex.offset);
+                        }
+                    }
                 }
+
+                Ok(state)
             }
             SessionTracker::Claude(claude) => poll_claude_session(claude),
         }
@@ -603,7 +617,7 @@ fn session_file_cwd(path: &Path) -> Result<Option<std::ffi::OsString>> {
     Ok(None)
 }
 
-fn poll_codex_session_file(path: &Path, offset: &mut u64) -> Result<bool> {
+fn poll_codex_session_file(path: &Path, offset: &mut u64) -> Result<TrackerState> {
     let file_len = fs::metadata(path)?.len();
     if file_len < *offset {
         *offset = 0;
@@ -614,6 +628,7 @@ fn poll_codex_session_file(path: &Path, offset: &mut u64) -> Result<bool> {
     reader.seek(SeekFrom::Start(*offset))?;
 
     let mut completed = false;
+    let mut had_new_events = false;
     loop {
         let line_start = reader.stream_position()?;
         let mut line = String::new();
@@ -625,6 +640,8 @@ fn poll_codex_session_file(path: &Path, offset: &mut u64) -> Result<bool> {
             reader.seek(SeekFrom::Start(line_start))?;
             break;
         }
+
+        had_new_events = true;
 
         if let Ok(entry) = serde_json::from_str::<Value>(&line) {
             if entry.get("type").and_then(Value::as_str) == Some("event_msg")
@@ -641,7 +658,13 @@ fn poll_codex_session_file(path: &Path, offset: &mut u64) -> Result<bool> {
         *offset = reader.stream_position()?;
     }
 
-    Ok(completed)
+    if completed {
+        Ok(TrackerState::Completed)
+    } else if had_new_events {
+        Ok(TrackerState::Active)
+    } else {
+        Ok(TrackerState::Unknown)
+    }
 }
 
 fn poll_claude_session(tracker: &mut ClaudeSessionTracker) -> Result<TrackerState> {
@@ -1271,7 +1294,11 @@ mod tests {
         handle.flush().unwrap();
 
         let mut offset = 0;
-        assert!(!poll_codex_session_file(&session_file, &mut offset).unwrap());
+        // session_meta is a new event but not task_complete → Active
+        assert_eq!(
+            poll_codex_session_file(&session_file, &mut offset).unwrap(),
+            TrackerState::Active
+        );
 
         writeln!(
             handle,
@@ -1280,8 +1307,15 @@ mod tests {
         .unwrap();
         handle.flush().unwrap();
 
-        assert!(poll_codex_session_file(&session_file, &mut offset).unwrap());
-        assert!(!poll_codex_session_file(&session_file, &mut offset).unwrap());
+        assert_eq!(
+            poll_codex_session_file(&session_file, &mut offset).unwrap(),
+            TrackerState::Completed
+        );
+        // No new events → Unknown
+        assert_eq!(
+            poll_codex_session_file(&session_file, &mut offset).unwrap(),
+            TrackerState::Unknown
+        );
     }
 
     #[test]
@@ -1323,9 +1357,11 @@ mod tests {
             }
         }
 
-        assert!(
-            !poll_codex_session_file(tracker.session_file.as_ref().unwrap(), &mut tracker.offset)
-                .unwrap()
+        // After binding at EOF, no new events → Unknown
+        assert_eq!(
+            poll_codex_session_file(tracker.session_file.as_ref().unwrap(), &mut tracker.offset)
+                .unwrap(),
+            TrackerState::Unknown
         );
 
         let mut handle = std::fs::OpenOptions::new()
@@ -1339,9 +1375,10 @@ mod tests {
         .unwrap();
         handle.flush().unwrap();
 
-        assert!(
+        assert_eq!(
             poll_codex_session_file(tracker.session_file.as_ref().unwrap(), &mut tracker.offset)
-                .unwrap()
+                .unwrap(),
+            TrackerState::Completed
         );
     }
 
