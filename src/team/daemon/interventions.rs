@@ -1483,9 +1483,11 @@ fn review_task_intervention_signature(tasks: &[&crate::task::Task]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::team::config::WorkflowMode;
     use crate::team::harness::{TestHarness, architect_member, engineer_member, manager_member};
     use crate::team::inbox::{self, InboxMessage};
 
@@ -1501,6 +1503,12 @@ mod tests {
 
     fn delivered_result(from: &str, body: &str) -> InboxMessage {
         let mut message = InboxMessage::new_send(from, "lead", body);
+        message.timestamp = super::super::now_unix();
+        message
+    }
+
+    fn delivered_result_for(from: &str, to: &str, body: &str) -> InboxMessage {
+        let mut message = InboxMessage::new_send(from, to, body);
         message.timestamp = super::super::now_unix();
         message
     }
@@ -1586,6 +1594,43 @@ mod tests {
                         + 1,
                 ),
         );
+    }
+
+    fn set_exact_cooldown_boundary(daemon: &mut TeamDaemon, key: &str) {
+        daemon.intervention_cooldowns.insert(
+            key.to_string(),
+            Instant::now()
+                - Duration::from_secs(
+                    daemon
+                        .config
+                        .team_config
+                        .automation
+                        .intervention_cooldown_secs,
+                ),
+        );
+    }
+
+    fn run_intervention_cycle(daemon: &mut TeamDaemon) {
+        daemon.maybe_intervene_triage_backlog().unwrap();
+        daemon.maybe_intervene_owned_tasks().unwrap();
+        daemon.maybe_intervene_review_backlog().unwrap();
+        daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+        daemon.maybe_intervene_architect_utilization().unwrap();
+    }
+
+    fn enable_orchestrator_logging(daemon: &mut TeamDaemon) {
+        daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+        daemon.config.team_config.orchestrator_pane = true;
+    }
+
+    fn assert_log_contains_in_order(log: &str, fragments: &[&str]) {
+        let mut offset = 0;
+        for fragment in fragments {
+            let next = log[offset..].find(fragment).unwrap_or_else(|| {
+                panic!("log never contained `{fragment}` after offset {offset}")
+            });
+            offset += next + fragment.len();
+        }
     }
 
     #[test]
@@ -2142,6 +2187,233 @@ mod tests {
         let pending = harness.pending_inbox_messages("architect").unwrap();
         assert_eq!(pending.len(), 1);
         assert!(pending[0].body.contains("#193 (todo) open-task-2"));
+    }
+
+    #[test]
+    fn multi_intervention_cycle_fires_independent_recoveries_in_strict_order() {
+        let harness = TestHarness::new()
+            .with_member(architect_member("architect"))
+            .with_member(manager_member("lead-triage", Some("architect")))
+            .with_member(manager_member("lead-review", Some("architect")))
+            .with_member(manager_member("lead-dispatch", Some("architect")))
+            .with_member(engineer_member("eng-triage", Some("lead-triage"), false))
+            .with_member(engineer_member("eng-owned", Some("lead-triage"), false))
+            .with_member(engineer_member("eng-review", Some("lead-review"), false))
+            .with_member(engineer_member("eng-active", Some("lead-dispatch"), false))
+            .with_member(engineer_member("eng-free", Some("lead-dispatch"), false))
+            .with_member_state("architect", MemberState::Idle)
+            .with_member_state("lead-triage", MemberState::Idle)
+            .with_member_state("lead-review", MemberState::Idle)
+            .with_member_state("lead-dispatch", MemberState::Idle)
+            .with_member_state("eng-owned", MemberState::Idle)
+            .with_member_state("eng-triage", MemberState::Idle)
+            .with_member_state("eng-review", MemberState::Idle)
+            .with_member_state("eng-active", MemberState::Idle)
+            .with_member_state("eng-free", MemberState::Idle)
+            .with_pane("architect", "%999997")
+            .with_pane("lead-triage", "%999998")
+            .with_pane("lead-review", "%999999")
+            .with_pane("lead-dispatch", "%999996")
+            .with_pane("eng-owned", "%999995")
+            .with_inbox_message(
+                "lead-triage",
+                delivered_result_for("eng-triage", "lead-triage", "done"),
+                true,
+            )
+            .with_board_task(191, "owned-task", "in-progress", Some("eng-owned"))
+            .with_board_task(192, "review-task", "review", Some("eng-review"))
+            .with_board_task(193, "dispatch-task", "in-progress", Some("eng-active"))
+            .with_board_task(194, "open-task", "todo", None);
+        let mut daemon = harness.build_daemon().unwrap();
+        enable_orchestrator_logging(&mut daemon);
+
+        enter_idle_epoch(&mut daemon, "architect");
+        enter_idle_epoch(&mut daemon, "lead-triage");
+        enter_idle_epoch(&mut daemon, "lead-review");
+        enter_idle_epoch(&mut daemon, "lead-dispatch");
+        enter_idle_epoch(&mut daemon, "eng-owned");
+        run_intervention_cycle(&mut daemon);
+
+        assert_eq!(
+            harness.pending_inbox_messages("lead-triage").unwrap().len(),
+            1
+        );
+        assert_eq!(
+            harness.pending_inbox_messages("eng-owned").unwrap().len(),
+            1
+        );
+        assert_eq!(
+            harness.pending_inbox_messages("lead-review").unwrap().len(),
+            1
+        );
+        assert_eq!(
+            harness
+                .pending_inbox_messages("lead-dispatch")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            harness.pending_inbox_messages("architect").unwrap().len(),
+            1
+        );
+
+        let log = fs::read_to_string(
+            harness
+                .project_root()
+                .join(".batty")
+                .join("orchestrator.log"),
+        )
+        .unwrap();
+        assert_log_contains_in_order(
+            &log,
+            &[
+                "recovery: triage intervention for lead-triage",
+                "recovery: owned-task intervention for eng-owned",
+                "recovery: review intervention for lead-review",
+                "recovery: dispatch-gap intervention for lead-dispatch",
+                "recovery: utilization intervention for architect",
+            ],
+        );
+    }
+
+    #[test]
+    fn multi_intervention_cycle_pending_inbox_only_suppresses_targeted_member() {
+        let harness = TestHarness::new()
+            .with_member(architect_member("architect"))
+            .with_member(manager_member("lead-triage", Some("architect")))
+            .with_member(manager_member("lead-review", Some("architect")))
+            .with_member(manager_member("lead-dispatch", Some("architect")))
+            .with_member(engineer_member("eng-triage", Some("lead-triage"), false))
+            .with_member(engineer_member("eng-owned", Some("lead-triage"), false))
+            .with_member(engineer_member("eng-review", Some("lead-review"), false))
+            .with_member(engineer_member("eng-active", Some("lead-dispatch"), false))
+            .with_member(engineer_member("eng-free", Some("lead-dispatch"), false))
+            .with_member_state("architect", MemberState::Idle)
+            .with_member_state("lead-triage", MemberState::Idle)
+            .with_member_state("lead-review", MemberState::Idle)
+            .with_member_state("lead-dispatch", MemberState::Idle)
+            .with_member_state("eng-owned", MemberState::Idle)
+            .with_member_state("eng-triage", MemberState::Idle)
+            .with_member_state("eng-review", MemberState::Idle)
+            .with_member_state("eng-active", MemberState::Idle)
+            .with_member_state("eng-free", MemberState::Idle)
+            .with_pane("architect", "%999997")
+            .with_pane("lead-triage", "%999998")
+            .with_pane("lead-review", "%999999")
+            .with_pane("lead-dispatch", "%999996")
+            .with_pane("eng-owned", "%999995")
+            .with_inbox_message(
+                "lead-triage",
+                InboxMessage::new_send("architect", "lead-triage", "Handle this first."),
+                false,
+            )
+            .with_inbox_message(
+                "lead-triage",
+                delivered_result_for("eng-triage", "lead-triage", "done"),
+                true,
+            )
+            .with_board_task(191, "owned-task", "in-progress", Some("eng-owned"))
+            .with_board_task(192, "review-task", "review", Some("eng-review"))
+            .with_board_task(193, "dispatch-task", "in-progress", Some("eng-active"))
+            .with_board_task(194, "open-task", "todo", None);
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "architect");
+        enter_idle_epoch(&mut daemon, "lead-triage");
+        enter_idle_epoch(&mut daemon, "lead-review");
+        enter_idle_epoch(&mut daemon, "lead-dispatch");
+        enter_idle_epoch(&mut daemon, "eng-owned");
+        run_intervention_cycle(&mut daemon);
+
+        let triage_pending = harness.pending_inbox_messages("lead-triage").unwrap();
+        assert_eq!(triage_pending.len(), 1);
+        assert_eq!(triage_pending[0].from, "architect");
+        assert!(daemon.triage_interventions.get("lead-triage").is_none());
+        assert_eq!(
+            harness.pending_inbox_messages("eng-owned").unwrap().len(),
+            1
+        );
+        assert_eq!(
+            harness.pending_inbox_messages("lead-review").unwrap().len(),
+            1
+        );
+        assert_eq!(
+            harness
+                .pending_inbox_messages("lead-dispatch")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            harness.pending_inbox_messages("architect").unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn multi_intervention_cycle_exact_owned_cooldown_boundary_still_allows_parallel_refire() {
+        let harness = TestHarness::new()
+            .with_member(architect_member("architect"))
+            .with_member(manager_member("lead", Some("architect")))
+            .with_member(manager_member("lead-review", Some("architect")))
+            .with_member(engineer_member("eng-triage", Some("lead"), false))
+            .with_member(engineer_member("eng-1", Some("lead"), false))
+            .with_member(engineer_member("eng-review", Some("lead-review"), false))
+            .with_member_state("lead", MemberState::Idle)
+            .with_member_state("lead-review", MemberState::Idle)
+            .with_member_state("eng-triage", MemberState::Idle)
+            .with_member_state("eng-1", MemberState::Idle)
+            .with_member_state("eng-review", MemberState::Idle)
+            .with_pane("lead", "%999999")
+            .with_pane("lead-review", "%999998")
+            .with_pane("eng-1", "%999997")
+            .with_inbox_message("lead", delivered_result("eng-triage", "done"), true)
+            .with_board_task(191, "owned-task", "in-progress", Some("eng-1"))
+            .with_board_task(192, "review-task", "review", Some("eng-review"));
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "lead");
+        enter_idle_epoch(&mut daemon, "lead-review");
+        enter_idle_epoch(&mut daemon, "eng-1");
+        daemon.maybe_intervene_triage_backlog().unwrap();
+        daemon.maybe_intervene_owned_tasks().unwrap();
+        daemon.maybe_intervene_review_backlog().unwrap();
+        mark_pending_delivered(&harness, "lead");
+        mark_pending_delivered(&harness, "lead-review");
+        mark_pending_delivered(&harness, "eng-1");
+
+        std::fs::write(
+            harness.board_tasks_dir().join("193-second-task.md"),
+            "---\nid: 193\ntitle: second-task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\n---\n\nTask description.\n",
+        )
+        .unwrap();
+
+        enter_idle_epoch(&mut daemon, "lead");
+        enter_idle_epoch(&mut daemon, "lead-review");
+        enter_idle_epoch(&mut daemon, "eng-1");
+        expire_triage_cooldown(&mut daemon, "lead");
+        set_exact_cooldown_boundary(&mut daemon, "eng-1");
+        daemon.maybe_intervene_triage_backlog().unwrap();
+        daemon.maybe_intervene_owned_tasks().unwrap();
+        daemon.maybe_intervene_review_backlog().unwrap();
+
+        assert_eq!(daemon.triage_interventions.get("lead"), Some(&2));
+        assert_eq!(
+            daemon
+                .owned_task_interventions
+                .get("eng-1")
+                .map(|state| state.idle_epoch),
+            Some(2)
+        );
+        assert_eq!(harness.pending_inbox_messages("lead").unwrap().len(), 1);
+        assert_eq!(harness.pending_inbox_messages("eng-1").unwrap().len(), 1);
+        assert!(
+            harness
+                .pending_inbox_messages("lead-review")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
