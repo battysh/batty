@@ -66,6 +66,8 @@ const INBOX_BODY_PREVIEW_CHARS: usize = 140;
 const TRIAGE_RESULT_FRESHNESS_SECONDS: u64 = 300;
 const LOG_ROTATION_BYTES: u64 = 5 * 1024 * 1024;
 const LOG_ROTATION_KEEP: usize = 3;
+const DAEMON_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
+const DAEMON_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -637,25 +639,114 @@ fn spawn_daemon(project_root: &Path, resume: bool) -> Result<u32> {
 }
 
 /// Kill the daemon process if it's running.
-fn kill_daemon(project_root: &Path) {
+fn read_daemon_pid(project_root: &Path) -> Option<u32> {
     let pid_path = daemon_pid_path(project_root);
-    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
-        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            #[cfg(unix)]
-            {
-                // Send SIGTERM to the daemon process
-                unsafe {
-                    libc::kill(pid as libc::pid_t, libc::SIGTERM);
-                }
-                info!(pid, "sent SIGTERM to daemon");
-            }
-            #[cfg(not(unix))]
-            {
-                warn!(pid, "cannot kill daemon on this platform");
-            }
-        }
-        let _ = std::fs::remove_file(&pid_path);
+    let pid_str = std::fs::read_to_string(pid_path).ok()?;
+    pid_str.trim().parse::<u32>().ok()
+}
+
+#[cfg(unix)]
+fn send_unix_signal(pid: u32, signal: libc::c_int) -> bool {
+    let status = unsafe { libc::kill(pid as libc::pid_t, signal) };
+    if status == 0 {
+        true
+    } else {
+        let error = std::io::Error::last_os_error();
+        warn!(pid, signal, error = %error, "failed to signal daemon");
+        false
     }
+}
+
+#[cfg(not(unix))]
+fn send_unix_signal(_pid: u32, _signal: i32) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn daemon_process_exists(pid: u32) -> bool {
+    let status = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if status == 0 {
+        true
+    } else {
+        !matches!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        )
+    }
+}
+
+#[cfg(not(unix))]
+fn daemon_process_exists(_pid: u32) -> bool {
+    false
+}
+
+fn wait_for_graceful_daemon_shutdown(
+    project_root: &Path,
+    pid: u32,
+    previous_saved_at: Option<u64>,
+    timeout: Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let clean_snapshot = daemon_state_indicates_clean_shutdown(project_root, previous_saved_at);
+        if clean_snapshot {
+            let _ = std::fs::remove_file(daemon_pid_path(project_root));
+            return true;
+        }
+        let running = daemon_process_exists(pid);
+        if !running {
+            let _ = std::fs::remove_file(daemon_pid_path(project_root));
+            return false;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(DAEMON_SHUTDOWN_POLL_INTERVAL);
+    }
+}
+
+fn request_graceful_daemon_shutdown(project_root: &Path, timeout: Duration) -> bool {
+    let Some(pid) = read_daemon_pid(project_root) else {
+        return true;
+    };
+
+    let previous_saved_at = read_daemon_state_probe(project_root).and_then(|state| state.saved_at);
+    #[cfg(unix)]
+    {
+        if !send_unix_signal(pid, libc::SIGTERM) {
+            return false;
+        }
+        info!(pid, "sent SIGTERM to daemon");
+    }
+    #[cfg(not(unix))]
+    {
+        warn!(
+            pid,
+            "graceful daemon shutdown is not supported on this platform"
+        );
+        return false;
+    }
+
+    wait_for_graceful_daemon_shutdown(project_root, pid, previous_saved_at, timeout)
+}
+
+fn force_kill_daemon(project_root: &Path) {
+    let Some(pid) = read_daemon_pid(project_root) else {
+        return;
+    };
+
+    #[cfg(unix)]
+    {
+        if send_unix_signal(pid, libc::SIGKILL) {
+            info!(pid, "sent SIGKILL to daemon");
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        warn!(pid, "cannot force-kill daemon on this platform");
+    }
+
+    let _ = std::fs::remove_file(daemon_pid_path(project_root));
 }
 
 /// Start a team session: load config, resolve hierarchy, create tmux layout,
@@ -846,25 +937,48 @@ fn resume_marker_path(project_root: &Path) -> PathBuf {
 struct DaemonStateResumeProbe {
     #[serde(default)]
     clean_shutdown: bool,
+    #[serde(default)]
+    saved_at: Option<u64>,
 }
 
-fn should_resume_from_daemon_state(project_root: &Path) -> bool {
+fn read_daemon_state_probe(project_root: &Path) -> Option<DaemonStateResumeProbe> {
     let path = daemon_state_path(project_root);
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return false;
-    };
+    let content = std::fs::read_to_string(&path).ok()?;
 
     match serde_json::from_str::<DaemonStateResumeProbe>(&content) {
-        Ok(state) => !state.clean_shutdown,
+        Ok(state) => Some(state),
         Err(error) => {
             warn!(
                 path = %path.display(),
                 error = %error,
                 "failed to parse daemon state while probing for resume"
             );
-            false
+            None
         }
     }
+}
+
+fn daemon_state_indicates_clean_shutdown(
+    project_root: &Path,
+    previous_saved_at: Option<u64>,
+) -> bool {
+    let Some(state) = read_daemon_state_probe(project_root) else {
+        return false;
+    };
+
+    state.clean_shutdown
+        && match (state.saved_at, previous_saved_at) {
+            (Some(saved_at), Some(previous_saved_at)) => saved_at > previous_saved_at,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => true,
+        }
+}
+
+fn should_resume_from_daemon_state(project_root: &Path) -> bool {
+    read_daemon_state_probe(project_root)
+        .map(|state| !state.clean_shutdown)
+        .unwrap_or(false)
 }
 
 /// Path to the pause marker file. Presence pauses nudges and standups.
@@ -906,8 +1020,11 @@ pub fn stop_team(project_root: &Path) -> Result<()> {
     }
     std::fs::write(&marker, "").ok();
 
-    // Kill the daemon process first
-    kill_daemon(project_root);
+    // Ask the daemon to persist a final clean snapshot before the tmux session is torn down.
+    if !request_graceful_daemon_shutdown(project_root, DAEMON_SHUTDOWN_GRACE_PERIOD) {
+        warn!("daemon did not stop gracefully; forcing shutdown");
+        force_kill_daemon(project_root);
+    }
 
     let config_path = team_config_path(project_root);
     let primary_session = if config_path.exists() {
@@ -2033,6 +2150,73 @@ mod tests {
         std::fs::write(&path, r#"{"clean_shutdown":true}"#).unwrap();
 
         assert!(!should_resume_from_daemon_state(tmp.path()));
+    }
+
+    #[cfg(unix)]
+    fn write_daemon_script(script_path: &Path, body: &str) {
+        std::fs::write(script_path, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn graceful_daemon_shutdown_waits_for_clean_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = daemon_state_path(tmp.path());
+        let state_dir = state_path.parent().unwrap();
+        std::fs::create_dir_all(state_dir).unwrap();
+        std::fs::write(&state_path, r#"{"clean_shutdown":false,"saved_at":1}"#).unwrap();
+
+        let state_path_for_thread = state_path.clone();
+        let state_dir_for_thread = state_dir.to_path_buf();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            std::fs::create_dir_all(&state_dir_for_thread).unwrap();
+            std::fs::write(
+                &state_path_for_thread,
+                r#"{"clean_shutdown":true,"saved_at":2}"#,
+            )
+            .unwrap();
+        });
+
+        assert!(wait_for_graceful_daemon_shutdown(
+            tmp.path(),
+            std::process::id(),
+            Some(1),
+            Duration::from_secs(2)
+        ));
+
+        writer.join().unwrap();
+        assert!(daemon_state_indicates_clean_shutdown(tmp.path(), Some(1)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn graceful_daemon_shutdown_times_out_before_force_kill_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script_path = tmp.path().join("stubborn-daemon.sh");
+        write_daemon_script(
+            &script_path,
+            "#!/bin/sh\ntrap '' TERM\nwhile :; do :; done\n",
+        );
+
+        let mut child = std::process::Command::new(&script_path).spawn().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+        std::fs::write(daemon_pid_path(tmp.path()), child.id().to_string()).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+
+        assert!(!request_graceful_daemon_shutdown(
+            tmp.path(),
+            Duration::from_millis(300)
+        ));
+        assert!(daemon_process_exists(child.id()));
+
+        force_kill_daemon(tmp.path());
+        let _ = child.wait().unwrap();
+        assert!(!daemon_pid_path(tmp.path()).exists());
     }
 
     #[test]
