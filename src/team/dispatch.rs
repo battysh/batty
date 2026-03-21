@@ -67,7 +67,7 @@ impl TeamDaemon {
             }
         }
 
-        self.ensure_assignment_pane_cwd(engineer, &pane_id, &work_dir)?;
+        self.ensure_member_pane_cwd(engineer, &pane_id, &work_dir)?;
 
         let role_context = member
             .as_ref()
@@ -107,7 +107,7 @@ impl TeamDaemon {
         })
     }
 
-    pub(super) fn ensure_assignment_pane_cwd(
+    pub(super) fn ensure_member_pane_cwd(
         &mut self,
         member_name: &str,
         pane_id: &str,
@@ -124,7 +124,7 @@ impl TeamDaemon {
             pane = %pane_id,
             current = %current_path.display(),
             expected = %expected_dir.display(),
-            "correcting pane cwd before assignment"
+            "correcting pane cwd before agent interaction"
         );
 
         let command = format!(

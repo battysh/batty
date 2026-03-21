@@ -3724,6 +3724,230 @@ mod tests {
 
     #[test]
     #[serial]
+    fn spawn_all_agents_corrects_mismatched_cwd_before_launch() {
+        let session = format!("batty-test-spawn-cwd-correct-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+        let wrong_dir = tmp.path().join("wrong");
+        std::fs::create_dir_all(&wrong_dir).unwrap();
+
+        let member_name = "architect-cwd";
+        let (fake_bin, fake_log) = setup_fake_claude(&tmp, member_name);
+
+        crate::tmux::create_session(&session, "bash", &[], wrong_dir.to_string_lossy().as_ref())
+            .unwrap();
+        let pane_id = crate::tmux::pane_id(&session).unwrap();
+
+        let member = MemberInstance {
+            name: member_name.to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                roles: Vec::new(),
+            },
+            session: session.clone(),
+            members: vec![member],
+            pane_map: HashMap::from([(member_name.to_string(), pane_id.clone())]),
+        })
+        .unwrap();
+
+        daemon.spawn_all_agents(false).unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+
+        let log = (0..20)
+            .find_map(|_| {
+                let content = match std::fs::read_to_string(&fake_log) {
+                    Ok(content) => content,
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_millis(100));
+                        return None;
+                    }
+                };
+                if content.contains("--append-system-prompt") {
+                    Some(content)
+                } else {
+                    std::thread::sleep(Duration::from_millis(100));
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "fake claude log was not written by spawned member at {}",
+                    fake_log.display()
+                )
+            });
+        assert!(log.contains("--append-system-prompt"));
+
+        let current = crate::tmux::pane_current_path(&pane_id).unwrap();
+        assert_eq!(
+            normalized_assignment_dir(Path::new(&current)),
+            normalized_assignment_dir(tmp.path())
+        );
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        let corrected = events
+            .iter()
+            .find(|event| event.event == "cwd_corrected")
+            .expect("expected cwd_corrected event during spawn");
+        assert_eq!(corrected.role.as_deref(), Some(member_name));
+        assert_eq!(
+            corrected.reason.as_deref(),
+            Some(tmp.path().to_string_lossy().as_ref())
+        );
+
+        crate::tmux::kill_session(&session).unwrap();
+        let _ = std::fs::remove_dir_all(&fake_bin);
+    }
+
+    #[test]
+    #[serial]
+    fn restart_member_corrects_mismatched_cwd_after_respawn() {
+        let session = format!("batty-test-restart-cwd-correct-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+        let wrong_dir = tmp.path().join("wrong");
+        std::fs::create_dir_all(&wrong_dir).unwrap();
+
+        let member_name = "architect-restart-cwd";
+        let (fake_bin, fake_log) = setup_fake_claude(&tmp, member_name);
+
+        crate::tmux::create_session(&session, "bash", &[], wrong_dir.to_string_lossy().as_ref())
+            .unwrap();
+        crate::tmux::create_window(
+            &session,
+            "keeper",
+            "sleep",
+            &["30".to_string()],
+            wrong_dir.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        let pane_id = crate::tmux::pane_id(&session).unwrap();
+        Command::new("tmux")
+            .args(["set-option", "-p", "-t", &pane_id, "remain-on-exit", "on"])
+            .output()
+            .unwrap();
+
+        let member = MemberInstance {
+            name: member_name.to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                roles: Vec::new(),
+            },
+            session: session.clone(),
+            members: vec![member],
+            pane_map: HashMap::from([(member_name.to_string(), pane_id.clone())]),
+        })
+        .unwrap();
+
+        crate::tmux::send_keys(&pane_id, "exit", true).unwrap();
+        for _ in 0..5 {
+            if crate::tmux::pane_dead(&pane_id).unwrap_or(false) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        assert!(crate::tmux::pane_dead(&pane_id).unwrap());
+
+        daemon.restart_member(member_name).unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+
+        let log = (0..20)
+            .find_map(|_| {
+                let content = match std::fs::read_to_string(&fake_log) {
+                    Ok(content) => content,
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_millis(100));
+                        return None;
+                    }
+                };
+                if content.contains("--append-system-prompt") {
+                    Some(content)
+                } else {
+                    std::thread::sleep(Duration::from_millis(100));
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "fake claude log was not written by restarted member at {}",
+                    fake_log.display()
+                )
+            });
+        assert!(log.contains("--append-system-prompt"));
+
+        let current = crate::tmux::pane_current_path(&pane_id).unwrap();
+        assert_eq!(
+            normalized_assignment_dir(Path::new(&current)),
+            normalized_assignment_dir(tmp.path())
+        );
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "pane_respawned" && event.role.as_deref() == Some(member_name)
+        }));
+        assert!(events.iter().any(|event| {
+            event.event == "cwd_corrected"
+                && event.role.as_deref() == Some(member_name)
+                && event.reason.as_deref() == Some(tmp.path().to_string_lossy().as_ref())
+        }));
+
+        crate::tmux::kill_session(&session).unwrap();
+        let _ = std::fs::remove_dir_all(&fake_bin);
+    }
+
+    #[test]
+    #[serial]
     fn agent_restart_relaunches_context_exhausted_member_with_task_context() {
         let session = "batty-test-agent-restart-context";
         let _ = crate::tmux::kill_session(session);
@@ -3860,6 +4084,111 @@ mod tests {
             event.event == "message_routed"
                 && event.from.as_deref() == Some("daemon")
                 && event.to.as_deref() == Some(member_name)
+        }));
+
+        crate::tmux::kill_session(session).unwrap();
+        let _ = std::fs::remove_dir_all(&fake_bin);
+    }
+
+    #[test]
+    #[serial]
+    fn context_exhaustion_relaunch_corrects_mismatched_cwd() {
+        let session = "batty-test-context-cwd-correct";
+        let _ = crate::tmux::kill_session(session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+        let wrong_dir = tmp.path().join("wrong");
+        std::fs::create_dir_all(&wrong_dir).unwrap();
+
+        let member_name = "eng-context-cwd";
+        let lead_name = "lead";
+        let (fake_bin, _fake_log) = setup_fake_claude(&tmp, member_name);
+
+        crate::tmux::create_session(session, "bash", &[], wrong_dir.to_string_lossy().as_ref())
+            .unwrap();
+        crate::tmux::create_window(
+            session,
+            "keeper",
+            "sleep",
+            &["30".to_string()],
+            wrong_dir.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        let pane_id = crate::tmux::pane_id(session).unwrap();
+        Command::new("tmux")
+            .args(["set-option", "-p", "-t", &pane_id, "remain-on-exit", "on"])
+            .output()
+            .unwrap();
+
+        let lead = MemberInstance {
+            name: lead_name.to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: member_name.to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some(lead_name.to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                roles: Vec::new(),
+            },
+            session: session.to_string(),
+            members: vec![lead, engineer],
+            pane_map: HashMap::from([(member_name.to_string(), pane_id.clone())]),
+        })
+        .unwrap();
+        daemon
+            .states
+            .insert(member_name.to_string(), MemberState::Working);
+        daemon.active_tasks.insert(member_name.to_string(), 191);
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, member_name).unwrap();
+        inbox::init_inbox(&root, lead_name).unwrap();
+        write_owned_task_file(tmp.path(), 191, "active-task", "in-progress", member_name);
+
+        daemon.handle_context_exhaustion(member_name).unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+
+        let current = crate::tmux::pane_current_path(&pane_id).unwrap();
+        assert_eq!(
+            normalized_assignment_dir(Path::new(&current)),
+            normalized_assignment_dir(tmp.path())
+        );
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "cwd_corrected"
+                && event.role.as_deref() == Some(member_name)
+                && event.reason.as_deref() == Some(tmp.path().to_string_lossy().as_ref())
         }));
 
         crate::tmux::kill_session(session).unwrap();
@@ -4205,7 +4534,7 @@ mod tests {
         .unwrap();
 
         daemon
-            .ensure_assignment_pane_cwd("eng-1", &pane_id, &expected_dir)
+            .ensure_member_pane_cwd("eng-1", &pane_id, &expected_dir)
             .unwrap();
 
         let current = crate::tmux::pane_current_path(&pane_id).unwrap();
@@ -4285,7 +4614,7 @@ mod tests {
         .unwrap();
 
         daemon
-            .ensure_assignment_pane_cwd("eng-1", &pane_id, &expected_dir)
+            .ensure_member_pane_cwd("eng-1", &pane_id, &expected_dir)
             .unwrap();
 
         let events = crate::team::events::read_events(
