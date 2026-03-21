@@ -501,104 +501,6 @@ impl TeamDaemon {
         Ok(())
     }
 
-    pub(super) fn poll_telegram(&mut self) -> Result<()> {
-        let Some(bot) = &mut self.telegram_bot else {
-            return Ok(());
-        };
-
-        let messages = match bot.poll_updates() {
-            Ok(msgs) => msgs,
-            Err(error) => {
-                debug!(error = %error, "telegram poll failed");
-                return Ok(());
-            }
-        };
-
-        if messages.is_empty() {
-            return Ok(());
-        }
-
-        let root = inbox::inboxes_root(&self.config.project_root);
-        let targets: Vec<String> = self
-            .config
-            .team_config
-            .roles
-            .iter()
-            .find(|role| role.role_type == RoleType::User)
-            .map(|role| role.talks_to.clone())
-            .unwrap_or_default();
-
-        for msg in messages {
-            info!(
-                from_user = msg.from_user_id,
-                text_len = msg.text.len(),
-                "telegram inbound"
-            );
-
-            for target in &targets {
-                let inbox_msg = inbox::InboxMessage::new_send("human", target, &msg.text);
-                if let Err(error) = inbox::deliver_to_inbox(&root, &inbox_msg) {
-                    warn!(to = %target, error = %error, "failed to deliver telegram message to inbox");
-                }
-            }
-
-            self.record_message_routed("human", "telegram");
-        }
-
-        Ok(())
-    }
-
-    pub(super) fn deliver_user_inbox(&mut self) -> Result<()> {
-        let root = inbox::inboxes_root(&self.config.project_root);
-        let user_roles: Vec<String> = self
-            .config
-            .team_config
-            .roles
-            .iter()
-            .filter(|role| role.role_type == RoleType::User)
-            .map(|role| role.name.clone())
-            .collect();
-
-        for user_name in &user_roles {
-            let messages = match inbox::pending_messages(&root, user_name) {
-                Ok(msgs) => msgs,
-                Err(error) => {
-                    debug!(user = %user_name, error = %error, "failed to read user inbox");
-                    continue;
-                }
-            };
-
-            if messages.is_empty() {
-                continue;
-            }
-
-            for msg in &messages {
-                info!(from = %msg.from, to = %user_name, id = %msg.id, "delivering to user channel");
-
-                let formatted = format!("--- Message from {} ---\n{}", msg.from, msg.body);
-                let send_result = match self.channels.get(user_name) {
-                    Some(channel) => channel.send(&formatted),
-                    None => {
-                        debug!(user = %user_name, "no channel for user role");
-                        break;
-                    }
-                };
-                if let Err(error) = send_result {
-                    warn!(to = %user_name, error = %error, "failed to send via channel");
-                    continue;
-                }
-
-                if let Err(error) = inbox::mark_delivered(&root, user_name, &msg.id) {
-                    warn!(user = %user_name, id = %msg.id, error = %error, "failed to mark delivered");
-                }
-
-                self.record_message_routed(&msg.from, user_name);
-            }
-        }
-
-        Ok(())
-    }
-
     fn resolve_role_name(&self, member_name: &str) -> String {
         if member_name == "human" || member_name == "daemon" {
             return member_name.to_string();
@@ -609,26 +511,6 @@ impl TeamDaemon {
             .find(|member| member.name == member_name)
             .map(|member| member.role_name.clone())
             .unwrap_or_else(|| member_name.to_string())
-    }
-
-    pub(super) fn automation_sender_for(&self, recipient: &str) -> String {
-        let recipient_member = self
-            .config
-            .members
-            .iter()
-            .find(|member| member.name == recipient);
-
-        if let Some(member) = recipient_member {
-            if let Some(parent) = &member.reports_to {
-                return parent.clone();
-            }
-        }
-
-        if let Some(sender) = &self.config.team_config.automation_sender {
-            return sender.clone();
-        }
-
-        "daemon".to_string()
     }
 }
 
