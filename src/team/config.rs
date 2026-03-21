@@ -27,7 +27,33 @@ pub struct TeamConfig {
     pub layout: Option<LayoutConfig>,
     #[serde(default)]
     pub workflow_policy: WorkflowPolicy,
+    #[serde(default)]
+    pub cost: CostConfig,
     pub roles: Vec<RoleDef>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CostConfig {
+    #[serde(default)]
+    pub models: HashMap<String, ModelPricing>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelPricing {
+    pub input_usd_per_mtok: f64,
+    #[serde(default)]
+    pub cached_input_usd_per_mtok: f64,
+    #[serde(default)]
+    pub cache_creation_input_usd_per_mtok: Option<f64>,
+    #[serde(default)]
+    pub cache_creation_5m_input_usd_per_mtok: Option<f64>,
+    #[serde(default)]
+    pub cache_creation_1h_input_usd_per_mtok: Option<f64>,
+    #[serde(default)]
+    pub cache_read_input_usd_per_mtok: f64,
+    pub output_usd_per_mtok: f64,
+    #[serde(default)]
+    pub reasoning_output_usd_per_mtok: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -578,9 +604,45 @@ roles:
         assert!(config.automation.failure_pattern_detection);
         assert!(config.automation.triage_interventions);
         assert_eq!(config.automation.intervention_idle_grace_secs, 60);
+        assert!(config.cost.models.is_empty());
         assert_eq!(config.roles[0].instances, 1);
         assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
         assert!(config.orchestrator_pane);
+    }
+
+    #[test]
+    fn parse_cost_config() {
+        let yaml = r#"
+name: test-team
+cost:
+  models:
+    gpt-5.4:
+      input_usd_per_mtok: 2.5
+      cached_input_usd_per_mtok: 0.25
+      output_usd_per_mtok: 15.0
+    claude-opus-4-6:
+      input_usd_per_mtok: 15.0
+      cache_creation_5m_input_usd_per_mtok: 18.75
+      cache_creation_1h_input_usd_per_mtok: 30.0
+      cache_read_input_usd_per_mtok: 1.5
+      output_usd_per_mtok: 75.0
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        let gpt = config.cost.models.get("gpt-5.4").unwrap();
+        assert_eq!(gpt.input_usd_per_mtok, 2.5);
+        assert_eq!(gpt.cached_input_usd_per_mtok, 0.25);
+        assert_eq!(gpt.output_usd_per_mtok, 15.0);
+
+        let claude = config.cost.models.get("claude-opus-4-6").unwrap();
+        assert_eq!(claude.input_usd_per_mtok, 15.0);
+        assert_eq!(claude.cache_creation_5m_input_usd_per_mtok, Some(18.75));
+        assert_eq!(claude.cache_creation_1h_input_usd_per_mtok, Some(30.0));
+        assert_eq!(claude.cache_read_input_usd_per_mtok, 1.5);
+        assert_eq!(claude.output_usd_per_mtok, 75.0);
     }
 
     #[test]

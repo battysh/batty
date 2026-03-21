@@ -11,6 +11,7 @@ pub mod capability;
 pub mod comms;
 pub mod completion;
 pub mod config;
+pub mod cost;
 pub mod daemon;
 pub mod delivery;
 pub mod doctor;

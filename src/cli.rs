@@ -158,6 +158,9 @@ pub enum Command {
     /// Estimate team load and show recent load history
     Load,
 
+    /// Estimate current run cost from agent session files
+    Cost,
+
     /// Dump diagnostic state from Batty state files
     Doctor {
         /// Remove orphan branches and worktrees after confirmation
@@ -639,6 +642,12 @@ mod tests {
     fn load_subcommand_parses() {
         let cli = Cli::parse_from(["batty", "load"]);
         assert!(matches!(cli.command, Command::Load));
+    }
+
+    #[test]
+    fn cost_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "cost"]);
+        assert!(matches!(cli.command, Command::Cost));
     }
 
     #[test]
