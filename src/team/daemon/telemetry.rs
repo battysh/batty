@@ -106,6 +106,11 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::task_unblocked(role, &task));
     }
 
+    pub(crate) fn record_performance_regression(&mut self, task: impl Into<String>, reason: &str) {
+        let task = task.into();
+        self.emit_event(TeamEvent::performance_regression(&task, reason));
+    }
+
     pub(crate) fn record_task_completed(&mut self, role: &str) {
         self.emit_event(TeamEvent::task_completed(role));
     }

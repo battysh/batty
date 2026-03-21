@@ -9,6 +9,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::artifact::read_test_timing_log;
 use super::config::{RoleType, TeamConfig};
 use super::git_cmd;
 use super::hierarchy::{self, MemberInstance};
@@ -126,6 +127,7 @@ pub fn build_report(project_root: &Path) -> Result<String> {
         build_resume_eligibility(project_root, team_config.as_ref(), &members, &launch_state);
     let worktrees = build_worktree_statuses(project_root, &members);
     let board_git_checks = build_board_git_checks(project_root);
+    let performance_checks = build_performance_checks(project_root);
     let log_sizes = vec![
         LogSize {
             name: "daemon.log",
@@ -144,6 +146,7 @@ pub fn build_report(project_root: &Path) -> Result<String> {
         &resume,
         &worktrees,
         &board_git_checks,
+        &performance_checks,
         &log_sizes,
     ))
 }
@@ -155,6 +158,7 @@ fn render_report(
     resume: &[ResumeEligibility],
     worktrees: &[WorktreeStatus],
     board_git_checks: &[CheckLine],
+    performance_checks: &[CheckLine],
     log_sizes: &[LogSize],
 ) -> String {
     let mut out = String::new();
@@ -263,6 +267,20 @@ fn render_report(
                 line.message
             ));
         }
+    }
+    out.push('\n');
+
+    out.push_str("== Performance Regression ==\n");
+    for line in performance_checks {
+        out.push_str(&format!(
+            "{}: {}\n",
+            match line.level {
+                CheckLevel::Pass => "PASS",
+                CheckLevel::Warn => "WARN",
+                CheckLevel::Fail => "FAIL",
+            },
+            line.message
+        ));
     }
     out.push('\n');
 
@@ -431,6 +449,53 @@ fn build_board_git_checks(project_root: &Path) -> Vec<CheckLine> {
     lines.extend(orphan_branch_checks(project_root, &active_targets));
     lines.extend(orphan_worktree_checks(project_root, &active_targets));
     lines
+}
+
+fn build_performance_checks(project_root: &Path) -> Vec<CheckLine> {
+    let log_path = project_root.join(".batty").join("test_timing.jsonl");
+    let records = match read_test_timing_log(&log_path) {
+        Ok(records) => records,
+        Err(error) => {
+            return vec![check_line(
+                CheckLevel::Fail,
+                format!("failed to read test timing history: {error:#}"),
+            )];
+        }
+    };
+
+    let Some(latest) = records.last() else {
+        return vec![check_line(
+            CheckLevel::Pass,
+            "no merge test timing history recorded yet",
+        )];
+    };
+
+    match latest.rolling_average_ms {
+        None => vec![check_line(
+            CheckLevel::Pass,
+            format!(
+                "merge timing history has {} samples; need 6 successful merges before regression detection activates",
+                records.len()
+            ),
+        )],
+        Some(rolling_average_ms) if latest.regression_detected => vec![check_line(
+            CheckLevel::Warn,
+            format!(
+                "latest merge test runtime regressed on task #{}: {} ms vs rolling 5-merge average {} ms ({}% slower)",
+                latest.task_id,
+                latest.duration_ms,
+                rolling_average_ms,
+                latest.regression_pct.unwrap_or_default()
+            ),
+        )],
+        Some(rolling_average_ms) => vec![check_line(
+            CheckLevel::Pass,
+            format!(
+                "latest merge test runtime is {} ms vs rolling 5-merge average {} ms",
+                latest.duration_ms, rolling_average_ms
+            ),
+        )],
+    }
 }
 
 fn branch_consistency_checks(project_root: &Path, tasks: &[&crate::task::Task]) -> Vec<CheckLine> {
@@ -1178,6 +1243,7 @@ roles:
         assert!(report.contains("== Resume Eligibility =="));
         assert!(report.contains("== Worktree Status =="));
         assert!(report.contains("== Board-Git Consistency =="));
+        assert!(report.contains("== Performance Regression =="));
         assert!(report.contains("== Log Sizes =="));
         assert!(report.contains("manager: agent=codex-cli"));
         assert!(report.contains("clean_shutdown: false"));
@@ -1197,6 +1263,7 @@ roles:
         assert!(report.contains("== Daemon State =="));
         assert!(report.contains("== Resume Eligibility =="));
         assert!(report.contains("== Board-Git Consistency =="));
+        assert!(report.contains("== Performance Regression =="));
         assert!(report.contains("(no team config or members)"));
         assert!(report.contains("daemon.log: missing"));
         assert!(report.contains("orchestrator.log: missing"));
@@ -1239,6 +1306,60 @@ roles:
         );
         assert!(report.contains("PASS: no orphan task branches found"));
         assert!(report.contains("PASS: no orphan task worktrees found"));
+    }
+
+    #[test]
+    fn doctor_performance_regression_warns_on_latest_slow_merge() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+        fs::write(
+            tmp.path().join(".batty").join("test_timing.jsonl"),
+            [
+                r#"{"task_id":1,"engineer":"eng-1","branch":"eng-1/task-1","measured_at":1,"duration_ms":1000,"rolling_average_ms":null,"regression_pct":null,"regression_detected":false}"#,
+                r#"{"task_id":2,"engineer":"eng-1","branch":"eng-1/task-2","measured_at":2,"duration_ms":1000,"rolling_average_ms":null,"regression_pct":null,"regression_detected":false}"#,
+                r#"{"task_id":3,"engineer":"eng-1","branch":"eng-1/task-3","measured_at":3,"duration_ms":1000,"rolling_average_ms":null,"regression_pct":null,"regression_detected":false}"#,
+                r#"{"task_id":4,"engineer":"eng-1","branch":"eng-1/task-4","measured_at":4,"duration_ms":1000,"rolling_average_ms":null,"regression_pct":null,"regression_detected":false}"#,
+                r#"{"task_id":5,"engineer":"eng-1","branch":"eng-1/task-5","measured_at":5,"duration_ms":1000,"rolling_average_ms":null,"regression_pct":null,"regression_detected":false}"#,
+                r#"{"task_id":6,"engineer":"eng-1","branch":"eng-1/task-6","measured_at":6,"duration_ms":1300,"rolling_average_ms":1000,"regression_pct":30,"regression_detected":true}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let report = build_report(tmp.path()).unwrap();
+
+        assert!(report.contains("== Performance Regression =="));
+        assert!(report.contains("WARN: latest merge test runtime regressed on task #6"));
+        assert!(report.contains("1300 ms"));
+        assert!(report.contains("1000 ms"));
+        assert!(report.contains("30% slower"));
+    }
+
+    #[test]
+    fn doctor_performance_regression_reports_clean_baseline() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+        fs::write(
+            tmp.path().join(".batty").join("test_timing.jsonl"),
+            [
+                r#"{"task_id":1,"engineer":"eng-1","branch":"eng-1/task-1","measured_at":1,"duration_ms":1000,"rolling_average_ms":null,"regression_pct":null,"regression_detected":false}"#,
+                r#"{"task_id":2,"engineer":"eng-1","branch":"eng-1/task-2","measured_at":2,"duration_ms":1000,"rolling_average_ms":null,"regression_pct":null,"regression_detected":false}"#,
+                r#"{"task_id":3,"engineer":"eng-1","branch":"eng-1/task-3","measured_at":3,"duration_ms":1000,"rolling_average_ms":null,"regression_pct":null,"regression_detected":false}"#,
+                r#"{"task_id":4,"engineer":"eng-1","branch":"eng-1/task-4","measured_at":4,"duration_ms":1000,"rolling_average_ms":null,"regression_pct":null,"regression_detected":false}"#,
+                r#"{"task_id":5,"engineer":"eng-1","branch":"eng-1/task-5","measured_at":5,"duration_ms":1000,"rolling_average_ms":null,"regression_pct":null,"regression_detected":false}"#,
+                r#"{"task_id":6,"engineer":"eng-1","branch":"eng-1/task-6","measured_at":6,"duration_ms":1100,"rolling_average_ms":1000,"regression_pct":10,"regression_detected":false}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let report = build_report(tmp.path()).unwrap();
+
+        assert!(report.contains(
+            "PASS: latest merge test runtime is 1100 ms vs rolling 5-merge average 1000 ms"
+        ));
     }
 
     #[test]

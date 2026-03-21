@@ -12,10 +12,12 @@
 
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
+use super::artifact::{append_test_timing_record, read_test_timing_log};
 use super::daemon::TeamDaemon;
 use super::task_loop::{
     branch_is_merged_into, checkout_worktree_branch_from_main, current_worktree_branch,
@@ -86,7 +88,10 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         return Ok(());
     }
 
+    let task_branch = current_worktree_branch(&worktree_dir)?;
+    let test_started = Instant::now();
     let (tests_passed, output_truncated) = run_tests_in_worktree(&worktree_dir)?;
+    let test_duration_ms = test_started.elapsed().as_millis() as u64;
     if tests_passed {
         let task_title = read_task_title(&board_dir, task_id);
         let lock =
@@ -95,6 +100,21 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         match merge_engineer_branch(daemon.project_root(), engineer)? {
             MergeOutcome::Success => {
                 drop(lock);
+
+                if let Err(error) = record_merge_test_timing(
+                    daemon,
+                    task_id,
+                    engineer,
+                    &task_branch,
+                    test_duration_ms,
+                ) {
+                    warn!(
+                        engineer,
+                        task_id,
+                        error = %error,
+                        "failed to record merge test timing"
+                    );
+                }
 
                 let board_update_ok = daemon.run_kanban_md_nonfatal(
                     &[
@@ -377,6 +397,47 @@ pub(crate) fn reset_engineer_worktree(project_root: &Path, engineer_name: &str) 
     Ok(())
 }
 
+fn record_merge_test_timing(
+    daemon: &mut TeamDaemon,
+    task_id: u32,
+    engineer: &str,
+    task_branch: &str,
+    test_duration_ms: u64,
+) -> Result<()> {
+    let log_path = daemon
+        .project_root()
+        .join(".batty")
+        .join("test_timing.jsonl");
+    let record = append_test_timing_record(
+        &log_path,
+        task_id,
+        engineer,
+        task_branch,
+        now_unix(),
+        test_duration_ms,
+    )?;
+
+    if record.regression_detected {
+        let rolling_average_ms = record.rolling_average_ms.unwrap_or_default();
+        let regression_pct = record.regression_pct.unwrap_or_default();
+        let reason = format!(
+            "runtime_ms={} avg_ms={} pct={}",
+            record.duration_ms, rolling_average_ms, regression_pct
+        );
+        daemon.record_performance_regression(task_id.to_string(), &reason);
+        warn!(
+            engineer,
+            task_id,
+            runtime_ms = record.duration_ms,
+            rolling_average_ms,
+            regression_pct,
+            "post-merge test runtime exceeded rolling average"
+        );
+    }
+
+    Ok(())
+}
+
 fn commits_ahead_of_main(worktree_dir: &Path) -> Result<u32> {
     let output = std::process::Command::new("git")
         .args(["rev-list", "--count", "main..HEAD"])
@@ -396,6 +457,13 @@ fn commits_ahead_of_main(worktree_dir: &Path) -> Result<u32> {
             stdout.trim()
         )
     })
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -703,6 +771,14 @@ mod tests {
             std::fs::read_to_string(repo.join("note.txt")).unwrap(),
             "done\n"
         );
+
+        let timing_log = repo.join(".batty").join("test_timing.jsonl");
+        let timings = read_test_timing_log(&timing_log).unwrap();
+        assert_eq!(timings.len(), 1);
+        assert_eq!(timings[0].task_id, 42);
+        assert_eq!(timings[0].engineer, "eng-1");
+        assert_eq!(timings[0].branch, "eng-1");
+        assert!(!timings[0].regression_detected);
     }
 
     #[test]
@@ -839,5 +915,70 @@ mod tests {
                 .body
                 .contains("could not merge it into main")
         );
+    }
+
+    #[test]
+    fn handle_engineer_completion_emits_performance_regression_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        write_task_file(&repo, 42, "runtime-regression-task");
+
+        let timing_log = repo.join(".batty").join("test_timing.jsonl");
+        for task_id in 1..=5 {
+            super::super::artifact::record_test_timing(
+                &timing_log,
+                &super::super::artifact::TestTimingRecord {
+                    task_id,
+                    engineer: "eng-1".to_string(),
+                    branch: format!("eng-1/task-{task_id}"),
+                    measured_at: 1_777_000_000 + task_id as u64,
+                    duration_ms: 1,
+                    rolling_average_ms: Some(1),
+                    regression_pct: Some(0),
+                    regression_detected: false,
+                },
+            )
+            .unwrap();
+        }
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        std::fs::write(worktree_dir.join("note.txt"), "done\n").unwrap();
+        git_ok(&worktree_dir, &["add", "note.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "add note"]);
+
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng-1".to_string(),
+            role_type: super::super::config::RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: true,
+        };
+        let mut daemon = make_test_daemon(&repo, vec![engineer]);
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        let events = crate::team::events::read_events(
+            &repo.join(".batty").join("team_config").join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "performance_regression"
+                && event.task.as_deref() == Some("42")
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("runtime_ms="))
+        }));
+
+        let timings = read_test_timing_log(&timing_log).unwrap();
+        assert_eq!(timings.len(), 6);
+        assert!(timings.last().unwrap().regression_detected);
     }
 }
