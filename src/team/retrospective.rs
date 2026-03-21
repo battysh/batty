@@ -15,6 +15,11 @@ pub struct RunStats {
     pub run_end: u64,
     pub total_duration_secs: u64,
     pub task_stats: Vec<TaskStats>,
+    pub average_cycle_time_secs: Option<u64>,
+    pub fastest_task_id: Option<String>,
+    pub fastest_cycle_time_secs: Option<u64>,
+    pub longest_task_id: Option<String>,
+    pub longest_cycle_time_secs: Option<u64>,
     pub idle_time_pct: f64,
     pub escalation_count: u32,
     pub message_count: u32,
@@ -68,6 +73,68 @@ impl TaskAccumulator {
     }
 }
 
+fn task_reference(task: &str) -> String {
+    let line = task
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_else(|| task.trim());
+
+    task_id_from_assignment_line(line).unwrap_or_else(|| line.to_string())
+}
+
+fn task_id_from_assignment_line(line: &str) -> Option<String> {
+    let suffix = line.strip_prefix("Task #")?;
+    let digits: String = suffix
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        None
+    } else {
+        Some(digits)
+    }
+}
+
+fn cycle_time_metrics(
+    task_stats: &[TaskStats],
+) -> (
+    Option<u64>,
+    Option<String>,
+    Option<u64>,
+    Option<String>,
+    Option<u64>,
+) {
+    let completed: Vec<(&TaskStats, u64)> = task_stats
+        .iter()
+        .filter_map(|task| task.cycle_time_secs.map(|cycle| (task, cycle)))
+        .collect();
+    if completed.is_empty() {
+        return (None, None, None, None, None);
+    }
+
+    let total_cycle_secs: u64 = completed.iter().map(|(_, cycle)| *cycle).sum();
+    let average_cycle_time_secs = Some(total_cycle_secs / completed.len() as u64);
+    let (fastest_task, fastest_cycle_time_secs) = completed
+        .iter()
+        .min_by_key(|(_, cycle)| *cycle)
+        .map(|(task, cycle)| ((*task).task_id.clone(), *cycle))
+        .expect("completed is not empty");
+    let (longest_task, longest_cycle_time_secs) = completed
+        .iter()
+        .max_by_key(|(_, cycle)| *cycle)
+        .map(|(task, cycle)| ((*task).task_id.clone(), *cycle))
+        .expect("completed is not empty");
+
+    (
+        average_cycle_time_secs,
+        Some(fastest_task),
+        Some(fastest_cycle_time_secs),
+        Some(longest_task),
+        Some(longest_cycle_time_secs),
+    )
+}
+
 /// Analyze a single run (events between consecutive daemon_started events).
 /// Returns the last run's stats.
 pub fn analyze_events(events: &[TeamEvent]) -> Option<RunStats> {
@@ -104,16 +171,17 @@ pub fn analyze_events(events: &[TeamEvent]) -> Option<RunStats> {
                 let Some(role) = event.role.as_deref() else {
                     continue;
                 };
-                let Some(task_id) = event.task.as_deref() else {
+                let Some(task) = event.task.as_deref() else {
                     continue;
                 };
+                let task_id = task_reference(task);
 
-                let entry = tasks.entry(task_id.to_string()).or_insert_with(|| {
-                    TaskAccumulator::new(task_id.to_string(), role.to_string(), event.ts, 0)
+                let entry = tasks.entry(task_id.clone()).or_insert_with(|| {
+                    TaskAccumulator::new(task_id.clone(), role.to_string(), event.ts, 0)
                 });
                 entry.retry_count += 1;
                 entry.assigned_to = role.to_string();
-                active_task_by_role.insert(role.to_string(), task_id.to_string());
+                active_task_by_role.insert(role.to_string(), task_id);
             }
             // The completion event does not include a task id, so completion is
             // attributed to the role's currently active assignment in this run.
@@ -177,12 +245,24 @@ pub fn analyze_events(events: &[TeamEvent]) -> Option<RunStats> {
     } else {
         idle_samples.iter().sum::<f64>() / idle_samples.len() as f64
     };
+    let (
+        average_cycle_time_secs,
+        fastest_task_id,
+        fastest_cycle_time_secs,
+        longest_task_id,
+        longest_cycle_time_secs,
+    ) = cycle_time_metrics(&task_stats);
 
     Some(RunStats {
         run_start,
         run_end,
         total_duration_secs: run_end.saturating_sub(run_start),
         task_stats,
+        average_cycle_time_secs,
+        fastest_task_id,
+        fastest_cycle_time_secs,
+        longest_task_id,
+        longest_cycle_time_secs,
         idle_time_pct,
         escalation_count,
         message_count,
@@ -266,6 +346,30 @@ fn render_retrospective(stats: &RunStats) -> String {
         .iter()
         .filter(|task| task.completed_at.is_some())
         .count();
+    let average_cycle_time = stats
+        .average_cycle_time_secs
+        .map(format_duration)
+        .unwrap_or_else(|| "-".to_string());
+    let fastest_cycle_time = stats
+        .fastest_cycle_time_secs
+        .map(|cycle| {
+            format!(
+                "{} ({})",
+                format_duration(cycle),
+                stats.fastest_task_id.as_deref().unwrap_or("-")
+            )
+        })
+        .unwrap_or_else(|| "-".to_string());
+    let longest_cycle_time = stats
+        .longest_cycle_time_secs
+        .map(|cycle| {
+            format!(
+                "{} ({})",
+                format_duration(cycle),
+                stats.longest_task_id.as_deref().unwrap_or("-")
+            )
+        })
+        .unwrap_or_else(|| "-".to_string());
 
     let task_cycle_rows = render_task_cycle_rows(&stats.task_stats);
     let bottlenecks = render_bottlenecks(&stats.task_stats);
@@ -276,6 +380,9 @@ fn render_retrospective(stats: &RunStats) -> String {
 ## Summary\n\n\
 - Duration: {}\n\
 - Tasks completed: {}\n\
+- Average cycle time: {}\n\
+- Fastest task: {}\n\
+- Longest task: {}\n\
 - Messages: {}\n\
 - Escalations: {}\n\
 - Idle: {:.1}%\n\n\
@@ -291,6 +398,9 @@ fn render_retrospective(stats: &RunStats) -> String {
 {}",
         format_duration(stats.total_duration_secs),
         completed_tasks,
+        average_cycle_time,
+        fastest_cycle_time,
+        longest_cycle_time,
         stats.message_count,
         stats.escalation_count,
         stats.idle_time_pct * 100.0,
@@ -417,6 +527,11 @@ mod tests {
         assert_eq!(stats.escalation_count, 0);
         assert_eq!(stats.message_count, 1);
         assert_eq!(stats.task_stats.len(), 1);
+        assert_eq!(stats.average_cycle_time_secs, Some(40));
+        assert_eq!(stats.fastest_task_id.as_deref(), Some("42"));
+        assert_eq!(stats.fastest_cycle_time_secs, Some(40));
+        assert_eq!(stats.longest_task_id.as_deref(), Some("42"));
+        assert_eq!(stats.longest_cycle_time_secs, Some(40));
         assert_eq!(
             stats.task_stats[0],
             TaskStats {
@@ -435,8 +550,14 @@ mod tests {
     fn test_analyze_events_with_retries() {
         let events = vec![
             at(TeamEvent::daemon_started(), 100),
-            at(TeamEvent::task_assigned("eng-1", "42"), 110),
-            at(TeamEvent::task_assigned("eng-1", "42"), 130),
+            at(
+                TeamEvent::task_assigned("eng-1", "Task #42: retry task"),
+                110,
+            ),
+            at(
+                TeamEvent::task_assigned("eng-1", "Task #42: retry task"),
+                130,
+            ),
             at(TeamEvent::task_completed("eng-1"), 170),
             at(TeamEvent::daemon_stopped_with_reason("signal", 70), 180),
         ];
@@ -447,6 +568,7 @@ mod tests {
         assert_eq!(stats.task_stats[0].retry_count, 2);
         assert_eq!(stats.task_stats[0].assigned_at, 110);
         assert_eq!(stats.task_stats[0].cycle_time_secs, Some(60));
+        assert_eq!(stats.task_stats[0].task_id, "42");
     }
 
     #[test]
@@ -492,7 +614,10 @@ mod tests {
             at(TeamEvent::task_assigned("eng-1", "old-task"), 105),
             at(TeamEvent::daemon_stopped_with_reason("signal", 10), 110),
             at(TeamEvent::daemon_started(), 200),
-            at(TeamEvent::task_assigned("eng-2", "new-task"), 210),
+            at(
+                TeamEvent::task_assigned("eng-2", "Task #12: new-task\n\nTask details."),
+                210,
+            ),
             at(TeamEvent::task_completed("eng-2"), 240),
             at(TeamEvent::daemon_stopped_with_reason("signal", 45), 245),
         ];
@@ -502,9 +627,38 @@ mod tests {
         assert_eq!(stats.run_start, 200);
         assert_eq!(stats.run_end, 245);
         assert_eq!(stats.task_stats.len(), 1);
-        assert_eq!(stats.task_stats[0].task_id, "new-task");
+        assert_eq!(stats.task_stats[0].task_id, "12");
         assert_eq!(stats.task_stats[0].assigned_to, "eng-2");
         assert_eq!(stats.task_stats[0].cycle_time_secs, Some(30));
+        assert_eq!(stats.average_cycle_time_secs, Some(30));
+        assert_eq!(stats.fastest_task_id.as_deref(), Some("12"));
+        assert_eq!(stats.longest_task_id.as_deref(), Some("12"));
+    }
+
+    #[test]
+    fn test_analyze_events_computes_average_fastest_and_longest_cycle_times() {
+        let events = vec![
+            at(TeamEvent::daemon_started(), 100),
+            at(
+                TeamEvent::task_assigned("eng-1", "Task #11: short task\n\nBody."),
+                110,
+            ),
+            at(TeamEvent::task_completed("eng-1"), 140),
+            at(
+                TeamEvent::task_assigned("eng-2", "Task #12: long task\n\nBody."),
+                150,
+            ),
+            at(TeamEvent::task_completed("eng-2"), 240),
+            at(TeamEvent::daemon_stopped_with_reason("signal", 150), 250),
+        ];
+
+        let stats = analyze_events(&events).unwrap();
+
+        assert_eq!(stats.average_cycle_time_secs, Some(60));
+        assert_eq!(stats.fastest_task_id.as_deref(), Some("11"));
+        assert_eq!(stats.fastest_cycle_time_secs, Some(30));
+        assert_eq!(stats.longest_task_id.as_deref(), Some("12"));
+        assert_eq!(stats.longest_cycle_time_secs, Some(90));
     }
 
     fn sample_task(task_id: &str, cycle_time_secs: Option<u64>, retry_count: u32) -> TaskStats {
@@ -537,6 +691,11 @@ mod tests {
                 sample_task("T-101", Some(90), 1),
                 sample_task("T-102", Some(30), 2),
             ],
+            average_cycle_time_secs: Some(60),
+            fastest_task_id: Some("T-102".to_string()),
+            fastest_cycle_time_secs: Some(30),
+            longest_task_id: Some("T-101".to_string()),
+            longest_cycle_time_secs: Some(90),
             idle_time_pct: 0.25,
             escalation_count: 1,
             message_count: 6,
@@ -558,6 +717,9 @@ mod tests {
         assert!(content.contains("## Recommendations"));
         assert!(content.contains("| T-101 | eng-1 | completed | 1m 30s | 1 | no |"));
         assert!(content.contains("- Tasks completed: 2"));
+        assert!(content.contains("- Average cycle time: 1m 00s"));
+        assert!(content.contains("- Fastest task: 30s (T-102)"));
+        assert!(content.contains("- Longest task: 1m 30s (T-101)"));
     }
 
     #[test]
@@ -568,6 +730,11 @@ mod tests {
             run_end: 20,
             total_duration_secs: 10,
             task_stats: Vec::new(),
+            average_cycle_time_secs: None,
+            fastest_task_id: None,
+            fastest_cycle_time_secs: None,
+            longest_task_id: None,
+            longest_cycle_time_secs: None,
             idle_time_pct: 0.0,
             escalation_count: 0,
             message_count: 0,
@@ -577,6 +744,9 @@ mod tests {
         let content = fs::read_to_string(path).unwrap();
 
         assert!(content.contains("| No tasks recorded | - | - | - | - | - |"));
+        assert!(content.contains("- Average cycle time: -"));
+        assert!(content.contains("- Fastest task: -"));
+        assert!(content.contains("- Longest task: -"));
         assert!(content.contains("- Longest task: no completed tasks recorded."));
         assert!(content.contains("- Most retried: no task needed multiple attempts."));
     }
@@ -589,6 +759,11 @@ mod tests {
             run_end: 30,
             total_duration_secs: 20,
             task_stats: vec![sample_task("T-201", Some(20), 1)],
+            average_cycle_time_secs: Some(20),
+            fastest_task_id: Some("T-201".to_string()),
+            fastest_cycle_time_secs: Some(20),
+            longest_task_id: Some("T-201".to_string()),
+            longest_cycle_time_secs: Some(20),
             idle_time_pct: 0.75,
             escalation_count: 0,
             message_count: 1,
@@ -609,6 +784,11 @@ mod tests {
             run_end: 40,
             total_duration_secs: 30,
             task_stats: vec![sample_task("T-301", Some(25), 3)],
+            average_cycle_time_secs: Some(25),
+            fastest_task_id: Some("T-301".to_string()),
+            fastest_cycle_time_secs: Some(25),
+            longest_task_id: Some("T-301".to_string()),
+            longest_cycle_time_secs: Some(25),
             idle_time_pct: 0.1,
             escalation_count: 0,
             message_count: 2,
