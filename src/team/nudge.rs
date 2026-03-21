@@ -231,6 +231,16 @@ mod tests {
     }
 
     #[test]
+    fn zero_members_produces_no_nudges() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("tasks")).unwrap();
+
+        let nudges = compute_nudges(tmp.path(), &[], &HashMap::new(), &HashMap::new()).unwrap();
+
+        assert!(nudges.is_empty());
+    }
+
+    #[test]
     fn idle_executor_with_runnable_owned_task_gets_nudged() {
         let tmp = tempfile::tempdir().unwrap();
         let tasks_dir = tmp.path().join("tasks");
@@ -268,6 +278,38 @@ roles:
                 capability: WorkflowCapability::Executor,
             }]
         );
+    }
+
+    #[test]
+    fn all_members_busy_produces_no_nudges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(
+            &tasks_dir,
+            2,
+            "status: todo\nexecution_owner: builder-1-1\nclaimed_by: builder-1-1\n",
+        );
+        let members = members(
+            r#"
+name: team
+roles:
+  - name: lead
+    role_type: manager
+    agent: claude
+  - name: builder
+    role_type: engineer
+    agent: codex
+"#,
+        );
+        let states = HashMap::from([
+            ("lead".to_string(), MemberState::Working),
+            ("builder-1-1".to_string(), MemberState::Working),
+        ]);
+
+        let nudges = compute_nudges(tmp.path(), &members, &states, &HashMap::new()).unwrap();
+
+        assert!(nudges.is_empty());
     }
 
     #[test]
@@ -333,6 +375,39 @@ roles:
     }
 
     #[test]
+    fn pending_inbox_suppresses_planner_nudge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(
+            &tasks_dir,
+            4,
+            "status: todo\nblocked_on: waiting-on-decision\n",
+        );
+        let members = members(
+            r#"
+name: team
+roles:
+  - name: lead
+    role_type: manager
+    agent: claude
+  - name: builder
+    role_type: engineer
+    agent: codex
+"#,
+        );
+        let states = HashMap::from([
+            ("lead".to_string(), MemberState::Idle),
+            ("builder-1-1".to_string(), MemberState::Working),
+        ]);
+        let pending = HashMap::from([("lead".to_string(), 1usize)]);
+
+        let nudges = compute_nudges(tmp.path(), &members, &states, &pending).unwrap();
+
+        assert!(nudges.is_empty());
+    }
+
+    #[test]
     fn blocked_frontier_without_runnable_work_nudges_planner() {
         let tmp = tempfile::tempdir().unwrap();
         let tasks_dir = tmp.path().join("tasks");
@@ -368,6 +443,186 @@ roles:
                 reason: "blocked frontier needs planning attention".to_string(),
                 capability: WorkflowCapability::Planner,
             }]
+        );
+    }
+
+    #[test]
+    fn multi_hop_blocked_dependency_chain_nudges_planner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: todo\ndepends_on:\n  - 2\n");
+        write_task(&tasks_dir, 2, "status: todo\ndepends_on:\n  - 3\n");
+        write_task(
+            &tasks_dir,
+            3,
+            "status: todo\nblocked_on: waiting-on-decision\n",
+        );
+        let members = members(
+            r#"
+name: team
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: builder
+    role_type: engineer
+    agent: codex
+"#,
+        );
+        let states = HashMap::from([
+            ("architect".to_string(), MemberState::Idle),
+            ("builder-1-1".to_string(), MemberState::Working),
+        ]);
+
+        let nudges = compute_nudges(tmp.path(), &members, &states, &HashMap::new()).unwrap();
+
+        assert_eq!(
+            nudges,
+            vec![NudgeTarget {
+                member: "architect".to_string(),
+                reason: "blocked frontier needs planning attention".to_string(),
+                capability: WorkflowCapability::Planner,
+            }]
+        );
+    }
+
+    #[test]
+    fn single_architect_can_receive_dispatcher_and_reviewer_nudges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: review\nreview_owner: architect\n");
+        write_task(&tasks_dir, 2, "status: todo\n");
+        let members = members(
+            r#"
+name: solo-architect
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+"#,
+        );
+        let states = HashMap::from([("architect".to_string(), MemberState::Idle)]);
+
+        let nudges = compute_nudges(tmp.path(), &members, &states, &HashMap::new()).unwrap();
+
+        assert_eq!(
+            nudges,
+            vec![
+                NudgeTarget {
+                    member: "architect".to_string(),
+                    reason: "dispatch unassigned runnable task #2: Task 2".to_string(),
+                    capability: WorkflowCapability::Dispatcher,
+                },
+                NudgeTarget {
+                    member: "architect".to_string(),
+                    reason: "review backlog for task #1: Task 1".to_string(),
+                    capability: WorkflowCapability::Reviewer,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn renamed_roles_from_config_still_receive_role_type_capabilities() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: review\nreview_owner: triage-lead\n");
+        write_task(&tasks_dir, 2, "status: todo\n");
+        let members = members(
+            r#"
+name: renamed
+roles:
+  - name: planner
+    role_type: architect
+    agent: claude
+  - name: triage-lead
+    role_type: manager
+    agent: claude
+  - name: implementer
+    role_type: engineer
+    agent: codex
+"#,
+        );
+        let states = HashMap::from([
+            ("planner".to_string(), MemberState::Working),
+            ("triage-lead".to_string(), MemberState::Idle),
+            ("implementer-1-1".to_string(), MemberState::Working),
+        ]);
+
+        let nudges = compute_nudges(tmp.path(), &members, &states, &HashMap::new()).unwrap();
+
+        assert_eq!(
+            nudges,
+            vec![
+                NudgeTarget {
+                    member: "triage-lead".to_string(),
+                    reason: "dispatch unassigned runnable task #2: Task 2".to_string(),
+                    capability: WorkflowCapability::Dispatcher,
+                },
+                NudgeTarget {
+                    member: "triage-lead".to_string(),
+                    reason: "review backlog for task #1: Task 1".to_string(),
+                    capability: WorkflowCapability::Reviewer,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn deterministic_ordering_with_member_name_ties_is_stable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(
+            &tasks_dir,
+            1,
+            "status: todo\nexecution_owner: builder-1-1\nclaimed_by: builder-1-1\n",
+        );
+        write_task(
+            &tasks_dir,
+            2,
+            "status: todo\nexecution_owner: builder-2-1\nclaimed_by: builder-2-1\n",
+        );
+        let members = members(
+            r#"
+name: team
+roles:
+  - name: lead
+    role_type: manager
+    agent: claude
+    instances: 2
+  - name: builder
+    role_type: engineer
+    agent: codex
+    instances: 1
+"#,
+        );
+        let states = HashMap::from([
+            ("lead-1".to_string(), MemberState::Working),
+            ("lead-2".to_string(), MemberState::Working),
+            ("builder-1-1".to_string(), MemberState::Idle),
+            ("builder-2-1".to_string(), MemberState::Idle),
+        ]);
+
+        let nudges = compute_nudges(tmp.path(), &members, &states, &HashMap::new()).unwrap();
+
+        assert_eq!(
+            nudges,
+            vec![
+                NudgeTarget {
+                    member: "builder-1-1".to_string(),
+                    reason: "resume runnable owned task #1: Task 1".to_string(),
+                    capability: WorkflowCapability::Executor,
+                },
+                NudgeTarget {
+                    member: "builder-2-1".to_string(),
+                    reason: "resume runnable owned task #2: Task 2".to_string(),
+                    capability: WorkflowCapability::Executor,
+                },
+            ]
         );
     }
 
