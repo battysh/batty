@@ -26,6 +26,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::board;
+use super::board_cmd;
 use super::comms::{self, Channel};
 #[cfg(test)]
 use super::config::OrchestratorPosition;
@@ -34,6 +35,7 @@ use super::delivery::FailedDelivery;
 use super::events::EventSink;
 use super::events::TeamEvent;
 use super::failure_patterns::FailureTracker;
+use super::git_cmd;
 use super::hierarchy::MemberInstance;
 use super::inbox;
 use super::merge;
@@ -81,6 +83,8 @@ const CONTEXT_RESTART_COOLDOWN: Duration = Duration::from_secs(30);
 
 const HOT_RELOAD_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const HOT_RELOAD_MIN_INTERVAL: Duration = Duration::from_secs(30);
+
+const STARTUP_PREFLIGHT_RESPAWN_DELAY: Duration = Duration::from_millis(200);
 
 /// The running team daemon.
 pub struct TeamDaemon {
@@ -347,7 +351,7 @@ impl TeamDaemon {
             warn!(error = %e, "failed to install signal handler");
         }
 
-        self.validate_member_panes_on_startup();
+        self.run_startup_preflight()?;
 
         // Spawn agents in all panes
         self.spawn_all_agents(resume)?;
@@ -488,6 +492,82 @@ impl TeamDaemon {
             warn!(error = %error, "failed to persist final daemon checkpoint");
         }
         self.record_daemon_stopped(shutdown_reason, uptime);
+        Ok(())
+    }
+
+    fn run_startup_preflight(&mut self) -> Result<()> {
+        ensure_tmux_session_ready(&self.config.session)?;
+        self.ensure_member_panes_ready()?;
+        ensure_kanban_available()?;
+        ensure_git_repo_clean(&self.config.project_root)?;
+        if ensure_board_initialized(&self.config.project_root)? {
+            let board_dir = board_dir(&self.config.project_root);
+            info!(
+                board = %board_dir.display(),
+                "initialized missing board during daemon startup preflight"
+            );
+            self.record_orchestrator_action(format!(
+                "startup: initialized board at {}",
+                board_dir.display()
+            ));
+        }
+        self.validate_member_panes_on_startup();
+        Ok(())
+    }
+
+    fn ensure_member_panes_ready(&mut self) -> Result<()> {
+        let members = self.config.members.clone();
+        for member in &members {
+            if member.role_type == RoleType::User {
+                continue;
+            }
+
+            let Some(pane_id) = self.config.pane_map.get(&member.name) else {
+                bail!(
+                    "daemon startup pre-flight failed: no tmux pane mapped for member '{}'",
+                    member.name
+                );
+            };
+            if !tmux::pane_exists(pane_id) {
+                bail!(
+                    "daemon startup pre-flight failed: pane '{}' for member '{}' is missing",
+                    pane_id,
+                    member.name
+                );
+            }
+
+            if !tmux::pane_dead(pane_id)
+                .with_context(|| format!("failed to inspect pane '{pane_id}'"))?
+            {
+                continue;
+            }
+
+            warn!(
+                member = %member.name,
+                pane = %pane_id,
+                "respawning dead pane during daemon startup preflight"
+            );
+            tmux::respawn_pane(pane_id, "bash")
+                .with_context(|| format!("failed to respawn pane '{pane_id}'"))?;
+            std::thread::sleep(STARTUP_PREFLIGHT_RESPAWN_DELAY);
+
+            if tmux::pane_dead(pane_id)
+                .with_context(|| format!("failed to inspect respawned pane '{pane_id}'"))?
+            {
+                bail!(
+                    "daemon startup pre-flight failed: pane '{}' for member '{}' stayed dead after respawn",
+                    pane_id,
+                    member.name
+                );
+            }
+
+            self.record_orchestrator_action(format!(
+                "startup: respawned dead pane for {}",
+                member.name
+            ));
+            self.emit_event(TeamEvent::pane_respawned(&member.name));
+        }
+
         Ok(())
     }
 
@@ -1413,6 +1493,103 @@ fn format_stuck_duration(stuck_age_secs: u64) -> String {
     }
 }
 
+fn ensure_tmux_session_ready(session: &str) -> Result<()> {
+    if tmux::session_exists(session) {
+        Ok(())
+    } else {
+        bail!("daemon startup pre-flight failed: tmux session '{session}' is missing")
+    }
+}
+
+fn ensure_kanban_available() -> Result<()> {
+    let output = std::process::Command::new("kanban-md")
+        .arg("--help")
+        .output()
+        .context("daemon startup pre-flight failed: `kanban-md` is not installed or not on PATH")?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let detail = if stderr.is_empty() {
+        "unknown error".to_string()
+    } else {
+        stderr
+    };
+    bail!("daemon startup pre-flight failed: `kanban-md --help` failed: {detail}");
+}
+
+fn board_dir(project_root: &Path) -> PathBuf {
+    project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+}
+
+fn ensure_board_initialized(project_root: &Path) -> Result<bool> {
+    let board_dir = board_dir(project_root);
+    if board_dir.join("tasks").is_dir() {
+        return Ok(false);
+    }
+
+    board_cmd::init(&board_dir).map_err(|error| {
+        anyhow::anyhow!(
+            "daemon startup pre-flight failed: unable to initialize board at '{}': {error}",
+            board_dir.display()
+        )
+    })?;
+    Ok(true)
+}
+
+fn ensure_git_repo_clean(project_root: &Path) -> Result<()> {
+    let repo_root = git_cmd::rev_parse_toplevel(project_root).map_err(|error| {
+        anyhow::anyhow!("daemon startup pre-flight failed: project root is not a git repo: {error}")
+    })?;
+    let status = git_cmd::status_porcelain(&repo_root).map_err(|error| {
+        anyhow::anyhow!("daemon startup pre-flight failed: unable to inspect git status: {error}")
+    })?;
+
+    let dirty_lines: Vec<_> = status
+        .lines()
+        .filter(|line| !is_runtime_git_status_entry(line))
+        .map(str::to_string)
+        .collect();
+    if dirty_lines.is_empty() {
+        return Ok(());
+    }
+
+    bail!(
+        "daemon startup pre-flight failed: git worktree is dirty:\n{}",
+        dirty_lines.join("\n")
+    );
+}
+
+fn is_runtime_git_status_entry(line: &str) -> bool {
+    let path = git_status_entry_path(line);
+    matches!(
+        path,
+        ".batty/"
+            | ".batty"
+            | ".batty/daemon.log"
+            | ".batty/daemon.pid"
+            | ".batty/daemon-state.json"
+            | ".batty/launch-state.json"
+            | ".batty/merge.lock"
+            | ".batty/resume"
+            | ".batty/team_config/events.jsonl"
+            | ".batty/test_timing.jsonl"
+    ) || path.starts_with(".batty/assignment_results/")
+        || path.starts_with(".batty/codex-context/")
+        || path.starts_with(".batty/inboxes/")
+        || path.starts_with(".batty/logs/")
+        || path.starts_with(".batty/worktrees/")
+}
+
+fn git_status_entry_path(line: &str) -> &str {
+    let path = line.get(3..).unwrap_or(line).trim();
+    path.rsplit(" -> ").next().unwrap_or(path).trim_matches('"')
+}
+
 fn hot_reload_marker_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("reload")
 }
@@ -1557,6 +1734,37 @@ mod tests {
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::{LazyLock, Mutex};
+
+    static PATH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.original.as_deref() {
+                Some(value) => unsafe {
+                    std::env::set_var(self.key, value);
+                },
+                None => unsafe {
+                    std::env::remove_var(self.key);
+                },
+            }
+        }
+    }
 
     fn setup_fake_codex(
         project_root: &Path,
@@ -1590,6 +1798,41 @@ mod tests {
         (fake_bin, fake_log)
     }
 
+    fn setup_fake_kanban(tmp: &tempfile::TempDir, script_name: &str) -> PathBuf {
+        let fake_bin = tmp.path().join(format!("{script_name}-bin"));
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        let fake_kanban = fake_bin.join("kanban-md");
+        std::fs::write(
+            &fake_kanban,
+            r#"#!/bin/bash
+if [ "$1" = "--help" ]; then
+  echo "kanban-md fake help"
+  exit 0
+fi
+if [ "$1" = "init" ]; then
+  shift
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "--dir" ]; then
+      shift
+      mkdir -p "$1/tasks"
+      exit 0
+    fi
+    shift
+  done
+fi
+echo "unsupported fake kanban invocation" >&2
+exit 1
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_kanban, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fake_bin
+    }
+
     fn write_codex_session_meta(cwd: &Path) -> PathBuf {
         let home = PathBuf::from(std::env::var("HOME").expect("HOME must be set for tests"));
         let session_dir = home
@@ -1618,6 +1861,24 @@ mod tests {
         )
         .unwrap();
         session_file
+    }
+
+    fn test_team_config(name: &str) -> TeamConfig {
+        TeamConfig {
+            name: name.to_string(),
+            workflow_mode: WorkflowMode::Legacy,
+            workflow_policy: WorkflowPolicy::default(),
+            board: BoardConfig::default(),
+            standup: StandupConfig::default(),
+            automation: AutomationConfig::default(),
+            automation_sender: None,
+            orchestrator_pane: true,
+            orchestrator_position: OrchestratorPosition::Bottom,
+            layout: None,
+            cost: Default::default(),
+            event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+            roles: Vec::new(),
+        }
     }
 
     fn append_codex_task_complete(session_file: &Path) {
@@ -2955,6 +3216,151 @@ mod tests {
 
         crate::tmux::kill_session(session).unwrap();
         let _ = std::fs::remove_dir_all(&fake_bin);
+    }
+
+    #[test]
+    fn startup_preflight_reports_missing_kanban_binary() {
+        let _path_guard = PATH_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let empty_bin = tmp.path().join("empty-bin");
+        std::fs::create_dir_all(&empty_bin).unwrap();
+        let _path = EnvVarGuard::set("PATH", empty_bin.to_string_lossy().as_ref());
+
+        let error = ensure_kanban_available().unwrap_err();
+
+        assert!(format!("{error:#}").contains("kanban-md"));
+    }
+
+    #[test]
+    fn startup_preflight_initializes_missing_board_directory() {
+        let _path_guard = PATH_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "startup_board_init");
+        let fake_bin = setup_fake_kanban(&tmp, "startup-board-init");
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let _path = EnvVarGuard::set(
+            "PATH",
+            &format!("{}:{original_path}", fake_bin.to_string_lossy()),
+        );
+
+        let board_path = board_dir(&repo);
+        assert!(!board_path.exists());
+
+        assert!(ensure_board_initialized(&repo).unwrap());
+        assert!(board_path.join("tasks").is_dir());
+        assert!(!ensure_board_initialized(&repo).unwrap());
+    }
+
+    #[test]
+    fn startup_preflight_git_clean_check_ignores_runtime_artifacts_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "startup_git_clean");
+
+        std::fs::create_dir_all(repo.join(".batty").join("codex-context").join("eng-1-3")).unwrap();
+        std::fs::write(
+            repo.join(".batty")
+                .join("codex-context")
+                .join("eng-1-3")
+                .join("AGENTS.md"),
+            "generated context\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join(".batty").join("launch-state.json"), "{}").unwrap();
+        std::fs::write(repo.join(".batty").join("daemon.pid"), "123").unwrap();
+
+        ensure_git_repo_clean(&repo).unwrap();
+
+        std::fs::write(
+            repo.join("src").join("lib.rs"),
+            "pub fn smoke() -> bool { false }\n",
+        )
+        .unwrap();
+
+        let error = ensure_git_repo_clean(&repo).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("git worktree is dirty"));
+        assert!(message.contains("src/lib.rs"));
+    }
+
+    #[test]
+    #[serial]
+    fn startup_preflight_respawns_dead_pane_and_bootstraps_board() {
+        let _path_guard = PATH_LOCK.lock().unwrap();
+        let session = format!("batty-test-startup-preflight-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "startup_preflight");
+        let fake_bin = setup_fake_kanban(&tmp, "startup-preflight");
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let _path = EnvVarGuard::set(
+            "PATH",
+            &format!("{}:{original_path}", fake_bin.to_string_lossy()),
+        );
+
+        crate::tmux::create_session(&session, "bash", &[], repo.to_string_lossy().as_ref())
+            .unwrap();
+        crate::tmux::create_window(
+            &session,
+            "eng-1",
+            "bash",
+            &[],
+            repo.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+
+        let architect_pane = crate::tmux::pane_id(&session).unwrap();
+        let engineer_pane = crate::tmux::pane_id(&format!("{session}:eng-1")).unwrap();
+        Command::new("tmux")
+            .args([
+                "set-option",
+                "-p",
+                "-t",
+                &engineer_pane,
+                "remain-on-exit",
+                "on",
+            ])
+            .output()
+            .unwrap();
+        crate::tmux::send_keys(&engineer_pane, "exit", true).unwrap();
+        for _ in 0..20 {
+            if crate::tmux::pane_dead(&engineer_pane).unwrap_or(false) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(crate::tmux::pane_dead(&engineer_pane).unwrap());
+
+        let members = vec![
+            architect_member("architect"),
+            engineer_member("eng-1", Some("architect"), false),
+        ];
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: repo.clone(),
+            team_config: test_team_config("startup-preflight"),
+            session: session.clone(),
+            members,
+            pane_map: HashMap::from([
+                ("architect".to_string(), architect_pane),
+                ("eng-1".to_string(), engineer_pane.clone()),
+            ]),
+        })
+        .unwrap();
+
+        daemon.run_startup_preflight().unwrap();
+
+        assert!(!crate::tmux::pane_dead(&engineer_pane).unwrap_or(true));
+        assert!(board_dir(&repo).join("tasks").is_dir());
+
+        let events = crate::team::events::read_events(
+            &repo.join(".batty").join("team_config").join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "pane_respawned" && event.role.as_deref() == Some("eng-1")
+        }));
+
+        crate::tmux::kill_session(&session).unwrap();
     }
 
     #[test]
