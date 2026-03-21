@@ -296,6 +296,103 @@ pub fn init_team(project_root: &Path, template: &str) -> Result<Vec<PathBuf>> {
     Ok(created)
 }
 
+fn user_templates_root() -> Result<PathBuf> {
+    let home = std::env::var("HOME").context("HOME is not set")?;
+    Ok(PathBuf::from(home).join(".batty").join("templates"))
+}
+
+pub fn list_available_templates() -> Result<Vec<String>> {
+    let templates_dir = user_templates_root()?;
+    if !templates_dir.is_dir() {
+        bail!(
+            "no templates directory found at {}",
+            templates_dir.display()
+        );
+    }
+
+    let mut templates = Vec::new();
+    for entry in std::fs::read_dir(&templates_dir)
+        .with_context(|| format!("failed to read {}", templates_dir.display()))?
+    {
+        let entry = entry?;
+        if entry.path().is_dir() {
+            templates.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    templates.sort();
+    Ok(templates)
+}
+
+fn copy_template_dir(src: &Path, dst: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
+    std::fs::create_dir_all(dst).with_context(|| format!("failed to create {}", dst.display()))?;
+    for entry in
+        std::fs::read_dir(src).with_context(|| format!("failed to read {}", src.display()))?
+    {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_template_dir(&src_path, &dst_path, created)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path).with_context(|| {
+                format!(
+                    "failed to copy template file from {} to {}",
+                    src_path.display(),
+                    dst_path.display()
+                )
+            })?;
+            created.push(dst_path);
+        }
+    }
+    Ok(())
+}
+
+pub fn init_from_template(project_root: &Path, template_name: &str) -> Result<Vec<PathBuf>> {
+    let templates_dir = user_templates_root()?;
+    if !templates_dir.is_dir() {
+        bail!(
+            "no templates directory found at {}",
+            templates_dir.display()
+        );
+    }
+
+    let available = list_available_templates()?;
+    if !available.iter().any(|name| name == template_name) {
+        let available_display = if available.is_empty() {
+            "(none)".to_string()
+        } else {
+            available.join(", ")
+        };
+        bail!(
+            "template '{}' not found in {}; available templates: {}",
+            template_name,
+            templates_dir.display(),
+            available_display
+        );
+    }
+
+    let config_dir = team_config_dir(project_root);
+    let yaml_path = config_dir.join(TEAM_CONFIG_FILE);
+    if yaml_path.exists() {
+        bail!(
+            "team config already exists at {}; remove it first or edit directly",
+            yaml_path.display()
+        );
+    }
+
+    let source_dir = templates_dir.join(template_name);
+    let mut created = Vec::new();
+    copy_template_dir(&source_dir, &config_dir, &mut created)?;
+    info!(
+        template = template_name,
+        source = %source_dir.display(),
+        dest = %config_dir.display(),
+        files = created.len(),
+        "copied team config from user template"
+    );
+    Ok(created)
+}
+
 /// Path to the daemon PID file.
 fn daemon_pid_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("daemon.pid")
@@ -1874,6 +1971,34 @@ mod tests {
     use super::*;
     use crate::team::config::RoleType;
     use serial_test::serial;
+    use std::ffi::OsString;
+
+    struct HomeGuard {
+        original_home: Option<OsString>,
+    }
+
+    impl HomeGuard {
+        fn set(path: &Path) -> Self {
+            let original_home = std::env::var_os("HOME");
+            unsafe {
+                std::env::set_var("HOME", path);
+            }
+            Self { original_home }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match &self.original_home {
+                Some(home) => unsafe {
+                    std::env::set_var("HOME", home);
+                },
+                None => unsafe {
+                    std::env::remove_var("HOME");
+                },
+            }
+        }
+    }
 
     #[test]
     fn team_config_dir_is_under_batty() {
@@ -1914,6 +2039,68 @@ mod tests {
         let result = init_team(tmp.path(), "simple");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
+    }
+
+    #[test]
+    #[serial]
+    fn init_from_template_copies_files() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = HomeGuard::set(home.path());
+
+        let template_dir = home.path().join(".batty").join("templates").join("custom");
+        std::fs::create_dir_all(template_dir.join("board")).unwrap();
+        std::fs::write(template_dir.join("team.yaml"), "name: custom\nroles: []\n").unwrap();
+        std::fs::write(template_dir.join("architect.md"), "# Architect\n").unwrap();
+        std::fs::write(template_dir.join("board").join("task.md"), "task\n").unwrap();
+
+        let created = init_from_template(project.path(), "custom").unwrap();
+
+        assert!(!created.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(team_config_path(project.path())).unwrap(),
+            "name: custom\nroles: []\n"
+        );
+        assert!(
+            team_config_dir(project.path())
+                .join("architect.md")
+                .exists()
+        );
+        assert!(
+            team_config_dir(project.path())
+                .join("board")
+                .join("task.md")
+                .exists()
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn init_from_template_missing_template_errors_with_available_list() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = HomeGuard::set(home.path());
+
+        let templates_root = home.path().join(".batty").join("templates");
+        std::fs::create_dir_all(templates_root.join("alpha")).unwrap();
+        std::fs::create_dir_all(templates_root.join("beta")).unwrap();
+
+        let error = init_from_template(project.path(), "missing").unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("template 'missing' not found"));
+        assert!(message.contains("alpha"));
+        assert!(message.contains("beta"));
+    }
+
+    #[test]
+    #[serial]
+    fn init_from_template_errors_when_templates_dir_is_missing() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = HomeGuard::set(home.path());
+
+        let error = init_from_template(project.path(), "missing").unwrap_err();
+        assert!(error.to_string().contains("no templates directory found"));
     }
 
     #[test]
