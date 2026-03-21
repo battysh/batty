@@ -17,6 +17,8 @@ use uuid::Uuid;
 use super::board;
 use super::comms::{self, Channel};
 use super::config::{RoleType, TeamConfig};
+#[cfg(test)]
+use super::config::OrchestratorPosition;
 use super::events::{EventSink, TeamEvent};
 use super::failure_patterns::{self, FailureWindow};
 use super::hierarchy::MemberInstance;
@@ -350,13 +352,11 @@ impl TeamDaemon {
                 daemon.maybe_generate_standup()
             });
             self.run_loop_step("maybe_rotate_board", |daemon| daemon.maybe_rotate_board());
-<<<<<<< HEAD
             self.run_loop_step("maybe_generate_retrospective", |daemon| {
                 daemon.maybe_generate_retrospective()
-=======
+            });
             self.run_loop_step("maybe_notify_failure_patterns", |daemon| {
                 daemon.maybe_notify_failure_patterns()
->>>>>>> d7776e8 (daemon: add failure pattern notifications)
             });
             self.update_pane_status_labels();
 
@@ -5022,6 +5022,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5081,6 +5082,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5242,6 +5244,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: vec![RoleDef {
                         name: "human".to_string(),
@@ -5390,6 +5393,7 @@ mod tests {
                 automation: AutomationConfig::default(),
                 automation_sender: None,
                 orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 roles,
             },
@@ -5544,6 +5548,7 @@ mod tests {
                 automation: AutomationConfig::default(),
                 automation_sender: None,
                 orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 roles,
             },
@@ -5593,6 +5598,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5645,6 +5651,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5694,6 +5701,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5748,6 +5756,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5800,6 +5809,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5856,6 +5866,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5914,6 +5925,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -5981,6 +5993,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -6074,6 +6087,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -6209,6 +6223,7 @@ mod tests {
                 automation: AutomationConfig::default(),
                 automation_sender: None,
                 orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 roles: Vec::new(),
             },
@@ -6298,6 +6313,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -6378,6 +6394,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: vec![role],
                 },
@@ -6479,6 +6496,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: false,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: vec![role],
                 },
@@ -6504,6 +6522,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6578,6 +6597,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: false,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: vec![user_role, architect_role],
                 },
@@ -6606,6 +6626,7 @@ mod tests {
             )]),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6664,6 +6685,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -6760,6 +6782,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -6853,6 +6876,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -6942,6 +6966,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7019,6 +7044,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7117,6 +7143,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7191,6 +7218,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7257,6 +7285,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7328,6 +7357,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7363,7 +7393,6 @@ mod tests {
 
         daemon.update_automation_timers_for_state("lead", MemberState::Working);
         daemon.update_automation_timers_for_state("lead", MemberState::Idle);
-        backdate_idle_grace(&mut daemon, "lead");
         daemon.maybe_intervene_owned_tasks().unwrap();
 
         assert!(daemon.owned_task_interventions.get("lead").is_none());
@@ -7394,6 +7423,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7476,10 +7506,14 @@ mod tests {
                 project_root: tmp.path().to_path_buf(),
                 team_config: TeamConfig {
                     name: "test".to_string(),
+                    workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    orchestrator_pane: false,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7504,6 +7538,8 @@ mod tests {
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
             retro_generated: false,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7548,10 +7584,14 @@ mod tests {
                 project_root: tmp.path().to_path_buf(),
                 team_config: TeamConfig {
                     name: "test".to_string(),
+                    workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    orchestrator_pane: false,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7576,6 +7616,8 @@ mod tests {
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
             retro_generated: false,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7635,6 +7677,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7739,6 +7782,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7833,6 +7877,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -7954,6 +7999,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -8055,6 +8101,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -8136,6 +8183,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -8213,6 +8261,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: None,
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -8283,6 +8332,7 @@ mod tests {
                     automation: AutomationConfig::default(),
                     automation_sender: Some("human".to_string()),
                     orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
                     roles: Vec::new(),
                 },
@@ -8372,6 +8422,7 @@ mod tests {
                 automation: AutomationConfig::default(),
                 automation_sender: None,
                 orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 roles: Vec::new(),
             },
@@ -8400,6 +8451,7 @@ mod tests {
                 automation: AutomationConfig::default(),
                 automation_sender: None,
                 orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 roles: Vec::new(),
             },
@@ -8429,6 +8481,7 @@ mod tests {
                 automation: AutomationConfig::default(),
                 automation_sender: None,
                 orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 roles,
             },

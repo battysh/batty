@@ -317,6 +317,10 @@ mod tests {
         match cli.command {
             Command::ExportTemplate { name } => assert_eq!(name, "myteam"),
             other => panic!("expected export-template command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn retro_subcommand_parses() {
         let cli = Cli::parse_from(["batty", "retro"]);
         match cli.command {

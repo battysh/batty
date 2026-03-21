@@ -11,11 +11,11 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use tracing::{debug, info};
 
-use super::config::{LayoutConfig, RoleType, WorkflowMode};
+use super::config::{LayoutConfig, OrchestratorPosition, RoleType, WorkflowMode};
 use super::hierarchy::MemberInstance;
 use crate::tmux;
 
-const ORCHESTRATOR_PANE_HEIGHT_PCT: u32 = 20;
+const ORCHESTRATOR_PANE_WIDTH_PCT: u32 = 20;
 const ORCHESTRATOR_ROLE: &str = "orchestrator";
 
 #[derive(Debug, Clone)]
@@ -36,6 +36,7 @@ pub fn build_layout(
     project_root: &Path,
     workflow_mode: WorkflowMode,
     orchestrator_pane: bool,
+    orchestrator_position: OrchestratorPosition,
 ) -> Result<HashMap<String, String>> {
     let pane_members: Vec<_> = members
         .iter()
@@ -70,7 +71,7 @@ pub fn build_layout(
     let orchestrator_enabled = should_launch_orchestrator_pane(workflow_mode, orchestrator_pane);
     let initial_pane = tmux::pane_id(session)?;
     let agent_root_pane = if orchestrator_enabled {
-        launch_orchestrator_pane(session, &initial_pane, project_root)?
+        launch_orchestrator_pane(session, &initial_pane, project_root, orchestrator_position)?
     } else {
         initial_pane
     };
@@ -153,37 +154,55 @@ fn should_launch_orchestrator_pane(workflow_mode: WorkflowMode, orchestrator_pan
 
 fn launch_orchestrator_pane(
     session: &str,
-    agent_root_pane: &str,
+    initial_pane: &str,
     project_root: &Path,
+    position: OrchestratorPosition,
 ) -> Result<String> {
     let log_path = super::orchestrator_log_path(project_root);
     ensure_orchestrator_log(&log_path)?;
 
-    let orchestrator_pane = tmux::split_window_vertical_in_pane(
-        session,
-        agent_root_pane,
-        ORCHESTRATOR_PANE_HEIGHT_PCT,
-    )?;
+    let (orchestrator_target, agent_root_pane) = match position {
+        OrchestratorPosition::Left => {
+            // Split horizontally: new pane (right) gets the remaining width for agents.
+            // The original pane (left) becomes the orchestrator column.
+            let agent_pane = tmux::split_window_horizontal(
+                initial_pane,
+                100 - ORCHESTRATOR_PANE_WIDTH_PCT,
+            )?;
+            (initial_pane.to_string(), agent_pane)
+        }
+        OrchestratorPosition::Bottom => {
+            // Split vertically: new pane (bottom) becomes the orchestrator.
+            // The original pane (top) remains the agent root.
+            let orch_pane = tmux::split_window_vertical_in_pane(
+                session,
+                initial_pane,
+                ORCHESTRATOR_PANE_WIDTH_PCT,
+            )?;
+            (orch_pane, initial_pane.to_string())
+        }
+    };
+
     let tail_command = format!(
         "bash -lc 'touch {path}; exec tail -n 200 -F {path}'",
         path = shell_single_quote(log_path.to_string_lossy().as_ref())
     );
-    tmux::respawn_pane(&orchestrator_pane, &tail_command)?;
-    set_pane_title(session, &orchestrator_pane, ORCHESTRATOR_ROLE)?;
+    tmux::respawn_pane(&orchestrator_target, &tail_command)?;
+    set_pane_title(session, &orchestrator_target, ORCHESTRATOR_ROLE)?;
     let _ = std::process::Command::new("tmux")
         .args([
             "set-option",
             "-p",
             "-t",
-            orchestrator_pane.as_str(),
+            orchestrator_target.as_str(),
             "@batty_status",
             "workflow stream",
         ])
         .output();
     let _ = std::process::Command::new("tmux")
-        .args(["select-pane", "-t", agent_root_pane])
+        .args(["select-pane", "-t", agent_root_pane.as_str()])
         .output();
-    Ok(agent_root_pane.to_string())
+    Ok(agent_root_pane)
 }
 
 fn ensure_orchestrator_log(path: &Path) -> Result<()> {
@@ -614,6 +633,7 @@ roles:
             Path::new("/tmp"),
             WorkflowMode::Legacy,
             true,
+            OrchestratorPosition::Bottom,
         )
         .unwrap();
         assert_eq!(pane_map.len(), 9);
@@ -894,6 +914,7 @@ roles:
             tmp.path(),
             WorkflowMode::Hybrid,
             true,
+            OrchestratorPosition::Bottom,
         )
         .unwrap();
         assert_eq!(pane_map.len(), 2);
@@ -948,6 +969,7 @@ roles:
             tmp.path(),
             WorkflowMode::Hybrid,
             false,
+            OrchestratorPosition::Bottom,
         )
         .unwrap();
         assert_eq!(pane_map.len(), 2);
@@ -1020,6 +1042,7 @@ roles:
             Path::new("/tmp"),
             WorkflowMode::Legacy,
             true,
+            OrchestratorPosition::Bottom,
         )
         .unwrap();
         assert_eq!(pane_map.len(), 2);

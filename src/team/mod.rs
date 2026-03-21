@@ -23,7 +23,6 @@ pub mod policy;
 pub mod resolver;
 pub mod retrospective;
 pub mod review;
-pub mod retrospective;
 pub mod standup;
 pub mod task_cmd;
 pub mod task_loop;
@@ -604,6 +603,7 @@ pub fn start_team(project_root: &Path, attach: bool) -> Result<String> {
         project_root,
         team_config.workflow_mode,
         team_config.orchestrator_enabled(),
+        team_config.orchestrator_position,
     )?;
 
     // Initialize Maildir inboxes for all members
@@ -2082,33 +2082,6 @@ mod tests {
         }
     }
 
-    struct EnvVarGuard {
-        key: &'static str,
-        original: Option<String>,
-    }
-
-    impl EnvVarGuard {
-        fn unset(key: &'static str) -> Self {
-            let original = std::env::var(key).ok();
-            unsafe {
-                std::env::remove_var(key);
-            }
-            Self { key, original }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match self.original.as_deref() {
-                Some(value) => unsafe {
-                    std::env::set_var(self.key, value);
-                },
-                None => unsafe {
-                    std::env::remove_var(self.key);
-                },
-            }
-        }
-    }
     #[test]
     fn team_config_dir_is_under_batty() {
         let root = Path::new("/tmp/project");

@@ -123,6 +123,26 @@ The orchestrator is a visible tmux pane showing workflow decisions, not just a h
 
 Task markdown files gain workflow metadata in YAML frontmatter: `depends_on`, `review_owner`, `blocked_on`, `worktree_path`, `branch`, `commit`, `artifacts`, `next_action`. Older files without these fields are handled with safe defaults. kanban-md compatibility is preserved.
 
+## Intelligence Layer
+
+The intelligence layer makes the team self-aware and self-improving. It builds on the event stream, workflow metrics, and standup infrastructure to provide operational insight, automated feedback loops, and reusable knowledge.
+
+### Periodic Standups
+
+The daemon generates and delivers standup summaries on a configurable interval. Standups are scoped by hierarchy — each role sees only their direct reports. Standups include not just agent status (idle/working) but also board-derived context: what tasks are assigned, what's blocked, what's in review, and how long items have been in their current state. The standup interval and content depth are configurable in team.yaml.
+
+### Run Retrospectives
+
+When a run completes (all board tasks done, or team stopped), Batty analyzes the event log and board history to produce a retrospective. The retrospective reports: total cycle time, per-task duration, failure/retry counts, escalation frequency, merge conflict rate, and idle-time percentage. It identifies the top bottlenecks (e.g., "review queue stalled for 12 minutes," "eng-1-2 hit 3 test failures on T-005"). Retrospectives are written as markdown files to `.batty/retrospectives/` and optionally sent to the user via Telegram.
+
+### Failure Pattern Detection
+
+The daemon tracks recurring failure signatures across the event stream: repeated test failures on similar code paths, frequent escalations from the same engineer, merge conflicts on the same files. When a pattern is detected, it surfaces a structured observation to the manager (or architect, depending on severity). This is not automated remediation — it is automated noticing. The team decides what to do.
+
+### Team Templates
+
+Successful team configurations (topology, prompt templates, workflow policies) can be exported as reusable templates via `batty export-template`. Templates capture the team.yaml, prompt files, and workflow policy settings. `batty init --template <name>` bootstraps a new project from a saved template. This enables cross-project learning without building a recommendation engine — the human curates which configurations are worth reusing.
+
 ## Key Design Decisions
 
 **Why tmux?** Output capture (pipe-pane), input injection (send-keys/paste-buffer), status bar, panes, session persistence — all for free. No custom terminal code.
