@@ -8,13 +8,11 @@ use tracing::warn;
 
 use crate::task;
 
-use super::config::{self, RoleType, TeamConfig};
+use super::config::{self, RoleType};
 use super::daemon::NudgeSchedule;
 use super::hierarchy::MemberInstance;
 use super::inbox;
-use super::standup::{self, MemberState};
-use super::telegram::TelegramBot;
-use super::watcher::SessionWatcher;
+use super::standup::MemberState;
 use super::{
     TRIAGE_RESULT_FRESHNESS_SECONDS, now_unix, pause_marker_path, team_config_dir, team_config_path,
 };
@@ -645,143 +643,6 @@ pub(crate) fn workflow_metrics_enabled(config_path: &Path) -> bool {
     })
 }
 
-pub(crate) fn maybe_generate_standup(
-    project_root: &Path,
-    team_config: &TeamConfig,
-    members: &[MemberInstance],
-    watchers: &HashMap<String, SessionWatcher>,
-    states: &HashMap<String, MemberState>,
-    pane_map: &HashMap<String, String>,
-    telegram_bot: Option<&TelegramBot>,
-    paused_standups: &HashSet<String>,
-    last_standup: &mut HashMap<String, Instant>,
-) -> Result<Vec<String>> {
-    if !team_config.automation.standups {
-        return Ok(Vec::new());
-    }
-    if pause_marker_path(project_root).exists() {
-        return Ok(Vec::new());
-    }
-    let global_interval = team_config.standup.interval_secs;
-    if global_interval == 0 {
-        return Ok(Vec::new());
-    }
-
-    let mut recipients: Vec<(MemberInstance, Duration)> = Vec::new();
-    for role in &team_config.roles {
-        let receives = role.receives_standup.unwrap_or(matches!(
-            role.role_type,
-            RoleType::Manager | RoleType::Architect
-        ));
-        if !receives {
-            continue;
-        }
-        let interval_secs = role.standup_interval_secs.unwrap_or(global_interval);
-        let interval = Duration::from_secs(interval_secs);
-        for member in members {
-            if member.role_name == role.name {
-                recipients.push((member.clone(), interval));
-            }
-        }
-    }
-
-    let mut generated_recipients = Vec::new();
-
-    for (recipient, interval) in &recipients {
-        if paused_standups.contains(&recipient.name) {
-            continue;
-        }
-
-        let last = last_standup.get(&recipient.name).copied();
-        let should_fire = match last {
-            Some(t) => t.elapsed() >= *interval,
-            None => true,
-        };
-
-        if last.is_none() {
-            last_standup.insert(recipient.name.clone(), Instant::now());
-            continue;
-        }
-
-        if !should_fire {
-            continue;
-        }
-
-        let board_dir = team_config_dir(project_root).join("board");
-        let report = standup::generate_board_aware_standup_for(
-            recipient,
-            members,
-            watchers,
-            states,
-            team_config.standup.output_lines as usize,
-            Some(&board_dir),
-        );
-
-        match recipient.role_type {
-            RoleType::User => {
-                if let Some(bot) = telegram_bot {
-                    let chat_id = team_config
-                        .roles
-                        .iter()
-                        .find(|role| {
-                            role.role_type == RoleType::User && role.name == recipient.role_name
-                        })
-                        .and_then(|role| role.channel_config.as_ref())
-                        .map(|config| config.target.clone());
-
-                    match chat_id {
-                        Some(chat_id) => {
-                            if let Err(error) = bot.send_message(&chat_id, &report) {
-                                warn!(
-                                    member = %recipient.name,
-                                    target = %chat_id,
-                                    error = %error,
-                                    "failed to send standup via telegram"
-                                );
-                            } else {
-                                generated_recipients.push(recipient.name.clone());
-                            }
-                        }
-                        None => {
-                            warn!(
-                                member = %recipient.name,
-                                "telegram standup delivery skipped: missing target"
-                            );
-                        }
-                    }
-                } else {
-                    match standup::write_standup_file(project_root, &report) {
-                        Ok(path) => {
-                            tracing::info!(member = %recipient.name, path = %path.display(), "standup written to file");
-                            generated_recipients.push(recipient.name.clone());
-                        }
-                        Err(error) => {
-                            warn!(member = %recipient.name, error = %error, "failed to write standup file");
-                        }
-                    }
-                }
-            }
-            _ => {
-                if let Some(pane_id) = pane_map.get(&recipient.name) {
-                    if let Err(error) = standup::inject_standup(pane_id, &report) {
-                        warn!(member = %recipient.name, error = %error, "failed to inject standup");
-                    } else {
-                        generated_recipients.push(recipient.name.clone());
-                    }
-                }
-            }
-        }
-
-        last_standup.insert(recipient.name.clone(), Instant::now());
-    }
-
-    if !generated_recipients.is_empty() {
-        tracing::info!("standups generated and delivered");
-    }
-
-    Ok(generated_recipients)
-}
-
 pub(crate) fn update_pane_status_labels(
     project_root: &Path,
     members: &[MemberInstance],
@@ -987,110 +848,56 @@ pub(crate) fn format_standup_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::team::config::{
-        AutomationConfig, BoardConfig, OrchestratorPosition, RoleDef, StandupConfig, WorkflowMode,
-        WorkflowPolicy,
-    };
 
     #[test]
-    fn maybe_generate_standup_writes_user_report_to_file_without_telegram_bot() {
-        let tmp = tempfile::tempdir().unwrap();
-        let user = MemberInstance {
-            name: "user".to_string(),
-            role_name: "user".to_string(),
-            role_type: RoleType::User,
-            agent: None,
-            prompt: None,
-            reports_to: None,
-            use_worktrees: false,
-        };
-        let architect = MemberInstance {
-            name: "architect".to_string(),
-            role_name: "architect".to_string(),
-            role_type: RoleType::Architect,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("user".to_string()),
-            use_worktrees: false,
-        };
-        let user_role = RoleDef {
-            name: "user".to_string(),
-            role_type: RoleType::User,
-            agent: None,
-            instances: 1,
-            prompt: None,
-            talks_to: vec!["architect".to_string()],
-            channel: None,
-            channel_config: None,
-            nudge_interval_secs: None,
-            receives_standup: Some(true),
-            standup_interval_secs: Some(1),
-            owns: Vec::new(),
-            use_worktrees: false,
-        };
-        let architect_role = RoleDef {
-            name: "architect".to_string(),
-            role_type: RoleType::Architect,
-            agent: Some("claude".to_string()),
-            instances: 1,
-            prompt: None,
-            talks_to: vec![],
-            channel: None,
-            channel_config: None,
-            nudge_interval_secs: None,
-            receives_standup: Some(false),
-            standup_interval_secs: None,
-            owns: Vec::new(),
-            use_worktrees: false,
-        };
-        let team_config = TeamConfig {
-            name: "test".to_string(),
-            workflow_mode: WorkflowMode::Legacy,
-            workflow_policy: WorkflowPolicy::default(),
-            board: BoardConfig::default(),
-            standup: StandupConfig {
-                interval_secs: 1,
-                output_lines: 30,
-            },
-            automation: AutomationConfig::default(),
-            automation_sender: None,
-            orchestrator_pane: false,
-            orchestrator_position: OrchestratorPosition::Bottom,
-            layout: None,
-            roles: vec![user_role, architect_role],
-        };
-        let members = vec![user.clone(), architect];
-        let watchers = HashMap::new();
-        let states = HashMap::from([("architect".to_string(), MemberState::Working)]);
-        let pane_map = HashMap::new();
-        let paused_standups = HashSet::new();
-        let mut last_standup =
-            HashMap::from([(user.name.clone(), Instant::now() - Duration::from_secs(5))]);
+    fn format_standup_status_marks_paused_while_member_is_working() {
+        assert_eq!(
+            format_standup_status(Some(Instant::now()), Duration::from_secs(600), true),
+            " #[fg=244]standup paused#[default]"
+        );
+    }
 
-        let generated = maybe_generate_standup(
-            tmp.path(),
-            &team_config,
-            &members,
-            &watchers,
-            &states,
-            &pane_map,
-            None,
-            &paused_standups,
-            &mut last_standup,
-        )
-        .unwrap();
+    #[test]
+    fn format_nudge_status_marks_paused_while_member_is_working() {
+        let schedule = NudgeSchedule {
+            text: "check in".to_string(),
+            interval: Duration::from_secs(600),
+            idle_since: None,
+            fired_this_idle: false,
+            paused: true,
+        };
 
-        assert_eq!(generated, vec!["user".to_string()]);
+        assert_eq!(
+            format_nudge_status(Some(&schedule)),
+            " #[fg=244]nudge paused#[default]"
+        );
+    }
 
-        let standups_dir = tmp.path().join(".batty").join("standups");
-        let entries = std::fs::read_dir(&standups_dir)
-            .unwrap()
-            .collect::<std::io::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(entries.len(), 1);
+    #[test]
+    fn compose_pane_status_label_shows_pending_inbox_count() {
+        let label = compose_pane_status_label(
+            MemberState::Idle,
+            3,
+            2,
+            &[191],
+            &[193, 194],
+            false,
+            " #[fg=magenta]nudge 0:30#[default]",
+            "",
+        );
+        assert!(label.contains("idle"));
+        assert!(label.contains("inbox 3"));
+        assert!(label.contains("triage 2"));
+        assert!(label.contains("task 191"));
+        assert!(label.contains("review 2"));
+        assert!(label.contains("nudge 0:30"));
+    }
 
-        let report = std::fs::read_to_string(entries[0].path()).unwrap();
-        assert!(report.contains("=== STANDUP for user ==="));
-        assert!(report.contains("[architect] status: working"));
+    #[test]
+    fn compose_pane_status_label_shows_zero_inbox_and_pause_state() {
+        let label = compose_pane_status_label(MemberState::Working, 0, 0, &[], &[], true, "", "");
+        assert!(label.contains("working"));
+        assert!(label.contains("inbox 0"));
+        assert!(label.contains("PAUSED"));
     }
 }
