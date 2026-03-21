@@ -1,8 +1,19 @@
-//! Core team daemon — polling loop, agent lifecycle, message routing.
+//! Core team daemon: poll loop, lifecycle coordination, and routing.
 //!
-//! The daemon ties together all team subsystems: it spawns agents in tmux
-//! panes, monitors their output via `SessionWatcher`, routes messages between
-//! roles, generates periodic standups, and emits structured events.
+//! `TeamDaemon` owns the long-running control loop for a Batty team session.
+//! It starts and resumes member agents, polls tmux-backed watchers, routes
+//! messages across panes, inboxes, and external channels, persists runtime
+//! state, and runs periodic automation such as standups and board rotation.
+//!
+//! Focused subsystems that were extracted from this file stay close to the
+//! daemon boundary:
+//! - `merge` handles engineer completion, test gating, and merge/escalation
+//!   flow once a task is reported done.
+//! - `interventions` handles idle nudges and manager/architect intervention
+//!   automation without changing the daemon's main control flow.
+//!
+//! This module remains the integration layer that sequences those subsystems
+//! inside each poll iteration.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
