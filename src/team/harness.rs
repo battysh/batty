@@ -90,6 +90,12 @@ impl TestHarness {
         self
     }
 
+    pub fn with_pane(mut self, member: &str, pane_id: &str) -> Self {
+        self.pane_map
+            .insert(member.to_string(), pane_id.to_string());
+        self
+    }
+
     pub fn with_board_task(
         self,
         id: u32,
