@@ -20,6 +20,8 @@ pub enum WatcherState {
     Active,
     /// No agent running in pane (idle / waiting for assignment).
     Idle,
+    /// Agent reported that its conversation/session is too large to continue.
+    ContextExhausted,
 }
 
 pub struct SessionWatcher {
@@ -137,7 +139,7 @@ impl SessionWatcher {
                 self.last_capture = capture;
                 let next_state =
                     next_state_after_capture(tracker_kind, screen_state, tracker_state, self.state);
-                if next_state == WatcherState::Active {
+                if next_state != WatcherState::Idle {
                     self.last_output_hash = simple_hash(&self.last_capture);
                     self.state = next_state;
                 }
@@ -225,6 +227,15 @@ impl SessionWatcher {
             Some(SessionTracker::Claude(claude)) => session_file_id(claude.session_file.as_ref()),
             None => None,
         }
+    }
+
+    pub fn current_session_size_bytes(&self) -> Option<u64> {
+        let path = match self.tracker.as_ref() {
+            Some(SessionTracker::Codex(codex)) => codex.session_file.as_ref(),
+            Some(SessionTracker::Claude(claude)) => claude.session_file.as_ref(),
+            None => None,
+        }?;
+        fs::metadata(path).ok().map(|metadata| metadata.len())
     }
 
     pub fn take_completion_event(&mut self) -> bool {
@@ -348,6 +359,7 @@ fn starts_with_agent_prompt(line: &str, prompt: char) -> bool {
 enum ScreenState {
     Active,
     Idle,
+    ContextExhausted,
     Unknown,
 }
 
@@ -372,6 +384,10 @@ fn classify_capture_state(capture: &str) -> ScreenState {
         .any(|line| is_live_interrupt_footer(line))
     {
         return ScreenState::Active;
+    }
+
+    if capture_contains_context_exhaustion(capture) {
+        return ScreenState::ContextExhausted;
     }
 
     if is_at_agent_prompt(capture) {
@@ -405,12 +421,28 @@ fn is_live_interrupt_footer(line: &str) -> bool {
         || trimmed.contains("esc to in...")
 }
 
+fn capture_contains_context_exhaustion(capture: &str) -> bool {
+    let lowered = capture.to_ascii_lowercase();
+    lowered.contains("context window exceeded")
+        || lowered.contains("context window is full")
+        || lowered.contains("conversation is too long")
+        || lowered.contains("maximum context length")
+        || lowered.contains("context limit reached")
+        || lowered.contains("truncated due to context limit")
+        || lowered.contains("input exceeds the model")
+        || lowered.contains("prompt is too long")
+}
+
 fn next_state_after_capture(
     tracker_kind: TrackerKind,
     screen_state: ScreenState,
     tracker_state: TrackerState,
     previous_state: WatcherState,
 ) -> WatcherState {
+    if screen_state == ScreenState::ContextExhausted {
+        return WatcherState::ContextExhausted;
+    }
+
     if tracker_kind == TrackerKind::Claude {
         match screen_state {
             // Claude's live pane state is more reliable than session logs when
@@ -419,6 +451,7 @@ fn next_state_after_capture(
             // idle, even if an old session file still looks active.
             ScreenState::Active => return WatcherState::Active,
             ScreenState::Idle => return WatcherState::Idle,
+            ScreenState::ContextExhausted => return WatcherState::ContextExhausted,
             ScreenState::Unknown => {}
         }
     }
@@ -432,6 +465,7 @@ fn next_state_after_capture(
     match screen_state {
         ScreenState::Active => WatcherState::Active,
         ScreenState::Idle => WatcherState::Idle,
+        ScreenState::ContextExhausted => WatcherState::ContextExhausted,
         ScreenState::Unknown => previous_state,
     }
 }
@@ -933,6 +967,42 @@ mod tests {
             "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
         );
         assert!(is_at_agent_prompt(capture));
+        assert_eq!(classify_capture_state(capture), ScreenState::Idle);
+    }
+
+    #[test]
+    fn claude_context_window_message_marks_capture_exhausted() {
+        let capture = concat!(
+            "Claude cannot continue: conversation is too long.\n",
+            "Start a new conversation or clear earlier context.\n",
+            "❯ \n",
+        );
+        assert_eq!(
+            classify_capture_state(capture),
+            ScreenState::ContextExhausted
+        );
+    }
+
+    #[test]
+    fn codex_context_limit_message_marks_capture_exhausted() {
+        let capture = concat!(
+            "Request truncated due to context limit.\n",
+            "Please start a fresh session with a smaller prompt.\n",
+            "› \n",
+        );
+        assert_eq!(
+            classify_capture_state(capture),
+            ScreenState::ContextExhausted
+        );
+    }
+
+    #[test]
+    fn ambiguous_context_wording_does_not_mark_capture_exhausted() {
+        let capture = concat!(
+            "We should reduce context window usage in the next refactor.\n",
+            "That note is informational only.\n",
+        );
+        assert_eq!(classify_capture_state(capture), ScreenState::Unknown);
     }
 
     #[test]
@@ -1129,6 +1199,15 @@ mod tests {
             ),
             WatcherState::Idle
         );
+        assert_eq!(
+            next_state_after_capture(
+                TrackerKind::Codex,
+                ScreenState::ContextExhausted,
+                TrackerState::Unknown,
+                WatcherState::Active,
+            ),
+            WatcherState::ContextExhausted
+        );
     }
 
     #[test]
@@ -1211,6 +1290,26 @@ mod tests {
         assert!(!watcher.last_output().is_empty());
 
         crate::tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn idle_poll_detects_context_exhaustion() {
+        let session = format!("batty-test-watcher-context-exhaust-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
+
+        crate::tmux::create_session(&session, "cat", &[], "/tmp").unwrap();
+        let pane_id = crate::tmux::pane_id(&session).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        crate::tmux::send_keys(&pane_id, "Conversation is too long to continue.", true).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        let mut watcher = SessionWatcher::new(&pane_id, "eng-1-1", 300, None);
+
+        assert_eq!(watcher.poll().unwrap(), WatcherState::ContextExhausted);
+        assert!(watcher.last_output().contains("Conversation is too long"));
+
+        crate::tmux::kill_session(&session).unwrap();
     }
 
     #[test]

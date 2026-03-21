@@ -40,6 +40,8 @@ pub struct TeamEvent {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uptime_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_size_bytes: Option<u64>,
     pub ts: u64,
 }
 
@@ -68,6 +70,7 @@ impl TeamEvent {
             step: None,
             error: None,
             uptime_secs: None,
+            session_size_bytes: None,
             ts: Self::now(),
         }
     }
@@ -101,6 +104,19 @@ impl TeamEvent {
         Self {
             uptime_secs: Some(uptime_secs),
             ..Self::base("daemon_heartbeat")
+        }
+    }
+
+    pub fn context_exhausted(
+        role: &str,
+        task: Option<u32>,
+        session_size_bytes: Option<u64>,
+    ) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: task.map(|task_id| task_id.to_string()),
+            session_size_bytes,
+            ..Self::base("context_exhausted")
         }
     }
 
@@ -312,6 +328,10 @@ mod tests {
             ),
             ("daemon_heartbeat", TeamEvent::daemon_heartbeat(120)),
             (
+                "context_exhausted",
+                TeamEvent::context_exhausted("eng-1", Some(42), Some(1_024)),
+            ),
+            (
                 "loop_step_error",
                 TeamEvent::loop_step_error("poll_watchers", "tmux error"),
             ),
@@ -431,6 +451,17 @@ mod tests {
         // No reason/step/error fields
         assert!(parsed.get("reason").is_none());
         assert!(parsed.get("step").is_none());
+    }
+
+    #[test]
+    fn context_exhausted_includes_role_task_and_session_size() {
+        let event = TeamEvent::context_exhausted("eng-1", Some(77), Some(4096));
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"].as_str().unwrap(), "context_exhausted");
+        assert_eq!(parsed["role"].as_str().unwrap(), "eng-1");
+        assert_eq!(parsed["task"].as_str().unwrap(), "77");
+        assert_eq!(parsed["session_size_bytes"].as_u64().unwrap(), 4096);
     }
 
     #[test]
