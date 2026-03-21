@@ -983,10 +983,19 @@ impl TeamDaemon {
 
         for name in &member_names {
             let prev_state = self.states.get(name).copied();
-            let (new_state, completion_observed) = {
+            let prev_watcher_state = self
+                .watchers
+                .get(name)
+                .map(|watcher| watcher.state)
+                .unwrap_or(WatcherState::Idle);
+            let (new_state, completion_observed, session_size_bytes) = {
                 let watcher = self.watchers.get_mut(name).unwrap();
                 match watcher.poll() {
-                    Ok(new_state) => (new_state, watcher.take_completion_event()),
+                    Ok(new_state) => (
+                        new_state,
+                        watcher.take_completion_event(),
+                        watcher.current_session_size_bytes(),
+                    ),
                     Err(e) => {
                         warn!(member = %name, error = %e, "watcher poll failed");
                         continue;
@@ -997,6 +1006,7 @@ impl TeamDaemon {
             let member_state = match new_state {
                 WatcherState::Active => MemberState::Working,
                 WatcherState::Idle => MemberState::Idle,
+                WatcherState::ContextExhausted => MemberState::Working,
             };
 
             if prev_state != Some(member_state) {
@@ -1004,6 +1014,27 @@ impl TeamDaemon {
 
                 // Update automation countdowns on state transitions.
                 self.update_automation_timers_for_state(name, member_state);
+            }
+
+            if new_state == WatcherState::ContextExhausted
+                && prev_watcher_state != WatcherState::ContextExhausted
+            {
+                let task_id = self.active_task_id(name);
+                warn!(
+                    member = %name,
+                    task_id,
+                    session_size_bytes,
+                    "detected context exhaustion"
+                );
+                self.emit_event(TeamEvent::context_exhausted(
+                    name,
+                    task_id,
+                    session_size_bytes,
+                ));
+                self.record_orchestrator_action(format!(
+                    "lifecycle: detected context exhaustion for {} (task={:?}, session_size_bytes={:?})",
+                    name, task_id, session_size_bytes
+                ));
             }
 
             if completion_observed && self.active_task_id(name).is_some() {
@@ -5154,7 +5185,7 @@ mod tests {
     use crate::team::config::{
         BoardConfig, ChannelConfig, RoleDef, StandupConfig, WorkflowMode, WorkflowPolicy,
     };
-    use crate::team::events::EventSink;
+    use crate::team::events::{EventSink, read_events};
     use crate::team::watcher::WatcherState;
     use serial_test::serial;
 
@@ -7371,6 +7402,92 @@ mod tests {
                 .contains("Live message delivery failed after 3 attempts.")
         );
         assert!(messages[0].body.contains("Recipient: eng-1"));
+    }
+
+    #[test]
+    #[serial]
+    fn poll_watchers_emits_context_exhausted_event() {
+        let session = format!("batty-test-context-exhausted-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
+
+        crate::tmux::create_session(&session, "cat", &[], "/tmp").unwrap();
+        let pane_id = crate::tmux::pane_id(&session).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        tmux::send_keys(&pane_id, "Conversation is too long to continue.", true).unwrap();
+        tmux::send_keys(&pane_id, "prompt is too long", true).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let events_path = tmp.path().join("events.jsonl");
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    orchestrator_pane: false,
+                    orchestrator_position: OrchestratorPosition::Bottom,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: session.clone(),
+                members: vec![engineer],
+                pane_map: HashMap::from([("eng-1".to_string(), pane_id.clone())]),
+            },
+            watchers: HashMap::from([(
+                "eng-1".to_string(),
+                SessionWatcher::new(&pane_id, "eng-1", 300, None),
+            )]),
+            states: HashMap::from([("eng-1".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
+            active_tasks: HashMap::from([("eng-1".to_string(), 42)]),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
+            event_sink: EventSink::new(&events_path).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
+            retro_generated: false,
+            failed_deliveries: Vec::new(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        daemon.poll_watchers().unwrap();
+
+        assert_eq!(daemon.states.get("eng-1"), Some(&MemberState::Working));
+        let events = read_events(&events_path).unwrap();
+        let event = events
+            .iter()
+            .find(|event| event.event == "context_exhausted")
+            .unwrap();
+        assert_eq!(event.role.as_deref(), Some("eng-1"));
+        assert_eq!(event.task.as_deref(), Some("42"));
+
+        let _ = crate::tmux::kill_session(&session);
     }
 
     #[test]

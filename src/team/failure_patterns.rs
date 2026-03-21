@@ -277,6 +277,7 @@ mod tests {
             step: None,
             error: Some(error.to_string()),
             uptime_secs: None,
+            session_size_bytes: None,
             ts,
         }
     }
@@ -304,6 +305,7 @@ mod tests {
             step: None,
             error: error.map(str::to_string),
             uptime_secs: None,
+            session_size_bytes: None,
             ts,
         }
     }
