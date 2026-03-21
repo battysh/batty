@@ -115,7 +115,7 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::retro_generated());
     }
 
-    pub(super) fn record_message_routed(&mut self, from: &str, to: &str) {
+    pub(crate) fn record_message_routed(&mut self, from: &str, to: &str) {
         self.emit_event(TeamEvent::message_routed(from, to));
     }
 
