@@ -76,6 +76,14 @@ impl TeamEvent {
         Self::base("daemon_started")
     }
 
+    pub fn daemon_reloading() -> Self {
+        Self::base("daemon_reloading")
+    }
+
+    pub fn daemon_reloaded() -> Self {
+        Self::base("daemon_reloaded")
+    }
+
     #[allow(dead_code)]
     pub fn daemon_stopped() -> Self {
         Self::base("daemon_stopped")
@@ -295,6 +303,8 @@ mod tests {
     fn all_event_variants_serialize_with_correct_event_field() {
         let variants: Vec<(&str, TeamEvent)> = vec![
             ("daemon_started", TeamEvent::daemon_started()),
+            ("daemon_reloading", TeamEvent::daemon_reloading()),
+            ("daemon_reloaded", TeamEvent::daemon_reloaded()),
             ("daemon_stopped", TeamEvent::daemon_stopped()),
             (
                 "daemon_stopped",
