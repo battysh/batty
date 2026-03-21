@@ -1540,6 +1540,27 @@ roles:
     }
 
     #[test]
+    fn load_json_file_returns_none_for_missing_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("missing.json");
+
+        let parsed: Option<DoctorDaemonState> = load_json_file(&path).unwrap();
+
+        assert_eq!(parsed, None);
+    }
+
+    #[test]
+    fn load_json_file_reports_invalid_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("broken.json");
+        fs::write(&path, "{not json").unwrap();
+
+        let error = load_json_file::<DoctorDaemonState>(&path).unwrap_err();
+
+        assert!(error.to_string().contains("failed to parse"));
+    }
+
+    #[test]
     fn test_doctor_formats_output() {
         let tmp = tempfile::tempdir().unwrap();
         init_git_repo(tmp.path());
@@ -1639,6 +1660,72 @@ roles:
     }
 
     #[test]
+    fn build_resume_eligibility_reports_missing_launch_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_team_config(tmp.path());
+        let members =
+            hierarchy::resolve_hierarchy(&load_team_config(tmp.path()).unwrap().unwrap()).unwrap();
+
+        let resume = build_resume_eligibility(
+            tmp.path(),
+            load_team_config(tmp.path()).unwrap().as_ref(),
+            &members,
+            &None,
+        );
+
+        assert_eq!(resume.len(), 3);
+        assert!(resume.iter().all(|item| !item.eligible));
+        assert!(resume.iter().all(|item| item.reason == "no_launch_state"));
+    }
+
+    #[test]
+    fn build_resume_eligibility_reports_missing_member_launch_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_team_config(tmp.path());
+        let config = load_team_config(tmp.path()).unwrap().unwrap();
+        let members = hierarchy::resolve_hierarchy(&config).unwrap();
+        let launch_state = Some(HashMap::from([(
+            "architect".to_string(),
+            LaunchIdentityRecord {
+                agent: "claude-code".to_string(),
+                prompt: strip_nudge_section(
+                    "Architect prompt\n## Nudge\nnudge text\n## Next\nkeep this",
+                ),
+                session_id: None,
+            },
+        )]));
+
+        let resume = build_resume_eligibility(tmp.path(), Some(&config), &members, &launch_state);
+
+        let manager = resume.iter().find(|item| item.member == "manager").unwrap();
+        assert!(!manager.eligible);
+        assert_eq!(manager.reason, "missing_member_launch_state");
+        assert!(manager.current_prompt_hash.is_some());
+    }
+
+    #[test]
+    fn build_resume_eligibility_reports_agent_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_team_config(tmp.path());
+        let config = load_team_config(tmp.path()).unwrap().unwrap();
+        let members = hierarchy::resolve_hierarchy(&config).unwrap();
+        let launch_state = Some(HashMap::from([(
+            "manager".to_string(),
+            LaunchIdentityRecord {
+                agent: "claude-code".to_string(),
+                prompt: "Manager prompt".to_string(),
+                session_id: None,
+            },
+        )]));
+
+        let resume = build_resume_eligibility(tmp.path(), Some(&config), &members, &launch_state);
+
+        let manager = resume.iter().find(|item| item.member == "manager").unwrap();
+        assert!(!manager.eligible);
+        assert_eq!(manager.reason, "agent_changed");
+    }
+
+    #[test]
     fn doctor_board_clean_state_reports_passes() {
         let tmp = tempfile::tempdir().unwrap();
         init_git_repo(tmp.path());
@@ -1708,6 +1795,84 @@ roles:
     }
 
     #[test]
+    fn doctor_dependency_graph_reports_no_board_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(
+            tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks"),
+        )
+        .unwrap();
+
+        let lines = build_board_dependency_graph(tmp.path());
+
+        assert_eq!(lines, vec!["PASS: no board tasks found".to_string()]);
+    }
+
+    #[test]
+    fn doctor_dependency_graph_reports_no_dependencies() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_dependency_task(tmp.path(), 30, "Standalone", "todo", &[]);
+
+        let lines = build_board_dependency_graph(tmp.path());
+
+        assert_eq!(
+            lines,
+            vec!["PASS: no task dependencies declared".to_string()]
+        );
+    }
+
+    #[test]
+    fn doctor_board_git_checks_pass_when_tasks_directory_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let checks = build_board_git_checks(tmp.path());
+
+        assert_eq!(
+            checks,
+            vec![check_line(
+                CheckLevel::Pass,
+                "board tasks directory missing; nothing to verify",
+            )]
+        );
+    }
+
+    #[test]
+    fn doctor_board_git_checks_pass_when_no_active_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_board_task(tmp.path(), 40, "todo", None, None);
+        write_board_task(tmp.path(), 41, "done", None, None);
+
+        let checks = build_board_git_checks(tmp.path());
+
+        assert_eq!(
+            checks,
+            vec![check_line(
+                CheckLevel::Pass,
+                "no in-progress or review tasks on the board",
+            )]
+        );
+    }
+
+    #[test]
+    fn doctor_board_git_checks_fail_when_git_state_unavailable() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_board_task(tmp.path(), 42, "in-progress", Some("eng-1/task-42"), None);
+
+        let checks = build_board_git_checks(tmp.path());
+
+        assert_eq!(
+            checks,
+            vec![check_line(
+                CheckLevel::Fail,
+                "git state unavailable; cannot cross-check board metadata",
+            )]
+        );
+    }
+
+    #[test]
     fn doctor_performance_regression_warns_on_latest_slow_merge() {
         let tmp = tempfile::tempdir().unwrap();
         init_git_repo(tmp.path());
@@ -1759,6 +1924,43 @@ roles:
         assert!(report.contains(
             "PASS: latest merge test runtime is 1100 ms vs rolling 5-merge average 1000 ms"
         ));
+    }
+
+    #[test]
+    fn doctor_performance_regression_reports_missing_history() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let checks = build_performance_checks(tmp.path());
+
+        assert_eq!(
+            checks,
+            vec![check_line(
+                CheckLevel::Pass,
+                "no merge test timing history recorded yet",
+            )]
+        );
+    }
+
+    #[test]
+    fn doctor_performance_regression_reports_insufficient_samples() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+        fs::write(
+            tmp.path().join(".batty").join("test_timing.jsonl"),
+            r#"{"task_id":1,"engineer":"eng-1","branch":"eng-1/task-1","measured_at":1,"duration_ms":1000,"rolling_average_ms":null,"regression_pct":null,"regression_detected":false}"#,
+        )
+        .unwrap();
+
+        let checks = build_performance_checks(tmp.path());
+
+        assert_eq!(
+            checks,
+            vec![check_line(
+                CheckLevel::Pass,
+                "merge timing history has 1 samples; need 6 successful merges before regression detection activates",
+            )]
+        );
     }
 
     #[test]
@@ -1917,6 +2119,186 @@ roles:
         assert!(cleanup_plan.orphan_status.branches.is_empty());
         assert!(cleanup_plan.orphan_status.worktrees.is_empty());
         assert_eq!(cleanup_plan.stale_state, stale_paths);
+    }
+
+    #[test]
+    fn detect_stale_state_returns_empty_without_team_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_stale_state_files(tmp.path());
+
+        let stale = detect_stale_state(tmp.path(), None);
+
+        assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn stale_state_candidates_match_expected_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let candidates = stale_state_candidates(tmp.path());
+
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0], launch_state_path(tmp.path()));
+        assert_eq!(candidates[1], super::super::daemon_state_path(tmp.path()));
+        assert_eq!(candidates[2], tmp.path().join(".batty").join("merge.lock"));
+    }
+
+    #[test]
+    fn cleanup_stale_state_removes_files_and_reports_actions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stale_paths = write_stale_state_files(tmp.path());
+
+        let summary = cleanup_stale_state(tmp.path(), &stale_paths).unwrap();
+
+        assert_eq!(summary.branches_removed, 0);
+        assert_eq!(summary.worktrees_removed, 0);
+        assert_eq!(summary.stale_state_removed, 3);
+        assert!(
+            summary
+                .actions
+                .iter()
+                .any(|action| action.contains(".batty/launch-state.json"))
+        );
+        for path in stale_paths {
+            assert!(!path.exists(), "{} should be removed", path.display());
+        }
+    }
+
+    #[test]
+    fn render_cleanup_plan_reports_empty_plan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = CleanupPlan {
+            orphan_status: OrphanStatus {
+                branches: Vec::new(),
+                worktrees: Vec::new(),
+            },
+            stale_state: Vec::new(),
+        };
+
+        let rendered = render_cleanup_plan(tmp.path(), &plan);
+
+        assert!(rendered.contains("== Cleanup Plan =="));
+        assert!(rendered.contains("No orphan branches, worktrees, or stale state to clean up."));
+    }
+
+    #[test]
+    fn render_cleanup_summary_lists_counts_and_actions() {
+        let summary = CleanupSummary {
+            branches_removed: 1,
+            worktrees_removed: 2,
+            stale_state_removed: 3,
+            actions: vec!["deleted orphan branch 'eng-1/task-1'".to_string()],
+        };
+
+        let rendered = render_cleanup_summary(&summary);
+
+        assert!(rendered.contains("removed_branches: 1"));
+        assert!(rendered.contains("removed_worktrees: 2"));
+        assert!(rendered.contains("removed_stale_state: 3"));
+        assert!(rendered.contains("action: deleted orphan branch 'eng-1/task-1'"));
+    }
+
+    #[test]
+    fn display_cleanup_path_prefers_relative_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join(".batty").join("worktrees").join("eng-1");
+
+        let display = display_cleanup_path(tmp.path(), &nested);
+
+        assert_eq!(display, ".batty/worktrees/eng-1");
+    }
+
+    #[test]
+    fn resolve_task_worktree_handles_relative_and_absolute_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let relative = resolve_task_worktree(tmp.path(), ".batty/worktrees/eng-1");
+        let absolute = resolve_task_worktree(tmp.path(), "/tmp/eng-1");
+
+        assert_eq!(
+            relative,
+            tmp.path().join(".batty").join("worktrees").join("eng-1")
+        );
+        assert_eq!(absolute, PathBuf::from("/tmp/eng-1"));
+    }
+
+    #[test]
+    fn branch_and_engineer_name_helpers_match_expected_patterns() {
+        assert!(is_task_branch("eng-1/task-12"));
+        assert!(!is_task_branch("main"));
+        assert!(!is_task_branch("eng-1/feature"));
+        assert!(is_engineer_name("eng-1"));
+        assert!(!is_engineer_name("manager"));
+    }
+
+    #[test]
+    fn canonicalize_cycle_rotates_to_lowest_task_id() {
+        let cycle = canonicalize_cycle(&[7, 9, 5]);
+
+        assert_eq!(cycle, vec![5, 7, 9, 5]);
+    }
+
+    #[test]
+    fn active_task_targets_derive_branch_and_worktree_from_claimed_engineer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let task = crate::task::Task {
+            id: 88,
+            title: "Task 88".to_string(),
+            status: "in-progress".to_string(),
+            priority: "medium".to_string(),
+            claimed_by: Some("eng-2".to_string()),
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            branch: None,
+            worktree_path: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            description: "Task body.".to_string(),
+            batty_config: None,
+            source_path: PathBuf::from("task-88.md"),
+        };
+
+        let targets = active_task_targets(tmp.path(), &[&task]);
+
+        assert!(targets.branches.contains("eng-2/task-88"));
+        assert!(
+            targets
+                .worktrees
+                .contains(&tmp.path().join(".batty").join("worktrees").join("eng-2"))
+        );
+    }
+
+    #[test]
+    fn build_worktree_statuses_skips_non_engineers() {
+        let members = vec![
+            MemberInstance {
+                name: "architect".to_string(),
+                role_name: "architect".to_string(),
+                role_type: RoleType::Architect,
+                agent: Some("claude".to_string()),
+                prompt: None,
+                reports_to: None,
+                use_worktrees: false,
+            },
+            MemberInstance {
+                name: "eng-1".to_string(),
+                role_name: "engineer".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("codex".to_string()),
+                prompt: None,
+                reports_to: Some("manager".to_string()),
+                use_worktrees: true,
+            },
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+
+        let statuses = build_worktree_statuses(tmp.path(), &members);
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].member, "eng-1");
     }
 
     #[test]
