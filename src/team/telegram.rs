@@ -3,7 +3,7 @@
 //! Provides a blocking HTTP client that sends messages and polls for updates
 //! via the Telegram Bot API. Access control is enforced by numeric user IDs.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use std::io::{self, Write as IoWrite};
 use std::path::Path;
 use tracing::{debug, warn};
@@ -91,12 +91,22 @@ impl TelegramBot {
 
         match resp {
             Ok(r) => {
-                debug!(status = r.status(), "sendMessage response");
+                let status = r.status();
+                let body: serde_json::Value = r
+                    .into_json()
+                    .context("failed to parse sendMessage response body")?;
+                let message_id = parse_send_message_response(&body)?;
+                debug!(status, message_id, "sendMessage accepted by Telegram API");
                 Ok(())
             }
-            Err(e) => {
-                warn!(error = %e, "sendMessage failed");
-                bail!("Telegram sendMessage failed: {e}");
+            Err(ureq::Error::Status(status, response)) => {
+                let detail = response.into_string().unwrap_or_default();
+                warn!(status, detail = %detail, "sendMessage failed");
+                bail!("Telegram sendMessage failed with status {status}: {detail}");
+            }
+            Err(ureq::Error::Transport(error)) => {
+                warn!(error = %error, "sendMessage transport failed");
+                bail!("Telegram sendMessage transport failed: {error}");
             }
         }
     }
@@ -129,6 +139,17 @@ impl TelegramBot {
 
         Ok(messages)
     }
+}
+
+fn parse_send_message_response(json: &serde_json::Value) -> Result<i64> {
+    if json["ok"].as_bool() != Some(true) {
+        return Err(anyhow!("Telegram API returned ok=false"));
+    }
+
+    json.get("result")
+        .and_then(|result| result.get("message_id"))
+        .and_then(|message_id| message_id.as_i64())
+        .ok_or_else(|| anyhow!("Telegram sendMessage response missing result.message_id"))
 }
 
 /// Parse a Telegram `getUpdates` JSON response into authorized inbound messages.
@@ -705,6 +726,31 @@ mod tests {
             "description": "Not Found"
         });
         assert_eq!(parse_get_me_response(&json), None);
+    }
+
+    #[test]
+    fn parse_send_message_response_requires_api_acceptance() {
+        let json: serde_json::Value = serde_json::json!({
+            "ok": true,
+            "result": {
+                "message_id": 42
+            }
+        });
+
+        assert_eq!(parse_send_message_response(&json).unwrap(), 42);
+    }
+
+    #[test]
+    fn parse_send_message_response_rejects_missing_confirmation() {
+        let json: serde_json::Value = serde_json::json!({
+            "ok": true,
+            "result": {}
+        });
+
+        assert!(parse_send_message_response(&json)
+            .unwrap_err()
+            .to_string()
+            .contains("message_id"));
     }
 
     #[test]

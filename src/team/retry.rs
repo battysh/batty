@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
 use super::board_cmd::BoardError;
+use super::errors::DeliveryError;
 use super::git_cmd::GitError;
 
 /// Classifies whether an error is safe to retry.
@@ -21,6 +22,12 @@ impl Retryable for GitError {
 }
 
 impl Retryable for BoardError {
+    fn is_transient(&self) -> bool {
+        self.is_transient()
+    }
+}
+
+impl Retryable for DeliveryError {
     fn is_transient(&self) -> bool {
         self.is_transient()
     }
@@ -147,7 +154,7 @@ mod tests {
 
     use crate::team::board_cmd::BoardError;
 
-    use super::{RetryConfig, Retryable, next_delay_ms, retry_sync, retry_sync_with_sleep};
+    use super::{next_delay_ms, retry_sync, retry_sync_with_sleep, RetryConfig, Retryable};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum TestError {
