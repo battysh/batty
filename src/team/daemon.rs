@@ -34,11 +34,10 @@ use super::delivery::FailedDelivery;
 use super::events::EventSink;
 #[cfg(test)]
 use super::events::TeamEvent;
-use super::failure_patterns::FailureWindow;
+use super::failure_patterns::FailureTracker;
 use super::hierarchy::MemberInstance;
 use super::inbox;
 use super::merge;
-use super::message;
 use super::standup::{self, MemberState};
 use super::status;
 use super::task_cmd;
@@ -97,8 +96,7 @@ pub struct TeamDaemon {
     pub(super) channels: HashMap<String, Box<dyn Channel>>,
     pub(super) nudges: HashMap<String, NudgeSchedule>,
     pub(super) telegram_bot: Option<super::telegram::TelegramBot>,
-    pub(super) failure_window: FailureWindow,
-    pub(super) last_pattern_notifications: HashMap<String, u32>,
+    pub(super) failure_tracker: FailureTracker,
     pub(super) event_sink: EventSink,
     pub(super) paused_standups: HashSet<String>,
     pub(super) last_standup: HashMap<String, Instant>,
@@ -318,8 +316,7 @@ impl TeamDaemon {
             channels,
             nudges,
             telegram_bot,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink,
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -1378,7 +1375,6 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         info!(path = %report_path.display(), "retrospective generated");
         Ok(())
     }
-
 }
 
 fn describe_command_failure(command: &str, args: &[&str], output: &std::process::Output) -> String {
@@ -1573,21 +1569,19 @@ fn save_daemon_state(project_root: &Path, state: &PersistedDaemonState) -> Resul
 mod tests {
     use super::*;
     use crate::team::config::AutomationConfig;
-    use std::collections::HashMap;
-    use std::path::Path;
-    use std::process::Command;
     use crate::team::config::{
         BoardConfig, ChannelConfig, RoleDef, StandupConfig, WorkflowMode, WorkflowPolicy,
     };
     use crate::team::events::EventSink;
-    use crate::team::test_helpers::{
-        daemon_config_with_roles, make_test_daemon, write_event_log,
-    };
+    use crate::team::test_helpers::{daemon_config_with_roles, make_test_daemon, write_event_log};
     use crate::team::test_support::{
         init_git_repo, setup_fake_claude, write_owned_task_file, write_owned_task_file_with_context,
     };
     use crate::team::watcher::WatcherState;
     use serial_test::serial;
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::process::Command;
 
     fn write_open_task_file(project_root: &Path, id: u32, title: &str, status: &str) {
         let tasks_dir = project_root
@@ -1708,8 +1702,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -1982,8 +1975,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -2038,8 +2030,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -2091,8 +2082,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -2149,8 +2139,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -2205,8 +2194,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -2265,8 +2253,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -3176,8 +3163,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -3419,8 +3405,7 @@ mod tests {
                     },
                 )]),
                 telegram_bot: None,
-                failure_window: FailureWindow::new(20),
-                last_pattern_notifications: HashMap::new(),
+                failure_tracker: FailureTracker::new(20),
                 event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
                 paused_standups: HashSet::new(),
                 last_standup: HashMap::new(),
@@ -3521,8 +3506,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -3618,8 +3602,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -3711,8 +3694,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -3792,8 +3774,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -3894,8 +3875,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -3972,8 +3952,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -4042,8 +4021,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -4117,8 +4095,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -4186,8 +4163,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -4285,8 +4261,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -4382,8 +4357,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -4493,8 +4467,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&events_path).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -4798,8 +4771,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -4894,8 +4866,7 @@ mod tests {
             pipeline_starvation_fired: false,
             retro_generated: false,
             failed_deliveries: Vec::new(),
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -4975,8 +4946,7 @@ mod tests {
             pipeline_starvation_fired: false,
             retro_generated: false,
             failed_deliveries: Vec::new(),
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -5056,8 +5026,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(
                 &repo.join(".batty").join("team_config").join("events.jsonl"),
             )
@@ -5164,8 +5133,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -5266,8 +5234,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -5392,8 +5359,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -5590,8 +5556,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -5684,8 +5649,7 @@ mod tests {
                 },
             )]),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -5765,8 +5729,7 @@ mod tests {
                 },
             )]),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -5858,8 +5821,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),

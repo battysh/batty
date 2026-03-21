@@ -47,6 +47,11 @@ pub struct FailureWindow {
     window_size: usize,
 }
 
+pub struct FailureTracker {
+    window: FailureWindow,
+    last_notifications: HashMap<String, u32>,
+}
+
 #[derive(Debug, Clone)]
 struct FailureEvent {
     pub event_type: String,
@@ -178,6 +183,47 @@ impl FailureWindow {
     }
 }
 
+impl FailureTracker {
+    pub fn new(window_size: usize) -> Self {
+        Self {
+            window: FailureWindow::new(window_size),
+            last_notifications: HashMap::new(),
+        }
+    }
+
+    pub fn push(&mut self, event: &TeamEvent) {
+        self.window.push(event);
+    }
+
+    pub fn pattern_notifications(
+        &mut self,
+        notification_threshold: u32,
+        severity_threshold: u32,
+    ) -> Vec<PatternNotification> {
+        let (notification_threshold, severity_threshold) =
+            normalized_thresholds(notification_threshold, severity_threshold);
+
+        self.window
+            .detect_failure_patterns()
+            .into_iter()
+            .filter(|pattern| pattern.frequency >= notification_threshold)
+            .filter_map(|pattern| {
+                let signature = pattern_signature(&pattern);
+                let last_frequency = self
+                    .last_notifications
+                    .get(&signature)
+                    .copied()
+                    .unwrap_or(0);
+                if pattern.frequency <= last_frequency {
+                    return None;
+                }
+                self.last_notifications.insert(signature, pattern.frequency);
+                Some(build_pattern_notification(&pattern, severity_threshold))
+            })
+            .collect()
+    }
+}
+
 fn pattern_sort_key(pattern_type: &PatternType) -> u8 {
     match pattern_type {
         PatternType::RepeatedTestFailure => 0,
@@ -206,6 +252,17 @@ pub fn generate_pattern_notifications(
     notification_threshold: u32,
     severity_threshold: u32,
 ) -> Vec<PatternNotification> {
+    let (notification_threshold, severity_threshold) =
+        normalized_thresholds(notification_threshold, severity_threshold);
+
+    patterns
+        .iter()
+        .filter(|pattern| pattern.frequency >= notification_threshold)
+        .map(|pattern| build_pattern_notification(pattern, severity_threshold))
+        .collect()
+}
+
+fn normalized_thresholds(notification_threshold: u32, severity_threshold: u32) -> (u32, u32) {
     let notification_threshold = if notification_threshold == 0 {
         DEFAULT_NOTIFICATION_THRESHOLD
     } else {
@@ -216,18 +273,28 @@ pub fn generate_pattern_notifications(
     } else {
         severity_threshold
     };
+    (notification_threshold, severity_threshold)
+}
 
-    patterns
-        .iter()
-        .filter(|pattern| pattern.frequency >= notification_threshold)
-        .map(|pattern| PatternNotification {
-            message: pattern_notification_message(pattern),
-            notify_manager: true,
-            notify_architect: pattern.frequency >= severity_threshold,
-            pattern_type: pattern.pattern_type.clone(),
-            frequency: pattern.frequency,
-        })
-        .collect()
+fn build_pattern_notification(
+    pattern: &PatternMatch,
+    severity_threshold: u32,
+) -> PatternNotification {
+    PatternNotification {
+        message: pattern_notification_message(pattern),
+        notify_manager: true,
+        notify_architect: pattern.frequency >= severity_threshold,
+        pattern_type: pattern.pattern_type.clone(),
+        frequency: pattern.frequency,
+    }
+}
+
+fn pattern_signature(pattern: &PatternMatch) -> String {
+    format!(
+        "{}:{}",
+        pattern.pattern_type.as_str(),
+        pattern.affected_entities.join(",")
+    )
 }
 
 fn pattern_notification_message(pattern: &PatternMatch) -> String {
@@ -511,5 +578,35 @@ mod tests {
         assert!(message.contains("pause"));
         assert!(message.contains("rebase"));
         assert!(message.contains("fix"));
+    }
+
+    #[test]
+    fn tracker_suppresses_repeated_notifications_without_new_failures() {
+        let mut tracker = FailureTracker::new(20);
+        tracker.push(&error_event("test_failure", "eng-1", "tests failed", 1));
+        tracker.push(&error_event("test_failure", "eng-1", "tests failed", 2));
+        tracker.push(&error_event("test_failure", "eng-1", "tests failed", 3));
+
+        let initial = tracker.pattern_notifications(3, 5);
+        let repeated = tracker.pattern_notifications(3, 5);
+
+        assert_eq!(initial.len(), 1);
+        assert!(repeated.is_empty());
+    }
+
+    #[test]
+    fn tracker_reemits_when_pattern_frequency_increases() {
+        let mut tracker = FailureTracker::new(20);
+        tracker.push(&error_event("test_failure", "eng-1", "tests failed", 1));
+        tracker.push(&error_event("test_failure", "eng-1", "tests failed", 2));
+        tracker.push(&error_event("test_failure", "eng-1", "tests failed", 3));
+        assert_eq!(tracker.pattern_notifications(3, 5).len(), 1);
+
+        tracker.push(&error_event("test_failure", "eng-1", "tests failed", 4));
+
+        let notifications = tracker.pattern_notifications(3, 5);
+
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].frequency, 4);
     }
 }
