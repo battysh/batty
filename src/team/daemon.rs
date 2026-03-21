@@ -16,9 +16,9 @@ use uuid::Uuid;
 
 use super::board;
 use super::comms::{self, Channel};
-use super::config::{RoleType, TeamConfig};
 #[cfg(test)]
 use super::config::OrchestratorPosition;
+use super::config::{RoleType, TeamConfig};
 use super::events::{EventSink, TeamEvent};
 use super::failure_patterns::{self, FailureWindow};
 use super::hierarchy::MemberInstance;
@@ -3811,14 +3811,8 @@ fn review_task_intervention_signature(tasks: &[&crate::task::Task]) -> String {
 }
 
 fn append_orchestrator_log_line(path: &Path, message: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     use std::io::Write;
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let mut file = super::open_log_for_append(path)?;
     writeln!(file, "[{}] {}", now_unix(), message)?;
     file.flush()?;
     Ok(())
@@ -5393,7 +5387,7 @@ mod tests {
                 automation: AutomationConfig::default(),
                 automation_sender: None,
                 orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
+                orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 roles,
             },
@@ -5548,7 +5542,7 @@ mod tests {
                 automation: AutomationConfig::default(),
                 automation_sender: None,
                 orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
+                orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 roles,
             },
@@ -6223,7 +6217,7 @@ mod tests {
                 automation: AutomationConfig::default(),
                 automation_sender: None,
                 orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
+                orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 roles: Vec::new(),
             },
@@ -8422,7 +8416,7 @@ mod tests {
                 automation: AutomationConfig::default(),
                 automation_sender: None,
                 orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
+                orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 roles: Vec::new(),
             },
@@ -8451,7 +8445,7 @@ mod tests {
                 automation: AutomationConfig::default(),
                 automation_sender: None,
                 orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
+                orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 roles: Vec::new(),
             },
@@ -8481,7 +8475,7 @@ mod tests {
                 automation: AutomationConfig::default(),
                 automation_sender: None,
                 orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
+                orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 roles,
             },
