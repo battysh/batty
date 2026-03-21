@@ -24,7 +24,7 @@ pub(crate) struct NudgeSchedule {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct OwnedTaskInterventionState {
+pub(crate) struct OwnedTaskInterventionState {
     pub(super) idle_epoch: u64,
     pub(super) signature: String,
     pub(super) detected_at: Instant,
