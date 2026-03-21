@@ -207,6 +207,7 @@ fn main() -> Result<()> {
                     "automation": {
                         "timeout_nudges": team_config.automation.timeout_nudges,
                         "standups": team_config.automation.standups,
+                        "failure_pattern_detection": team_config.automation.failure_pattern_detection,
                         "triage_interventions": team_config.automation.triage_interventions,
                         "review_interventions": team_config.automation.review_interventions,
                         "owned_task_interventions": team_config.automation.owned_task_interventions,
@@ -232,9 +233,10 @@ fn main() -> Result<()> {
                 println!("Board auto-dispatch: {}", team_config.board.auto_dispatch);
                 println!("Standup interval: {}s", team_config.standup.interval_secs);
                 println!(
-                    "Automation: timeout_nudges={}, standups={}, triage={}, review={}, owned_tasks={}, manager_dispatch={}, architect_utilization={}",
+                    "Automation: timeout_nudges={}, standups={}, failure_patterns={}, triage={}, review={}, owned_tasks={}, manager_dispatch={}, architect_utilization={}",
                     team_config.automation.timeout_nudges,
                     team_config.automation.standups,
+                    team_config.automation.failure_pattern_detection,
                     team_config.automation.triage_interventions,
                     team_config.automation.review_interventions,
                     team_config.automation.owned_task_interventions,

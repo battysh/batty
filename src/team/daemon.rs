@@ -18,6 +18,7 @@ use super::board;
 use super::comms::{self, Channel};
 use super::config::{RoleType, TeamConfig};
 use super::events::{EventSink, TeamEvent};
+use super::failure_patterns::{self, FailureWindow};
 use super::hierarchy::MemberInstance;
 use super::inbox;
 use super::message;
@@ -75,6 +76,8 @@ pub struct TeamDaemon {
     channels: HashMap<String, Box<dyn Channel>>,
     nudges: HashMap<String, NudgeSchedule>,
     telegram_bot: Option<super::telegram::TelegramBot>,
+    failure_window: FailureWindow,
+    last_pattern_notifications: HashMap<String, u32>,
     event_sink: EventSink,
     paused_standups: HashSet<String>,
     last_standup: HashMap<String, Instant>,
@@ -251,6 +254,8 @@ impl TeamDaemon {
             channels,
             nudges,
             telegram_bot,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink,
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -345,8 +350,13 @@ impl TeamDaemon {
                 daemon.maybe_generate_standup()
             });
             self.run_loop_step("maybe_rotate_board", |daemon| daemon.maybe_rotate_board());
+<<<<<<< HEAD
             self.run_loop_step("maybe_generate_retrospective", |daemon| {
                 daemon.maybe_generate_retrospective()
+=======
+            self.run_loop_step("maybe_notify_failure_patterns", |daemon| {
+                daemon.maybe_notify_failure_patterns()
+>>>>>>> d7776e8 (daemon: add failure pattern notifications)
             });
             self.update_pane_status_labels();
 
@@ -391,9 +401,78 @@ impl TeamDaemon {
     }
 
     fn emit_event(&mut self, event: TeamEvent) {
+        self.failure_window.push(&event);
         if let Err(error) = self.event_sink.emit(event) {
             warn!(error = %error, "failed to write daemon event; continuing");
         }
+    }
+
+    fn maybe_notify_failure_patterns(&mut self) -> Result<()> {
+        if !self.config.team_config.automation.failure_pattern_detection {
+            return Ok(());
+        }
+
+        let patterns = self.failure_window.detect_failure_patterns();
+        if patterns.is_empty() {
+            return Ok(());
+        }
+
+        let notifications = failure_patterns::generate_pattern_notifications(&patterns, 3, 5);
+        for (pattern, notification) in patterns
+            .iter()
+            .filter(|pattern| pattern.frequency >= 3)
+            .zip(notifications)
+        {
+            let signature = format!(
+                "{}:{}",
+                pattern.pattern_type.as_str(),
+                pattern.affected_entities.join(",")
+            );
+            let last_frequency = self
+                .last_pattern_notifications
+                .get(&signature)
+                .copied()
+                .unwrap_or(0);
+            if notification.frequency <= last_frequency {
+                continue;
+            }
+            self.last_pattern_notifications
+                .insert(signature, notification.frequency);
+
+            let managers: Vec<String> = self
+                .config
+                .members
+                .iter()
+                .filter(|member| member.role_type == RoleType::Manager)
+                .map(|member| member.name.clone())
+                .collect();
+            let architects: Vec<String> = self
+                .config
+                .members
+                .iter()
+                .filter(|member| member.role_type == RoleType::Architect)
+                .map(|member| member.name.clone())
+                .collect();
+
+            self.emit_event(TeamEvent::pattern_detected(
+                notification.pattern_type.as_str(),
+                notification.frequency,
+            ));
+
+            if notification.notify_manager {
+                for recipient in &managers {
+                    self.queue_daemon_message(recipient, &notification.message)?;
+                }
+            }
+
+            if notification.notify_architect {
+                for recipient in &architects {
+                    self.queue_daemon_message(recipient, &notification.message)?;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn orchestrator_enabled(&self) -> bool {
@@ -2143,10 +2222,6 @@ impl TeamDaemon {
             if !is_idle {
                 continue;
             }
-            if !self.ready_for_idle_automation(&inbox_root, &name) {
-                continue;
-            }
-
             let owned_tasks: Vec<&crate::task::Task> = tasks
                 .iter()
                 .filter(|task| task.claimed_by.as_deref() == Some(name.as_str()))
@@ -2160,11 +2235,14 @@ impl TeamDaemon {
             let idle_epoch = self.triage_idle_epochs.get(&name).copied().unwrap_or(0);
 
             let signature = owned_task_intervention_signature(&owned_tasks);
-            if self
-                .owned_task_interventions
-                .get(&name)
-                .is_some_and(|state| state.signature == signature)
-            {
+            if let Some(state) = self.owned_task_interventions.get_mut(&name) {
+                if state.signature == signature {
+                    state.idle_epoch = idle_epoch;
+                    continue;
+                }
+            }
+
+            if !self.ready_for_idle_automation(&inbox_root, &name) {
                 continue;
             }
 
@@ -4962,6 +5040,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -5019,6 +5099,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::from_writer(
                 tmp.path().join("broken-events.jsonl").as_path(),
                 FailingWriter,
@@ -5047,6 +5129,82 @@ mod tests {
             sent.lock().unwrap().as_slice(),
             ["Event sink can fail without breaking delivery."]
         );
+    }
+
+    #[test]
+    fn maybe_notify_failure_patterns_routes_severe_patterns_to_manager_and_architect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roles = vec![
+            RoleDef {
+                name: "architect".to_string(),
+                role_type: RoleType::Architect,
+                agent: Some("claude".to_string()),
+                instances: 1,
+                prompt: None,
+                talks_to: vec![],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                use_worktrees: false,
+            },
+            RoleDef {
+                name: "manager".to_string(),
+                role_type: RoleType::Manager,
+                agent: Some("claude".to_string()),
+                instances: 1,
+                prompt: None,
+                talks_to: vec![],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                use_worktrees: false,
+            },
+        ];
+        let mut config = daemon_config_with_roles(&tmp, roles);
+        config.members = vec![
+            MemberInstance {
+                name: "architect".to_string(),
+                role_name: "architect".to_string(),
+                role_type: RoleType::Architect,
+                agent: Some("claude".to_string()),
+                prompt: None,
+                reports_to: Some("human".to_string()),
+                use_worktrees: false,
+            },
+            MemberInstance {
+                name: "manager".to_string(),
+                role_name: "manager".to_string(),
+                role_type: RoleType::Manager,
+                agent: Some("claude".to_string()),
+                prompt: None,
+                reports_to: Some("architect".to_string()),
+                use_worktrees: false,
+            },
+        ];
+
+        let mut daemon = TeamDaemon::new(config).unwrap();
+        for index in 0..5 {
+            let mut event = TeamEvent::task_escalated("eng-1", &format!("{}", 100 + index));
+            event.ts = index as u64 + 1;
+            daemon.emit_event(event);
+        }
+
+        daemon.maybe_notify_failure_patterns().unwrap();
+
+        let root = inbox::inboxes_root(tmp.path());
+        let manager_messages = inbox::pending_messages(&root, "manager").unwrap();
+        let architect_messages = inbox::pending_messages(&root, "architect").unwrap();
+
+        assert_eq!(manager_messages.len(), 1);
+        assert_eq!(architect_messages.len(), 1);
+        assert!(manager_messages[0].body.contains("Review blockers"));
+        assert!(architect_messages[0].body.contains("Review blockers"));
     }
 
     #[test]
@@ -5132,6 +5290,8 @@ mod tests {
             )]),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -5451,6 +5611,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -5501,6 +5663,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -5548,6 +5712,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -5600,6 +5766,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -5650,6 +5818,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -5704,6 +5874,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -5760,6 +5932,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -5825,6 +5999,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -5916,6 +6092,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(
                 &repo.join(".batty").join("team_config").join("events.jsonl"),
             )
@@ -6138,6 +6316,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -6225,6 +6405,8 @@ mod tests {
                 },
             )]),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::from([(
@@ -6315,6 +6497,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -6412,6 +6596,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::from([(
@@ -6505,6 +6691,8 @@ mod tests {
                 },
             )]),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -6590,6 +6778,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -6681,6 +6871,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -6768,6 +6960,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -6843,6 +7037,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -6939,6 +7135,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -7011,6 +7209,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -7075,6 +7275,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -7144,6 +7346,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -7208,6 +7412,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -7447,6 +7653,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(
                 &repo.join(".batty").join("team_config").join("events.jsonl"),
             )
@@ -7549,6 +7757,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -7645,6 +7855,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -7765,6 +7977,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -7859,6 +8073,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -7947,6 +8163,8 @@ mod tests {
                 },
             )]),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -8022,6 +8240,8 @@ mod tests {
                 },
             )]),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
@@ -8109,6 +8329,8 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),

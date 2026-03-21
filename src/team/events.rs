@@ -141,8 +141,16 @@ impl TeamEvent {
         }
     }
 
+<<<<<<< HEAD
     pub fn retro_generated() -> Self {
         Self::base("retro_generated")
+=======
+    pub fn pattern_detected(pattern_type: &str, frequency: u32) -> Self {
+        Self {
+            reason: Some(format!("{pattern_type}:{frequency}")),
+            ..Self::base("pattern_detected")
+        }
+>>>>>>> d7776e8 (daemon: add failure pattern notifications)
     }
 
     pub fn member_crashed(role: &str, restart: bool) -> Self {
@@ -306,7 +314,14 @@ mod tests {
             ("task_escalated", TeamEvent::task_escalated("eng-1", "task")),
             ("task_completed", TeamEvent::task_completed("eng-1")),
             ("standup_generated", TeamEvent::standup_generated("manager")),
+<<<<<<< HEAD
             ("retro_generated", TeamEvent::retro_generated()),
+=======
+            (
+                "pattern_detected",
+                TeamEvent::pattern_detected("merge_conflict_recurrence", 5),
+            ),
+>>>>>>> d7776e8 (daemon: add failure pattern notifications)
             ("member_crashed", TeamEvent::member_crashed("eng-1", true)),
             ("message_routed", TeamEvent::message_routed("a", "b")),
             ("agent_spawned", TeamEvent::agent_spawned("eng-1")),
@@ -438,6 +453,15 @@ mod tests {
         assert!(!json.contains("\"step\""));
         assert!(!json.contains("\"error\""));
         assert!(!json.contains("\"uptime_secs\""));
+    }
+
+    #[test]
+    fn pattern_detected_includes_reason_payload() {
+        let event = TeamEvent::pattern_detected("escalation_cluster", 6);
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"].as_str().unwrap(), "pattern_detected");
+        assert_eq!(parsed["reason"].as_str().unwrap(), "escalation_cluster:6");
     }
 
     #[test]

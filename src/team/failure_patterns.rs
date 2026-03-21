@@ -5,6 +5,8 @@ use std::collections::{HashMap, VecDeque};
 use super::events::TeamEvent;
 
 const DEFAULT_WINDOW_SIZE: usize = 20;
+const DEFAULT_NOTIFICATION_THRESHOLD: u32 = 3;
+const DEFAULT_SEVERITY_THRESHOLD: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatternType {
@@ -13,12 +15,31 @@ pub enum PatternType {
     MergeConflictRecurrence,
 }
 
+impl PatternType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PatternType::RepeatedTestFailure => "repeated_test_failure",
+            PatternType::EscalationCluster => "escalation_cluster",
+            PatternType::MergeConflictRecurrence => "merge_conflict_recurrence",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatternMatch {
     pub pattern_type: PatternType,
     pub frequency: u32,
     pub affected_entities: Vec<String>,
     pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatternNotification {
+    pub message: String,
+    pub notify_manager: bool,
+    pub notify_architect: bool,
+    pub pattern_type: PatternType,
+    pub frequency: u32,
 }
 
 pub struct FailureWindow {
@@ -178,6 +199,61 @@ fn contains_failure_keyword(value: &str) -> bool {
 
 fn contains_conflict(value: &str) -> bool {
     value.to_ascii_lowercase().contains("conflict")
+}
+
+pub fn generate_pattern_notifications(
+    patterns: &[PatternMatch],
+    notification_threshold: u32,
+    severity_threshold: u32,
+) -> Vec<PatternNotification> {
+    let notification_threshold = if notification_threshold == 0 {
+        DEFAULT_NOTIFICATION_THRESHOLD
+    } else {
+        notification_threshold
+    };
+    let severity_threshold = if severity_threshold == 0 {
+        DEFAULT_SEVERITY_THRESHOLD
+    } else {
+        severity_threshold
+    };
+
+    patterns
+        .iter()
+        .filter(|pattern| pattern.frequency >= notification_threshold)
+        .map(|pattern| PatternNotification {
+            message: pattern_notification_message(pattern),
+            notify_manager: true,
+            notify_architect: pattern.frequency >= severity_threshold,
+            pattern_type: pattern.pattern_type.clone(),
+            frequency: pattern.frequency,
+        })
+        .collect()
+}
+
+fn pattern_notification_message(pattern: &PatternMatch) -> String {
+    let affected = format_affected_entities(&pattern.affected_entities);
+    match pattern.pattern_type {
+        PatternType::RepeatedTestFailure => format!(
+            "Repeated test failures for {affected} ({}) in the recent window. Review the failing runs and stabilize before retrying.",
+            pattern.frequency
+        ),
+        PatternType::EscalationCluster => format!(
+            "Escalations clustered across {affected} ({} total). Review blockers and rebalance or unblock the work.",
+            pattern.frequency
+        ),
+        PatternType::MergeConflictRecurrence => format!(
+            "Merge conflicts keep recurring across {affected} ({} total). Pause merges, rebase branches, and fix the shared hotspot.",
+            pattern.frequency
+        ),
+    }
+}
+
+fn format_affected_entities(entities: &[String]) -> String {
+    if entities.is_empty() {
+        "recent work".to_string()
+    } else {
+        entities.join(", ")
+    }
 }
 
 #[cfg(test)]
@@ -343,5 +419,93 @@ mod tests {
 
         assert!(window.events.is_empty());
         assert!(window.detect_failure_patterns().is_empty());
+    }
+
+    #[test]
+    fn notification_threshold_triggers() {
+        let notifications = generate_pattern_notifications(
+            &[PatternMatch {
+                pattern_type: PatternType::RepeatedTestFailure,
+                frequency: 3,
+                affected_entities: vec!["eng-1".to_string()],
+                description: "eng-1 failing repeatedly".to_string(),
+            }],
+            3,
+            5,
+        );
+
+        assert_eq!(notifications.len(), 1);
+        assert!(notifications[0].notify_manager);
+        assert_eq!(notifications[0].frequency, 3);
+    }
+
+    #[test]
+    fn notification_below_threshold_is_silent() {
+        let notifications = generate_pattern_notifications(
+            &[PatternMatch {
+                pattern_type: PatternType::RepeatedTestFailure,
+                frequency: 2,
+                affected_entities: vec!["eng-1".to_string()],
+                description: "eng-1 failing repeatedly".to_string(),
+            }],
+            3,
+            5,
+        );
+
+        assert!(notifications.is_empty());
+    }
+
+    #[test]
+    fn severity_routes_to_architect() {
+        let notifications = generate_pattern_notifications(
+            &[PatternMatch {
+                pattern_type: PatternType::MergeConflictRecurrence,
+                frequency: 5,
+                affected_entities: vec!["201".to_string(), "202".to_string()],
+                description: "conflicts recurring".to_string(),
+            }],
+            3,
+            5,
+        );
+
+        assert_eq!(notifications.len(), 1);
+        assert!(notifications[0].notify_architect);
+    }
+
+    #[test]
+    fn below_severity_routes_to_manager_only() {
+        let notifications = generate_pattern_notifications(
+            &[PatternMatch {
+                pattern_type: PatternType::EscalationCluster,
+                frequency: 4,
+                affected_entities: vec!["101".to_string(), "102".to_string()],
+                description: "escalations piling up".to_string(),
+            }],
+            3,
+            5,
+        );
+
+        assert_eq!(notifications.len(), 1);
+        assert!(notifications[0].notify_manager);
+        assert!(!notifications[0].notify_architect);
+    }
+
+    #[test]
+    fn notification_message_is_actionable() {
+        let notifications = generate_pattern_notifications(
+            &[PatternMatch {
+                pattern_type: PatternType::MergeConflictRecurrence,
+                frequency: 4,
+                affected_entities: vec!["201".to_string()],
+                description: "conflicts recurring".to_string(),
+            }],
+            3,
+            5,
+        );
+
+        let message = notifications[0].message.to_ascii_lowercase();
+        assert!(message.contains("pause"));
+        assert!(message.contains("rebase"));
+        assert!(message.contains("fix"));
     }
 }

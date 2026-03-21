@@ -447,7 +447,6 @@ fn copy_template_file(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-
 /// Path to the daemon PID file.
 fn daemon_pid_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("daemon.pid")
@@ -2047,33 +2046,6 @@ mod tests {
             match &self.original_home {
                 Some(home) => unsafe {
                     std::env::set_var("HOME", home);
-                },
-                None => unsafe {
-                    std::env::remove_var("HOME");
-                },
-            }
-        }
-    }
-
-    struct HomeGuard {
-        original: Option<String>,
-    }
-
-    impl HomeGuard {
-        fn set(path: &Path) -> Self {
-            let original = std::env::var("HOME").ok();
-            unsafe {
-                std::env::set_var("HOME", path);
-            }
-            Self { original }
-        }
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            match self.original.as_deref() {
-                Some(value) => unsafe {
-                    std::env::set_var("HOME", value);
                 },
                 None => unsafe {
                     std::env::remove_var("HOME");
