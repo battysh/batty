@@ -155,6 +155,8 @@ pub struct AutomationConfig {
     pub architect_utilization_interventions: bool,
     #[serde(default = "default_intervention_idle_grace_secs")]
     pub intervention_idle_grace_secs: u64,
+    #[serde(default = "default_intervention_cooldown_secs")]
+    pub intervention_cooldown_secs: u64,
 }
 
 impl Default for AutomationConfig {
@@ -169,6 +171,7 @@ impl Default for AutomationConfig {
             manager_dispatch_interventions: default_enabled(),
             architect_utilization_interventions: default_enabled(),
             intervention_idle_grace_secs: default_intervention_idle_grace_secs(),
+            intervention_cooldown_secs: default_intervention_cooldown_secs(),
         }
     }
 }
@@ -288,6 +291,10 @@ fn default_orchestrator_pane() -> bool {
 
 fn default_intervention_idle_grace_secs() -> u64 {
     60
+}
+
+fn default_intervention_cooldown_secs() -> u64 {
+    120
 }
 
 impl TeamConfig {

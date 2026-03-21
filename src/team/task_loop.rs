@@ -208,11 +208,7 @@ pub(crate) fn prepare_engineer_assignment_worktree(
     ensure_task_branch_namespace_available(project_root, engineer_name)?;
 
     if worktree_has_user_changes(worktree_dir)? {
-        bail!(
-            "engineer worktree '{}' at {} has uncommitted changes",
-            engineer_name,
-            worktree_dir.display()
-        );
+        auto_clean_worktree(worktree_dir)?;
     }
 
     let previous_branch = current_worktree_branch(worktree_dir)?;
@@ -570,6 +566,48 @@ fn worktree_has_user_changes(worktree_dir: &Path) -> Result<bool> {
     Ok(String::from_utf8_lossy(&status.stdout)
         .lines()
         .any(|line| !line.starts_with("?? .batty/")))
+}
+
+fn auto_clean_worktree(worktree_dir: &Path) -> Result<()> {
+    // Try stash first — preserves work for manual recovery.
+    let stash = std::process::Command::new("git")
+        .args(["stash", "--include-untracked"])
+        .current_dir(worktree_dir)
+        .output()
+        .context("failed to run git stash")?;
+
+    if stash.status.success() {
+        let stdout = String::from_utf8_lossy(&stash.stdout);
+        if !stdout.contains("No local changes to save") {
+            warn!(
+                worktree = %worktree_dir.display(),
+                "auto-stashed uncommitted changes in engineer worktree"
+            );
+            return Ok(());
+        }
+    }
+
+    // Stash was a no-op or failed — force clean.
+    warn!(
+        worktree = %worktree_dir.display(),
+        "force-cleaning engineer worktree"
+    );
+    let _ = std::process::Command::new("git")
+        .args(["checkout", "--", "."])
+        .current_dir(worktree_dir)
+        .output();
+    let _ = std::process::Command::new("git")
+        .args(["clean", "-fd", "--exclude=.batty/"])
+        .current_dir(worktree_dir)
+        .output();
+
+    if worktree_has_user_changes(worktree_dir)? {
+        bail!(
+            "engineer worktree at {} still dirty after auto-clean",
+            worktree_dir.display()
+        );
+    }
+    Ok(())
 }
 
 fn current_worktree_branch(worktree_dir: &Path) -> Result<String> {
@@ -1093,7 +1131,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_assignment_worktree_rejects_dirty_worktree() {
+    fn test_prepare_assignment_worktree_auto_cleans_dirty() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp);
         let worktree_dir = repo.join(".batty").join("worktrees").join("eng-6");
@@ -1108,15 +1146,25 @@ mod tests {
         .unwrap();
         std::fs::write(worktree_dir.join("scratch.txt"), "uncommitted\n").unwrap();
 
-        let err = prepare_engineer_assignment_worktree(
+        // Should succeed — auto-clean stashes the dirty file.
+        prepare_engineer_assignment_worktree(
             &repo,
             &worktree_dir,
             "eng-6",
             "eng-6/task-7",
             &team_config_dir,
         )
-        .unwrap_err();
-        assert!(err.to_string().contains("uncommitted changes"));
+        .unwrap();
+
+        // Worktree should be clean now.
+        assert!(!worktree_has_user_changes(&worktree_dir).unwrap());
+
+        // Stash should contain the saved work.
+        let stash_list = git_stdout(&worktree_dir, &["stash", "list"]);
+        assert!(
+            !stash_list.is_empty(),
+            "stash should contain auto-saved work"
+        );
     }
 
     #[test]

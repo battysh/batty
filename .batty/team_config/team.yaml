@@ -1,5 +1,8 @@
 name: batty-dev
 
+workflow_mode: hybrid
+orchestrator_position: left
+
 board:
   rotation_threshold: 15
   auto_dispatch: false
@@ -17,6 +20,7 @@ automation:
   manager_dispatch_interventions: true
   architect_utilization_interventions: true
   intervention_idle_grace_secs: 60
+  intervention_cooldown_secs: 120
 
 automation_sender: human
 
