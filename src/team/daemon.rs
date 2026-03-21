@@ -3196,6 +3196,7 @@ mod tests {
                 orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 cost: Default::default(),
+                event_log_max_bytes: 10 * 1024 * 1024,
                 roles: Vec::new(),
             },
             session: session.clone(),
