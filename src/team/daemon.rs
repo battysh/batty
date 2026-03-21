@@ -440,10 +440,10 @@ impl TeamDaemon {
                 break;
             }
 
+            self.run_loop_step("poll_watchers", |daemon| daemon.poll_watchers());
             self.run_loop_step("restart_dead_members", |daemon| {
                 daemon.restart_dead_members()
             });
-            self.run_loop_step("poll_watchers", |daemon| daemon.poll_watchers());
             self.run_loop_step("sync_launch_state_session_ids", |daemon| {
                 daemon.sync_launch_state_session_ids()
             });
@@ -873,6 +873,11 @@ impl TeamDaemon {
         {
             warn!(member = %member.name, error = %error, "failed to persist restarted launch identity");
         }
+        self.record_orchestrator_action(format!(
+            "restart: respawned pane and relaunched {} after pane death",
+            member.name
+        ));
+        self.emit_event(TeamEvent::pane_respawned(&member.name));
         self.emit_event(TeamEvent::member_crashed(&member.name, true));
         Ok(())
     }
@@ -1125,6 +1130,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             let member_state = match new_state {
                 WatcherState::Active => MemberState::Working,
                 WatcherState::Idle => MemberState::Idle,
+                WatcherState::PaneDead => MemberState::Idle,
                 WatcherState::ContextExhausted => MemberState::Working,
             };
 
@@ -1133,6 +1139,25 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
 
                 // Update automation countdowns on state transitions.
                 self.update_automation_timers_for_state(name, member_state);
+            }
+
+            if new_state == WatcherState::PaneDead {
+                if prev_watcher_state != WatcherState::PaneDead {
+                    warn!(member = %name, "detected pane death");
+                    self.emit_event(TeamEvent::pane_death(name));
+                    self.record_orchestrator_action(format!(
+                        "lifecycle: detected pane death for {}",
+                        name
+                    ));
+                }
+                if let Err(error) = self.handle_pane_death(name) {
+                    warn!(
+                        member = %name,
+                        error = %error,
+                        "pane-death respawn handling failed; continuing"
+                    );
+                }
+                continue;
             }
 
             if new_state == WatcherState::ContextExhausted {
@@ -1177,6 +1202,10 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         }
 
         Ok(())
+    }
+
+    fn handle_pane_death(&mut self, member_name: &str) -> Result<()> {
+        self.restart_member(member_name)
     }
 
     pub(super) fn mark_member_working(&mut self, member_name: &str) {
@@ -5601,9 +5630,9 @@ mod tests {
 
     #[test]
     #[serial]
-    fn restart_dead_members_respawns_member_and_records_event() {
-        let session = "batty-test-restart-dead-member";
-        let _ = crate::tmux::kill_session(session);
+    fn poll_watchers_respawns_pane_dead_member_and_records_events() {
+        let session = format!("batty-test-restart-dead-member-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
 
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
@@ -5633,16 +5662,16 @@ mod tests {
             std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        crate::tmux::create_session(session, "bash", &[], tmp.path().to_str().unwrap()).unwrap();
+        crate::tmux::create_session(&session, "bash", &[], tmp.path().to_str().unwrap()).unwrap();
         crate::tmux::create_window(
-            session,
+            &session,
             "keeper",
             "sleep",
             &["30".to_string()],
             tmp.path().to_str().unwrap(),
         )
         .unwrap();
-        let pane_id = crate::tmux::pane_id(session).unwrap();
+        let pane_id = crate::tmux::pane_id(&session).unwrap();
         Command::new("tmux")
             .args(["set-option", "-p", "-t", &pane_id, "remain-on-exit", "on"])
             .output()
@@ -5672,7 +5701,7 @@ mod tests {
                 layout: None,
                 roles: Vec::new(),
             },
-            session: session.to_string(),
+            session: session.clone(),
             members: vec![member],
             pane_map: HashMap::from([(member_name.to_string(), pane_id.clone())]),
         })
@@ -5690,7 +5719,7 @@ mod tests {
         }
         assert!(crate::tmux::pane_dead(&pane_id).unwrap());
 
-        daemon.restart_dead_members().unwrap();
+        daemon.poll_watchers().unwrap();
         std::thread::sleep(Duration::from_millis(700));
 
         assert!(!crate::tmux::pane_dead(&pane_id).unwrap_or(true));
@@ -5734,11 +5763,13 @@ mod tests {
                 .join("events.jsonl"),
         )
         .unwrap();
+        assert!(events.contains("\"event\":\"pane_death\""));
+        assert!(events.contains("\"event\":\"pane_respawned\""));
         assert!(events.contains("\"event\":\"member_crashed\""));
         assert!(events.contains(&format!("\"role\":\"{member_name}\"")));
         assert!(events.contains("\"restart\":true"));
 
-        crate::tmux::kill_session(session).unwrap();
+        crate::tmux::kill_session(&session).unwrap();
         let _ = std::fs::remove_dir_all(&fake_bin);
     }
 
