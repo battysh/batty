@@ -1,3 +1,11 @@
+//! Idle nudge and intervention automation extracted from the daemon.
+//!
+//! This module keeps the daemon poll loop readable by isolating the logic that
+//! decides when to nudge idle members or escalate stalled ownership, review,
+//! dispatch-gap, and utilization conditions. It operates on `TeamDaemon`
+//! state directly, but it is intentionally limited to automation decisions and
+//! message delivery side effects rather than broader daemon orchestration.
+
 use std::path::Path;
 use std::time::{Duration, Instant};
 

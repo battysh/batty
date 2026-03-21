@@ -1,4 +1,14 @@
 //! Merge orchestration extracted from the team daemon.
+//!
+//! This module owns the completion path after an engineer reports a task as
+//! done in a worktree-based flow. It validates that the branch contains real
+//! work, runs the configured test gate, serializes merges with a lock, and
+//! either lands the branch on `main` or escalates conflicts and failures back
+//! through the daemon.
+//!
+//! The daemon calls into this module so the poll loop can stay focused on
+//! orchestration while merge-specific retries and board transitions remain in
+//! one place.
 
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
