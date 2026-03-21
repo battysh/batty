@@ -7077,6 +7077,7 @@ mod tests {
 
         daemon.update_automation_timers_for_state("lead", MemberState::Working);
         daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        backdate_idle_grace(&mut daemon, "lead");
         daemon.maybe_intervene_owned_tasks().unwrap();
 
         assert!(daemon.owned_task_interventions.get("lead").is_none());
@@ -7158,7 +7159,7 @@ mod tests {
                 .owned_task_interventions
                 .get("lead")
                 .map(|state| state.idle_epoch),
-            Some(1)
+            Some(2)
         );
     }
 
