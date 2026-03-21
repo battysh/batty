@@ -250,6 +250,8 @@ mod tests {
 
     static CWD_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+    const REAL_KANBAN_MD: &str = "/opt/homebrew/bin/kanban-md";
+
     fn with_process_cwd<T>(cwd: &Path, action: impl FnOnce() -> T) -> T {
         let _guard = CWD_LOCK.lock().unwrap();
         let original = std::env::current_dir().unwrap();
@@ -262,11 +264,70 @@ mod tests {
         }
     }
 
+    fn real_kanban_available() -> bool {
+        Path::new(REAL_KANBAN_MD).is_file()
+    }
+
+    fn run_real_board(board_dir: &Path, args: &[&str]) -> Result<BoardOutput, BoardError> {
+        run_board_with_program(REAL_KANBAN_MD, board_dir, args)
+    }
+
+    fn create_task_real(
+        board_dir: &Path,
+        title: &str,
+        body: &str,
+        priority: Option<&str>,
+        tags: Option<&str>,
+        depends_on: Option<&str>,
+    ) -> Result<String, BoardError> {
+        let mut args = vec![
+            "create".to_string(),
+            title.to_string(),
+            "--body".to_string(),
+            body.to_string(),
+        ];
+        if let Some(priority) = priority {
+            args.push("--priority".to_string());
+            args.push(priority.to_string());
+        }
+        if let Some(tags) = tags {
+            args.push("--tags".to_string());
+            args.push(tags.to_string());
+        }
+        if let Some(depends_on) = depends_on {
+            args.push("--depends-on".to_string());
+            args.push(depends_on.to_string());
+        }
+
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = run_real_board(board_dir, &arg_refs)?;
+        extract_task_id(&output.stdout, "Created task #").ok_or_else(|| BoardError::Permanent {
+            message: format!(
+                "failed to parse task ID from create output: {}",
+                output.stdout.lines().next().unwrap_or_default()
+            ),
+            stderr: output.stderr,
+        })
+    }
+
+    fn pick_task_real(
+        board_dir: &Path,
+        claim: &str,
+        move_to: &str,
+    ) -> Result<Option<String>, BoardError> {
+        match run_real_board(board_dir, &["pick", "--claim", claim, "--move", move_to]) {
+            Ok(output) => Ok(extract_task_id(&output.stdout, "Picked and moved task #")
+                .or_else(|| extract_task_id(&output.stdout, "Picked task #"))),
+            Err(BoardError::Permanent { stderr, .. }) if is_empty_pick(&stderr) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     fn with_live_board_cwd<T>(action: impl FnOnce() -> T) -> T {
         let live_repo = TempDir::new().unwrap();
         let live_board_dir = live_repo.path().join(".batty/team_config/board");
         fs::create_dir_all(live_board_dir.parent().unwrap()).unwrap();
-        init(&live_board_dir).unwrap();
+        run_real_board(&live_board_dir, &["init"]).unwrap();
 
         let nested_cwd = live_repo.path().join("nested/project");
         fs::create_dir_all(&nested_cwd).unwrap();
@@ -363,7 +424,7 @@ mod tests {
 
     #[test]
     fn init_create_show_round_trip_when_kanban_available() {
-        if Command::new("kanban-md").arg("--version").output().is_err() {
+        if !real_kanban_available() {
             return;
         }
 
@@ -371,11 +432,11 @@ mod tests {
             let temp = TempDir::new().unwrap();
             let board_dir = temp.path().join("board");
 
-            let init_output = init(&board_dir).unwrap();
+            let init_output = run_real_board(&board_dir, &["init"]).unwrap();
             assert!(board_dir.is_dir());
             assert!(init_output.stdout.contains("Initialized board"));
 
-            let task_id = create_task(
+            let task_id = create_task_real(
                 &board_dir,
                 "Test task",
                 "Body text",
@@ -386,21 +447,42 @@ mod tests {
             .unwrap();
             assert_eq!(task_id, "1");
 
-            let show = show_task(&board_dir, &task_id).unwrap();
+            let show = run_real_board(&board_dir, &["show", &task_id])
+                .unwrap()
+                .stdout;
             assert!(show.contains("Task #1: Test task"));
             assert!(show.contains("Body text"));
 
-            let list = list_tasks(&board_dir, Some("backlog")).unwrap();
+            let list = run_real_board(&board_dir, &["list", "--status", "backlog"])
+                .unwrap()
+                .stdout;
             assert!(list.contains("Test task"));
 
-            let picked = pick_task(&board_dir, "eng-1-2", "in-progress").unwrap();
+            let picked = pick_task_real(&board_dir, "eng-1-2", "in-progress").unwrap();
             assert_eq!(picked.as_deref(), Some("1"));
 
-            move_task(&board_dir, &task_id, "review", Some("eng-1-2")).unwrap();
-            let review = show_task(&board_dir, &task_id).unwrap();
+            run_real_board(
+                &board_dir,
+                &["move", &task_id, "review", "--claim", "eng-1-2"],
+            )
+            .unwrap();
+            let review = run_real_board(&board_dir, &["show", &task_id])
+                .unwrap()
+                .stdout;
             assert!(review.contains("Status:      review"));
 
-            edit_task(&board_dir, &task_id, "needs manager input").unwrap();
+            run_real_board(
+                &board_dir,
+                &[
+                    "edit",
+                    &task_id,
+                    "--block",
+                    "needs manager input",
+                    "--claim",
+                    "eng-1-2",
+                ],
+            )
+            .unwrap();
             let task_file = fs::read_to_string(board_dir.join("tasks/001-test-task.md")).unwrap();
             assert!(task_file.contains("block_reason: needs manager input"));
         });
@@ -408,16 +490,16 @@ mod tests {
 
     #[test]
     fn pick_task_returns_none_when_board_is_empty() {
-        if Command::new("kanban-md").arg("--version").output().is_err() {
+        if !real_kanban_available() {
             return;
         }
 
         with_live_board_cwd(|| {
             let temp = TempDir::new().unwrap();
             let board_dir = temp.path().join("board");
-            init(&board_dir).unwrap();
+            run_real_board(&board_dir, &["init"]).unwrap();
 
-            let picked = pick_task(&board_dir, "eng-1-2", "in-progress").unwrap();
+            let picked = pick_task_real(&board_dir, "eng-1-2", "in-progress").unwrap();
             assert_eq!(picked, None);
         });
     }
