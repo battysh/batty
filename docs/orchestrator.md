@@ -46,11 +46,11 @@ When board automation is enabled, Batty can move work forward without waiting fo
 At a high level, the path is:
 
 1. identify open work in backlog or todo
-2. resolve runnable tasks against workflow state and dependencies
-3. pick an engineer with available capacity
-4. claim the task / move it to `in-progress`
-5. prepare the engineer worktree and branch
-6. deliver the assignment and record the result
+1. resolve runnable tasks against workflow state and dependencies
+1. pick an engineer with available capacity
+1. claim the task / move it to `in-progress`
+1. prepare the engineer worktree and branch
+1. deliver the assignment and record the result
 
 This is controlled primarily by:
 
@@ -62,14 +62,14 @@ This is controlled primarily by:
 
 The orchestrator's recovery prompts are state-driven, not timer spam. Each intervention family computes a signature from the current board/runtime state, tracks the member's current idle epoch, and suppresses repeat prompts unless either the state meaningfully changes or the cooldown expires.
 
-| Intervention | Trigger | State / dedupe behavior | Main config knobs |
-| --- | --- | --- | --- |
-| Triage backlog | Manager is idle and has delivered direct-report result packets waiting in inbox | Signature is based on the delivered backlog set; repeats are suppressed within the same idle epoch until backlog changes | `automation.triage_interventions`, `automation.intervention_idle_grace_secs`, `automation_sender` |
-| Review backlog | Review owner is idle while board tasks remain in `review` for them | Signature includes review task refs; repeat prompts are blocked unless the review queue changes or cooldown clears | `automation.review_interventions`, `automation.intervention_idle_grace_secs`, `workflow_policy.review_timeout_secs` |
-| Owned-task recovery | Member is idle while still owning active board work | Signature follows owned active/review work; same-signature prompts are suppressed and may escalate when the condition persists | `automation.owned_task_interventions`, `automation.intervention_idle_grace_secs`, `workflow_policy.escalation_threshold_secs` |
-| Manager dispatch-gap | Manager is idle while direct reports are idle and runnable work still exists | Signature includes idle reports plus runnable backlog; repeats wait for a changed dispatch picture or cooldown reset | `automation.manager_dispatch_interventions`, `automation.intervention_idle_grace_secs`, `board.auto_dispatch`, `workflow_policy.wip_limit_per_engineer` |
-| Architect utilization | Architect is idle while the team is underloaded or blocked on replenishment/lead action | Signature follows the underload snapshot; repeated prompts are deduped per idle epoch | `automation.architect_utilization_interventions`, `automation.intervention_idle_grace_secs` |
-| Board replenishment | Idle engineers exist but runnable todo work is below threshold | Signature tracks idle capacity and runnable queue counts so the architect is only re-prompted when the replenishment picture changes | `board.rotation_threshold`, `automation.architect_utilization_interventions`, `automation.intervention_idle_grace_secs` |
+| Intervention          | Trigger                                                                                 | State / dedupe behavior                                                                                                              | Main config knobs                                                                                                                                       |
+| --------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Triage backlog        | Manager is idle and has delivered direct-report result packets waiting in inbox         | Signature is based on the delivered backlog set; repeats are suppressed within the same idle epoch until backlog changes             | `automation.triage_interventions`, `automation.intervention_idle_grace_secs`, `automation_sender`                                                       |
+| Review backlog        | Review owner is idle while board tasks remain in `review` for them                      | Signature includes review task refs; repeat prompts are blocked unless the review queue changes or cooldown clears                   | `automation.review_interventions`, `automation.intervention_idle_grace_secs`, `workflow_policy.review_timeout_secs`                                     |
+| Owned-task recovery   | Member is idle while still owning active board work                                     | Signature follows owned active/review work; same-signature prompts are suppressed and may escalate when the condition persists       | `automation.owned_task_interventions`, `automation.intervention_idle_grace_secs`, `workflow_policy.escalation_threshold_secs`                           |
+| Manager dispatch-gap  | Manager is idle while direct reports are idle and runnable work still exists            | Signature includes idle reports plus runnable backlog; repeats wait for a changed dispatch picture or cooldown reset                 | `automation.manager_dispatch_interventions`, `automation.intervention_idle_grace_secs`, `board.auto_dispatch`, `workflow_policy.wip_limit_per_engineer` |
+| Architect utilization | Architect is idle while the team is underloaded or blocked on replenishment/lead action | Signature follows the underload snapshot; repeated prompts are deduped per idle epoch                                                | `automation.architect_utilization_interventions`, `automation.intervention_idle_grace_secs`                                                             |
+| Board replenishment   | Idle engineers exist but runnable todo work is below threshold                          | Signature tracks idle capacity and runnable queue counts so the architect is only re-prompted when the replenishment picture changes | `board.rotation_threshold`, `automation.architect_utilization_interventions`, `automation.intervention_idle_grace_secs`                                 |
 
 Operationally, all of these share the same guard rails:
 
@@ -272,60 +272,60 @@ The orchestrator-related `team.yaml` keys are spread across root config, board c
 
 ### Root Keys
 
-| Key | Meaning |
-| --- | --- |
-| `workflow_mode` | Chooses `legacy`, `hybrid`, or `workflow_first`. |
-| `orchestrator_pane` | Enables the dedicated orchestrator surface when the workflow mode supports it. |
-| `orchestrator_position` | Places the orchestrator pane at `bottom` or `left`. |
-| `automation_sender` | Optional visible sender name for daemon-generated intervention messages. |
+| Key                     | Meaning                                                                        |
+| ----------------------- | ------------------------------------------------------------------------------ |
+| `workflow_mode`         | Chooses `legacy`, `hybrid`, or `workflow_first`.                               |
+| `orchestrator_pane`     | Enables the dedicated orchestrator surface when the workflow mode supports it. |
+| `orchestrator_position` | Places the orchestrator pane at `bottom` or `left`.                            |
+| `automation_sender`     | Optional visible sender name for daemon-generated intervention messages.       |
 
 ### Board Keys
 
-| Key | Meaning |
-| --- | --- |
+| Key                        | Meaning                                      |
+| -------------------------- | -------------------------------------------- |
 | `board.rotation_threshold` | Threshold used by board-rotation automation. |
-| `board.auto_dispatch` | Enables automated dispatch of runnable work. |
+| `board.auto_dispatch`      | Enables automated dispatch of runnable work. |
 
 ### Standup Keys
 
-| Key | Meaning |
-| --- | --- |
+| Key                     | Meaning                                                    |
+| ----------------------- | ---------------------------------------------------------- |
 | `standup.interval_secs` | Global standup interval in seconds. `0` disables standups. |
-| `standup.output_lines` | Number of recent output lines included per report. |
+| `standup.output_lines`  | Number of recent output lines included per report.         |
 
 ### Automation Keys
 
-| Key | Meaning |
-| --- | --- |
-| `automation.timeout_nudges` | Enables idle nudges. |
-| `automation.standups` | Enables periodic standup generation. |
-| `automation.failure_pattern_detection` | Enables rolling failure-pattern detection. |
-| `automation.triage_interventions` | Enables direct-report triage recovery prompts. |
-| `automation.review_interventions` | Enables review backlog interventions. |
-| `automation.owned_task_interventions` | Enables recovery prompts for idle members holding active work. |
-| `automation.manager_dispatch_interventions` | Enables prompts when managers are idle while lanes are under-dispatched. |
-| `automation.architect_utilization_interventions` | Enables architect utilization recovery prompts. |
-| `automation.intervention_idle_grace_secs` | Minimum idle time before state-driven interventions are allowed to fire. |
+| Key                                              | Meaning                                                                  |
+| ------------------------------------------------ | ------------------------------------------------------------------------ |
+| `automation.timeout_nudges`                      | Enables idle nudges.                                                     |
+| `automation.standups`                            | Enables periodic standup generation.                                     |
+| `automation.failure_pattern_detection`           | Enables rolling failure-pattern detection.                               |
+| `automation.triage_interventions`                | Enables direct-report triage recovery prompts.                           |
+| `automation.review_interventions`                | Enables review backlog interventions.                                    |
+| `automation.owned_task_interventions`            | Enables recovery prompts for idle members holding active work.           |
+| `automation.manager_dispatch_interventions`      | Enables prompts when managers are idle while lanes are under-dispatched. |
+| `automation.architect_utilization_interventions` | Enables architect utilization recovery prompts.                          |
+| `automation.intervention_idle_grace_secs`        | Minimum idle time before state-driven interventions are allowed to fire. |
 
 ### Workflow Policy Keys
 
-| Key | Meaning |
-| --- | --- |
-| `workflow_policy.wip_limit_per_engineer` | Optional engineer concurrency guard for dispatch. |
-| `workflow_policy.wip_limit_per_reviewer` | Optional reviewer concurrency guard. |
-| `workflow_policy.escalation_threshold_secs` | Timeout threshold for escalation-sensitive workflow handling. |
-| `workflow_policy.review_timeout_secs` | Timeout threshold for overdue review work. |
-| `workflow_policy.auto_archive_done_after_secs` | Optional archival timeout for completed work. |
-| `workflow_policy.capability_overrides` | Maps work types to roles/capabilities for dispatch decisions. |
+| Key                                            | Meaning                                                       |
+| ---------------------------------------------- | ------------------------------------------------------------- |
+| `workflow_policy.wip_limit_per_engineer`       | Optional engineer concurrency guard for dispatch.             |
+| `workflow_policy.wip_limit_per_reviewer`       | Optional reviewer concurrency guard.                          |
+| `workflow_policy.escalation_threshold_secs`    | Timeout threshold for escalation-sensitive workflow handling. |
+| `workflow_policy.review_timeout_secs`          | Timeout threshold for overdue review work.                    |
+| `workflow_policy.auto_archive_done_after_secs` | Optional archival timeout for completed work.                 |
+| `workflow_policy.capability_overrides`         | Maps work types to roles/capabilities for dispatch decisions. |
 
 ### Role-Level Keys
 
-| Key | Meaning |
-| --- | --- |
-| `roles[].receives_standup` | Opts a role in or out of standups. |
-| `roles[].standup_interval_secs` | Overrides the global standup cadence for that role. |
-| `roles[].nudge_interval_secs` | Sets the idle timeout before a nudge is eligible to fire. |
-| `roles[].use_worktrees` | Enables engineer-style worktree handling for that role. |
+| Key                             | Meaning                                                   |
+| ------------------------------- | --------------------------------------------------------- |
+| `roles[].receives_standup`      | Opts a role in or out of standups.                        |
+| `roles[].standup_interval_secs` | Overrides the global standup cadence for that role.       |
+| `roles[].nudge_interval_secs`   | Sets the idle timeout before a nudge is eligible to fire. |
+| `roles[].use_worktrees`         | Enables engineer-style worktree handling for that role.   |
 
 ## Recommended Starting Point
 

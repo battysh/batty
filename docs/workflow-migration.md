@@ -32,5 +32,5 @@ Validation now reports the effective workflow mode and prints migration notes:
 ## Recommended Adoption Path
 
 1. Leave existing projects on the default `legacy` mode.
-2. Add `workflow_mode: hybrid` when you want to begin introducing workflow-aware tooling.
-3. Move to `workflow_mode: workflow_first` only after your board/process migration is complete.
+1. Add `workflow_mode: hybrid` when you want to begin introducing workflow-aware tooling.
+1. Move to `workflow_mode: workflow_first` only after your board/process migration is complete.
