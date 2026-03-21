@@ -2825,43 +2825,19 @@ mod tests {
     use std::process::Command;
     use std::sync::{Arc, Mutex};
 
-    use crate::team::comms::Channel;
     use crate::team::config::{
         BoardConfig, ChannelConfig, RoleDef, StandupConfig, WorkflowMode, WorkflowPolicy,
     };
     use crate::team::events::EventSink;
+    use crate::team::test_helpers::{
+        FailingChannel, RecordingChannel, daemon_config_with_roles, make_test_daemon,
+        write_event_log,
+    };
     use crate::team::test_support::{
         init_git_repo, setup_fake_claude, write_owned_task_file, write_owned_task_file_with_context,
     };
     use crate::team::watcher::WatcherState;
     use serial_test::serial;
-
-    struct RecordingChannel {
-        messages: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl Channel for RecordingChannel {
-        fn send(&self, message: &str) -> Result<()> {
-            self.messages.lock().unwrap().push(message.to_string());
-            Ok(())
-        }
-
-        fn channel_type(&self) -> &str {
-            "test"
-        }
-    }
-
-    struct FailingChannel;
-
-    impl Channel for FailingChannel {
-        fn send(&self, _message: &str) -> Result<()> {
-            bail!("synthetic channel failure")
-        }
-
-        fn channel_type(&self) -> &str {
-            "test-failing"
-        }
-    }
 
     fn write_open_task_file(project_root: &Path, id: u32, title: &str, status: &str) {
         let tasks_dir = project_root
@@ -3068,17 +3044,6 @@ mod tests {
             retro_generated: false,
             failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
-        }
-    }
-
-    fn write_event_log(project_root: &Path, events: &[TeamEvent]) {
-        let events_path = project_root
-            .join(".batty")
-            .join("team_config")
-            .join("events.jsonl");
-        let mut sink = EventSink::new(&events_path).unwrap();
-        for event in events {
-            sink.emit(event.clone()).unwrap();
         }
     }
 
@@ -4513,29 +4478,6 @@ mod tests {
                 .contains("Live message delivery failed after 3 attempts.")
         );
         assert!(messages[0].body.contains("Recipient: eng-1"));
-    }
-
-    fn make_test_daemon(project_root: &Path, members: Vec<MemberInstance>) -> TeamDaemon {
-        TeamDaemon::new(DaemonConfig {
-            project_root: project_root.to_path_buf(),
-            team_config: TeamConfig {
-                name: "test".to_string(),
-                workflow_mode: WorkflowMode::Legacy,
-                workflow_policy: WorkflowPolicy::default(),
-                board: BoardConfig::default(),
-                standup: StandupConfig::default(),
-                automation: AutomationConfig::default(),
-                automation_sender: None,
-                orchestrator_pane: true,
-                orchestrator_position: OrchestratorPosition::Bottom,
-                layout: None,
-                roles: Vec::new(),
-            },
-            session: "test".to_string(),
-            members,
-            pane_map: HashMap::new(),
-        })
-        .unwrap()
     }
 
     #[test]
@@ -8062,28 +8004,6 @@ mod tests {
     }
 
     /// Helper: build a minimal DaemonConfig with the given roles.
-    fn daemon_config_with_roles(tmp: &tempfile::TempDir, roles: Vec<RoleDef>) -> DaemonConfig {
-        DaemonConfig {
-            project_root: tmp.path().to_path_buf(),
-            team_config: TeamConfig {
-                name: "test".to_string(),
-                workflow_mode: WorkflowMode::Legacy,
-                workflow_policy: WorkflowPolicy::default(),
-                board: BoardConfig::default(),
-                standup: StandupConfig::default(),
-                automation: AutomationConfig::default(),
-                automation_sender: None,
-                orchestrator_pane: true,
-                orchestrator_position: OrchestratorPosition::Bottom,
-                layout: None,
-                roles,
-            },
-            session: "test".to_string(),
-            members: Vec::new(),
-            pane_map: HashMap::new(),
-        }
-    }
-
     #[test]
     fn daemon_creates_telegram_bot_when_configured() {
         let tmp = tempfile::tempdir().unwrap();
@@ -8108,7 +8028,7 @@ mod tests {
             use_worktrees: false,
         }];
 
-        let config = daemon_config_with_roles(&tmp, roles);
+        let config = daemon_config_with_roles(tmp.path(), roles);
         let daemon = TeamDaemon::new(config).unwrap();
         assert!(
             daemon.telegram_bot.is_some(),
@@ -8135,7 +8055,7 @@ mod tests {
             use_worktrees: false,
         }];
 
-        let config = daemon_config_with_roles(&tmp, roles);
+        let config = daemon_config_with_roles(tmp.path(), roles);
         let daemon = TeamDaemon::new(config).unwrap();
         assert!(
             daemon.telegram_bot.is_none(),

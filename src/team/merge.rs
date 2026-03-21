@@ -402,16 +402,11 @@ fn commits_ahead_of_main(worktree_dir: &Path) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::team::config::{
-        AutomationConfig, BoardConfig, OrchestratorPosition, StandupConfig, WorkflowMode,
-        WorkflowPolicy,
-    };
-    use crate::team::daemon::DaemonConfig;
     use crate::team::hierarchy::MemberInstance;
     use crate::team::inbox;
     use crate::team::task_loop::{prepare_engineer_assignment_worktree, setup_engineer_worktree};
+    use crate::team::test_helpers::make_test_daemon;
     use crate::team::test_support::{git, git_ok, git_stdout, init_git_repo};
-    use std::collections::HashMap;
     use std::path::Path;
 
     fn write_task_file(project_root: &Path, id: u32, title: &str) {
@@ -428,29 +423,6 @@ mod tests {
             ),
         )
         .unwrap();
-    }
-
-    fn make_test_daemon(project_root: &Path, members: Vec<MemberInstance>) -> TeamDaemon {
-        TeamDaemon::new(DaemonConfig {
-            project_root: project_root.to_path_buf(),
-            team_config: super::super::config::TeamConfig {
-                name: "test".to_string(),
-                workflow_mode: WorkflowMode::Legacy,
-                workflow_policy: WorkflowPolicy::default(),
-                board: BoardConfig::default(),
-                standup: StandupConfig::default(),
-                automation: AutomationConfig::default(),
-                automation_sender: None,
-                orchestrator_pane: true,
-                orchestrator_position: OrchestratorPosition::Bottom,
-                layout: None,
-                roles: Vec::new(),
-            },
-            session: "test".to_string(),
-            members,
-            pane_map: HashMap::new(),
-        })
-        .unwrap()
     }
 
     #[test]

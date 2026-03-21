@@ -34,6 +34,8 @@ pub mod task_cmd;
 pub mod task_loop;
 pub mod telegram;
 #[cfg(test)]
+pub mod test_helpers;
+#[cfg(test)]
 pub mod test_support;
 pub mod validation;
 pub mod watcher;

@@ -93,15 +93,6 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::context_exhausted(role, task, session_size_bytes));
     }
 
-    pub(super) fn record_task_assigned(&mut self, role: &str, task: &str) {
-        self.emit_event(TeamEvent::task_assigned(role, task));
-    }
-
-    pub(super) fn record_cwd_corrected(&mut self, role: &str, path: impl Into<String>) {
-        let path = path.into();
-        self.emit_event(TeamEvent::cwd_corrected(role, &path));
-    }
-
     pub(crate) fn record_task_escalated(&mut self, role: &str, task: impl Into<String>) {
         let task = task.into();
         self.emit_event(TeamEvent::task_escalated(role, &task));
@@ -238,31 +229,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use anyhow::Result;
-
     use super::*;
-    use crate::team::comms::Channel;
     use crate::team::config::{
         AutomationConfig, BoardConfig, OrchestratorPosition, RoleDef, StandupConfig, TeamConfig,
         WorkflowMode, WorkflowPolicy,
     };
     use crate::team::events::{EventSink, read_events};
+    use crate::team::test_helpers::{RecordingChannel, daemon_config_with_roles};
     use serial_test::serial;
-
-    struct RecordingChannel {
-        messages: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl Channel for RecordingChannel {
-        fn send(&self, message: &str) -> Result<()> {
-            self.messages.lock().unwrap().push(message.to_string());
-            Ok(())
-        }
-
-        fn channel_type(&self) -> &str {
-            "test"
-        }
-    }
 
     struct FailingWriter;
 
@@ -273,28 +247,6 @@ mod tests {
 
         fn flush(&mut self) -> io::Result<()> {
             Err(io::Error::other("synthetic event sink failure"))
-        }
-    }
-
-    fn daemon_config_with_roles(tmp: &tempfile::TempDir, roles: Vec<RoleDef>) -> DaemonConfig {
-        DaemonConfig {
-            project_root: tmp.path().to_path_buf(),
-            team_config: TeamConfig {
-                name: "test".to_string(),
-                workflow_mode: WorkflowMode::Legacy,
-                workflow_policy: WorkflowPolicy::default(),
-                board: BoardConfig::default(),
-                standup: StandupConfig::default(),
-                automation: AutomationConfig::default(),
-                automation_sender: None,
-                orchestrator_pane: true,
-                orchestrator_position: OrchestratorPosition::Bottom,
-                layout: None,
-                roles,
-            },
-            session: "test".to_string(),
-            members: Vec::new(),
-            pane_map: HashMap::new(),
         }
     }
 
@@ -402,7 +354,7 @@ mod tests {
                 use_worktrees: false,
             },
         ];
-        let mut config = daemon_config_with_roles(&tmp, roles);
+        let mut config = daemon_config_with_roles(tmp.path(), roles);
         config.members = vec![
             MemberInstance {
                 name: "architect".to_string(),
