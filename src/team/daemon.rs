@@ -1550,8 +1550,103 @@ mod tests {
     use crate::team::watcher::WatcherState;
     use serial_test::serial;
     use std::collections::HashMap;
-    use std::path::Path;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
+
+
+    fn setup_fake_codex(
+        project_root: &Path,
+        log_root: &Path,
+        member_name: &str,
+    ) -> (PathBuf, PathBuf) {
+        let project_slug = project_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "default".to_string());
+        let fake_bin = std::env::temp_dir().join(format!("batty-bin-{project_slug}-{member_name}"));
+        let _ = std::fs::remove_dir_all(&fake_bin);
+        std::fs::create_dir_all(&fake_bin).unwrap();
+
+        let fake_log = log_root.join(format!("{member_name}-fake-codex.log"));
+        let fake_codex = fake_bin.join("codex");
+        std::fs::write(
+            &fake_codex,
+            format!(
+                "#!/bin/bash\nprintf 'PWD:%s\\nARGS:%s\\n' \"$PWD\" \"$*\" >> '{}'\nsleep 1\n",
+                fake_log.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        (fake_bin, fake_log)
+    }
+
+    fn write_codex_session_meta(cwd: &Path) -> PathBuf {
+        let home = PathBuf::from(std::env::var("HOME").expect("HOME must be set for tests"));
+        let session_dir = home
+            .join(".codex")
+            .join("sessions")
+            .join("2099")
+            .join("12")
+            .join("31");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let unique = format!(
+            "batty-daemon-lifecycle-{}-{}.jsonl",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let session_file = session_dir.join(unique);
+        std::fs::write(
+            &session_file,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"{}\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+        session_file
+    }
+
+    fn append_codex_task_complete(session_file: &Path) {
+        let mut handle = OpenOptions::new().append(true).open(session_file).unwrap();
+        writeln!(
+            handle,
+            "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_complete\"}}}}"
+        )
+        .unwrap();
+        handle.flush().unwrap();
+    }
+
+    fn wait_for_log_contains(log_path: &Path, needle: &str) -> String {
+        (0..40)
+            .find_map(|_| {
+                let content = match std::fs::read_to_string(log_path) {
+                    Ok(content) => content,
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_millis(100));
+                        return None;
+                    }
+                };
+                if content.contains(needle) {
+                    Some(content)
+                } else {
+                    std::thread::sleep(Duration::from_millis(100));
+                    None
+                }
+            })
+            .unwrap_or_else(|| panic!("log {} never contained `{needle}`", log_path.display()))
+    }
 
     fn starvation_test_daemon(tmp: &tempfile::TempDir, threshold: Option<usize>) -> TeamDaemon {
         let mut daemon = TestDaemonBuilder::new(tmp.path())
@@ -1811,6 +1906,136 @@ mod tests {
         let before = daemon.last_auto_dispatch;
         daemon.maybe_auto_dispatch().unwrap();
         assert_eq!(daemon.last_auto_dispatch, before);
+    }
+
+    #[test]
+    #[serial]
+    fn daemon_lifecycle_happy_path_exercises_decomposed_modules() {
+        let session = format!("batty-test-daemon-lifecycle-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-daemon-lifecycle");
+        write_open_task_file(&repo, 42, "lifecycle-task", "todo");
+
+        let member_name = "eng-lifecycle";
+        let (fake_bin, fake_log) = setup_fake_codex(&repo, tmp.path(), member_name);
+
+        crate::tmux::create_session(&session, "bash", &[], repo.to_string_lossy().as_ref())
+            .unwrap();
+        crate::tmux::create_window(
+            &session,
+            "keeper",
+            "sleep",
+            &["30".to_string()],
+            repo.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        let pane_id = crate::tmux::pane_id(&session).unwrap();
+
+        let engineer = MemberInstance {
+            name: member_name.to_string(),
+            role_name: "engineer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: true,
+        };
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: repo.clone(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                roles: Vec::new(),
+            },
+            session: session.clone(),
+            members: vec![engineer],
+            pane_map: HashMap::from([(member_name.to_string(), pane_id)]),
+        })
+        .unwrap();
+        daemon.spawn_all_agents(false).unwrap();
+        let spawn_log =
+            wait_for_log_contains(&fake_log, "--dangerously-bypass-approvals-and-sandbox");
+        assert!(spawn_log.contains("PWD:"));
+
+        let assignment = "Task #42: lifecycle-task\n\nTask description.";
+        daemon
+            .assign_task_with_task_id(member_name, assignment, Some(42))
+            .unwrap();
+        daemon.active_tasks.insert(member_name.to_string(), 42);
+        let assignment_log = wait_for_log_contains(&fake_log, "Task #42: lifecycle-task");
+        assert!(assignment_log.contains("Task #42: lifecycle-task"));
+        assert_eq!(daemon.active_task_id(member_name), Some(42));
+        assert_eq!(daemon.states.get(member_name), Some(&MemberState::Working));
+
+        let worktree_dir = repo.join(".batty").join("worktrees").join(member_name);
+        assert!(worktree_dir.exists());
+        assert_eq!(
+            crate::team::test_support::git_stdout(&worktree_dir, &["branch", "--show-current"]),
+            format!("{member_name}/task-42")
+        );
+
+        let codex_cwd = worktree_dir
+            .join(".batty")
+            .join("codex-context")
+            .join(member_name);
+        let session_file = write_codex_session_meta(&codex_cwd);
+
+        daemon.run_loop_step("poll_watchers", |daemon| daemon.poll_watchers());
+        daemon.run_loop_step("sync_launch_state_session_ids", |daemon| {
+            daemon.sync_launch_state_session_ids()
+        });
+
+        std::fs::write(worktree_dir.join("note.txt"), "done\n").unwrap();
+        crate::team::test_support::git_ok(&worktree_dir, &["add", "note.txt"]);
+        crate::team::test_support::git_ok(&worktree_dir, &["commit", "-m", "finish task"]);
+        append_codex_task_complete(&session_file);
+
+        daemon.run_loop_step("poll_watchers", |daemon| daemon.poll_watchers());
+
+        assert_eq!(daemon.active_task_id(member_name), None);
+        assert_eq!(daemon.states.get(member_name), Some(&MemberState::Idle));
+        assert_eq!(
+            std::fs::read_to_string(repo.join("note.txt")).unwrap(),
+            "done\n"
+        );
+
+        let events = crate::team::events::read_events(
+            &repo.join(".batty").join("team_config").join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "task_assigned"
+                && event.role.as_deref() == Some(member_name)
+                && event
+                    .task
+                    .as_deref()
+                    .is_some_and(|task| task.contains("Task #42: lifecycle-task"))
+        }));
+        assert!(events.iter().any(|event| {
+            event.event == "task_completed" && event.role.as_deref() == Some(member_name)
+        }));
+
+        let launch_state = load_launch_state(&repo);
+        let identity = launch_state.get(member_name).expect("missing launch state");
+        assert_eq!(identity.agent, "codex-cli");
+        assert_eq!(
+            identity.session_id.as_deref(),
+            session_file.file_stem().and_then(|stem| stem.to_str())
+        );
+
+        crate::tmux::kill_session(&session).unwrap();
+        let _ = std::fs::remove_file(&session_file);
+        let _ = std::fs::remove_dir_all(&fake_bin);
     }
 
     #[test]
