@@ -1,9 +1,10 @@
-//! Pure event-log analysis for retrospective metrics.
+//! Pure event-log analysis and markdown report generation for retrospectives.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::events::{TeamEvent, read_events};
 
@@ -194,8 +195,169 @@ pub fn analyze_event_log(path: &Path) -> Result<Option<RunStats>> {
     Ok(analyze_events(&events))
 }
 
+pub fn generate_retrospective(project_root: &Path, stats: &RunStats) -> Result<PathBuf> {
+    let retrospectives_dir = project_root.join(".batty").join("retrospectives");
+    fs::create_dir_all(&retrospectives_dir).with_context(|| {
+        format!(
+            "failed to create retrospectives directory: {}",
+            retrospectives_dir.display()
+        )
+    })?;
+
+    let report_path = retrospectives_dir.join(format!("{}.md", stats.run_end));
+    let report = render_retrospective(stats);
+    fs::write(&report_path, report)
+        .with_context(|| format!("failed to write retrospective: {}", report_path.display()))?;
+
+    Ok(report_path)
+}
+
+pub fn format_duration(secs: u64) -> String {
+    let hours = secs / 3_600;
+    let minutes = (secs % 3_600) / 60;
+    let seconds = secs % 60;
+
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m {seconds:02}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn render_retrospective(stats: &RunStats) -> String {
+    let completed_tasks = stats
+        .task_stats
+        .iter()
+        .filter(|task| task.completed_at.is_some())
+        .count();
+
+    let task_cycle_rows = render_task_cycle_rows(&stats.task_stats);
+    let bottlenecks = render_bottlenecks(&stats.task_stats);
+    let recommendations = render_recommendations(stats);
+
+    format!(
+        "# Batty Retrospective\n\n\
+## Summary\n\n\
+- Duration: {}\n\
+- Tasks completed: {}\n\
+- Messages: {}\n\
+- Escalations: {}\n\
+- Idle: {:.1}%\n\n\
+## Task Cycle Times\n\n\
+| Task | Assignee | Status | Cycle Time | Retries | Escalated |\n\
+| --- | --- | --- | --- | --- | --- |\n\
+{}\
+\n\
+## Bottlenecks\n\n\
+{}\
+\n\
+## Recommendations\n\n\
+{}",
+        format_duration(stats.total_duration_secs),
+        completed_tasks,
+        stats.message_count,
+        stats.escalation_count,
+        stats.idle_time_pct * 100.0,
+        task_cycle_rows,
+        bottlenecks,
+        recommendations
+    )
+}
+
+fn render_task_cycle_rows(tasks: &[TaskStats]) -> String {
+    if tasks.is_empty() {
+        return "| No tasks recorded | - | - | - | - | - |\n".to_string();
+    }
+
+    let mut rows = String::new();
+    for task in tasks {
+        let status = if task.completed_at.is_some() {
+            "completed"
+        } else {
+            "incomplete"
+        };
+        let cycle_time = task
+            .cycle_time_secs
+            .map(format_duration)
+            .unwrap_or_else(|| "-".to_string());
+        let escalated = if task.was_escalated { "yes" } else { "no" };
+        rows.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} |\n",
+            task.task_id, task.assigned_to, status, cycle_time, task.retry_count, escalated
+        ));
+    }
+    rows
+}
+
+fn render_bottlenecks(tasks: &[TaskStats]) -> String {
+    let longest_task = tasks
+        .iter()
+        .filter_map(|task| task.cycle_time_secs.map(|cycle| (task, cycle)))
+        .max_by_key(|(_, cycle)| *cycle);
+
+    let most_retried = tasks.iter().max_by_key(|task| task.retry_count);
+
+    let mut lines = Vec::new();
+    match longest_task {
+        Some((task, cycle)) => lines.push(format!(
+            "- Longest task: `{}` owned by `{}` at {}.",
+            task.task_id,
+            task.assigned_to,
+            format_duration(cycle)
+        )),
+        None => lines.push("- Longest task: no completed tasks recorded.".to_string()),
+    }
+
+    match most_retried {
+        Some(task) if task.retry_count > 1 => lines.push(format!(
+            "- Most retried: `{}` retried {} times.",
+            task.task_id, task.retry_count
+        )),
+        _ => lines.push("- Most retried: no task needed multiple attempts.".to_string()),
+    }
+
+    format!("{}\n", lines.join("\n"))
+}
+
+fn render_recommendations(stats: &RunStats) -> String {
+    let mut lines = Vec::new();
+    let max_retry_count = stats
+        .task_stats
+        .iter()
+        .map(|task| task.retry_count)
+        .max()
+        .unwrap_or(0);
+
+    if stats.idle_time_pct >= 0.5 {
+        lines.push(
+            "- Idle time stayed high. Queue more ready tasks so engineers are not waiting on assignment."
+                .to_string(),
+        );
+    }
+
+    if max_retry_count >= 3 {
+        lines.push(
+            "- Several retries were needed. Break work into smaller tasks with clearer acceptance criteria."
+                .to_string(),
+        );
+    }
+
+    if lines.is_empty() {
+        lines.push(
+            "- No major bottlenecks stood out. Keep the current task sizing and routing cadence."
+                .to_string(),
+        );
+    }
+
+    format!("{}\n", lines.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
 
     fn at(mut event: TeamEvent, ts: u64) -> TeamEvent {
@@ -309,5 +471,119 @@ mod tests {
         assert_eq!(stats.task_stats[0].task_id, "new-task");
         assert_eq!(stats.task_stats[0].assigned_to, "eng-2");
         assert_eq!(stats.task_stats[0].cycle_time_secs, Some(30));
+    }
+
+    fn sample_task(task_id: &str, cycle_time_secs: Option<u64>, retry_count: u32) -> TaskStats {
+        TaskStats {
+            task_id: task_id.to_string(),
+            assigned_to: "eng-1".to_string(),
+            assigned_at: 100,
+            completed_at: cycle_time_secs.map(|cycle| 100 + cycle),
+            cycle_time_secs,
+            retry_count,
+            was_escalated: retry_count > 2,
+        }
+    }
+
+    #[test]
+    fn format_duration_variants() {
+        assert_eq!(format_duration(45), "45s");
+        assert_eq!(format_duration(65), "1m 05s");
+        assert_eq!(format_duration(3_665), "1h 01m 05s");
+    }
+
+    #[test]
+    fn generate_retrospective_writes_report_with_sections() {
+        let tmp = tempdir().unwrap();
+        let stats = RunStats {
+            run_start: 1_700_000_000,
+            run_end: 1_700_000_123,
+            total_duration_secs: 123,
+            task_stats: vec![
+                sample_task("T-101", Some(90), 1),
+                sample_task("T-102", Some(30), 2),
+            ],
+            idle_time_pct: 0.25,
+            escalation_count: 1,
+            message_count: 6,
+        };
+
+        let path = generate_retrospective(tmp.path(), &stats).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+
+        assert_eq!(
+            path,
+            tmp.path()
+                .join(".batty")
+                .join("retrospectives")
+                .join("1700000123.md")
+        );
+        assert!(content.contains("## Summary"));
+        assert!(content.contains("## Task Cycle Times"));
+        assert!(content.contains("## Bottlenecks"));
+        assert!(content.contains("## Recommendations"));
+        assert!(content.contains("| T-101 | eng-1 | completed | 1m 30s | 1 | no |"));
+        assert!(content.contains("- Tasks completed: 2"));
+    }
+
+    #[test]
+    fn generate_retrospective_handles_empty_tasks() {
+        let tmp = tempdir().unwrap();
+        let stats = RunStats {
+            run_start: 10,
+            run_end: 20,
+            total_duration_secs: 10,
+            task_stats: Vec::new(),
+            idle_time_pct: 0.0,
+            escalation_count: 0,
+            message_count: 0,
+        };
+
+        let path = generate_retrospective(tmp.path(), &stats).unwrap();
+        let content = fs::read_to_string(path).unwrap();
+
+        assert!(content.contains("| No tasks recorded | - | - | - | - | - |"));
+        assert!(content.contains("- Longest task: no completed tasks recorded."));
+        assert!(content.contains("- Most retried: no task needed multiple attempts."));
+    }
+
+    #[test]
+    fn generate_retrospective_adds_high_idle_recommendation() {
+        let tmp = tempdir().unwrap();
+        let stats = RunStats {
+            run_start: 10,
+            run_end: 30,
+            total_duration_secs: 20,
+            task_stats: vec![sample_task("T-201", Some(20), 1)],
+            idle_time_pct: 0.75,
+            escalation_count: 0,
+            message_count: 1,
+        };
+
+        let path = generate_retrospective(tmp.path(), &stats).unwrap();
+        let content = fs::read_to_string(path).unwrap();
+
+        assert!(content.contains("Idle time stayed high"));
+        assert!(content.contains("Queue more ready tasks"));
+    }
+
+    #[test]
+    fn generate_retrospective_adds_high_retry_recommendation() {
+        let tmp = tempdir().unwrap();
+        let stats = RunStats {
+            run_start: 10,
+            run_end: 40,
+            total_duration_secs: 30,
+            task_stats: vec![sample_task("T-301", Some(25), 3)],
+            idle_time_pct: 0.1,
+            escalation_count: 0,
+            message_count: 2,
+        };
+
+        let path = generate_retrospective(tmp.path(), &stats).unwrap();
+        let content = fs::read_to_string(path).unwrap();
+
+        assert!(content.contains("Several retries were needed"));
+        assert!(content.contains("smaller tasks"));
     }
 }
