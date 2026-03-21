@@ -12,6 +12,7 @@ pub mod completion;
 pub mod config;
 pub mod daemon;
 pub mod events;
+pub mod failure_patterns;
 pub mod hierarchy;
 pub mod inbox;
 pub mod layout;
