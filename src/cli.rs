@@ -158,6 +158,9 @@ pub enum Command {
     /// Estimate team load and show recent load history
     Load,
 
+    /// Dump diagnostic state from Batty state files
+    Doctor,
+
     /// Internal: run the daemon loop (spawned by `batty start`)
     #[command(hide = true)]
     Daemon {
@@ -614,6 +617,12 @@ mod tests {
     fn telegram_subcommand_parses() {
         let cli = Cli::parse_from(["batty", "telegram"]);
         assert!(matches!(cli.command, Command::Telegram));
+    }
+
+    #[test]
+    fn doctor_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "doctor"]);
+        assert!(matches!(cli.command, Command::Doctor));
     }
 
     #[test]

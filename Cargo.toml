@@ -57,6 +57,7 @@ ureq = { version = "2", features = ["json"] }
 
 # Pattern matching
 regex = "1"
+sha2 = "0.10"
 
 # Error handling
 anyhow = "1"
