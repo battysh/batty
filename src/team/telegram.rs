@@ -3,7 +3,8 @@
 //! Provides a blocking HTTP client that sends messages and polls for updates
 //! via the Telegram Bot API. Access control is enforced by numeric user IDs.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
+use std::hash::{Hash, Hasher};
 use std::io::{self, Write as IoWrite};
 use std::path::Path;
 use tracing::{debug, warn};
@@ -66,11 +67,18 @@ impl TelegramBot {
     /// Messages longer than 4096 characters are split into multiple messages.
     /// POST `https://api.telegram.org/bot{token}/sendMessage`
     pub fn send_message(&self, chat_id: &str, text: &str) -> Result<()> {
-        if text.len() <= Self::MAX_MESSAGE_LEN {
-            return self.send_message_chunk(chat_id, text);
-        }
+        let chunks = split_message(text, Self::MAX_MESSAGE_LEN);
+        let total_chunks = chunks.len();
 
-        for chunk in split_message(text, Self::MAX_MESSAGE_LEN) {
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            let chunk_id = outbound_chunk_message_id(chat_id, chunk, index, total_chunks);
+            debug!(
+                chat_id,
+                chunk_index = index,
+                total_chunks,
+                chunk_id,
+                "sending telegram message chunk"
+            );
             self.send_message_chunk(chat_id, chunk)?;
         }
         Ok(())
@@ -150,6 +158,20 @@ fn parse_send_message_response(json: &serde_json::Value) -> Result<i64> {
         .and_then(|result| result.get("message_id"))
         .and_then(|message_id| message_id.as_i64())
         .ok_or_else(|| anyhow!("Telegram sendMessage response missing result.message_id"))
+}
+
+fn outbound_chunk_message_id(
+    chat_id: &str,
+    chunk: &str,
+    chunk_index: usize,
+    total_chunks: usize,
+) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    chat_id.hash(&mut hasher);
+    chunk.hash(&mut hasher);
+    chunk_index.hash(&mut hasher);
+    total_chunks.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Parse a Telegram `getUpdates` JSON response into authorized inbound messages.
@@ -747,10 +769,12 @@ mod tests {
             "result": {}
         });
 
-        assert!(parse_send_message_response(&json)
-            .unwrap_err()
-            .to_string()
-            .contains("message_id"));
+        assert!(
+            parse_send_message_response(&json)
+                .unwrap_err()
+                .to_string()
+                .contains("message_id")
+        );
     }
 
     #[test]
@@ -869,5 +893,17 @@ roles:
     fn split_message_empty_text() {
         let chunks = split_message("", 4096);
         assert_eq!(chunks, vec![""]);
+    }
+
+    #[test]
+    fn outbound_chunk_message_id_changes_per_chunk() {
+        let text = format!("{}\n{}", "a".repeat(4096), "b".repeat(200));
+        let chunks = split_message(&text, 4096);
+        assert_eq!(chunks.len(), 2);
+
+        let first = outbound_chunk_message_id("12345", chunks[0], 0, chunks.len());
+        let second = outbound_chunk_message_id("12345", chunks[1], 1, chunks.len());
+
+        assert_ne!(first, second);
     }
 }
