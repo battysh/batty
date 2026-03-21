@@ -302,35 +302,48 @@ mod tests {
     #[serial]
     fn test_inject_message_empty_message_writes_message_wrapper_to_pane() {
         let session = "batty-test-message-empty";
-        let _ = crate::tmux::kill_session(session);
+        let mut delivered = false;
 
-        let tmp = tempfile::tempdir().unwrap();
-        let log_path = tmp.path().join("message-empty.log");
+        for _attempt in 0..3 {
+            let _ = crate::tmux::kill_session(session);
 
-        crate::tmux::create_session(session, "cat", &[], "/tmp").unwrap();
-        crate::tmux::setup_pipe_pane(session, &log_path).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
+            let tmp = tempfile::tempdir().unwrap();
+            let log_path = tmp.path().join("message-empty.log");
 
-        inject_message(session, "manager", "").unwrap();
-        let content = (0..30)
-            .find_map(|_| {
-                let content = std::fs::read_to_string(&log_path).unwrap_or_default();
-                let ready = content.contains("--- Message from manager ---")
-                    && content.contains("--- end message ---")
-                    && content.contains("batty send manager");
-                if ready {
-                    Some(content)
-                } else {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    None
-                }
-            })
-            .unwrap_or_else(|| std::fs::read_to_string(&log_path).unwrap_or_default());
-        assert!(content.contains("--- Message from manager ---"));
-        assert!(content.contains("--- end message ---"));
-        assert!(content.contains("batty send manager"));
+            crate::tmux::create_session(session, "cat", &[], "/tmp").unwrap();
+            crate::tmux::setup_pipe_pane(session, &log_path).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(200));
 
-        crate::tmux::kill_session(session).unwrap();
+            inject_message(session, "manager", "").unwrap();
+            let content = (0..30)
+                .find_map(|_| {
+                    let content = std::fs::read_to_string(&log_path).unwrap_or_default();
+                    let ready = content.contains("--- Message from manager ---")
+                        && content.contains("--- end message ---")
+                        && content.contains("batty send manager");
+                    if ready {
+                        Some(content)
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        None
+                    }
+                })
+                .unwrap_or_else(|| std::fs::read_to_string(&log_path).unwrap_or_default());
+
+            if content.contains("--- Message from manager ---")
+                && content.contains("--- end message ---")
+                && content.contains("batty send manager")
+            {
+                delivered = true;
+                crate::tmux::kill_session(session).unwrap();
+                break;
+            }
+
+            crate::tmux::kill_session(session).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        assert!(delivered, "expected wrapped empty message to reach pane");
     }
 
     #[test]

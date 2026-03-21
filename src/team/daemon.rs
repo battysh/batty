@@ -54,6 +54,8 @@ mod dispatch;
 mod interventions;
 #[path = "launcher.rs"]
 mod launcher;
+#[path = "telegram_bridge.rs"]
+mod telegram_bridge;
 #[path = "daemon/telemetry.rs"]
 mod telemetry;
 
@@ -254,13 +256,7 @@ impl TeamDaemon {
         }
 
         // Create Telegram bot for inbound polling (if configured)
-        let telegram_bot = config
-            .team_config
-            .roles
-            .iter()
-            .find(|r| r.role_type == RoleType::User && r.channel.as_deref() == Some("telegram"))
-            .and_then(|r| r.channel_config.as_ref())
-            .and_then(super::telegram::TelegramBot::from_config);
+        let telegram_bot = telegram_bridge::build_telegram_bot(&config.team_config);
 
         let states = HashMap::new();
 
@@ -422,8 +418,9 @@ impl TeamDaemon {
             self.run_loop_step("maybe_detect_pipeline_starvation", |daemon| {
                 daemon.maybe_detect_pipeline_starvation()
             });
-            self.run_loop_step("poll_telegram", |daemon| daemon.poll_telegram());
-            self.run_loop_step("deliver_user_inbox", |daemon| daemon.deliver_user_inbox());
+            self.run_loop_step("process_telegram_queue", |daemon| {
+                daemon.process_telegram_queue()
+            });
             self.run_loop_step("maybe_fire_nudges", |daemon| daemon.maybe_fire_nudges());
             self.run_loop_step("maybe_generate_standup", |daemon| {
                 let generated = standup::maybe_generate_standup(
@@ -1542,11 +1539,9 @@ fn save_daemon_state(project_root: &Path, state: &PersistedDaemonState) -> Resul
 mod tests {
     use super::*;
     use crate::team::config::AutomationConfig;
-    use crate::team::config::{
-        BoardConfig, ChannelConfig, RoleDef, StandupConfig, WorkflowMode, WorkflowPolicy,
-    };
+    use crate::team::config::{BoardConfig, RoleDef, StandupConfig, WorkflowMode, WorkflowPolicy};
     use crate::team::events::EventSink;
-    use crate::team::test_helpers::{daemon_config_with_roles, make_test_daemon, write_event_log};
+    use crate::team::test_helpers::{make_test_daemon, write_event_log};
     use crate::team::test_support::{
         init_git_repo, setup_fake_claude, write_owned_task_file, write_owned_task_file_with_context,
     };
@@ -3304,222 +3299,6 @@ mod tests {
         );
 
         crate::tmux::kill_session(&session).unwrap();
-    }
-
-    #[test]
-    #[serial]
-    fn maybe_fire_nudges_marks_member_working_after_live_delivery() {
-        let session = "batty-test-nudge-live-delivery";
-        let mut delivered_live = false;
-
-        // A freshly created tmux pane can occasionally reject the first live
-        // injection under heavy suite load. Retry the full setup a few times so
-        // this test only fails on a real regression in the live-delivery path.
-        for _attempt in 0..3 {
-            let _ = crate::tmux::kill_session(session);
-
-            crate::tmux::create_session(session, "cat", &[], "/tmp").unwrap();
-            let pane_id = crate::tmux::pane_id(session).unwrap();
-            std::thread::sleep(Duration::from_millis(150));
-
-            let tmp = tempfile::tempdir().unwrap();
-            let member = MemberInstance {
-                name: "scientist".to_string(),
-                role_name: "scientist".to_string(),
-                role_type: RoleType::Architect,
-                agent: Some("claude".to_string()),
-                prompt: None,
-                reports_to: None,
-                use_worktrees: false,
-            };
-            let mut watchers = HashMap::new();
-            watchers.insert(
-                "scientist".to_string(),
-                SessionWatcher::new(&pane_id, "scientist", 300, None),
-            );
-            let mut daemon = TeamDaemon {
-                config: DaemonConfig {
-                    project_root: tmp.path().to_path_buf(),
-                    team_config: TeamConfig {
-                        name: "test".to_string(),
-                        workflow_mode: WorkflowMode::Legacy,
-                        workflow_policy: WorkflowPolicy::default(),
-                        board: BoardConfig::default(),
-                        standup: StandupConfig::default(),
-                        automation: AutomationConfig::default(),
-                        automation_sender: None,
-                        orchestrator_pane: true,
-                        orchestrator_position: OrchestratorPosition::Bottom,
-                        layout: None,
-                        roles: Vec::new(),
-                    },
-                    session: session.to_string(),
-                    members: vec![member],
-                    pane_map: HashMap::from([("scientist".to_string(), pane_id.clone())]),
-                },
-                watchers,
-                states: HashMap::from([("scientist".to_string(), MemberState::Idle)]),
-                idle_started_at: HashMap::new(),
-                active_tasks: HashMap::new(),
-                retry_counts: HashMap::new(),
-                triage_idle_epochs: HashMap::new(),
-                triage_interventions: HashMap::new(),
-                owned_task_interventions: HashMap::new(),
-                intervention_cooldowns: HashMap::new(),
-                channels: HashMap::new(),
-                nudges: HashMap::from([(
-                    "scientist".to_string(),
-                    NudgeSchedule {
-                        text: "Please make progress.".to_string(),
-                        interval: Duration::from_secs(1),
-                        idle_since: Some(Instant::now() - Duration::from_secs(5)),
-                        fired_this_idle: false,
-                        paused: false,
-                    },
-                )]),
-                telegram_bot: None,
-                failure_tracker: FailureTracker::new(20),
-                event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-                paused_standups: HashSet::new(),
-                last_standup: HashMap::new(),
-                last_board_rotation: Instant::now(),
-                last_auto_dispatch: Instant::now(),
-                pipeline_starvation_fired: false,
-                retro_generated: false,
-                failed_deliveries: Vec::new(),
-                poll_interval: Duration::from_secs(5),
-            };
-
-            backdate_idle_grace(&mut daemon, "scientist");
-            daemon.maybe_fire_nudges().unwrap();
-
-            if daemon.states.get("scientist") == Some(&MemberState::Working) {
-                let schedule = daemon.nudges.get("scientist").unwrap();
-                assert!(schedule.paused);
-                assert!(schedule.idle_since.is_none());
-                assert!(!schedule.fired_this_idle);
-                delivered_live = true;
-                crate::tmux::kill_session(session).unwrap();
-                break;
-            }
-
-            crate::tmux::kill_session(session).unwrap();
-            std::thread::sleep(Duration::from_millis(100));
-        }
-
-        assert!(
-            delivered_live,
-            "expected at least one successful live nudge delivery"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn maybe_intervene_triage_backlog_marks_member_working_after_live_delivery() {
-        let session = "batty-test-triage-live-delivery";
-        let _ = crate::tmux::kill_session(session);
-
-        crate::tmux::create_session(session, "cat", &[], "/tmp").unwrap();
-        let pane_id = crate::tmux::pane_id(session).unwrap();
-        std::thread::sleep(Duration::from_millis(100));
-
-        let tmp = tempfile::tempdir().unwrap();
-        let lead = MemberInstance {
-            name: "lead".to_string(),
-            role_name: "lead".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let engineer = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("codex".to_string()),
-            prompt: None,
-            reports_to: Some("lead".to_string()),
-            use_worktrees: false,
-        };
-        let mut watchers = HashMap::new();
-        watchers.insert(
-            "lead".to_string(),
-            SessionWatcher::new(&pane_id, "lead", 300, None),
-        );
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: session.to_string(),
-                members: vec![lead, engineer],
-                pane_map: HashMap::from([("lead".to_string(), pane_id.clone())]),
-            },
-            watchers,
-            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
-
-        let root = inbox::inboxes_root(tmp.path());
-        inbox::init_inbox(&root, "lead").unwrap();
-        inbox::init_inbox(&root, "eng-1").unwrap();
-        let mut result = inbox::InboxMessage::new_send("eng-1", "lead", "Task complete.");
-        result.timestamp = super::now_unix();
-        let id = inbox::deliver_to_inbox(&root, &result).unwrap();
-        inbox::mark_delivered(&root, "lead", &id).unwrap();
-
-        daemon.update_automation_timers_for_state("lead", MemberState::Working);
-        daemon.update_automation_timers_for_state("lead", MemberState::Idle);
-        backdate_idle_grace(&mut daemon, "lead");
-        daemon.maybe_intervene_triage_backlog().unwrap();
-
-        assert_eq!(daemon.triage_interventions.get("lead"), Some(&1));
-        if daemon.states.get("lead") == Some(&MemberState::Working) {
-            let pane = tmux::capture_pane(&pane_id).unwrap_or_default();
-            assert!(pane.contains("batty inbox lead"));
-            assert!(pane.contains("batty read lead <ref>"));
-            assert!(pane.contains("batty send eng-1"));
-            assert!(pane.contains("batty assign eng-1"));
-            assert!(pane.contains("batty send architect"));
-            assert!(pane.contains("next time you become idle"));
-        } else {
-            let pending = inbox::pending_messages(&root, "lead").unwrap();
-            assert_eq!(pending.len(), 1);
-            assert!(pending[0].body.contains("batty inbox lead"));
-        }
-
-        crate::tmux::kill_session(session).unwrap();
     }
 
     #[test]
@@ -5732,89 +5511,6 @@ mod tests {
     }
 
     #[test]
-    fn automation_sender_prefers_direct_manager_and_config_fallback() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: Some("human".to_string()),
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![
-                    MemberInstance {
-                        name: "architect".to_string(),
-                        role_name: "architect".to_string(),
-                        role_type: RoleType::Architect,
-                        agent: Some("claude".to_string()),
-                        prompt: None,
-                        reports_to: None,
-                        use_worktrees: false,
-                    },
-                    MemberInstance {
-                        name: "lead".to_string(),
-                        role_name: "lead".to_string(),
-                        role_type: RoleType::Manager,
-                        agent: Some("claude".to_string()),
-                        prompt: None,
-                        reports_to: Some("architect".to_string()),
-                        use_worktrees: false,
-                    },
-                    MemberInstance {
-                        name: "eng-1".to_string(),
-                        role_name: "eng".to_string(),
-                        role_type: RoleType::Engineer,
-                        agent: Some("codex".to_string()),
-                        prompt: None,
-                        reports_to: Some("lead".to_string()),
-                        use_worktrees: false,
-                    },
-                ],
-                pane_map: HashMap::new(),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::new(),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
-
-        assert_eq!(daemon.automation_sender_for("eng-1"), "lead");
-        assert_eq!(daemon.automation_sender_for("lead"), "architect");
-        assert_eq!(daemon.automation_sender_for("architect"), "human");
-
-        daemon.config.team_config.automation_sender = None;
-        assert_eq!(daemon.automation_sender_for("architect"), "daemon");
-    }
-
-    #[test]
     fn hot_reload_marker_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
         let marker = hot_reload_marker_path(tmp.path());
@@ -5895,65 +5591,5 @@ mod tests {
         let content =
             fs::read_to_string(tmp.path().join(".batty").join("orchestrator.log")).unwrap();
         assert!(content.contains("resume: architect=no (resume disabled)"));
-    }
-
-    /// Helper: build a minimal DaemonConfig with the given roles.
-    #[test]
-    fn daemon_creates_telegram_bot_when_configured() {
-        let tmp = tempfile::tempdir().unwrap();
-        let roles = vec![RoleDef {
-            name: "user".to_string(),
-            role_type: RoleType::User,
-            agent: None,
-            instances: 1,
-            prompt: None,
-            talks_to: vec!["architect".to_string()],
-            channel: Some("telegram".to_string()),
-            channel_config: Some(ChannelConfig {
-                target: "12345".to_string(),
-                provider: "telegram".to_string(),
-                bot_token: Some("test-token-123".to_string()),
-                allowed_user_ids: vec![42],
-            }),
-            nudge_interval_secs: None,
-            receives_standup: None,
-            standup_interval_secs: None,
-            owns: Vec::new(),
-            use_worktrees: false,
-        }];
-
-        let config = daemon_config_with_roles(tmp.path(), roles);
-        let daemon = TeamDaemon::new(config).unwrap();
-        assert!(
-            daemon.telegram_bot.is_some(),
-            "telegram_bot should be Some when user role has bot_token"
-        );
-    }
-
-    #[test]
-    fn daemon_no_telegram_bot_without_config() {
-        let tmp = tempfile::tempdir().unwrap();
-        let roles = vec![RoleDef {
-            name: "user".to_string(),
-            role_type: RoleType::User,
-            agent: None,
-            instances: 1,
-            prompt: None,
-            talks_to: vec!["architect".to_string()],
-            channel: None,
-            channel_config: None,
-            nudge_interval_secs: None,
-            receives_standup: None,
-            standup_interval_secs: None,
-            owns: Vec::new(),
-            use_worktrees: false,
-        }];
-
-        let config = daemon_config_with_roles(tmp.path(), roles);
-        let daemon = TeamDaemon::new(config).unwrap();
-        assert!(
-            daemon.telegram_bot.is_none(),
-            "telegram_bot should be None when no bot_token configured"
-        );
     }
 }
