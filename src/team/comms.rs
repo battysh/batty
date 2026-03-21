@@ -99,7 +99,6 @@ impl TelegramChannel {
         Self::new(config.target.clone(), config.provider.clone())
     }
 
-    #[cfg(test)]
     fn with_dedup_settings(
         target: String,
         provider: String,
@@ -181,7 +180,6 @@ impl NativeTelegramChannel {
         TelegramBot::from_config(config).map(|bot| Self::new(bot, config.target.clone()))
     }
 
-    #[cfg(test)]
     fn with_dedup_settings(
         target: String,
         bot: TelegramBot,
