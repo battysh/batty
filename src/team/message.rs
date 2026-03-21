@@ -312,9 +312,20 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         inject_message(session, "manager", "").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(400));
-
-        let content = std::fs::read_to_string(&log_path).unwrap_or_default();
+        let content = (0..10)
+            .find_map(|_| {
+                let content = std::fs::read_to_string(&log_path).unwrap_or_default();
+                let ready = content.contains("--- Message from manager ---")
+                    && content.contains("--- end message ---")
+                    && content.contains("batty send manager");
+                if ready {
+                    Some(content)
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    None
+                }
+            })
+            .unwrap_or_else(|| std::fs::read_to_string(&log_path).unwrap_or_default());
         assert!(content.contains("--- Message from manager ---"));
         assert!(content.contains("--- end message ---"));
         assert!(content.contains("batty send manager"));
