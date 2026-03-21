@@ -23,13 +23,12 @@ use super::events::{EventSink, TeamEvent};
 use super::failure_patterns::{self, FailureWindow};
 use super::hierarchy::MemberInstance;
 use super::inbox;
+use super::merge;
 use super::message;
 use super::standup::{self, MemberState};
 use super::task_cmd;
-pub use super::task_loop::merge_engineer_branch;
 use super::task_loop::{
-    MergeLock, MergeOutcome, engineer_base_branch_name, next_unclaimed_task,
-    prepare_engineer_assignment_worktree, read_task_title, run_tests_in_worktree,
+    engineer_base_branch_name, next_unclaimed_task, prepare_engineer_assignment_worktree,
     setup_engineer_worktree,
 };
 use super::watcher::{SessionTrackerConfig, SessionWatcher, WatcherState};
@@ -524,7 +523,7 @@ impl TeamDaemon {
         }
     }
 
-    fn emit_event(&mut self, event: TeamEvent) {
+    pub(super) fn emit_event(&mut self, event: TeamEvent) {
         self.failure_window.push(&event);
         if let Err(error) = self.event_sink.emit(event) {
             warn!(error = %error, "failed to write daemon event; continuing");
@@ -1154,7 +1153,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
 
             if completion_observed && self.active_task_id(name).is_some() {
                 info!(member = %name, "detected task completion");
-                if let Err(error) = self.handle_engineer_completion(name) {
+                if let Err(error) = merge::handle_engineer_completion(self, name) {
                     warn!(
                         member = %name,
                         error = %error,
@@ -1167,256 +1166,22 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         Ok(())
     }
 
-    fn handle_engineer_completion(&mut self, engineer: &str) -> Result<()> {
-        let Some(task_id) = self.active_task_id(engineer) else {
-            return Ok(());
-        };
-
-        let member = self.config.members.iter().find(|m| m.name == engineer);
-        if !member.map(|m| m.use_worktrees).unwrap_or(false) {
-            return Ok(());
-        }
-
-        let worktree_dir = self
-            .config
-            .project_root
-            .join(".batty")
-            .join("worktrees")
-            .join(engineer);
-        let board_dir = self
-            .config
-            .project_root
-            .join(".batty")
-            .join("team_config")
-            .join("board");
-        let board_dir_str = board_dir.to_string_lossy().to_string();
-        let manager_name = self
-            .config
-            .members
-            .iter()
-            .find(|m| m.name == engineer)
-            .and_then(|member| member.reports_to.clone());
-
-        if commits_ahead_of_main(&worktree_dir)? == 0 {
-            let msg = "Completion rejected: your branch has no commits ahead of main. Commit your changes before reporting done again.";
-            self.queue_message("batty", engineer, msg)?;
-            self.mark_member_working(engineer);
-            info!(
-                engineer,
-                task_id, "completion rejected because branch has no commits"
-            );
-            return Ok(());
-        }
-
-        let (tests_passed, output_truncated) = run_tests_in_worktree(&worktree_dir)?;
-        if tests_passed {
-            let task_title = read_task_title(&board_dir, task_id);
-            let _lock = MergeLock::acquire(&self.config.project_root)
-                .context("failed to acquire merge lock")?;
-
-            match merge_engineer_branch(&self.config.project_root, engineer)? {
-                MergeOutcome::Success => {
-                    drop(_lock);
-
-                    let board_update_ok = self.run_kanban_md_nonfatal(
-                        &[
-                            "move",
-                            &task_id.to_string(),
-                            "done",
-                            "--claim",
-                            engineer,
-                            "--dir",
-                            &board_dir_str,
-                        ],
-                        &format!("move task #{task_id} to done"),
-                        manager_name
-                            .as_deref()
-                            .into_iter()
-                            .chain(std::iter::once(engineer)),
-                    );
-
-                    if let Some(ref mgr_name) = manager_name {
-                        let msg = format!(
-                            "[{engineer}] Task #{task_id} completed.\nTitle: {task_title}\nTests: passed\nMerge: success{}",
-                            if board_update_ok {
-                                ""
-                            } else {
-                                "\nBoard: update failed; decide next board action manually."
-                            }
-                        );
-                        self.queue_message(engineer, mgr_name, &msg)?;
-                        self.mark_member_working(mgr_name);
-                    }
-
-                    if let Some(ref mgr_name) = manager_name {
-                        let rollup = format!(
-                            "Rollup: Task #{task_id} completed by {engineer}. Tests passed, merged to main.{}",
-                            if board_update_ok {
-                                ""
-                            } else {
-                                " Board automation failed; decide manually."
-                            }
-                        );
-                        self.notify_reports_to(mgr_name, &rollup)?;
-                    }
-
-                    self.clear_active_task(engineer);
-                    self.emit_event(TeamEvent::task_completed(engineer));
-                    self.states.insert(engineer.to_string(), MemberState::Idle);
-                    if let Some(watcher) = self.watchers.get_mut(engineer) {
-                        watcher.deactivate();
-                    }
-                    self.update_automation_timers_for_state(engineer, MemberState::Idle);
-                }
-                MergeOutcome::RebaseConflict(conflict_info) => {
-                    drop(_lock);
-
-                    let attempt = self.increment_retry(engineer);
-                    if attempt <= 2 {
-                        let msg = format!(
-                            "Merge conflict during rebase onto main (attempt {attempt}/2). Fix the conflicts in your worktree and try again:\n{conflict_info}"
-                        );
-                        self.queue_message("batty", engineer, &msg)?;
-                        self.mark_member_working(engineer);
-                        info!(engineer, attempt, "rebase conflict, sending back for retry");
-                    } else {
-                        if let Some(ref mgr_name) = manager_name {
-                            let msg = format!(
-                                "[{engineer}] task #{task_id} has unresolvable merge conflicts after 2 retries. Escalating.\n{conflict_info}"
-                            );
-                            self.queue_message(engineer, mgr_name, &msg)?;
-                            self.mark_member_working(mgr_name);
-                        }
-
-                        self.emit_event(TeamEvent::task_escalated(engineer, &task_id.to_string()));
-
-                        if let Some(ref mgr_name) = manager_name {
-                            let escalation = format!(
-                                "ESCALATION: Task #{task_id} assigned to {engineer} has unresolvable merge conflicts. Task blocked on board."
-                            );
-                            self.notify_reports_to(mgr_name, &escalation)?;
-                        }
-
-                        self.run_kanban_md_nonfatal(
-                            &[
-                                "edit",
-                                &task_id.to_string(),
-                                "--block",
-                                "merge conflicts after 2 retries",
-                                "--dir",
-                                &board_dir_str,
-                            ],
-                            &format!("block task #{task_id} after merge conflict retries"),
-                            manager_name
-                                .as_deref()
-                                .into_iter()
-                                .chain(std::iter::once(engineer)),
-                        );
-
-                        self.clear_active_task(engineer);
-                        self.states.insert(engineer.to_string(), MemberState::Idle);
-                        if let Some(watcher) = self.watchers.get_mut(engineer) {
-                            watcher.deactivate();
-                        }
-                        self.update_automation_timers_for_state(engineer, MemberState::Idle);
-                    }
-                }
-                MergeOutcome::MergeFailure(merge_info) => {
-                    drop(_lock);
-
-                    let manager_notice = format!(
-                        "Task #{task_id} from {engineer} passed tests but could not be merged to main.\n{merge_info}\nDecide whether to clean the main worktree, retry the merge, or redirect the engineer."
-                    );
-                    if let Some(ref mgr_name) = manager_name {
-                        self.queue_message("daemon", mgr_name, &manager_notice)?;
-                        self.mark_member_working(mgr_name);
-                        self.notify_reports_to(mgr_name, &manager_notice)?;
-                    }
-
-                    let engineer_notice = format!(
-                        "Your task passed tests, but Batty could not merge it into main.\n{merge_info}\nWait for lead direction before making more changes."
-                    );
-                    self.queue_message("daemon", engineer, &engineer_notice)?;
-
-                    self.emit_event(TeamEvent::task_escalated(engineer, &task_id.to_string()));
-                    self.clear_active_task(engineer);
-                    self.states.insert(engineer.to_string(), MemberState::Idle);
-                    if let Some(watcher) = self.watchers.get_mut(engineer) {
-                        watcher.deactivate();
-                    }
-                    self.update_automation_timers_for_state(engineer, MemberState::Idle);
-                    warn!(
-                        engineer,
-                        task_id,
-                        error = %merge_info,
-                        "merge into main failed after passing tests; escalated without exiting daemon"
-                    );
-                }
-            }
-            return Ok(());
-        }
-
-        let attempt = self.increment_retry(engineer);
-        if attempt <= 2 {
-            let msg = format!(
-                "Tests failed (attempt {attempt}/2). Fix the failures and try again:\n{output_truncated}"
-            );
-            self.queue_message("batty", engineer, &msg)?;
-            self.mark_member_working(engineer);
-            info!(engineer, attempt, "test failure, sending back for retry");
-            return Ok(());
-        }
-
-        if let Some(ref mgr_name) = manager_name {
-            let msg = format!(
-                "[{engineer}] task #{task_id} failed tests after 2 retries. Escalating.\nLast output:\n{output_truncated}"
-            );
-            self.queue_message(engineer, mgr_name, &msg)?;
-            self.mark_member_working(mgr_name);
-        }
-
-        self.emit_event(TeamEvent::task_escalated(engineer, &task_id.to_string()));
-
-        if let Some(ref mgr_name) = manager_name {
-            let escalation = format!(
-                "ESCALATION: Task #{task_id} assigned to {engineer} failed tests after 2 retries. Task blocked on board."
-            );
-            self.notify_reports_to(mgr_name, &escalation)?;
-        }
-
-        self.run_kanban_md_nonfatal(
-            &[
-                "edit",
-                &task_id.to_string(),
-                "--block",
-                "tests failed after 2 retries",
-                "--dir",
-                &board_dir_str,
-            ],
-            &format!("block task #{task_id} after max test retries"),
-            manager_name
-                .as_deref()
-                .into_iter()
-                .chain(std::iter::once(engineer)),
-        );
-
-        self.clear_active_task(engineer);
-        self.states.insert(engineer.to_string(), MemberState::Idle);
-        if let Some(watcher) = self.watchers.get_mut(engineer) {
-            watcher.deactivate();
-        }
-        self.update_automation_timers_for_state(engineer, MemberState::Idle);
-        info!(engineer, task_id, "escalated to manager after max retries");
-        Ok(())
-    }
-
-    fn mark_member_working(&mut self, member_name: &str) {
+    pub(super) fn mark_member_working(&mut self, member_name: &str) {
         self.states
             .insert(member_name.to_string(), MemberState::Working);
         if let Some(watcher) = self.watchers.get_mut(member_name) {
             watcher.activate();
         }
         self.update_automation_timers_for_state(member_name, MemberState::Working);
+    }
+
+    pub(super) fn set_member_idle(&mut self, member_name: &str) {
+        self.states
+            .insert(member_name.to_string(), MemberState::Idle);
+        if let Some(watcher) = self.watchers.get_mut(member_name) {
+            watcher.deactivate();
+        }
+        self.update_automation_timers_for_state(member_name, MemberState::Idle);
     }
 
     fn verify_message_content_in_pane(&self, pane_id: &str, message_marker: &str) -> bool {
@@ -1638,8 +1403,65 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         false
     }
 
-    fn active_task_id(&self, engineer: &str) -> Option<u32> {
+    pub(super) fn active_task_id(&self, engineer: &str) -> Option<u32> {
         self.active_tasks.get(engineer).copied()
+    }
+
+    pub(super) fn project_root(&self) -> &Path {
+        &self.config.project_root
+    }
+
+    pub(super) fn worktree_dir(&self, engineer: &str) -> PathBuf {
+        self.config
+            .project_root
+            .join(".batty")
+            .join("worktrees")
+            .join(engineer)
+    }
+
+    pub(super) fn board_dir(&self) -> PathBuf {
+        self.config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+    }
+
+    pub(super) fn member_uses_worktrees(&self, engineer: &str) -> bool {
+        self.config
+            .members
+            .iter()
+            .find(|member| member.name == engineer)
+            .map(|member| member.use_worktrees)
+            .unwrap_or(false)
+    }
+
+    pub(super) fn manager_name(&self, engineer: &str) -> Option<String> {
+        self.config
+            .members
+            .iter()
+            .find(|member| member.name == engineer)
+            .and_then(|member| member.reports_to.clone())
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_active_task_for_test(&mut self, engineer: &str, task_id: u32) {
+        self.active_tasks.insert(engineer.to_string(), task_id);
+    }
+
+    #[cfg(test)]
+    pub(super) fn retry_count_for_test(&self, engineer: &str) -> Option<u32> {
+        self.retry_counts.get(engineer).copied()
+    }
+
+    #[cfg(test)]
+    pub(super) fn member_state_for_test(&self, engineer: &str) -> Option<MemberState> {
+        self.states.get(engineer).copied()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_member_state_for_test(&mut self, engineer: &str, state: MemberState) {
+        self.states.insert(engineer.to_string(), state);
     }
 
     fn active_task(&self, member_name: &str) -> Result<Option<crate::task::Task>> {
@@ -1779,18 +1601,23 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         })
     }
 
-    fn increment_retry(&mut self, engineer: &str) -> u32 {
+    pub(super) fn increment_retry(&mut self, engineer: &str) -> u32 {
         let count = self.retry_counts.entry(engineer.to_string()).or_insert(0);
         *count += 1;
         *count
     }
 
-    fn clear_active_task(&mut self, engineer: &str) {
+    pub(super) fn clear_active_task(&mut self, engineer: &str) {
         self.active_tasks.remove(engineer);
         self.retry_counts.remove(engineer);
     }
 
-    fn run_kanban_md_nonfatal<'a, I>(&mut self, args: &[&str], action: &str, recipients: I) -> bool
+    pub(super) fn run_kanban_md_nonfatal<'a, I>(
+        &mut self,
+        args: &[&str],
+        action: &str,
+        recipients: I,
+    ) -> bool
     where
         I: IntoIterator<Item = &'a str>,
     {
@@ -1838,7 +1665,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         self.deliver_message(&visible_sender, recipient, body)
     }
 
-    fn queue_message(&mut self, from: &str, recipient: &str, body: &str) -> Result<()> {
+    pub(super) fn queue_message(&mut self, from: &str, recipient: &str, body: &str) -> Result<()> {
         self.deliver_message(from, recipient, body).map(|_| ())
     }
 
@@ -1984,7 +1811,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         }
     }
 
-    fn notify_reports_to(&mut self, from_role: &str, msg: &str) -> Result<()> {
+    pub(super) fn notify_reports_to(&mut self, from_role: &str, msg: &str) -> Result<()> {
         let parent = self
             .config
             .members
@@ -3869,27 +3696,6 @@ fn short_session_summary(session_id: &str) -> String {
     }
 }
 
-fn commits_ahead_of_main(worktree_dir: &Path) -> Result<u32> {
-    let output = std::process::Command::new("git")
-        .args(["rev-list", "--count", "main..HEAD"])
-        .current_dir(worktree_dir)
-        .output()
-        .context("failed to run git rev-list --count main..HEAD")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git rev-list --count main..HEAD failed: {stderr}");
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.trim().parse::<u32>().with_context(|| {
-        format!(
-            "failed to parse git rev-list --count main..HEAD output: {:?}",
-            stdout.trim()
-        )
-    })
-}
-
 fn member_session_tracker_config(
     project_root: &Path,
     member: &MemberInstance,
@@ -3939,8 +3745,8 @@ mod tests {
     use crate::team::config::AutomationConfig;
     use std::collections::HashMap;
     use std::io;
-    use std::path::{Path, PathBuf};
-    use std::process::{Command, Output};
+    use std::path::Path;
+    use std::process::Command;
     use std::sync::{Arc, Mutex};
 
     use crate::team::comms::Channel;
@@ -3948,6 +3754,9 @@ mod tests {
         BoardConfig, ChannelConfig, RoleDef, StandupConfig, WorkflowMode, WorkflowPolicy,
     };
     use crate::team::events::{EventSink, read_events};
+    use crate::team::test_support::{
+        init_git_repo, setup_fake_claude, write_owned_task_file, write_owned_task_file_with_context,
+    };
     use crate::team::watcher::WatcherState;
     use serial_test::serial;
 
@@ -3988,162 +3797,6 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Err(io::Error::other("synthetic event sink failure"))
         }
-    }
-
-    fn git(dir: &Path, args: &[&str]) -> Output {
-        Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap()
-    }
-
-    fn git_ok(dir: &Path, args: &[&str]) {
-        let output = git(dir, args);
-        assert!(
-            output.status.success(),
-            "git {:?} failed:\nstdout={}\nstderr={}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    fn init_git_repo(tmp: &tempfile::TempDir) -> PathBuf {
-        let repo = tmp.path().join("repo");
-        std::fs::create_dir_all(repo.join("src")).unwrap();
-        std::fs::create_dir_all(repo.join(".batty").join("team_config")).unwrap();
-        std::fs::write(
-            repo.join("Cargo.toml"),
-            "[package]\nname = \"batty-daemon-test\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
-        std::fs::write(
-            repo.join("src").join("lib.rs"),
-            "pub fn smoke() -> bool { true }\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn smoke_test() {\n        assert!(smoke());\n    }\n}\n",
-        )
-        .unwrap();
-        git_ok(tmp.path(), &["init", "-b", "main", repo.to_str().unwrap()]);
-        git_ok(&repo, &["config", "user.email", "batty@example.com"]);
-        git_ok(&repo, &["config", "user.name", "Batty Tests"]);
-        git_ok(&repo, &["add", "."]);
-        git_ok(&repo, &["commit", "-m", "initial"]);
-        repo
-    }
-
-    fn write_task_file(project_root: &Path, id: u32, title: &str) {
-        let tasks_dir = project_root
-            .join(".batty")
-            .join("team_config")
-            .join("board")
-            .join("tasks");
-        std::fs::create_dir_all(&tasks_dir).unwrap();
-        std::fs::write(
-            tasks_dir.join(format!("{id:03}-{title}.md")),
-            format!(
-                "---\nid: {id}\ntitle: {title}\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\n---\n\nTask description.\n"
-            ),
-        )
-        .unwrap();
-    }
-
-    fn make_test_daemon(project_root: &Path, members: Vec<MemberInstance>) -> TeamDaemon {
-        TeamDaemon {
-            config: DaemonConfig {
-                project_root: project_root.to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members,
-                pane_map: HashMap::new(),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::new(),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
-            event_sink: EventSink::new(
-                &project_root
-                    .join(".batty")
-                    .join("team_config")
-                    .join("events.jsonl"),
-            )
-            .unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        }
-    }
-
-    fn write_owned_task_file(
-        project_root: &Path,
-        id: u32,
-        title: &str,
-        status: &str,
-        claimed_by: &str,
-    ) {
-        let tasks_dir = project_root
-            .join(".batty")
-            .join("team_config")
-            .join("board")
-            .join("tasks");
-        std::fs::create_dir_all(&tasks_dir).unwrap();
-        std::fs::write(
-            tasks_dir.join(format!("{id:03}-{title}.md")),
-            format!(
-                "---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: critical\nclaimed_by: {claimed_by}\nclass: standard\n---\n\nTask description.\n"
-            ),
-        )
-        .unwrap();
-    }
-
-    fn write_owned_task_file_with_context(
-        project_root: &Path,
-        id: u32,
-        title: &str,
-        status: &str,
-        claimed_by: &str,
-        branch: &str,
-        worktree_path: &str,
-    ) {
-        let tasks_dir = project_root
-            .join(".batty")
-            .join("team_config")
-            .join("board")
-            .join("tasks");
-        std::fs::create_dir_all(&tasks_dir).unwrap();
-        std::fs::write(
-            tasks_dir.join(format!("{id:03}-{title}.md")),
-            format!(
-                "---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: critical\nclaimed_by: {claimed_by}\nbranch: {branch}\nworktree_path: {worktree_path}\nclass: standard\n---\n\nTask description.\n"
-            ),
-        )
-        .unwrap();
     }
 
     fn write_open_task_file(project_root: &Path, id: u32, title: &str, status: &str) {
@@ -5831,194 +5484,6 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_completion_routes_engineers_with_tasks() {
-        let tmp = tempfile::tempdir().unwrap();
-        let engineer = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng-1".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("manager".to_string()),
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![engineer],
-                pane_map: HashMap::new(),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::new(),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
-
-        daemon.active_tasks.insert("eng-1".into(), 42);
-        daemon.handle_engineer_completion("eng-1").unwrap();
-        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
-    }
-
-    #[test]
-    fn test_completion_gate_rejects_zero_commits() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp);
-        write_task_file(&repo, 42, "zero-commit-task");
-
-        let team_config_dir = repo.join(".batty").join("team_config");
-        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
-        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
-
-        std::fs::remove_file(worktree_dir.join("Cargo.toml")).unwrap();
-
-        let engineer = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng-1".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: None,
-            use_worktrees: true,
-        };
-        let mut daemon = make_test_daemon(&repo, vec![engineer]);
-
-        daemon.active_tasks.insert("eng-1".to_string(), 42);
-        daemon.handle_engineer_completion("eng-1").unwrap();
-
-        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
-        assert_eq!(daemon.retry_counts.get("eng-1"), None);
-        assert_eq!(daemon.states.get("eng-1"), Some(&MemberState::Working));
-    }
-
-    #[test]
-    fn test_completion_gate_passes_with_commits() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp);
-        write_task_file(&repo, 42, "commit-gate-success");
-
-        let team_config_dir = repo.join(".batty").join("team_config");
-        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
-        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
-
-        std::fs::write(worktree_dir.join("note.txt"), "done\n").unwrap();
-        git_ok(&worktree_dir, &["add", "note.txt"]);
-        git_ok(&worktree_dir, &["commit", "-m", "add note"]);
-
-        let engineer = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng-1".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: None,
-            use_worktrees: true,
-        };
-        let mut daemon = make_test_daemon(&repo, vec![engineer]);
-
-        daemon.active_tasks.insert("eng-1".to_string(), 42);
-        daemon
-            .states
-            .insert("eng-1".to_string(), MemberState::Working);
-
-        daemon.handle_engineer_completion("eng-1").unwrap();
-
-        assert_eq!(daemon.active_task_id("eng-1"), None);
-        assert_eq!(daemon.states.get("eng-1"), Some(&MemberState::Idle));
-        assert_eq!(
-            std::fs::read_to_string(repo.join("note.txt")).unwrap(),
-            "done\n"
-        );
-    }
-
-    #[test]
-    fn test_zero_commit_retry_message_sent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp);
-        write_task_file(&repo, 42, "zero-commit-message");
-
-        let team_config_dir = repo.join(".batty").join("team_config");
-        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
-        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
-
-        std::fs::remove_file(worktree_dir.join("Cargo.toml")).unwrap();
-
-        let manager = MemberInstance {
-            name: "manager".to_string(),
-            role_name: "manager".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: None,
-            use_worktrees: false,
-        };
-        let engineer = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng-1".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("manager".to_string()),
-            use_worktrees: true,
-        };
-        let mut daemon = make_test_daemon(&repo, vec![manager, engineer]);
-
-        daemon.active_tasks.insert("eng-1".to_string(), 42);
-        daemon.handle_engineer_completion("eng-1").unwrap();
-
-        let engineer_messages =
-            inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
-        assert_eq!(engineer_messages.len(), 1);
-        assert_eq!(engineer_messages[0].from, "batty");
-        assert!(
-            engineer_messages[0]
-                .body
-                .contains("no commits ahead of main")
-        );
-        assert!(
-            engineer_messages[0]
-                .body
-                .contains("Commit your changes before reporting done again")
-        );
-
-        let manager_messages =
-            inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
-        assert!(manager_messages.is_empty());
-    }
-
-    #[test]
     fn nonfatal_kanban_failures_are_relayed_to_known_members() {
         let tmp = tempfile::tempdir().unwrap();
         let manager = MemberInstance {
@@ -6312,132 +5777,27 @@ mod tests {
         let _ = crate::tmux::kill_session(&session);
     }
 
-    #[test]
-    fn handle_engineer_completion_escalates_merge_failures_without_crashing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp);
-        write_task_file(&repo, 42, "merge-blocked-task");
-
-        std::fs::write(repo.join("journal.md"), "base\n").unwrap();
-        git_ok(&repo, &["add", "journal.md"]);
-        git_ok(&repo, &["commit", "-m", "add journal"]);
-
-        let team_config_dir = repo.join(".batty").join("team_config");
-        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
-        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
-
-        std::fs::write(worktree_dir.join("journal.md"), "engineer version\n").unwrap();
-        git_ok(&worktree_dir, &["add", "journal.md"]);
-        git_ok(&worktree_dir, &["commit", "-m", "engineer update"]);
-
-        std::fs::write(repo.join("journal.md"), "dirty main\n").unwrap();
-
-        let members = vec![
-            MemberInstance {
-                name: "manager".to_string(),
-                role_name: "manager".to_string(),
-                role_type: RoleType::Manager,
-                agent: Some("claude".to_string()),
-                prompt: None,
-                reports_to: None,
-                use_worktrees: false,
+    fn make_test_daemon(project_root: &Path, members: Vec<MemberInstance>) -> TeamDaemon {
+        TeamDaemon::new(DaemonConfig {
+            project_root: project_root.to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                roles: Vec::new(),
             },
-            MemberInstance {
-                name: "eng-1".to_string(),
-                role_name: "eng-1".to_string(),
-                role_type: RoleType::Engineer,
-                agent: Some("claude".to_string()),
-                prompt: None,
-                reports_to: Some("manager".to_string()),
-                use_worktrees: true,
-            },
-        ];
-
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: repo.clone(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members,
-                pane_map: HashMap::new(),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::new(),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
-            event_sink: EventSink::new(
-                &repo.join(".batty").join("team_config").join("events.jsonl"),
-            )
-            .unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
-
-        daemon.active_tasks.insert("eng-1".to_string(), 42);
-        daemon
-            .states
-            .insert("eng-1".to_string(), MemberState::Working);
-
-        daemon.handle_engineer_completion("eng-1").unwrap();
-
-        assert_eq!(daemon.active_task_id("eng-1"), None);
-        assert_eq!(daemon.states.get("eng-1"), Some(&MemberState::Idle));
-
-        let manager_messages =
-            inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
-        assert_eq!(manager_messages.len(), 1);
-        assert_eq!(manager_messages[0].from, "daemon");
-        assert!(
-            manager_messages[0]
-                .body
-                .contains("could not be merged to main")
-        );
-        assert!(
-            manager_messages[0]
-                .body
-                .contains("would be overwritten by merge")
-                || manager_messages[0]
-                    .body
-                    .contains("Please commit your changes or stash them")
-        );
-
-        let engineer_messages =
-            inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
-        assert_eq!(engineer_messages.len(), 1);
-        assert_eq!(engineer_messages[0].from, "daemon");
-        assert!(
-            engineer_messages[0]
-                .body
-                .contains("could not merge it into main")
-        );
+            session: "test".to_string(),
+            members,
+            pane_map: HashMap::new(),
+        })
+        .unwrap()
     }
 
     #[test]
@@ -8214,38 +7574,6 @@ mod tests {
             .insert(key.to_string(), Instant::now() - cooldown);
     }
 
-    fn setup_fake_claude(
-        tmp: &tempfile::TempDir,
-        member_name: &str,
-    ) -> (std::path::PathBuf, std::path::PathBuf) {
-        let project_slug = tmp
-            .path()
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "default".to_string());
-        let fake_bin = std::env::temp_dir().join(format!("batty-bin-{project_slug}-{member_name}"));
-        let _ = std::fs::remove_dir_all(&fake_bin);
-        std::fs::create_dir_all(&fake_bin).unwrap();
-
-        let fake_log = tmp.path().join(format!("{member_name}-fake-claude.log"));
-        let fake_claude = fake_bin.join("claude");
-        std::fs::write(
-            &fake_claude,
-            format!(
-                "#!/bin/bash\nprintf '%s\\n' \"$*\" >> '{}'\nsleep 5\n",
-                fake_log.display()
-            ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        (fake_bin, fake_log)
-    }
-
     #[test]
     fn owned_task_intervention_respects_cooldown() {
         let tmp = tempfile::tempdir().unwrap();
@@ -9005,7 +8333,7 @@ mod tests {
     #[test]
     fn maybe_intervene_review_backlog_queues_for_idle_manager_with_branch_and_worktree_context() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp);
+        let repo = init_git_repo(&tmp, "batty-daemon-test");
         let team_config_dir = repo.join(".batty").join("team_config");
         let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
         setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();

@@ -19,6 +19,7 @@ pub mod git_cmd;
 pub mod hierarchy;
 pub mod inbox;
 pub mod layout;
+pub mod merge;
 pub mod message;
 pub mod metrics;
 pub mod nudge;
@@ -31,6 +32,8 @@ pub mod standup;
 pub mod task_cmd;
 pub mod task_loop;
 pub mod telegram;
+#[cfg(test)]
+pub mod test_support;
 pub mod validation;
 pub mod watcher;
 pub mod workflow;
@@ -2117,12 +2120,12 @@ pub fn purge_inbox(
 /// Merge an engineer's worktree branch.
 pub fn merge_worktree(project_root: &Path, engineer: &str) -> Result<()> {
     let engineer = resolve_member_name(project_root, engineer)?;
-    match daemon::merge_engineer_branch(project_root, &engineer)? {
-        task_loop::MergeOutcome::Success => Ok(()),
-        task_loop::MergeOutcome::RebaseConflict(stderr) => {
+    match merge::merge_engineer_branch(project_root, &engineer)? {
+        merge::MergeOutcome::Success => Ok(()),
+        merge::MergeOutcome::RebaseConflict(stderr) => {
             bail!("merge blocked by rebase conflict: {stderr}")
         }
-        task_loop::MergeOutcome::MergeFailure(stderr) => bail!("merge failed: {stderr}"),
+        merge::MergeOutcome::MergeFailure(stderr) => bail!("merge failed: {stderr}"),
     }
 }
 
