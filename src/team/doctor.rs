@@ -1285,6 +1285,7 @@ fn canonical_agent_name(agent_name: &str) -> String {
     match agent_name {
         "claude" | "claude-code" => "claude-code".to_string(),
         "codex" | "codex-cli" => "codex-cli".to_string(),
+        "kiro" | "kiro-cli" => "kiro-cli".to_string(),
         _ => agent_name.to_string(),
     }
 }

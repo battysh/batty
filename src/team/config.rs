@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use super::DEFAULT_EVENT_LOG_MAX_BYTES;
 use super::TEAM_CONFIG_DIR;
+use crate::agent;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TeamConfig {
@@ -463,6 +464,16 @@ impl TeamConfig {
             if role.instances == 0 {
                 bail!("role '{}' has zero instances", role.name);
             }
+
+            if let Some(agent_name) = role.agent.as_deref()
+                && agent::adapter_from_name(agent_name).is_none()
+            {
+                bail!(
+                    "role '{}' uses unsupported agent '{}'",
+                    role.name,
+                    agent_name
+                );
+            }
         }
 
         // Validate talks_to references exist
@@ -723,6 +734,33 @@ roles:
         assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
         assert!(config.orchestrator_pane);
         assert_eq!(config.event_log_max_bytes, DEFAULT_EVENT_LOG_MAX_BYTES);
+    }
+
+    #[test]
+    fn validate_accepts_kiro_agent() {
+        let yaml = r#"
+name: test-team
+roles:
+  - name: architect
+    role_type: architect
+    agent: kiro
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_unknown_agent() {
+        let yaml = r#"
+name: test-team
+roles:
+  - name: architect
+    role_type: architect
+    agent: mystery
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("unsupported agent 'mystery'"));
     }
 
     #[test]
