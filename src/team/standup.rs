@@ -2,14 +2,18 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
+use super::config::{RoleType, TeamConfig};
 use super::hierarchy::MemberInstance;
 use super::metrics;
+use super::telegram::TelegramBot;
 use super::watcher::SessionWatcher;
+use super::{pause_marker_path, team_config_dir};
 use crate::task;
 use crate::tmux;
 
@@ -119,6 +123,221 @@ pub fn generate_board_aware_standup_for(
     report
 }
 
+pub(crate) fn maybe_generate_standup(
+    project_root: &Path,
+    team_config: &TeamConfig,
+    members: &[MemberInstance],
+    watchers: &HashMap<String, SessionWatcher>,
+    states: &HashMap<String, MemberState>,
+    pane_map: &HashMap<String, String>,
+    telegram_bot: Option<&TelegramBot>,
+    paused_standups: &HashSet<String>,
+    last_standup: &mut HashMap<String, Instant>,
+) -> Result<Vec<String>> {
+    if !team_config.automation.standups {
+        return Ok(Vec::new());
+    }
+    if pause_marker_path(project_root).exists() {
+        return Ok(Vec::new());
+    }
+    let global_interval = team_config.standup.interval_secs;
+    if global_interval == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut recipients = Vec::new();
+    for role in &team_config.roles {
+        let receives = role.receives_standup.unwrap_or(matches!(
+            role.role_type,
+            RoleType::Manager | RoleType::Architect
+        ));
+        if !receives {
+            continue;
+        }
+        let interval = Duration::from_secs(role.standup_interval_secs.unwrap_or(global_interval));
+        for member in members {
+            if member.role_name == role.name {
+                recipients.push((member.clone(), interval));
+            }
+        }
+    }
+
+    let mut generated_recipients = Vec::new();
+
+    for (recipient, interval) in &recipients {
+        if paused_standups.contains(&recipient.name) {
+            continue;
+        }
+
+        let last = last_standup.get(&recipient.name).copied();
+        let should_fire = match last {
+            Some(instant) => instant.elapsed() >= *interval,
+            None => true,
+        };
+
+        if last.is_none() {
+            last_standup.insert(recipient.name.clone(), Instant::now());
+            continue;
+        }
+        if !should_fire {
+            continue;
+        }
+
+        let board_dir = team_config_dir(project_root).join("board");
+        let report = generate_board_aware_standup_for(
+            recipient,
+            members,
+            watchers,
+            states,
+            team_config.standup.output_lines as usize,
+            Some(&board_dir),
+        );
+
+        match recipient.role_type {
+            RoleType::User => {
+                if let Some(bot) = telegram_bot {
+                    let chat_id = team_config
+                        .roles
+                        .iter()
+                        .find(|role| {
+                            role.role_type == RoleType::User && role.name == recipient.role_name
+                        })
+                        .and_then(|role| role.channel_config.as_ref())
+                        .map(|config| config.target.clone());
+
+                    match chat_id {
+                        Some(chat_id) => {
+                            if let Err(error) = bot.send_message(&chat_id, &report) {
+                                warn!(
+                                    member = %recipient.name,
+                                    target = %chat_id,
+                                    error = %error,
+                                    "failed to send standup via telegram"
+                                );
+                            } else {
+                                generated_recipients.push(recipient.name.clone());
+                            }
+                        }
+                        None => warn!(
+                            member = %recipient.name,
+                            "telegram standup delivery skipped: missing target"
+                        ),
+                    }
+                } else {
+                    match write_standup_file(project_root, &report) {
+                        Ok(path) => {
+                            tracing::info!(member = %recipient.name, path = %path.display(), "standup written to file");
+                            generated_recipients.push(recipient.name.clone());
+                        }
+                        Err(error) => warn!(
+                            member = %recipient.name,
+                            error = %error,
+                            "failed to write standup file"
+                        ),
+                    }
+                }
+            }
+            _ => {
+                if let Some(pane_id) = pane_map.get(&recipient.name) {
+                    if let Err(error) = inject_standup(pane_id, &report) {
+                        warn!(member = %recipient.name, error = %error, "failed to inject standup");
+                    } else {
+                        generated_recipients.push(recipient.name.clone());
+                    }
+                }
+            }
+        }
+
+        last_standup.insert(recipient.name.clone(), Instant::now());
+    }
+
+    if !generated_recipients.is_empty() {
+        tracing::info!("standups generated and delivered");
+    }
+
+    Ok(generated_recipients)
+}
+
+pub(crate) fn update_timer_for_state(
+    team_config: &TeamConfig,
+    members: &[MemberInstance],
+    paused_standups: &mut HashSet<String>,
+    last_standup: &mut HashMap<String, Instant>,
+    member_name: &str,
+    new_state: MemberState,
+) {
+    if standup_interval_for_member_name(team_config, members, member_name).is_none() {
+        paused_standups.remove(member_name);
+        last_standup.remove(member_name);
+        return;
+    }
+
+    match new_state {
+        MemberState::Working => {
+            paused_standups.insert(member_name.to_string());
+            last_standup.remove(member_name);
+        }
+        MemberState::Idle => {
+            let was_paused = paused_standups.remove(member_name);
+            if was_paused || !last_standup.contains_key(member_name) {
+                last_standup.insert(member_name.to_string(), Instant::now());
+            }
+        }
+    }
+}
+
+pub(crate) fn standup_interval_for_member_name(
+    team_config: &TeamConfig,
+    members: &[MemberInstance],
+    member_name: &str,
+) -> Option<Duration> {
+    let member = members.iter().find(|member| member.name == member_name)?;
+    let role_def = team_config
+        .roles
+        .iter()
+        .find(|role| role.name == member.role_name);
+
+    let receives = role_def
+        .and_then(|role| role.receives_standup)
+        .unwrap_or(matches!(
+            member.role_type,
+            RoleType::Manager | RoleType::Architect
+        ));
+    if !receives {
+        return None;
+    }
+
+    let interval_secs = role_def
+        .and_then(|role| role.standup_interval_secs)
+        .unwrap_or(team_config.standup.interval_secs);
+    Some(Duration::from_secs(interval_secs))
+}
+
+pub(crate) fn restore_timer_state(
+    last_standup_elapsed_secs: HashMap<String, u64>,
+) -> HashMap<String, Instant> {
+    last_standup_elapsed_secs
+        .into_iter()
+        .map(|(member, elapsed_secs)| {
+            (
+                member,
+                Instant::now()
+                    .checked_sub(Duration::from_secs(elapsed_secs))
+                    .unwrap_or_else(Instant::now),
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn snapshot_timer_state(
+    last_standup: &HashMap<String, Instant>,
+) -> HashMap<String, u64> {
+    last_standup
+        .iter()
+        .map(|(member, instant)| (member.clone(), instant.elapsed().as_secs()))
+        .collect()
+}
+
 /// Inject standup text into a pane via load-buffer + paste-buffer.
 pub fn inject_standup(pane_id: &str, standup: &str) -> Result<()> {
     tmux::load_buffer(standup)?;
@@ -224,7 +443,10 @@ fn format_age(age_secs: Option<u64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::team::config::RoleType;
+    use crate::team::config::{
+        AutomationConfig, BoardConfig, OrchestratorPosition, RoleDef, RoleType, StandupConfig,
+        TeamConfig, WorkflowMode, WorkflowPolicy,
+    };
     use std::path::Path;
 
     fn make_member(name: &str, role_type: RoleType, reports_to: Option<&str>) -> MemberInstance {
@@ -465,5 +687,222 @@ mod tests {
         assert_eq!(path.parent(), Some(expected_dir.as_path()));
         assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("md"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), report);
+    }
+
+    #[test]
+    fn update_timer_for_state_pauses_while_working_and_restarts_on_idle() {
+        let member = make_member("manager", RoleType::Manager, None);
+        let role = RoleDef {
+            name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            instances: 1,
+            prompt: None,
+            talks_to: vec![],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: Some(true),
+            standup_interval_secs: Some(600),
+            owns: Vec::new(),
+            use_worktrees: false,
+        };
+        let team_config = TeamConfig {
+            name: "test".to_string(),
+            workflow_mode: WorkflowMode::Legacy,
+            workflow_policy: WorkflowPolicy::default(),
+            board: BoardConfig::default(),
+            standup: StandupConfig::default(),
+            automation: AutomationConfig::default(),
+            automation_sender: None,
+            orchestrator_pane: true,
+            orchestrator_position: OrchestratorPosition::Bottom,
+            layout: None,
+            roles: vec![role],
+        };
+        let members = vec![member];
+        let mut paused_standups = HashSet::new();
+        let mut last_standup = HashMap::from([(
+            "manager".to_string(),
+            Instant::now() - Duration::from_secs(120),
+        )]);
+
+        update_timer_for_state(
+            &team_config,
+            &members,
+            &mut paused_standups,
+            &mut last_standup,
+            "manager",
+            MemberState::Working,
+        );
+
+        assert!(paused_standups.contains("manager"));
+        assert!(!last_standup.contains_key("manager"));
+
+        update_timer_for_state(
+            &team_config,
+            &members,
+            &mut paused_standups,
+            &mut last_standup,
+            "manager",
+            MemberState::Idle,
+        );
+
+        assert!(!paused_standups.contains("manager"));
+        assert!(last_standup["manager"].elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn maybe_generate_standup_skips_when_global_interval_is_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member = make_member("manager", RoleType::Manager, None);
+        let role = RoleDef {
+            name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            instances: 1,
+            prompt: None,
+            talks_to: vec![],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: Some(true),
+            standup_interval_secs: Some(600),
+            owns: Vec::new(),
+            use_worktrees: false,
+        };
+        let team_config = TeamConfig {
+            name: "test".to_string(),
+            workflow_mode: WorkflowMode::Legacy,
+            workflow_policy: WorkflowPolicy::default(),
+            board: BoardConfig::default(),
+            standup: StandupConfig {
+                interval_secs: 0,
+                output_lines: 30,
+            },
+            automation: AutomationConfig::default(),
+            automation_sender: None,
+            orchestrator_pane: false,
+            orchestrator_position: OrchestratorPosition::Bottom,
+            layout: None,
+            roles: vec![role],
+        };
+        let members = vec![member];
+        let mut last_standup = HashMap::new();
+
+        let generated = maybe_generate_standup(
+            tmp.path(),
+            &team_config,
+            &members,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+            &mut last_standup,
+        )
+        .unwrap();
+
+        assert!(generated.is_empty());
+        assert!(last_standup.is_empty());
+    }
+
+    #[test]
+    fn maybe_generate_standup_writes_user_report_to_file_without_telegram_bot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user = MemberInstance {
+            name: "user".to_string(),
+            role_name: "user".to_string(),
+            role_type: RoleType::User,
+            agent: None,
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let architect = MemberInstance {
+            name: "architect".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("user".to_string()),
+            use_worktrees: false,
+        };
+        let user_role = RoleDef {
+            name: "user".to_string(),
+            role_type: RoleType::User,
+            agent: None,
+            instances: 1,
+            prompt: None,
+            talks_to: vec!["architect".to_string()],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: Some(true),
+            standup_interval_secs: Some(1),
+            owns: Vec::new(),
+            use_worktrees: false,
+        };
+        let architect_role = RoleDef {
+            name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            instances: 1,
+            prompt: None,
+            talks_to: vec![],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: Some(false),
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            use_worktrees: false,
+        };
+        let team_config = TeamConfig {
+            name: "test".to_string(),
+            workflow_mode: WorkflowMode::Legacy,
+            workflow_policy: WorkflowPolicy::default(),
+            board: BoardConfig::default(),
+            standup: StandupConfig {
+                interval_secs: 1,
+                output_lines: 30,
+            },
+            automation: AutomationConfig::default(),
+            automation_sender: None,
+            orchestrator_pane: false,
+            orchestrator_position: OrchestratorPosition::Bottom,
+            layout: None,
+            roles: vec![user_role, architect_role],
+        };
+        let members = vec![user.clone(), architect];
+        let states = HashMap::from([("architect".to_string(), MemberState::Working)]);
+        let mut last_standup =
+            HashMap::from([(user.name.clone(), Instant::now() - Duration::from_secs(5))]);
+
+        let generated = maybe_generate_standup(
+            tmp.path(),
+            &team_config,
+            &members,
+            &HashMap::new(),
+            &states,
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+            &mut last_standup,
+        )
+        .unwrap();
+
+        assert_eq!(generated, vec!["user".to_string()]);
+
+        let standups_dir = tmp.path().join(".batty").join("standups");
+        let entries = std::fs::read_dir(&standups_dir)
+            .unwrap()
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+
+        let report = std::fs::read_to_string(entries[0].path()).unwrap();
+        assert!(report.contains("=== STANDUP for user ==="));
+        assert!(report.contains("[architect] status: working"));
     }
 }
