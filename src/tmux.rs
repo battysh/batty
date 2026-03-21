@@ -621,8 +621,24 @@ pub fn kill_session(session: &str) -> Result<()> {
 /// Returns the text currently shown in the pane (useful for prompt detection
 /// when pipe-pane output has a lag).
 pub fn capture_pane(target: &str) -> Result<String> {
+    capture_pane_recent(target, 0)
+}
+
+/// Capture only the most recent visible lines of a tmux target.
+pub fn capture_pane_recent(target: &str, lines: u32) -> Result<String> {
+    let mut args = vec![
+        "capture-pane".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+        "-p".to_string(),
+    ];
+    if lines > 0 {
+        args.push("-S".to_string());
+        args.push(format!("-{lines}"));
+    }
+
     let output = Command::new("tmux")
-        .args(["capture-pane", "-t", target, "-p"])
+        .args(&args)
         .output()
         .with_context(|| format!("failed to capture pane for target '{target}'"))?;
 
@@ -1402,6 +1418,30 @@ mod tests {
             !content.trim().is_empty(),
             "capture-pane should return content"
         );
+
+        kill_session(session).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn capture_pane_recent_returns_content() {
+        let session = "batty-test-capture-recent";
+        let _ = kill_session(session);
+
+        create_session(
+            session,
+            "bash",
+            &[
+                "-c".to_string(),
+                "echo 'capture-recent-test'; sleep 2".to_string(),
+            ],
+            "/tmp",
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let content = capture_pane_recent(session, 10).unwrap();
+        assert!(content.contains("capture-recent-test"));
 
         kill_session(session).unwrap();
     }
