@@ -165,10 +165,8 @@ fn launch_orchestrator_pane(
         OrchestratorPosition::Left => {
             // Split horizontally: new pane (right) gets the remaining width for agents.
             // The original pane (left) becomes the orchestrator column.
-            let agent_pane = tmux::split_window_horizontal(
-                initial_pane,
-                100 - ORCHESTRATOR_PANE_WIDTH_PCT,
-            )?;
+            let agent_pane =
+                tmux::split_window_horizontal(initial_pane, 100 - ORCHESTRATOR_PANE_WIDTH_PCT)?;
             (initial_pane.to_string(), agent_pane)
         }
         OrchestratorPosition::Bottom => {
