@@ -221,6 +221,12 @@ impl HotReloadMonitor {
 }
 
 impl TeamDaemon {
+    fn watcher_mut(&mut self, name: &str) -> Result<&mut SessionWatcher> {
+        self.watchers
+            .get_mut(name)
+            .with_context(|| format!("watcher registry missing member '{name}'"))
+    }
+
     /// Create a new daemon from resolved config and layout.
     pub fn new(config: DaemonConfig) -> Result<Self> {
         let team_config_dir = config.project_root.join(".batty").join("team_config");
@@ -844,7 +850,13 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
                 .map(|watcher| watcher.state)
                 .unwrap_or(WatcherState::Idle);
             let (new_state, completion_observed, session_size_bytes) = {
-                let watcher = self.watchers.get_mut(name).unwrap();
+                let watcher = match self.watcher_mut(name) {
+                    Ok(watcher) => watcher,
+                    Err(error) => {
+                        warn!(member = %name, error = %error, "watcher missing during poll");
+                        continue;
+                    }
+                };
                 match watcher.poll() {
                     Ok(new_state) => (
                         new_state,
@@ -1943,6 +1955,24 @@ exit 1
 
         let loaded = load_daemon_state(tmp.path()).unwrap();
         assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn watcher_mut_returns_context_for_unknown_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+        let mut daemon = make_test_daemon(tmp.path(), vec![manager_member("manager", None)]);
+
+        let error = match daemon.watcher_mut("missing") {
+            Ok(_) => panic!("expected missing watcher to return an error"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("watcher registry missing member 'missing'")
+        );
     }
 
     #[test]
