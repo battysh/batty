@@ -243,8 +243,35 @@ mod tests {
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+    use std::sync::{LazyLock, Mutex};
 
     use tempfile::TempDir;
+
+    static CWD_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    fn with_process_cwd<T>(cwd: &Path, action: impl FnOnce() -> T) -> T {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(cwd).unwrap();
+        let result = catch_unwind(AssertUnwindSafe(action));
+        std::env::set_current_dir(original).unwrap();
+        match result {
+            Ok(value) => value,
+            Err(panic) => resume_unwind(panic),
+        }
+    }
+
+    fn with_live_board_cwd<T>(action: impl FnOnce() -> T) -> T {
+        let live_repo = TempDir::new().unwrap();
+        let live_board_dir = live_repo.path().join(".batty/team_config/board");
+        fs::create_dir_all(live_board_dir.parent().unwrap()).unwrap();
+        init(&live_board_dir).unwrap();
+
+        let nested_cwd = live_repo.path().join("nested/project");
+        fs::create_dir_all(&nested_cwd).unwrap();
+        with_process_cwd(&nested_cwd, action)
+    }
 
     #[test]
     fn classifies_transient_errors() {
@@ -340,41 +367,43 @@ mod tests {
             return;
         }
 
-        let temp = TempDir::new().unwrap();
-        let board_dir = temp.path().join("board");
+        with_live_board_cwd(|| {
+            let temp = TempDir::new().unwrap();
+            let board_dir = temp.path().join("board");
 
-        let init_output = init(&board_dir).unwrap();
-        assert!(board_dir.is_dir());
-        assert!(init_output.stdout.contains("Initialized board"));
+            let init_output = init(&board_dir).unwrap();
+            assert!(board_dir.is_dir());
+            assert!(init_output.stdout.contains("Initialized board"));
 
-        let task_id = create_task(
-            &board_dir,
-            "Test task",
-            "Body text",
-            Some("high"),
-            Some("phase-8,wave-1"),
-            None,
-        )
-        .unwrap();
-        assert_eq!(task_id, "1");
+            let task_id = create_task(
+                &board_dir,
+                "Test task",
+                "Body text",
+                Some("high"),
+                Some("phase-8,wave-1"),
+                None,
+            )
+            .unwrap();
+            assert_eq!(task_id, "1");
 
-        let show = show_task(&board_dir, &task_id).unwrap();
-        assert!(show.contains("Task #1: Test task"));
-        assert!(show.contains("Body text"));
+            let show = show_task(&board_dir, &task_id).unwrap();
+            assert!(show.contains("Task #1: Test task"));
+            assert!(show.contains("Body text"));
 
-        let list = list_tasks(&board_dir, Some("backlog")).unwrap();
-        assert!(list.contains("Test task"));
+            let list = list_tasks(&board_dir, Some("backlog")).unwrap();
+            assert!(list.contains("Test task"));
 
-        let picked = pick_task(&board_dir, "eng-1-2", "in-progress").unwrap();
-        assert_eq!(picked.as_deref(), Some("1"));
+            let picked = pick_task(&board_dir, "eng-1-2", "in-progress").unwrap();
+            assert_eq!(picked.as_deref(), Some("1"));
 
-        move_task(&board_dir, &task_id, "review", Some("eng-1-2")).unwrap();
-        let review = show_task(&board_dir, &task_id).unwrap();
-        assert!(review.contains("Status:      review"));
+            move_task(&board_dir, &task_id, "review", Some("eng-1-2")).unwrap();
+            let review = show_task(&board_dir, &task_id).unwrap();
+            assert!(review.contains("Status:      review"));
 
-        edit_task(&board_dir, &task_id, "needs manager input").unwrap();
-        let task_file = fs::read_to_string(board_dir.join("tasks/001-test-task.md")).unwrap();
-        assert!(task_file.contains("block_reason: needs manager input"));
+            edit_task(&board_dir, &task_id, "needs manager input").unwrap();
+            let task_file = fs::read_to_string(board_dir.join("tasks/001-test-task.md")).unwrap();
+            assert!(task_file.contains("block_reason: needs manager input"));
+        });
     }
 
     #[test]
@@ -383,11 +412,13 @@ mod tests {
             return;
         }
 
-        let temp = TempDir::new().unwrap();
-        let board_dir = temp.path().join("board");
-        init(&board_dir).unwrap();
+        with_live_board_cwd(|| {
+            let temp = TempDir::new().unwrap();
+            let board_dir = temp.path().join("board");
+            init(&board_dir).unwrap();
 
-        let picked = pick_task(&board_dir, "eng-1-2", "in-progress").unwrap();
-        assert_eq!(picked, None);
+            let picked = pick_task(&board_dir, "eng-1-2", "in-progress").unwrap();
+            assert_eq!(picked, None);
+        });
     }
 }
