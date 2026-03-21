@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::debug;
 
-use cli::{Cli, Command, ReviewDispositionArg, TaskCommand, TaskStateArg};
+use cli::{Cli, Command, InboxCommand, ReviewDispositionArg, TaskCommand, TaskStateArg};
 
 /// Resolve the project root directory.
 ///
@@ -271,10 +271,39 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Inbox { member, limit, all } => {
-            let limit = if all { None } else { Some(limit) };
-            team::list_inbox(&root, &member, limit)?;
-        }
+        Command::Inbox {
+            command,
+            member,
+            limit,
+            all,
+        } => match command {
+            Some(InboxCommand::Purge {
+                role,
+                all_roles,
+                before,
+                all,
+            }) => {
+                let summary = team::purge_inbox(&root, role.as_deref(), all_roles, before, all)?;
+                if all_roles {
+                    println!(
+                        "Purged {} delivered message(s) across {} inbox(es).",
+                        summary.messages, summary.roles
+                    );
+                } else {
+                    let role = role.unwrap_or_default();
+                    println!(
+                        "Purged {} delivered message(s) from {role}.",
+                        summary.messages
+                    );
+                }
+            }
+            None => {
+                let member =
+                    member.context("member is required unless using `batty inbox purge`")?;
+                let limit = if all { None } else { Some(limit) };
+                team::list_inbox(&root, &member, limit)?;
+            }
+        },
 
         Command::Read { member, id } => {
             team::read_message(&root, &member, &id)?;

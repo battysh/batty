@@ -8,6 +8,7 @@
 //! - `cur/` — delivered messages (moved here after tmux injection)
 //! - `tmp/` — atomic write staging (managed by `maildir` crate)
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -38,6 +39,12 @@ pub struct InboxMessage {
 pub enum MessageType {
     Send,
     Assign,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InboxPurgeSummary {
+    pub roles: usize,
+    pub messages: usize,
 }
 
 impl InboxMessage {
@@ -228,6 +235,96 @@ pub fn delete_message(inboxes_root: &Path, member: &str, id: &str) -> Result<()>
     md.delete(id)
         .with_context(|| format!("failed to delete message '{id}' from '{member}' inbox"))?;
     Ok(())
+}
+
+/// Purge delivered messages from a member inbox.
+pub fn purge_delivered_messages(
+    inboxes_root: &Path,
+    member: &str,
+    before: Option<u64>,
+    purge_all: bool,
+) -> Result<usize> {
+    let cur_dir = inboxes_root.join(member).join("cur");
+    if !cur_dir.is_dir() {
+        return Ok(0);
+    }
+
+    let mut removed = 0usize;
+    for entry in
+        fs::read_dir(&cur_dir).with_context(|| format!("failed to read {}", cur_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to read {}", cur_dir.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let should_delete = if purge_all {
+            true
+        } else if let Some(cutoff) = before {
+            let data = match fs::read(&path) {
+                Ok(data) => data,
+                Err(_) => continue,
+            };
+            let Some(id) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            match InboxMessage::from_json_bytes(&data, id) {
+                Ok(message) => message.timestamp < cutoff,
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+
+        if should_delete {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
+}
+
+/// Purge delivered messages from every member inbox under `.batty/inboxes/`.
+pub fn purge_delivered_messages_for_all(
+    inboxes_root: &Path,
+    before: Option<u64>,
+    purge_all: bool,
+) -> Result<InboxPurgeSummary> {
+    if !inboxes_root.is_dir() {
+        return Ok(InboxPurgeSummary {
+            roles: 0,
+            messages: 0,
+        });
+    }
+
+    let mut roles = 0usize;
+    let mut messages = 0usize;
+    for entry in fs::read_dir(inboxes_root)
+        .with_context(|| format!("failed to read {}", inboxes_root.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to read {}", inboxes_root.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let Some(member) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        roles += 1;
+        messages += purge_delivered_messages(inboxes_root, member, before, purge_all)?;
+    }
+
+    Ok(InboxPurgeSummary { roles, messages })
 }
 
 fn now_unix() -> u64 {
@@ -454,5 +551,74 @@ mod tests {
         // Should not panic, just skip the bad entry
         let pending = pending_messages(root, "bad").unwrap();
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn purge_delivered_messages_before_timestamp_only_removes_older_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        init_inbox(root, "eng").unwrap();
+
+        let mut old_msg = InboxMessage::new_send("mgr", "eng", "old");
+        old_msg.timestamp = 10;
+        let old_id = deliver_to_inbox(root, &old_msg).unwrap();
+        mark_delivered(root, "eng", &old_id).unwrap();
+
+        let mut new_msg = InboxMessage::new_send("mgr", "eng", "new");
+        new_msg.timestamp = 20;
+        let new_id = deliver_to_inbox(root, &new_msg).unwrap();
+        mark_delivered(root, "eng", &new_id).unwrap();
+
+        let removed = purge_delivered_messages(root, "eng", Some(15), false).unwrap();
+        assert_eq!(removed, 1);
+
+        let remaining = all_messages(root, "eng").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].0.id, new_id);
+        assert!(remaining[0].1);
+    }
+
+    #[test]
+    fn purge_delivered_messages_all_removes_every_cur_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        init_inbox(root, "eng").unwrap();
+
+        for body in ["one", "two"] {
+            let msg = InboxMessage::new_send("mgr", "eng", body);
+            let id = deliver_to_inbox(root, &msg).unwrap();
+            mark_delivered(root, "eng", &id).unwrap();
+        }
+
+        let removed = purge_delivered_messages(root, "eng", None, true).unwrap();
+        assert_eq!(removed, 2);
+        assert!(all_messages(root, "eng").unwrap().is_empty());
+    }
+
+    #[test]
+    fn purge_delivered_messages_for_all_scans_every_member_inbox() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        init_inbox(root, "eng-1").unwrap();
+        init_inbox(root, "eng-2").unwrap();
+
+        let msg1 = InboxMessage::new_send("mgr", "eng-1", "first");
+        let id1 = deliver_to_inbox(root, &msg1).unwrap();
+        mark_delivered(root, "eng-1", &id1).unwrap();
+
+        let msg2 = InboxMessage::new_send("mgr", "eng-2", "second");
+        let id2 = deliver_to_inbox(root, &msg2).unwrap();
+        mark_delivered(root, "eng-2", &id2).unwrap();
+
+        let summary = purge_delivered_messages_for_all(root, None, true).unwrap();
+        assert_eq!(
+            summary,
+            InboxPurgeSummary {
+                roles: 2,
+                messages: 2
+            }
+        );
+        assert!(all_messages(root, "eng-1").unwrap().is_empty());
+        assert!(all_messages(root, "eng-2").unwrap().is_empty());
     }
 }

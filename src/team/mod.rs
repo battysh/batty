@@ -2003,6 +2003,29 @@ pub fn ack_message(project_root: &Path, member: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Purge delivered messages from one inbox or all inboxes.
+pub fn purge_inbox(
+    project_root: &Path,
+    member: Option<&str>,
+    all_roles: bool,
+    before: Option<u64>,
+    purge_all: bool,
+) -> Result<inbox::InboxPurgeSummary> {
+    if !purge_all && before.is_none() {
+        bail!("use `--all` or `--before <unix-timestamp>` with `batty inbox purge`");
+    }
+
+    let root = inbox::inboxes_root(project_root);
+    if all_roles {
+        return inbox::purge_delivered_messages_for_all(&root, before, purge_all);
+    }
+
+    let member = member.context("member is required unless using `--all-roles`")?;
+    let member = resolve_member_name(project_root, member)?;
+    let messages = inbox::purge_delivered_messages(&root, &member, before, purge_all)?;
+    Ok(inbox::InboxPurgeSummary { roles: 1, messages })
+}
+
 /// Merge an engineer's worktree branch.
 pub fn merge_worktree(project_root: &Path, engineer: &str) -> Result<()> {
     let engineer = resolve_member_name(project_root, engineer)?;
