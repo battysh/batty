@@ -35,7 +35,6 @@ use super::delivery::FailedDelivery;
 use super::events::EventSink;
 use super::events::TeamEvent;
 use super::failure_patterns::FailureTracker;
-use super::git_cmd;
 use super::hierarchy::MemberInstance;
 use super::inbox;
 use super::merge;
@@ -428,11 +427,11 @@ impl TeamDaemon {
             self.run_loop_step("maybe_intervene_triage_backlog", |daemon| {
                 daemon.maybe_intervene_triage_backlog()
             });
-            self.run_loop_step("maybe_intervene_review_backlog", |daemon| {
-                daemon.maybe_intervene_review_backlog()
-            });
             self.run_loop_step("maybe_intervene_owned_tasks", |daemon| {
                 daemon.maybe_intervene_owned_tasks()
+            });
+            self.run_loop_step("maybe_intervene_review_backlog", |daemon| {
+                daemon.maybe_intervene_review_backlog()
             });
             self.run_loop_step("maybe_auto_unblock_blocked_tasks", |daemon| {
                 daemon.maybe_auto_unblock_blocked_tasks()
@@ -443,6 +442,9 @@ impl TeamDaemon {
             });
             self.run_loop_step("maybe_intervene_architect_utilization", |daemon| {
                 daemon.maybe_intervene_architect_utilization()
+            });
+            self.run_loop_step("maybe_intervene_board_replenishment", |daemon| {
+                daemon.maybe_intervene_board_replenishment()
             });
             self.run_loop_step("maybe_detect_pipeline_starvation", |daemon| {
                 daemon.maybe_detect_pipeline_starvation()
@@ -3859,7 +3861,17 @@ exit 1
 
         assert_eq!(daemon.triage_interventions.get("lead"), Some(&1));
         if daemon.states.get("lead") == Some(&MemberState::Working) {
-            let pane = tmux::capture_pane(&pane_id).unwrap_or_default();
+            let pane = (0..20)
+                .find_map(|_| {
+                    let pane = tmux::capture_pane(&pane_id).unwrap_or_default();
+                    if pane.contains("batty inbox lead") {
+                        Some(pane)
+                    } else {
+                        std::thread::sleep(Duration::from_millis(100));
+                        None
+                    }
+                })
+                .unwrap_or_else(|| tmux::capture_pane(&pane_id).unwrap_or_default());
             assert!(pane.contains("batty inbox lead"));
             assert!(pane.contains("batty read lead <ref>"));
             assert!(pane.contains("batty send eng-1"));

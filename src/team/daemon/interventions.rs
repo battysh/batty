@@ -883,6 +883,182 @@ impl TeamDaemon {
         Ok(())
     }
 
+    pub(super) fn maybe_intervene_board_replenishment(&mut self) -> Result<()> {
+        if super::super::pause_marker_path(&self.config.project_root).exists() {
+            return Ok(());
+        }
+
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let inbox_root = inbox::inboxes_root(&self.config.project_root);
+        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
+        let task_status_by_id: std::collections::HashMap<u32, String> = tasks
+            .iter()
+            .map(|task| (task.id, task.status.clone()))
+            .collect();
+        let architect_members: Vec<MemberInstance> = self
+            .config
+            .members
+            .iter()
+            .filter(|member| member.role_type == RoleType::Architect)
+            .cloned()
+            .collect();
+        if architect_members.is_empty() {
+            return Ok(());
+        }
+
+        let engineer_names: Vec<String> = self
+            .config
+            .members
+            .iter()
+            .filter(|member| member.role_type == RoleType::Engineer)
+            .map(|member| member.name.clone())
+            .collect();
+        if engineer_names.is_empty() {
+            return Ok(());
+        }
+
+        let idle_unassigned_engineers: Vec<String> = engineer_names
+            .iter()
+            .filter(|name| self.is_member_idle(name))
+            .filter(|name| {
+                !tasks.iter().any(|task| {
+                    task.claimed_by.as_deref() == Some(name.as_str())
+                        && task_needs_owned_intervention(task.status.as_str())
+                })
+            })
+            .cloned()
+            .collect();
+        if idle_unassigned_engineers.is_empty() {
+            return Ok(());
+        }
+
+        let unblocked_todo_tasks: Vec<&crate::task::Task> = tasks
+            .iter()
+            .filter(|task| task.status == "todo")
+            .filter(|task| task.claimed_by.is_none())
+            .filter(|task| task.blocked.is_none())
+            .filter(|task| task.blocked_on.is_none())
+            .filter(|task| {
+                task.depends_on.iter().all(|dep_id| {
+                    task_status_by_id
+                        .get(dep_id)
+                        .is_none_or(|status| status == "done")
+                })
+            })
+            .collect();
+
+        let threshold = self
+            .config
+            .team_config
+            .automation
+            .replenishment_threshold
+            .unwrap_or(engineer_names.len());
+        if unblocked_todo_tasks.len() >= threshold {
+            return Ok(());
+        }
+
+        let todo_count = tasks.iter().filter(|task| task.status == "todo").count();
+        let in_progress_count = tasks
+            .iter()
+            .filter(|task| matches!(task.status.as_str(), "in-progress" | "in_progress"))
+            .count();
+        let done_count = tasks
+            .iter()
+            .filter(|task| matches!(task.status.as_str(), "done" | "archived"))
+            .count();
+        let context = replenishment_context(&self.config.project_root);
+
+        for architect in &architect_members {
+            if !self.is_member_idle(&architect.name) {
+                continue;
+            }
+            if !self.ready_for_idle_automation(&inbox_root, &architect.name) {
+                continue;
+            }
+
+            let replenishment_key = board_replenishment_intervention_key(&architect.name);
+            let signature = board_replenishment_intervention_signature(
+                &idle_unassigned_engineers,
+                &unblocked_todo_tasks,
+                todo_count,
+                in_progress_count,
+                done_count,
+            );
+            if self
+                .owned_task_interventions
+                .get(&replenishment_key)
+                .is_some_and(|state| state.signature == signature)
+            {
+                continue;
+            }
+            if self.intervention_on_cooldown(&replenishment_key) {
+                continue;
+            }
+
+            let text = self.build_board_replenishment_message(
+                architect,
+                &idle_unassigned_engineers,
+                threshold,
+                &unblocked_todo_tasks,
+                todo_count,
+                in_progress_count,
+                done_count,
+                context.as_deref(),
+            );
+            info!(
+                member = %architect.name,
+                idle_engineers = idle_unassigned_engineers.len(),
+                unblocked_todo = unblocked_todo_tasks.len(),
+                threshold,
+                "firing board replenishment intervention"
+            );
+            let delivered_live = match self.queue_daemon_message(&architect.name, &text) {
+                Ok(MessageDelivery::LivePane) => true,
+                Ok(_) => false,
+                Err(error) => {
+                    warn!(member = %architect.name, error = %error, "failed to deliver board replenishment intervention");
+                    continue;
+                }
+            };
+            self.record_orchestrator_action(format!(
+                "recovery: board replenishment intervention for {} (idle engineers: {}, unblocked todo: {}, threshold: {}, todo/in-progress/done: {}/{}/{})",
+                architect.name,
+                idle_unassigned_engineers.len(),
+                unblocked_todo_tasks.len(),
+                threshold,
+                todo_count,
+                in_progress_count,
+                done_count
+            ));
+            let idle_epoch = self
+                .triage_idle_epochs
+                .get(&architect.name)
+                .copied()
+                .unwrap_or(0);
+            self.owned_task_interventions.insert(
+                replenishment_key.clone(),
+                OwnedTaskInterventionState {
+                    idle_epoch,
+                    signature,
+                    detected_at: Instant::now(),
+                    escalation_sent: false,
+                },
+            );
+            self.intervention_cooldowns
+                .insert(replenishment_key, Instant::now());
+            if delivered_live {
+                self.mark_member_working(&architect.name);
+            }
+        }
+
+        Ok(())
+    }
+
     fn build_triage_intervention_message(
         &self,
         member: &MemberInstance,
@@ -1402,6 +1578,63 @@ Recover throughput now:\n\
             message,
         )
     }
+
+    fn build_board_replenishment_message(
+        &self,
+        member: &MemberInstance,
+        idle_engineers: &[String],
+        threshold: usize,
+        unblocked_todo_tasks: &[&crate::task::Task],
+        todo_count: usize,
+        in_progress_count: usize,
+        done_count: usize,
+        context: Option<&str>,
+    ) -> String {
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let board_dir_str = board_dir.display();
+        let idle_engineer_summary = idle_engineers.join(", ");
+        let todo_summary = if unblocked_todo_tasks.is_empty() {
+            "none".to_string()
+        } else {
+            unblocked_todo_tasks
+                .iter()
+                .take(4)
+                .map(|task| format!("#{} {}", task.id, task.title))
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+
+        let mut message = format!(
+            "Board replenishment needed: unblocked todo queue is below threshold. Current counts: todo={todo_count}, in-progress={in_progress_count}, done={done_count}. Idle engineers without work: {} ({idle_engineer_summary}). Runnable todo threshold: {threshold}. Current runnable todo tasks: {todo_summary}.\n\
+Replenish the board now:\n\
+1. `batty status`\n\
+2. `kanban-md list --dir {board_dir_str} --status todo`\n\
+3. `kanban-md list --dir {board_dir_str} --status in-progress`\n\
+4. `kanban-md list --dir {board_dir_str} --status done`",
+            idle_engineers.len()
+        );
+
+        if let Some(context) = context {
+            message.push_str("\n\nReplenishment context:\n");
+            message.push_str(context);
+        }
+
+        if let Some(parent) = &member.reports_to {
+            message.push_str(&format!(
+                "\n\n5. After you add or normalize work, report upward with `batty send {parent} \"board replenished: <what was added or why the board cannot be replenished yet>\"`."
+            ));
+        }
+
+        message.push_str(
+            "\nDo not leave idle engineers without executable work. Create the next concrete tasks or explain the exact blocker now.",
+        );
+        message
+    }
 }
 
 fn task_needs_owned_intervention(status: &str) -> bool {
@@ -1471,6 +1704,10 @@ fn architect_utilization_intervention_key(member_name: &str) -> String {
     format!("utilization::{member_name}")
 }
 
+fn board_replenishment_intervention_key(member_name: &str) -> String {
+    format!("replenishment::{member_name}")
+}
+
 fn architect_utilization_intervention_signature(
     working_engineers: &[String],
     idle_active_engineers: &[(String, Vec<u32>)],
@@ -1499,6 +1736,38 @@ fn architect_utilization_intervention_signature(
     parts.join("|")
 }
 
+fn board_replenishment_intervention_signature(
+    idle_engineers: &[String],
+    unblocked_todo_tasks: &[&crate::task::Task],
+    todo_count: usize,
+    in_progress_count: usize,
+    done_count: usize,
+) -> String {
+    let mut parts = vec![
+        format!("counts:{todo_count}:{in_progress_count}:{done_count}"),
+        format!("idle:{}", idle_engineers.len()),
+    ];
+    for engineer in idle_engineers {
+        parts.push(format!("idle-free:{engineer}"));
+    }
+    for task in unblocked_todo_tasks {
+        parts.push(format!("todo:{}:{}", task.id, task.title));
+    }
+    parts.sort();
+    parts.join("|")
+}
+
+fn replenishment_context(project_root: &Path) -> Option<String> {
+    let path = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("replenishment_context.md");
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|content| content.trim().to_string())
+        .filter(|content| !content.is_empty())
+}
+
 fn review_task_intervention_signature(tasks: &[&crate::task::Task]) -> String {
     let mut parts = tasks
         .iter()
@@ -1524,6 +1793,7 @@ mod tests {
     use crate::team::config::WorkflowMode;
     use crate::team::harness::{TestHarness, architect_member, engineer_member, manager_member};
     use crate::team::inbox::{self, InboxMessage};
+    use crate::team::test_support::TestDaemonBuilder;
 
     fn triage_harness() -> TestHarness {
         TestHarness::new()
@@ -1658,6 +1928,7 @@ mod tests {
         daemon.maybe_intervene_review_backlog().unwrap();
         daemon.maybe_intervene_manager_dispatch_gap().unwrap();
         daemon.maybe_intervene_architect_utilization().unwrap();
+        daemon.maybe_intervene_board_replenishment().unwrap();
     }
 
     fn enable_orchestrator_logging(daemon: &mut TeamDaemon) {
@@ -2229,6 +2500,177 @@ mod tests {
         let pending = harness.pending_inbox_messages("architect").unwrap();
         assert_eq!(pending.len(), 1);
         assert!(pending[0].body.contains("#193 (todo) open-task-2"));
+    }
+
+    #[test]
+    fn maybe_intervene_board_replenishment_fires_when_todo_below_threshold_and_idle_engineers_exist()
+     {
+        let harness = intervention_team_harness()
+            .with_member_state("architect", MemberState::Idle)
+            .with_member_state("lead", MemberState::Working)
+            .with_member_state("eng-1", MemberState::Working)
+            .with_member_state("eng-2", MemberState::Idle)
+            .with_pane("architect", "%999996")
+            .with_board_task(191, "already-running", "in-progress", Some("eng-1"))
+            .with_board_task(192, "next-up", "todo", None);
+        let mut daemon = harness.build_daemon().unwrap();
+        daemon.config.team_config.automation.replenishment_threshold = Some(2);
+
+        enter_idle_epoch(&mut daemon, "architect");
+        daemon.maybe_intervene_board_replenishment().unwrap();
+
+        let pending = harness.pending_inbox_messages("architect").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "daemon");
+        assert!(pending[0].body.contains("Board replenishment needed"));
+        assert!(pending[0].body.contains("todo=1, in-progress=1, done=0"));
+        assert!(
+            pending[0]
+                .body
+                .contains("Idle engineers without work: 1 (eng-2)")
+        );
+        assert!(pending[0].body.contains("Runnable todo threshold: 2"));
+        assert!(
+            daemon
+                .owned_task_interventions
+                .contains_key("replenishment::architect")
+        );
+    }
+
+    #[test]
+    fn maybe_intervene_board_replenishment_respects_cooldown() {
+        let harness = intervention_team_harness()
+            .with_member_state("architect", MemberState::Idle)
+            .with_member_state("lead", MemberState::Working)
+            .with_member_state("eng-1", MemberState::Working)
+            .with_member_state("eng-2", MemberState::Idle)
+            .with_pane("architect", "%999996")
+            .with_board_task(191, "already-running", "in-progress", Some("eng-1"))
+            .with_board_task(192, "next-up", "todo", None);
+        let mut daemon = harness.build_daemon().unwrap();
+        daemon.config.team_config.automation.replenishment_threshold = Some(2);
+
+        enter_idle_epoch(&mut daemon, "architect");
+        daemon.maybe_intervene_board_replenishment().unwrap();
+        mark_pending_delivered(&harness, "architect");
+
+        daemon
+            .owned_task_interventions
+            .remove("replenishment::architect");
+        enter_idle_epoch(&mut daemon, "architect");
+        daemon.maybe_intervene_board_replenishment().unwrap();
+
+        assert!(
+            harness
+                .pending_inbox_messages("architect")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn maybe_intervene_board_replenishment_includes_optional_context_file() {
+        let harness = intervention_team_harness()
+            .with_member_state("architect", MemberState::Idle)
+            .with_member_state("lead", MemberState::Working)
+            .with_member_state("eng-1", MemberState::Working)
+            .with_member_state("eng-2", MemberState::Idle)
+            .with_pane("architect", "%999996");
+        fs::create_dir_all(harness.board_tasks_dir()).unwrap();
+        fs::write(
+            harness
+                .project_root()
+                .join(".batty")
+                .join("team_config")
+                .join("replenishment_context.md"),
+            "Prioritize launch-blocking tasks first.\nAvoid docs-only filler.",
+        )
+        .unwrap();
+        let mut daemon = TestDaemonBuilder::new(harness.project_root())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+                engineer_member("eng-2", Some("lead"), false),
+            ])
+            .states(std::collections::HashMap::from([
+                ("architect".to_string(), MemberState::Idle),
+                ("lead".to_string(), MemberState::Working),
+                ("eng-1".to_string(), MemberState::Working),
+                ("eng-2".to_string(), MemberState::Idle),
+            ]))
+            .pane_map(std::collections::HashMap::from([(
+                "architect".to_string(),
+                "%999996".to_string(),
+            )]))
+            .build();
+        daemon.config.team_config.automation.replenishment_threshold = Some(1);
+
+        enter_idle_epoch(&mut daemon, "architect");
+        daemon.maybe_intervene_board_replenishment().unwrap();
+
+        let pending = harness.pending_inbox_messages("architect").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].body.contains("Replenishment context:"));
+        assert!(
+            pending[0]
+                .body
+                .contains("Prioritize launch-blocking tasks first.")
+        );
+        assert!(pending[0].body.contains("Avoid docs-only filler."));
+    }
+
+    #[test]
+    fn maybe_intervene_board_replenishment_does_not_fire_when_all_engineers_busy() {
+        let harness = intervention_team_harness()
+            .with_member_state("architect", MemberState::Idle)
+            .with_member_state("lead", MemberState::Working)
+            .with_member_state("eng-1", MemberState::Working)
+            .with_member_state("eng-2", MemberState::Working)
+            .with_pane("architect", "%999996")
+            .with_board_task(191, "already-running", "in-progress", Some("eng-1"))
+            .with_board_task(192, "next-up", "todo", None);
+        let mut daemon = harness.build_daemon().unwrap();
+        daemon.config.team_config.automation.replenishment_threshold = Some(2);
+
+        enter_idle_epoch(&mut daemon, "architect");
+        daemon.maybe_intervene_board_replenishment().unwrap();
+
+        assert!(
+            harness
+                .pending_inbox_messages("architect")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !daemon
+                .owned_task_interventions
+                .contains_key("replenishment::architect")
+        );
+    }
+
+    #[test]
+    fn maybe_intervene_board_replenishment_does_not_fire_when_todo_is_sufficient() {
+        let harness = intervention_team_harness()
+            .with_member_state("architect", MemberState::Idle)
+            .with_member_state("lead", MemberState::Working)
+            .with_member_state("eng-1", MemberState::Working)
+            .with_member_state("eng-2", MemberState::Idle)
+            .with_pane("architect", "%999996")
+            .with_board_task(191, "next-up", "todo", None)
+            .with_board_task(192, "follow-up", "todo", None);
+        let mut daemon = harness.build_daemon().unwrap();
+        daemon.config.team_config.automation.replenishment_threshold = Some(2);
+
+        enter_idle_epoch(&mut daemon, "architect");
+        daemon.maybe_intervene_board_replenishment().unwrap();
+
+        assert!(
+            harness
+                .pending_inbox_messages("architect")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
