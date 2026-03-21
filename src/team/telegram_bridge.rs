@@ -457,7 +457,17 @@ mod tests {
 
         assert_eq!(daemon.triage_interventions.get("lead"), Some(&1));
         if daemon.states.get("lead") == Some(&MemberState::Working) {
-            let pane = tmux::capture_pane(&pane_id).unwrap_or_default();
+            let pane = (0..20)
+                .find_map(|_| {
+                    let pane = tmux::capture_pane(&pane_id).unwrap_or_default();
+                    if pane.contains("batty inbox lead") {
+                        Some(pane)
+                    } else {
+                        std::thread::sleep(Duration::from_millis(100));
+                        None
+                    }
+                })
+                .unwrap_or_else(|| tmux::capture_pane(&pane_id).unwrap_or_default());
             assert!(pane.contains("batty inbox lead"));
             assert!(pane.contains("batty read lead <ref>"));
             assert!(pane.contains("batty send eng-1"));
