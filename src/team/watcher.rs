@@ -131,6 +131,11 @@ impl SessionWatcher {
         // from the daemon whenever a nudge, standup, or external input arrives.
         if self.state == WatcherState::Idle {
             let capture = tmux::capture_pane(&self.pane_id).unwrap_or_default();
+            if detect_context_exhausted(&capture) {
+                self.last_capture = capture;
+                self.state = WatcherState::ContextExhausted;
+                return Ok(self.state);
+            }
             let screen_state = classify_capture_state(&capture);
             let tracker_state = self.poll_tracker().unwrap_or(TrackerState::Unknown);
             self.completion_observed = tracker_state == TrackerState::Completed;
@@ -149,6 +154,11 @@ impl SessionWatcher {
 
         // Capture current pane content
         let capture = tmux::capture_pane(&self.pane_id).unwrap_or_default();
+        if detect_context_exhausted(&capture) {
+            self.last_capture = capture;
+            self.state = WatcherState::ContextExhausted;
+            return Ok(self.state);
+        }
         let hash = simple_hash(&capture);
         let screen_state = classify_capture_state(&capture);
         let tracker_state = self.poll_tracker().unwrap_or(TrackerState::Unknown);
@@ -402,6 +412,10 @@ fn classify_capture_state(capture: &str) -> ScreenState {
     }
 
     ScreenState::Unknown
+}
+
+fn detect_context_exhausted(capture: &str) -> bool {
+    capture_contains_context_exhaustion(capture)
 }
 
 fn looks_like_claude_spinner_status(line: &str) -> bool {
