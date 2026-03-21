@@ -1325,10 +1325,38 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             return Ok(());
         };
 
-        let idle_engineers = self.idle_engineer_names();
-        let idle_count = idle_engineers.len();
-        if idle_count == 0 {
-            self.pipeline_starvation_fired = false;
+        // Already fired — stay suppressed until condition fully clears
+        if self.pipeline_starvation_fired {
+            // Only reset when enough unclaimed work exists for all idle engineers
+            let board_dir = self
+                .config
+                .project_root
+                .join(".batty")
+                .join("team_config")
+                .join("board");
+            let all_tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
+            let unclaimed_todo = all_tasks
+                .iter()
+                .filter(|t| matches!(t.status.as_str(), "todo" | "backlog"))
+                .filter(|t| t.claimed_by.is_none())
+                .count();
+            let truly_idle = self.truly_idle_engineer_count(&all_tasks);
+            if truly_idle == 0 || unclaimed_todo >= truly_idle {
+                self.pipeline_starvation_fired = false;
+            }
+            return Ok(());
+        }
+
+        // Suppress if manager is actively working (likely processing directives)
+        let manager_working = self
+            .config
+            .members
+            .iter()
+            .any(|m| {
+                m.role_type == RoleType::Manager
+                    && self.states.get(&m.name) == Some(&MemberState::Working)
+            });
+        if manager_working {
             return Ok(());
         }
 
@@ -1338,17 +1366,20 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             .join(".batty")
             .join("team_config")
             .join("board");
-        let todo_count = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?
-            .into_iter()
+        let all_tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
+        let idle_count = self.truly_idle_engineer_count(&all_tasks);
+        if idle_count == 0 {
+            return Ok(());
+        }
+
+        let todo_count = all_tasks
+            .iter()
             .filter(|task| matches!(task.status.as_str(), "todo" | "backlog"))
+            .filter(|task| task.claimed_by.is_none())
             .count();
 
         let deficit = idle_count.saturating_sub(todo_count);
         if todo_count >= idle_count || deficit < threshold {
-            self.pipeline_starvation_fired = false;
-            return Ok(());
-        }
-        if self.pipeline_starvation_fired {
             return Ok(());
         }
 
@@ -1373,6 +1404,21 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         }
         self.pipeline_starvation_fired = true;
         Ok(())
+    }
+
+    /// Count engineers that are tmux-idle AND have no active board items.
+    fn truly_idle_engineer_count(&self, all_tasks: &[crate::task::Task]) -> usize {
+        let engineers_with_active_items: std::collections::HashSet<String> = all_tasks
+            .iter()
+            .filter(|task| matches!(task.status.as_str(), "todo" | "in-progress" | "review"))
+            .filter_map(|task| task.claimed_by.as_ref())
+            .map(|name| name.trim_start_matches('@').to_string())
+            .collect();
+
+        self.idle_engineer_names()
+            .into_iter()
+            .filter(|name| !engineers_with_active_items.contains(name))
+            .count()
     }
 
     fn member_worktree_context(&self, member_name: &str) -> Option<MemberWorktreeContext> {
@@ -5359,6 +5405,57 @@ exit 1
         let pending = inbox::pending_messages(&root, "architect").unwrap();
         assert_eq!(pending.len(), 2);
         assert!(daemon.pipeline_starvation_fired);
+    }
+
+    #[test]
+    fn starvation_suppressed_when_engineer_has_active_board_item() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = starvation_test_daemon(&tmp, Some(1));
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "architect").unwrap();
+
+        // Create one unclaimed todo task and one in-review task claimed by eng-1
+        write_open_task_file(tmp.path(), 101, "queued-task", "todo");
+        write_board_task_file(tmp.path(), 102, "review-task", "review", Some("eng-1"), &[], None);
+
+        daemon.maybe_detect_pipeline_starvation().unwrap();
+
+        // eng-1 has an active board item (review), so only eng-2 is truly idle.
+        // 1 idle engineer, 1 unclaimed todo task => no deficit => no alert
+        let pending = inbox::pending_messages(&root, "architect").unwrap();
+        assert!(pending.is_empty());
+        assert!(!daemon.pipeline_starvation_fired);
+    }
+
+    #[test]
+    fn starvation_suppressed_when_manager_working() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+                engineer_member("eng-2", Some("lead"), false),
+            ])
+            .workflow_policy(WorkflowPolicy {
+                pipeline_starvation_threshold: Some(1),
+                ..WorkflowPolicy::default()
+            })
+            .build();
+        daemon.states = HashMap::from([
+            ("lead".to_string(), MemberState::Working),
+            ("eng-1".to_string(), MemberState::Idle),
+            ("eng-2".to_string(), MemberState::Idle),
+        ]);
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "architect").unwrap();
+        write_open_task_file(tmp.path(), 101, "queued-task", "todo");
+
+        daemon.maybe_detect_pipeline_starvation().unwrap();
+
+        // Manager is working, so starvation alert should be suppressed
+        let pending = inbox::pending_messages(&root, "architect").unwrap();
+        assert!(pending.is_empty());
     }
 
     #[test]
