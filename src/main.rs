@@ -126,6 +126,11 @@ fn main() -> Result<()> {
             println!("Exported template '{name}' ({count} files)");
         }
 
+        Command::ExportRun => {
+            let path = team::export_run(&root)?;
+            println!("Run export written to {}", path.display());
+        }
+
         Command::Retro { events } => {
             let events_path = events
                 .unwrap_or_else(|| root.join(".batty").join("team_config").join("events.jsonl"));

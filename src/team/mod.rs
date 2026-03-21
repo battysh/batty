@@ -454,7 +454,48 @@ pub fn export_template(project_root: &Path, name: &str) -> Result<usize> {
     Ok(copied)
 }
 
+pub fn export_run(project_root: &Path) -> Result<PathBuf> {
+    let team_yaml = team_config_path(project_root);
+    if !team_yaml.is_file() {
+        bail!("team config missing at {}", team_yaml.display());
+    }
+
+    let export_dir = create_run_export_dir(project_root)?;
+    copy_template_file(&team_yaml, &export_dir.join(TEAM_CONFIG_FILE))?;
+
+    copy_dir_if_exists(
+        &team_config_dir(project_root).join("board").join("tasks"),
+        &export_dir.join("board").join("tasks"),
+    )?;
+    copy_file_if_exists(
+        &team_events_path(project_root),
+        &export_dir.join("events.jsonl"),
+    )?;
+    copy_file_if_exists(
+        &daemon_log_path(project_root),
+        &export_dir.join("daemon.log"),
+    )?;
+    copy_file_if_exists(
+        &orchestrator_log_path(project_root),
+        &export_dir.join("orchestrator.log"),
+    )?;
+    copy_dir_if_exists(
+        &project_root.join(".batty").join("retrospectives"),
+        &export_dir.join("retrospectives"),
+    )?;
+    copy_file_if_exists(
+        &project_root.join(".batty").join("test_timing.jsonl"),
+        &export_dir.join("test_timing.jsonl"),
+    )?;
+
+    Ok(export_dir)
+}
+
 fn copy_template_file(source: &Path, destination: &Path) -> Result<()> {
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
     std::fs::copy(source, destination).with_context(|| {
         format!(
             "failed to copy {} to {}",
@@ -468,6 +509,36 @@ fn copy_template_file(source: &Path, destination: &Path) -> Result<()> {
 /// Path to the daemon PID file.
 fn daemon_pid_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("daemon.pid")
+}
+
+fn exports_dir(project_root: &Path) -> PathBuf {
+    project_root.join(".batty").join("exports")
+}
+
+fn create_run_export_dir(project_root: &Path) -> Result<PathBuf> {
+    let base = exports_dir(project_root);
+    std::fs::create_dir_all(&base)
+        .with_context(|| format!("failed to create {}", base.display()))?;
+
+    let timestamp = now_unix();
+    let primary = base.join(timestamp.to_string());
+    if !primary.exists() {
+        std::fs::create_dir(&primary)
+            .with_context(|| format!("failed to create {}", primary.display()))?;
+        return Ok(primary);
+    }
+
+    for suffix in 1.. {
+        let candidate = base.join(format!("{timestamp}-{suffix}"));
+        if candidate.exists() {
+            continue;
+        }
+        std::fs::create_dir(&candidate)
+            .with_context(|| format!("failed to create {}", candidate.display()))?;
+        return Ok(candidate);
+    }
+
+    unreachable!("infinite suffix iterator should always return or continue");
 }
 
 /// Path to the daemon log file.
@@ -521,6 +592,21 @@ pub(crate) fn rotate_log_if_needed(path: &Path) -> Result<()> {
             rotated.display()
         )
     })?;
+    Ok(())
+}
+
+fn copy_file_if_exists(source: &Path, destination: &Path) -> Result<()> {
+    if source.is_file() {
+        copy_template_file(source, destination)?;
+    }
+    Ok(())
+}
+
+fn copy_dir_if_exists(source: &Path, destination: &Path) -> Result<()> {
+    if source.is_dir() {
+        let mut created = Vec::new();
+        copy_template_dir(source, destination, &mut created)?;
+    }
     Ok(())
 }
 
@@ -2110,6 +2196,106 @@ mod tests {
         std::fs::create_dir_all(team_config_dir(&project_root)).unwrap();
 
         let error = export_template(&project_root, "demo-template").unwrap_err();
+
+        assert!(error.to_string().contains("team config missing"));
+    }
+
+    #[test]
+    fn export_run_copies_requested_run_state_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().join("project");
+        let config_dir = team_config_dir(&project_root);
+        let tasks_dir = config_dir.join("board").join("tasks");
+        let retrospectives_dir = project_root.join(".batty").join("retrospectives");
+        let worktree_dir = project_root
+            .join(".batty")
+            .join("worktrees")
+            .join("eng-1-1")
+            .join(".codex")
+            .join("sessions");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::create_dir_all(&retrospectives_dir).unwrap();
+        std::fs::create_dir_all(&worktree_dir).unwrap();
+
+        std::fs::write(config_dir.join("team.yaml"), "name: demo\n").unwrap();
+        std::fs::write(tasks_dir.join("001-task.md"), "---\nid: 1\n---\n").unwrap();
+        std::fs::write(
+            team_events_path(&project_root),
+            "{\"event\":\"daemon_started\"}\n",
+        )
+        .unwrap();
+        std::fs::write(daemon_log_path(&project_root), "daemon-log\n").unwrap();
+        std::fs::write(orchestrator_log_path(&project_root), "orchestrator-log\n").unwrap();
+        std::fs::write(retrospectives_dir.join("retro.md"), "# Retro\n").unwrap();
+        std::fs::write(
+            project_root.join(".batty").join("test_timing.jsonl"),
+            "{\"task_id\":1}\n",
+        )
+        .unwrap();
+        std::fs::write(worktree_dir.join("session.jsonl"), "secret\n").unwrap();
+
+        let export_dir = export_run(&project_root).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(export_dir.join("team.yaml")).unwrap(),
+            "name: demo\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(export_dir.join("board").join("tasks").join("001-task.md"))
+                .unwrap(),
+            "---\nid: 1\n---\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(export_dir.join("events.jsonl")).unwrap(),
+            "{\"event\":\"daemon_started\"}\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(export_dir.join("daemon.log")).unwrap(),
+            "daemon-log\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(export_dir.join("orchestrator.log")).unwrap(),
+            "orchestrator-log\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(export_dir.join("retrospectives").join("retro.md")).unwrap(),
+            "# Retro\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(export_dir.join("test_timing.jsonl")).unwrap(),
+            "{\"task_id\":1}\n"
+        );
+        assert!(!export_dir.join("worktrees").exists());
+        assert!(!export_dir.join(".codex").exists());
+        assert!(!export_dir.join("sessions").exists());
+    }
+
+    #[test]
+    fn export_run_skips_missing_optional_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().join("project");
+        let config_dir = team_config_dir(&project_root);
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("team.yaml"), "name: demo\n").unwrap();
+
+        let export_dir = export_run(&project_root).unwrap();
+
+        assert!(export_dir.join("team.yaml").is_file());
+        assert!(!export_dir.join("board").exists());
+        assert!(!export_dir.join("events.jsonl").exists());
+        assert!(!export_dir.join("daemon.log").exists());
+        assert!(!export_dir.join("orchestrator.log").exists());
+        assert!(!export_dir.join("retrospectives").exists());
+        assert!(!export_dir.join("test_timing.jsonl").exists());
+    }
+
+    #[test]
+    fn export_run_missing_team_yaml_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().join("project");
+        std::fs::create_dir_all(team_config_dir(&project_root)).unwrap();
+
+        let error = export_run(&project_root).unwrap_err();
 
         assert!(error.to_string().contains("team config missing"));
     }
