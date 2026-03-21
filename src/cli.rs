@@ -164,6 +164,9 @@ pub enum Command {
     /// Estimate team load and show recent load history
     Load,
 
+    /// Show pending dispatch queue entries
+    Queue,
+
     /// Estimate current run cost from agent session files
     Cost,
 
@@ -738,6 +741,12 @@ mod tests {
     fn load_subcommand_parses() {
         let cli = Cli::parse_from(["batty", "load"]);
         assert!(matches!(cli.command, Command::Load));
+    }
+
+    #[test]
+    fn queue_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "queue"]);
+        assert!(matches!(cli.command, Command::Queue));
     }
 
     #[test]

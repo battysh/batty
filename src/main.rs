@@ -448,6 +448,29 @@ fn main() -> Result<()> {
             team::show_load(&root)?;
         }
 
+        Command::Queue => {
+            let entries = team::daemon::load_dispatch_queue_snapshot(&root);
+            if entries.is_empty() {
+                println!("Dispatch queue is empty.");
+            } else {
+                println!(
+                    "{:<20} {:<8} {:<36} {:>8}  LAST FAILURE",
+                    "ENGINEER", "TASK", "TITLE", "FAILURES"
+                );
+                println!("{}", "-".repeat(100));
+                for entry in entries {
+                    println!(
+                        "{:<20} {:<8} {:<36} {:>8}  {}",
+                        entry.engineer,
+                        entry.task_id,
+                        entry.task_title,
+                        entry.validation_failures,
+                        entry.last_failure.unwrap_or_else(|| "-".to_string())
+                    );
+                }
+            }
+        }
+
         Command::Cost => {
             team::cost::show_cost(&root)?;
         }

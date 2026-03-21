@@ -1,9 +1,39 @@
 use super::super::events::TeamEvent;
-use super::super::task_loop::{next_unclaimed_task, prepare_engineer_assignment_worktree};
+#[cfg(test)]
+use super::super::task_loop::{engineer_base_branch_name, setup_engineer_worktree};
+use super::super::task_loop::{
+    engineer_worktree_ready_for_dispatch, prepare_engineer_assignment_worktree,
+};
 use super::launcher::{
     canonical_agent_name, new_member_session_id, strip_nudge_section, write_launch_script,
 };
+use super::task_cmd::{assign_task_owners, transition_task};
 use super::*;
+use serde::{Deserialize, Serialize};
+
+use super::super::policy::check_wip_limit;
+
+const DISPATCH_QUEUE_FAILURE_LIMIT: u32 = 3;
+
+fn dispatch_priority_rank(priority: &str) -> u32 {
+    match priority {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        "low" => 3,
+        _ => 4,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispatchQueueEntry {
+    pub engineer: String,
+    pub task_id: u32,
+    pub task_title: String,
+    pub queued_at: u64,
+    pub validation_failures: u32,
+    pub last_failure: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AssignmentLaunch {
@@ -127,8 +157,7 @@ impl TeamDaemon {
             .join(".batty")
             .join("codex-context")
             .join(member_name);
-        if normalized_assignment_dir(&current_path)
-            == normalized_assignment_dir(&codex_context_dir)
+        if normalized_assignment_dir(&current_path) == normalized_assignment_dir(&codex_context_dir)
         {
             return Ok(());
         }
@@ -336,62 +365,259 @@ impl TeamDaemon {
             .collect()
     }
 
-    fn auto_dispatch(&mut self) -> Result<()> {
-        let board_dir = self
-            .config
-            .project_root
-            .join(".batty")
-            .join("team_config")
-            .join("board");
-        let board_dir_str = board_dir.to_string_lossy().to_string();
+    fn next_dispatch_task(
+        &self,
+        board_dir: &Path,
+        queued_task_ids: &HashSet<u32>,
+    ) -> Result<Option<crate::task::Task>> {
+        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
+        let task_status_by_id: HashMap<u32, String> = tasks
+            .iter()
+            .map(|task| (task.id, task.status.clone()))
+            .collect();
 
-        for engineer_name in self.idle_engineer_names() {
-            let Some(task) = next_unclaimed_task(&board_dir)? else {
+        let mut available: Vec<crate::task::Task> = tasks
+            .into_iter()
+            .filter(|task| matches!(task.status.as_str(), "backlog" | "todo"))
+            .filter(|task| task.claimed_by.is_none())
+            .filter(|task| task.blocked.is_none())
+            .filter(|task| task.blocked_on.is_none())
+            .filter(|task| !queued_task_ids.contains(&task.id))
+            .filter(|task| {
+                task.depends_on.iter().all(|dep_id| {
+                    task_status_by_id
+                        .get(dep_id)
+                        .is_none_or(|status| status == "done")
+                })
+            })
+            .collect();
+
+        available.sort_by_key(|task| (dispatch_priority_rank(&task.priority), task.id));
+        Ok(available.into_iter().next())
+    }
+
+    fn enqueue_dispatch_candidates(&mut self) -> Result<()> {
+        let board_dir = self.board_dir();
+        let mut queued_task_ids: HashSet<u32> = self
+            .dispatch_queue
+            .iter()
+            .map(|entry| entry.task_id)
+            .collect();
+        let queued_engineers: HashSet<String> = self
+            .dispatch_queue
+            .iter()
+            .map(|entry| entry.engineer.clone())
+            .collect();
+
+        let mut engineers = self.idle_engineer_names();
+        engineers.sort();
+        for engineer_name in engineers {
+            if queued_engineers.contains(&engineer_name) {
+                continue;
+            }
+            let Some(task) = self.next_dispatch_task(&board_dir, &queued_task_ids)? else {
                 break;
             };
+            queued_task_ids.insert(task.id);
+            self.dispatch_queue.push(DispatchQueueEntry {
+                engineer: engineer_name,
+                task_id: task.id,
+                task_title: task.title,
+                queued_at: now_unix(),
+                validation_failures: 0,
+                last_failure: None,
+            });
+        }
+        Ok(())
+    }
 
-            let board_failure_recipients: Vec<String> = self
-                .config
+    fn engineer_board_wip_count(&self, board_dir: &Path, engineer: &str) -> Result<u32> {
+        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
+        Ok(tasks
+            .into_iter()
+            .filter(|task| {
+                (task.status == "in-progress" && task.claimed_by.as_deref() == Some(engineer))
+                    || (task.status == "review" && task.review_owner.as_deref() == Some(engineer))
+            })
+            .count() as u32)
+    }
+
+    fn task_for_dispatch_entry(
+        &self,
+        board_dir: &Path,
+        entry: &DispatchQueueEntry,
+    ) -> Result<Option<crate::task::Task>> {
+        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
+        let task_status_by_id: HashMap<u32, String> = tasks
+            .iter()
+            .map(|task| (task.id, task.status.clone()))
+            .collect();
+        Ok(tasks.into_iter().find(|task| {
+            task.id == entry.task_id
+                && matches!(task.status.as_str(), "backlog" | "todo")
+                && task.claimed_by.is_none()
+                && task.blocked.is_none()
+                && task.blocked_on.is_none()
+                && task.depends_on.iter().all(|dep_id| {
+                    task_status_by_id
+                        .get(dep_id)
+                        .is_none_or(|status| status == "done")
+                })
+        }))
+    }
+
+    fn should_hold_dispatch_for_stabilization(&self, engineer: &str) -> bool {
+        let idle_since = self.idle_started_at.get(engineer);
+        let delay = Duration::from_secs(
+            self.config
+                .team_config
+                .board
+                .dispatch_stabilization_delay_secs,
+        );
+        idle_since.is_none_or(|started| started.elapsed() < delay)
+    }
+
+    fn dispatch_failure_recipient(&self, engineer: &str) -> Option<String> {
+        self.manager_name(engineer).or_else(|| {
+            self.config
                 .members
                 .iter()
-                .filter(|member| {
-                    matches!(member.role_type, RoleType::Architect | RoleType::Manager)
-                })
+                .find(|member| member.role_type == RoleType::Manager)
                 .map(|member| member.name.clone())
-                .collect();
-            if !self.run_kanban_md_nonfatal(
-                &[
-                    "pick",
-                    "--claim",
-                    &engineer_name,
-                    "--move",
-                    "in-progress",
-                    "--dir",
-                    &board_dir_str,
-                ],
-                &format!("pick the next task for {engineer_name}"),
-                board_failure_recipients.iter().map(String::as_str),
+        })
+    }
+
+    fn escalate_dispatch_queue_entry(
+        &mut self,
+        entry: &DispatchQueueEntry,
+        detail: &str,
+    ) -> Result<()> {
+        let Some(manager) = self.dispatch_failure_recipient(&entry.engineer) else {
+            warn!(
+                engineer = %entry.engineer,
+                task_id = entry.task_id,
+                detail,
+                "dispatch queue entry exhausted retries without escalation target"
+            );
+            return Ok(());
+        };
+
+        let body = format!(
+            "Dispatch queue entry failed validation too many times.\nEngineer: {}\nTask #{}: {}\nFailures: {}\nLast failure: {}",
+            entry.engineer, entry.task_id, entry.task_title, entry.validation_failures, detail
+        );
+        self.queue_daemon_message(&manager, &body)?;
+        Ok(())
+    }
+
+    fn process_dispatch_queue(&mut self) -> Result<()> {
+        let board_dir = self.board_dir();
+        let mut pending: Vec<DispatchQueueEntry> = std::mem::take(&mut self.dispatch_queue);
+        let mut retained = Vec::new();
+
+        for mut entry in pending.drain(..) {
+            if self.states.get(&entry.engineer) != Some(&MemberState::Idle) {
+                retained.push(entry);
+                continue;
+            }
+            if self.should_hold_dispatch_for_stabilization(&entry.engineer) {
+                retained.push(entry);
+                continue;
+            }
+
+            let Some(task) = self.task_for_dispatch_entry(&board_dir, &entry)? else {
+                continue;
+            };
+
+            let active_count = self.engineer_board_wip_count(&board_dir, &entry.engineer)?;
+            if !check_wip_limit(
+                &self.config.team_config.workflow_policy,
+                RoleType::Engineer,
+                active_count,
             ) {
-                break;
+                entry.validation_failures += 1;
+                entry.last_failure = Some(format!(
+                    "WIP gate blocked dispatch for '{}' with {} active board task(s)",
+                    entry.engineer, active_count
+                ));
+                if entry.validation_failures >= DISPATCH_QUEUE_FAILURE_LIMIT {
+                    self.escalate_dispatch_queue_entry(
+                        &entry,
+                        entry
+                            .last_failure
+                            .as_deref()
+                            .unwrap_or("wip gate blocked dispatch"),
+                    )?;
+                } else {
+                    retained.push(entry);
+                }
+                continue;
+            }
+
+            let member_uses_worktrees = self.member_uses_worktrees(&entry.engineer);
+            if member_uses_worktrees {
+                let worktree_dir = self.worktree_dir(&entry.engineer);
+                if let Err(error) = engineer_worktree_ready_for_dispatch(
+                    &self.config.project_root,
+                    &worktree_dir,
+                    &entry.engineer,
+                ) {
+                    entry.validation_failures += 1;
+                    entry.last_failure = Some(error.to_string());
+                    if entry.validation_failures >= DISPATCH_QUEUE_FAILURE_LIMIT {
+                        self.escalate_dispatch_queue_entry(
+                            &entry,
+                            entry
+                                .last_failure
+                                .as_deref()
+                                .unwrap_or("worktree readiness validation failed"),
+                        )?;
+                    } else {
+                        retained.push(entry);
+                    }
+                    continue;
+                }
             }
 
             let assignment_message =
                 format!("Task #{}: {}\n\n{}", task.id, task.title, task.description);
-            self.assign_task_with_task_id(&engineer_name, &assignment_message, Some(task.id))?;
-            self.active_tasks.insert(engineer_name.clone(), task.id);
-            self.retry_counts.remove(&engineer_name);
-            self.record_orchestrator_action(format!(
-                "dependency resolution: selected runnable task #{} ({}) and dispatched it to {}",
-                task.id, task.title, engineer_name
-            ));
-            info!(
-                engineer = %engineer_name,
-                task_id = task.id,
-                task_title = %task.title,
-                "auto-dispatched task"
-            );
+            match self.assign_task_with_task_id(&entry.engineer, &assignment_message, Some(task.id))
+            {
+                Ok(_) => {
+                    assign_task_owners(&board_dir, task.id, Some(&entry.engineer), None)?;
+                    transition_task(&board_dir, task.id, "in-progress")?;
+                    self.active_tasks.insert(entry.engineer.clone(), task.id);
+                    self.retry_counts.remove(&entry.engineer);
+                    self.record_orchestrator_action(format!(
+                        "dispatch queue: selected runnable task #{} ({}) and dispatched it to {}",
+                        task.id, task.title, entry.engineer
+                    ));
+                    info!(
+                        engineer = %entry.engineer,
+                        task_id = task.id,
+                        task_title = %task.title,
+                        "queued task dispatched"
+                    );
+                }
+                Err(error) => {
+                    entry.validation_failures += 1;
+                    entry.last_failure = Some(error.to_string());
+                    if entry.validation_failures >= DISPATCH_QUEUE_FAILURE_LIMIT {
+                        self.escalate_dispatch_queue_entry(
+                            &entry,
+                            entry
+                                .last_failure
+                                .as_deref()
+                                .unwrap_or("assignment launch failed"),
+                        )?;
+                    } else {
+                        retained.push(entry);
+                    }
+                }
+            }
         }
 
+        self.dispatch_queue = retained;
         Ok(())
     }
 
@@ -404,7 +630,10 @@ impl TeamDaemon {
             return Ok(());
         }
 
-        if let Err(error) = self.auto_dispatch() {
+        if let Err(error) = self.enqueue_dispatch_candidates() {
+            warn!(error = %error, "failed to enqueue dispatch candidates");
+        }
+        if let Err(error) = self.process_dispatch_queue() {
             warn!(error = %error, "auto-dispatch failed");
         }
         self.last_auto_dispatch = Instant::now();
@@ -497,6 +726,14 @@ fn slugify_task_branch(task: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::team::config::{BoardConfig, WorkflowPolicy};
+    use crate::team::inbox;
+    use crate::team::standup::MemberState;
+    use crate::team::test_support::{
+        TestDaemonBuilder, engineer_member, init_git_repo, manager_member, write_open_task_file,
+    };
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn engineer_task_branch_name_uses_explicit_task_id() {
@@ -525,6 +762,182 @@ mod tests {
         assert_eq!(
             summarize_assignment("\n\nTask #9: fix move ordering\n\nDetails below"),
             "Task #9: fix move ordering"
+        );
+    }
+
+    #[test]
+    fn stabilization_delay_prevents_premature_dispatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 101, "queued-task", "todo");
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), false),
+        ];
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(members)
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 30,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon
+            .idle_started_at
+            .insert("eng-1".to_string(), Instant::now() - Duration::from_secs(5));
+
+        daemon.maybe_auto_dispatch().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].validation_failures, 0);
+        assert_eq!(daemon.dispatch_queue[0].task_id, 101);
+    }
+
+    #[test]
+    fn wip_gate_blocks_double_assignment() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 101, "queued-task", "todo");
+        crate::team::test_support::write_owned_task_file(
+            tmp.path(),
+            91,
+            "active-task",
+            "in-progress",
+            "eng-1",
+        );
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), false),
+        ];
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(members)
+            .workflow_policy(WorkflowPolicy {
+                wip_limit_per_engineer: Some(1),
+                ..WorkflowPolicy::default()
+            })
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 0,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon.idle_started_at.insert(
+            "eng-1".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+
+        daemon.maybe_auto_dispatch().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].validation_failures, 1);
+        assert!(
+            daemon.dispatch_queue[0]
+                .last_failure
+                .as_deref()
+                .unwrap_or_default()
+                .contains("WIP gate")
+        );
+    }
+
+    #[test]
+    fn worktree_gate_blocks_dirty_worktrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "dispatch-queue");
+        write_open_task_file(&repo, 101, "queued-task", "todo");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            &engineer_base_branch_name("eng-1"),
+            &team_config_dir,
+        )
+        .unwrap();
+        std::fs::write(worktree_dir.join("DIRTY.txt"), "dirty\n").unwrap();
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ];
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(members)
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 0,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon.idle_started_at.insert(
+            "eng-1".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+
+        daemon.maybe_auto_dispatch().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].validation_failures, 1);
+        assert!(
+            daemon.dispatch_queue[0]
+                .last_failure
+                .as_deref()
+                .unwrap_or_default()
+                .contains("uncommitted changes")
+        );
+    }
+
+    #[test]
+    fn queue_escalates_after_repeated_validation_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 101, "queued-task", "todo");
+        crate::team::test_support::write_owned_task_file(
+            tmp.path(),
+            91,
+            "active-task",
+            "in-progress",
+            "eng-1",
+        );
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), false),
+        ];
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(members)
+            .workflow_policy(WorkflowPolicy {
+                wip_limit_per_engineer: Some(1),
+                ..WorkflowPolicy::default()
+            })
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 0,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([
+                ("eng-1".to_string(), MemberState::Idle),
+                ("manager".to_string(), MemberState::Idle),
+            ]))
+            .build();
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon.idle_started_at.insert(
+            "eng-1".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+
+        for _ in 0..DISPATCH_QUEUE_FAILURE_LIMIT {
+            daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+            daemon.maybe_auto_dispatch().unwrap();
+        }
+
+        assert!(daemon.dispatch_queue.is_empty());
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        let manager_messages = inbox::pending_messages(&inbox_root, "manager").unwrap();
+        assert_eq!(manager_messages.len(), 1);
+        assert!(
+            manager_messages[0]
+                .body
+                .contains("Dispatch queue entry failed validation")
         );
     }
 }
