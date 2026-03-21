@@ -40,6 +40,7 @@ pub(crate) fn team_config_with_roles(roles: Vec<RoleDef>) -> TeamConfig {
         orchestrator_pane: true,
         orchestrator_position: OrchestratorPosition::Bottom,
         layout: None,
+        cost: Default::default(),
         roles,
     }
 }

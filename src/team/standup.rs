@@ -719,6 +719,7 @@ mod tests {
             orchestrator_pane: true,
             orchestrator_position: OrchestratorPosition::Bottom,
             layout: None,
+            cost: Default::default(),
             roles: vec![role],
         };
         let members = vec![member];
@@ -786,6 +787,7 @@ mod tests {
             orchestrator_pane: false,
             orchestrator_position: OrchestratorPosition::Bottom,
             layout: None,
+            cost: Default::default(),
             roles: vec![role],
         };
         let members = vec![member];
@@ -873,6 +875,7 @@ mod tests {
             orchestrator_pane: false,
             orchestrator_position: OrchestratorPosition::Bottom,
             layout: None,
+            cost: Default::default(),
             roles: vec![user_role, architect_role],
         };
         let members = vec![user.clone(), architect];

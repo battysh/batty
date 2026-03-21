@@ -271,6 +271,7 @@ impl<'a> TestDaemonBuilder<'a> {
                 orchestrator_pane: self.orchestrator_pane,
                 orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
+                cost: Default::default(),
                 roles: Vec::new(),
             },
             session: self.session,

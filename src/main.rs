@@ -404,6 +404,10 @@ fn main() -> Result<()> {
             team::show_load(&root)?;
         }
 
+        Command::Cost => {
+            team::cost::show_cost(&root)?;
+        }
+
         Command::Doctor { fix } => {
             print!("{}", team::doctor::run(&root, fix)?);
         }
