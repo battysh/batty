@@ -25,6 +25,8 @@ pub struct TeamEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restart: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub load: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working_members: Option<u32>,
@@ -62,6 +64,7 @@ impl TeamEvent {
             from: None,
             to: None,
             restart: None,
+            restart_count: None,
             load: None,
             working_members: None,
             total_members: None,
@@ -196,6 +199,16 @@ impl TeamEvent {
         Self {
             role: Some(role.into()),
             ..Self::base("agent_spawned")
+        }
+    }
+
+    pub fn agent_restarted(role: &str, task: &str, reason: &str, restart_count: u32) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            reason: Some(reason.into()),
+            restart_count: Some(restart_count),
+            ..Self::base("agent_restarted")
         }
     }
 
@@ -351,6 +364,10 @@ mod tests {
             ("member_crashed", TeamEvent::member_crashed("eng-1", true)),
             ("message_routed", TeamEvent::message_routed("a", "b")),
             ("agent_spawned", TeamEvent::agent_spawned("eng-1")),
+            (
+                "agent_restarted",
+                TeamEvent::agent_restarted("eng-1", "42", "context_exhausted", 1),
+            ),
             ("load_snapshot", TeamEvent::load_snapshot(2, 5, true)),
         ];
         for (expected_event, event) in &variants {
@@ -433,6 +450,18 @@ mod tests {
     }
 
     #[test]
+    fn agent_restarted_includes_reason_task_and_count() {
+        let event = TeamEvent::agent_restarted("eng-1-2", "67", "context_exhausted", 2);
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"].as_str().unwrap(), "agent_restarted");
+        assert_eq!(parsed["role"].as_str().unwrap(), "eng-1-2");
+        assert_eq!(parsed["task"].as_str().unwrap(), "67");
+        assert_eq!(parsed["reason"].as_str().unwrap(), "context_exhausted");
+        assert_eq!(parsed["restart_count"].as_u64().unwrap(), 2);
+    }
+
+    #[test]
     fn daemon_stopped_with_reason_includes_fields() {
         let event = TeamEvent::daemon_stopped_with_reason("signal", 7200);
         let json = serde_json::to_string(&event).unwrap();
@@ -490,6 +519,7 @@ mod tests {
         assert!(!json.contains("\"step\""));
         assert!(!json.contains("\"error\""));
         assert!(!json.contains("\"uptime_secs\""));
+        assert!(!json.contains("\"restart_count\""));
     }
 
     #[test]

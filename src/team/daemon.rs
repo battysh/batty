@@ -67,6 +67,7 @@ struct NudgeSchedule {
 const DELIVERY_VERIFICATION_CAPTURE_LINES: u32 = 50;
 const FAILED_DELIVERY_RETRY_DELAY: Duration = Duration::from_secs(30);
 const FAILED_DELIVERY_MAX_ATTEMPTS: u32 = 3;
+const CONTEXT_RESTART_COOLDOWN: Duration = Duration::from_secs(30);
 
 const HOT_RELOAD_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const HOT_RELOAD_MIN_INTERVAL: Duration = Duration::from_secs(30);
@@ -889,6 +890,137 @@ impl TeamDaemon {
         Ok(())
     }
 
+    fn handle_context_exhaustion(&mut self, member_name: &str) -> Result<()> {
+        let Some(task) = self.active_task(member_name)? else {
+            warn!(member = %member_name, "context exhausted but no active task is recorded");
+            self.states
+                .insert(member_name.to_string(), MemberState::Idle);
+            return Ok(());
+        };
+        let Some(member) = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let Some(pane_id) = self.config.pane_map.get(member_name).cloned() else {
+            return Ok(());
+        };
+        let restart_cooldown_key = Self::context_restart_cooldown_key(member_name);
+        let restart_on_cooldown = self
+            .intervention_cooldowns
+            .get(&restart_cooldown_key)
+            .is_some_and(|last| last.elapsed() < CONTEXT_RESTART_COOLDOWN);
+        let escalation_cooldown_key = Self::context_escalation_cooldown_key(member_name);
+        let escalation_on_cooldown = self
+            .intervention_cooldowns
+            .get(&escalation_cooldown_key)
+            .is_some_and(|last| last.elapsed() < CONTEXT_RESTART_COOLDOWN);
+
+        let prior_restarts = self.context_restart_count(task.id)?;
+        if prior_restarts >= 1 {
+            if escalation_on_cooldown {
+                info!(
+                    member = %member_name,
+                    task_id = task.id,
+                    "context exhaustion escalation suppressed by cooldown"
+                );
+                return Ok(());
+            }
+            self.escalate_context_exhaustion(&member, &task, prior_restarts + 1)?;
+            self.intervention_cooldowns
+                .insert(escalation_cooldown_key, Instant::now());
+            return Ok(());
+        }
+
+        if restart_on_cooldown {
+            info!(
+                member = %member_name,
+                task_id = task.id,
+                "context exhaustion restart suppressed by cooldown"
+            );
+            return Ok(());
+        }
+
+        warn!(
+            member = %member_name,
+            task_id = task.id,
+            "context exhausted; restarting agent with task context"
+        );
+        tmux::respawn_pane(&pane_id, "bash")?;
+        std::thread::sleep(Duration::from_millis(200));
+
+        let assignment = Self::restart_assignment_message(&task);
+        let launch =
+            self.launch_task_assignment(member_name, &assignment, Some(task.id), false, false)?;
+        let mut restart_notice = format!(
+            "Restarted after context exhaustion. Continue task #{} from the current worktree state.",
+            task.id
+        );
+        if let Some(branch) = launch.branch.as_deref() {
+            restart_notice.push_str(&format!("\nBranch: {branch}"));
+        }
+        restart_notice.push_str(&format!("\nWorktree: {}", launch.work_dir.display()));
+        if let Err(error) = self.queue_message("daemon", member_name, &restart_notice) {
+            warn!(member = %member_name, error = %error, "failed to inject restart notice");
+        }
+        self.record_orchestrator_action(format!(
+            "restart: relaunched {} on task #{} after context exhaustion",
+            member_name, task.id
+        ));
+        self.intervention_cooldowns
+            .insert(restart_cooldown_key, Instant::now());
+        self.emit_event(TeamEvent::agent_restarted(
+            member_name,
+            &task.id.to_string(),
+            "context_exhausted",
+            prior_restarts + 1,
+        ));
+        if let Some(branch) = launch.branch.as_deref() {
+            info!(member = %member_name, task_id = task.id, branch, "context restart relaunched assignment");
+        }
+        Ok(())
+    }
+
+    fn escalate_context_exhaustion(
+        &mut self,
+        member: &MemberInstance,
+        task: &crate::task::Task,
+        restart_count: u32,
+    ) -> Result<()> {
+        let Some(manager) = member.reports_to.as_deref() else {
+            warn!(
+                member = %member.name,
+                task_id = task.id,
+                restart_count,
+                "context exhaustion exceeded restart limit with no escalation target"
+            );
+            return Ok(());
+        };
+
+        let body = format!(
+            "Task #{task_id} for {member_name} exhausted context {restart_count} times. Batty restarted it once already and will not restart it again automatically.\n\
+Task: {title}\n\
+Next step: decide whether to split the task, redirect the engineer, or intervene directly in the lane.",
+            task_id = task.id,
+            member_name = member.name,
+            title = task.title,
+        );
+        self.queue_message("daemon", manager, &body)?;
+        self.record_orchestrator_action(format!(
+            "restart: escalated context exhaustion for {} on task #{} after {} exhaustions",
+            member.name, task.id, restart_count
+        ));
+        self.emit_event(TeamEvent::task_escalated(
+            &member.name,
+            &task.id.to_string(),
+        ));
+        Ok(())
+    }
+
     /// Spawn the correct agent in each member's pane.
     fn spawn_all_agents(&mut self, resume: bool) -> Result<()> {
         let previous_launch_state = load_launch_state(&self.config.project_root);
@@ -1016,25 +1148,33 @@ impl TeamDaemon {
                 self.update_automation_timers_for_state(name, member_state);
             }
 
-            if new_state == WatcherState::ContextExhausted
-                && prev_watcher_state != WatcherState::ContextExhausted
-            {
-                let task_id = self.active_task_id(name);
-                warn!(
-                    member = %name,
-                    task_id,
-                    session_size_bytes,
-                    "detected context exhaustion"
-                );
-                self.emit_event(TeamEvent::context_exhausted(
-                    name,
-                    task_id,
-                    session_size_bytes,
-                ));
-                self.record_orchestrator_action(format!(
-                    "lifecycle: detected context exhaustion for {} (task={:?}, session_size_bytes={:?})",
-                    name, task_id, session_size_bytes
-                ));
+            if new_state == WatcherState::ContextExhausted {
+                if prev_watcher_state != WatcherState::ContextExhausted {
+                    let task_id = self.active_task_id(name);
+                    warn!(
+                        member = %name,
+                        task_id,
+                        session_size_bytes,
+                        "detected context exhaustion"
+                    );
+                    self.emit_event(TeamEvent::context_exhausted(
+                        name,
+                        task_id,
+                        session_size_bytes,
+                    ));
+                    self.record_orchestrator_action(format!(
+                        "lifecycle: detected context exhaustion for {} (task={:?}, session_size_bytes={:?})",
+                        name, task_id, session_size_bytes
+                    ));
+                }
+                if let Err(error) = self.handle_context_exhaustion(name) {
+                    warn!(
+                        member = %name,
+                        error = %error,
+                        "context-exhausted restart handling failed; continuing"
+                    );
+                }
+                continue;
             }
 
             if completion_observed && self.active_task_id(name).is_some() {
@@ -1527,6 +1667,143 @@ impl TeamDaemon {
         self.active_tasks.get(engineer).copied()
     }
 
+    fn active_task(&self, member_name: &str) -> Result<Option<crate::task::Task>> {
+        let Some(task_id) = self.active_task_id(member_name) else {
+            return Ok(None);
+        };
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
+        Ok(tasks.into_iter().find(|task| task.id == task_id))
+    }
+
+    fn context_restart_cooldown_key(member_name: &str) -> String {
+        format!("context-restart::{member_name}")
+    }
+
+    fn context_escalation_cooldown_key(member_name: &str) -> String {
+        format!("context-escalation::{member_name}")
+    }
+
+    fn context_restart_count(&self, task_id: u32) -> Result<u32> {
+        let events_path = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let task_id = task_id.to_string();
+        let count = super::events::read_events(&events_path)?
+            .into_iter()
+            .filter(|event| event.event == "agent_restarted")
+            .filter(|event| event.task.as_deref() == Some(task_id.as_str()))
+            .count() as u32;
+        Ok(count)
+    }
+
+    fn restart_assignment_message(task: &crate::task::Task) -> String {
+        let mut message = format!(
+            "Continuing Task #{}: {}\nPrevious session exhausted context; resume from the current worktree state and continue.\n\n{}",
+            task.id, task.title, task.description
+        );
+        if let Some(branch) = task.branch.as_deref() {
+            message.push_str(&format!("\n\nBranch: {branch}"));
+        }
+        if let Some(worktree_path) = task.worktree_path.as_deref() {
+            message.push_str(&format!("\nWorktree: {worktree_path}"));
+        }
+        message
+    }
+
+    fn launch_task_assignment(
+        &mut self,
+        engineer: &str,
+        task: &str,
+        task_id: Option<u32>,
+        reset_context: bool,
+        emit_task_assigned: bool,
+    ) -> Result<AssignmentLaunch> {
+        info!(engineer, task, "assigning task");
+
+        let Some(pane_id) = self.config.pane_map.get(engineer).cloned() else {
+            bail!("no pane found for engineer '{engineer}'");
+        };
+
+        let member = self.config.members.iter().find(|m| m.name == engineer);
+        let agent_name = member.and_then(|m| m.agent.as_deref()).unwrap_or("claude");
+
+        let team_config_dir = self.config.project_root.join(".batty").join("team_config");
+        let use_worktrees = member.map(|m| m.use_worktrees).unwrap_or(false);
+        let task_branch = use_worktrees.then(|| engineer_task_branch_name(engineer, task, task_id));
+        let work_dir = if let Some(task_branch) = task_branch.as_deref() {
+            let work_dir = self
+                .config
+                .project_root
+                .join(".batty")
+                .join("worktrees")
+                .join(engineer);
+            prepare_engineer_assignment_worktree(
+                &self.config.project_root,
+                &work_dir,
+                engineer,
+                task_branch,
+                &team_config_dir,
+            )?
+        } else {
+            self.config.project_root.clone()
+        };
+
+        if reset_context {
+            let adapter = agent::adapter_from_name(agent_name);
+            if let Some(adapter) = &adapter {
+                for (keys, enter) in adapter.reset_context_keys() {
+                    tmux::send_keys(&pane_id, &keys, enter)?;
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }
+        }
+
+        let role_context =
+            member.map(|m| strip_nudge_section(&self.load_prompt(m, &team_config_dir)));
+        let normalized_agent = canonical_agent_name(agent_name);
+        let session_id = new_member_session_id(&normalized_agent);
+
+        std::thread::sleep(Duration::from_secs(1));
+        let short_cmd = write_launch_script(
+            engineer,
+            agent_name,
+            task,
+            role_context.as_deref(),
+            &work_dir,
+            &self.config.project_root,
+            false,
+            false,
+            session_id.as_deref(),
+        )?;
+        if let Some(watcher) = self.watchers.get_mut(engineer) {
+            watcher.set_session_id(session_id.clone());
+        }
+        tmux::send_keys(&pane_id, &short_cmd, true)?;
+        if let Some(session_id) = session_id.as_deref() {
+            self.persist_member_session_id(engineer, session_id)?;
+        }
+
+        self.mark_member_working(engineer);
+
+        if emit_task_assigned {
+            self.emit_event(TeamEvent::task_assigned(engineer, task));
+        }
+
+        Ok(AssignmentLaunch {
+            branch: task_branch,
+            work_dir,
+        })
+    }
+
     fn increment_retry(&mut self, engineer: &str) -> u32 {
         let count = self.retry_counts.entry(engineer.to_string()).or_insert(0);
         *count += 1;
@@ -1948,82 +2225,7 @@ impl TeamDaemon {
         task: &str,
         task_id: Option<u32>,
     ) -> Result<AssignmentLaunch> {
-        info!(engineer, task, "assigning task");
-
-        let Some(pane_id) = self.config.pane_map.get(engineer).cloned() else {
-            bail!("no pane found for engineer '{engineer}'");
-        };
-
-        // Find member to determine agent type
-        let member = self.config.members.iter().find(|m| m.name == engineer);
-
-        let agent_name = member.and_then(|m| m.agent.as_deref()).unwrap_or("claude");
-
-        let team_config_dir = self.config.project_root.join(".batty").join("team_config");
-        let use_worktrees = member.map(|m| m.use_worktrees).unwrap_or(false);
-        let task_branch = use_worktrees.then(|| engineer_task_branch_name(engineer, task, task_id));
-        let work_dir = if let Some(task_branch) = task_branch.as_deref() {
-            let work_dir = self
-                .config
-                .project_root
-                .join(".batty")
-                .join("worktrees")
-                .join(engineer);
-            prepare_engineer_assignment_worktree(
-                &self.config.project_root,
-                &work_dir,
-                engineer,
-                task_branch,
-                &team_config_dir,
-            )?
-        } else {
-            self.config.project_root.clone()
-        };
-
-        // Reset agent context after the new worktree branch is ready.
-        let adapter = agent::adapter_from_name(agent_name);
-        if let Some(adapter) = &adapter {
-            for (keys, enter) in adapter.reset_context_keys() {
-                tmux::send_keys(&pane_id, &keys, enter)?;
-                std::thread::sleep(Duration::from_millis(500));
-            }
-        }
-
-        let role_context =
-            member.map(|m| strip_nudge_section(&self.load_prompt(m, &team_config_dir)));
-        let normalized_agent = canonical_agent_name(agent_name);
-        let session_id = new_member_session_id(&normalized_agent);
-
-        // Wait for agent to reset, then launch with new task (never resume for assignments)
-        std::thread::sleep(Duration::from_secs(1));
-        let short_cmd = write_launch_script(
-            engineer,
-            agent_name,
-            task,
-            role_context.as_deref(),
-            &work_dir,
-            &self.config.project_root,
-            false,
-            false,
-            session_id.as_deref(),
-        )?;
-        if let Some(watcher) = self.watchers.get_mut(engineer) {
-            watcher.set_session_id(session_id.clone());
-        }
-        tmux::send_keys(&pane_id, &short_cmd, true)?;
-        if let Some(session_id) = session_id.as_deref() {
-            self.persist_member_session_id(engineer, session_id)?;
-        }
-
-        // Update state
-        self.mark_member_working(engineer);
-
-        self.emit_event(TeamEvent::task_assigned(engineer, task));
-
-        Ok(AssignmentLaunch {
-            branch: task_branch,
-            work_dir,
-        })
+        self.launch_task_assignment(engineer, task, task_id, true, true)
     }
 
     fn idle_engineer_names(&self) -> Vec<String> {
@@ -5360,6 +5562,30 @@ mod tests {
         .unwrap();
     }
 
+    fn write_owned_task_file_with_context(
+        project_root: &Path,
+        id: u32,
+        title: &str,
+        status: &str,
+        claimed_by: &str,
+        branch: &str,
+        worktree_path: &str,
+    ) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join(format!("{id:03}-{title}.md")),
+            format!(
+                "---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: critical\nclaimed_by: {claimed_by}\nbranch: {branch}\nworktree_path: {worktree_path}\nclass: standard\n---\n\nTask description.\n"
+            ),
+        )
+        .unwrap();
+    }
+
     fn write_open_task_file(project_root: &Path, id: u32, title: &str, status: &str) {
         let tasks_dir = project_root
             .join(".batty")
@@ -7762,6 +7988,375 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn agent_restart_relaunches_context_exhausted_member_with_task_context() {
+        let session = "batty-test-agent-restart-context";
+        let _ = crate::tmux::kill_session(session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let member_name = "eng-restart";
+        let lead_name = "lead";
+        let (fake_bin, fake_log) = setup_fake_claude(&tmp, member_name);
+        let worktree_path = tmp.path().join("worktree");
+        std::fs::create_dir_all(&worktree_path).unwrap();
+
+        crate::tmux::create_session(session, "bash", &[], tmp.path().to_str().unwrap()).unwrap();
+        crate::tmux::create_window(
+            session,
+            "keeper",
+            "sleep",
+            &["30".to_string()],
+            tmp.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let pane_id = crate::tmux::pane_id(session).unwrap();
+        Command::new("tmux")
+            .args(["set-option", "-p", "-t", &pane_id, "remain-on-exit", "on"])
+            .output()
+            .unwrap();
+
+        let lead = MemberInstance {
+            name: lead_name.to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: member_name.to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some(lead_name.to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                roles: Vec::new(),
+            },
+            session: session.to_string(),
+            members: vec![lead, engineer],
+            pane_map: HashMap::from([(member_name.to_string(), pane_id.clone())]),
+        })
+        .unwrap();
+        daemon
+            .states
+            .insert(member_name.to_string(), MemberState::Working);
+        daemon.active_tasks.insert(member_name.to_string(), 191);
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, member_name).unwrap();
+        inbox::init_inbox(&root, lead_name).unwrap();
+        write_owned_task_file_with_context(
+            tmp.path(),
+            191,
+            "active-task",
+            "in-progress",
+            member_name,
+            "eng-1-2/task-191",
+            &worktree_path.display().to_string(),
+        );
+
+        daemon.handle_context_exhaustion(member_name).unwrap();
+        std::thread::sleep(Duration::from_millis(700));
+
+        let log = (0..20)
+            .find_map(|_| {
+                let content = match std::fs::read_to_string(&fake_log) {
+                    Ok(content) => content,
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_millis(100));
+                        return None;
+                    }
+                };
+                if content.contains("Continuing Task #191") {
+                    Some(content)
+                } else {
+                    std::thread::sleep(Duration::from_millis(100));
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "fake claude log was not written by restarted member at {}",
+                    fake_log.display()
+                )
+            });
+        assert!(log.contains("Previous session exhausted context"));
+        assert!(log.contains("Branch: eng-1-2/task-191"));
+        assert!(log.contains(&format!("Worktree: {}", worktree_path.display())));
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        let restart_events = events
+            .iter()
+            .filter(|event| event.event == "agent_restarted")
+            .collect::<Vec<_>>();
+        assert_eq!(restart_events.len(), 1);
+        assert_eq!(restart_events[0].role.as_deref(), Some(member_name));
+        assert_eq!(restart_events[0].task.as_deref(), Some("191"));
+        assert_eq!(
+            restart_events[0].reason.as_deref(),
+            Some("context_exhausted")
+        );
+        assert_eq!(restart_events[0].restart_count, Some(1));
+        assert!(events.iter().any(|event| {
+            event.event == "message_routed"
+                && event.from.as_deref() == Some("daemon")
+                && event.to.as_deref() == Some(member_name)
+        }));
+
+        crate::tmux::kill_session(session).unwrap();
+        let _ = std::fs::remove_dir_all(&fake_bin);
+    }
+
+    #[test]
+    #[serial]
+    fn agent_restart_second_exhaustion_escalates_instead_of_restarting() {
+        let session = "batty-test-agent-restart-escalate";
+        let _ = crate::tmux::kill_session(session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let member_name = "eng-escalate";
+        let lead_name = "lead";
+        let (fake_bin, fake_log) = setup_fake_claude(&tmp, member_name);
+
+        crate::tmux::create_session(session, "bash", &[], tmp.path().to_str().unwrap()).unwrap();
+        crate::tmux::create_window(
+            session,
+            "keeper",
+            "sleep",
+            &["30".to_string()],
+            tmp.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let pane_id = crate::tmux::pane_id(session).unwrap();
+
+        let lead = MemberInstance {
+            name: lead_name.to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: member_name.to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some(lead_name.to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                roles: Vec::new(),
+            },
+            session: session.to_string(),
+            members: vec![lead, engineer],
+            pane_map: HashMap::from([(member_name.to_string(), pane_id)]),
+        })
+        .unwrap();
+        daemon
+            .states
+            .insert(member_name.to_string(), MemberState::Working);
+        daemon.active_tasks.insert(member_name.to_string(), 191);
+        daemon.intervention_cooldowns.insert(
+            TeamDaemon::context_restart_cooldown_key(member_name),
+            Instant::now(),
+        );
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, lead_name).unwrap();
+        write_owned_task_file(tmp.path(), 191, "active-task", "in-progress", member_name);
+        write_event_log(
+            tmp.path(),
+            &[TeamEvent::agent_restarted(
+                member_name,
+                "191",
+                "context_exhausted",
+                1,
+            )],
+        );
+
+        daemon.handle_context_exhaustion(member_name).unwrap();
+
+        let pending = inbox::pending_messages(&root, lead_name).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].body.contains("Task #191"));
+        assert!(pending[0].body.contains("split the task"));
+
+        let log = std::fs::read_to_string(&fake_log).unwrap_or_default();
+        assert!(!log.contains("Continuing Task #191"));
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event == "agent_restarted")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event == "task_escalated")
+                .count(),
+            1
+        );
+
+        crate::tmux::kill_session(session).unwrap();
+        let _ = std::fs::remove_dir_all(&fake_bin);
+    }
+
+    #[test]
+    #[serial]
+    fn agent_restart_respects_cooldown_before_first_restart() {
+        let session = "batty-test-agent-restart-cooldown";
+        let _ = crate::tmux::kill_session(session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let member_name = "eng-cooldown";
+        let lead_name = "lead";
+        let (fake_bin, fake_log) = setup_fake_claude(&tmp, member_name);
+
+        crate::tmux::create_session(session, "bash", &[], tmp.path().to_str().unwrap()).unwrap();
+        crate::tmux::create_window(
+            session,
+            "keeper",
+            "sleep",
+            &["30".to_string()],
+            tmp.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let pane_id = crate::tmux::pane_id(session).unwrap();
+
+        let lead = MemberInstance {
+            name: lead_name.to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: member_name.to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some(lead_name.to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                roles: Vec::new(),
+            },
+            session: session.to_string(),
+            members: vec![lead, engineer],
+            pane_map: HashMap::from([(member_name.to_string(), pane_id)]),
+        })
+        .unwrap();
+        daemon
+            .states
+            .insert(member_name.to_string(), MemberState::Working);
+        daemon.active_tasks.insert(member_name.to_string(), 191);
+        daemon.intervention_cooldowns.insert(
+            TeamDaemon::context_restart_cooldown_key(member_name),
+            Instant::now(),
+        );
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, lead_name).unwrap();
+        inbox::init_inbox(&root, member_name).unwrap();
+        write_owned_task_file(tmp.path(), 191, "active-task", "in-progress", member_name);
+
+        daemon.handle_context_exhaustion(member_name).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+
+        let log = std::fs::read_to_string(&fake_log).unwrap_or_default();
+        assert!(log.is_empty());
+        assert!(
+            inbox::pending_messages(&root, lead_name)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            inbox::pending_messages(&root, member_name)
+                .unwrap()
+                .is_empty()
+        );
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.is_empty());
+
+        crate::tmux::kill_session(session).unwrap();
+        let _ = std::fs::remove_dir_all(&fake_bin);
+    }
+
+    #[test]
     fn mark_member_working_updates_state_and_watcher() {
         let tmp = tempfile::tempdir().unwrap();
         let mut watchers = HashMap::new();
@@ -9021,6 +9616,38 @@ mod tests {
         daemon
             .intervention_cooldowns
             .insert(key.to_string(), Instant::now() - cooldown);
+    }
+
+    fn setup_fake_claude(
+        tmp: &tempfile::TempDir,
+        member_name: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let project_slug = tmp
+            .path()
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "default".to_string());
+        let fake_bin = std::env::temp_dir().join(format!("batty-bin-{project_slug}-{member_name}"));
+        let _ = std::fs::remove_dir_all(&fake_bin);
+        std::fs::create_dir_all(&fake_bin).unwrap();
+
+        let fake_log = tmp.path().join(format!("{member_name}-fake-claude.log"));
+        let fake_claude = fake_bin.join("claude");
+        std::fs::write(
+            &fake_claude,
+            format!(
+                "#!/bin/bash\nprintf '%s\\n' \"$*\" >> '{}'\nsleep 5\n",
+                fake_log.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        (fake_bin, fake_log)
     }
 
     #[test]
