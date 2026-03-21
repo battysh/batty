@@ -127,6 +127,7 @@ pub fn build_report(project_root: &Path) -> Result<String> {
         build_resume_eligibility(project_root, team_config.as_ref(), &members, &launch_state);
     let worktrees = build_worktree_statuses(project_root, &members);
     let board_git_checks = build_board_git_checks(project_root);
+    let board_dependency_graph = build_board_dependency_graph(project_root);
     let performance_checks = build_performance_checks(project_root);
     let log_sizes = vec![
         LogSize {
@@ -146,6 +147,7 @@ pub fn build_report(project_root: &Path) -> Result<String> {
         &resume,
         &worktrees,
         &board_git_checks,
+        &board_dependency_graph,
         &performance_checks,
         &log_sizes,
     ))
@@ -158,6 +160,7 @@ fn render_report(
     resume: &[ResumeEligibility],
     worktrees: &[WorktreeStatus],
     board_git_checks: &[CheckLine],
+    board_dependency_graph: &[String],
     performance_checks: &[CheckLine],
     log_sizes: &[LogSize],
 ) -> String {
@@ -267,6 +270,13 @@ fn render_report(
                 line.message
             ));
         }
+    }
+    out.push('\n');
+
+    out.push_str("== Board Dependency Graph ==\n");
+    for line in board_dependency_graph {
+        out.push_str(line);
+        out.push('\n');
     }
     out.push('\n');
 
@@ -449,6 +459,146 @@ fn build_board_git_checks(project_root: &Path) -> Vec<CheckLine> {
     lines.extend(orphan_branch_checks(project_root, &active_targets));
     lines.extend(orphan_worktree_checks(project_root, &active_targets));
     lines
+}
+
+fn build_board_dependency_graph(project_root: &Path) -> Vec<String> {
+    let tasks_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    if !tasks_dir.exists() {
+        return vec!["PASS: board tasks directory missing; nothing to visualize".to_string()];
+    }
+
+    let tasks = match load_tasks_from_dir(&tasks_dir) {
+        Ok(tasks) => tasks,
+        Err(error) => return vec![format!("FAIL: failed to load board tasks: {error:#}")],
+    };
+    if tasks.is_empty() {
+        return vec!["PASS: no board tasks found".to_string()];
+    }
+
+    let mut tasks_with_dependencies: Vec<_> = tasks
+        .iter()
+        .filter(|task| !task.depends_on.is_empty())
+        .collect();
+    if tasks_with_dependencies.is_empty() {
+        return vec!["PASS: no task dependencies declared".to_string()];
+    }
+
+    tasks_with_dependencies.sort_by_key(|task| task.id);
+    let task_by_id: HashMap<u32, &crate::task::Task> =
+        tasks.iter().map(|task| (task.id, task)).collect();
+
+    let mut lines = Vec::new();
+    for task in tasks_with_dependencies {
+        lines.push(format!("#{} [{}] {}", task.id, task.status, task.title));
+        for dep_id in &task.depends_on {
+            match task_by_id.get(dep_id) {
+                Some(dependency) => lines.push(format!(
+                    "  -> #{} [{}] {} ({})",
+                    dependency.id,
+                    dependency.status,
+                    dependency.title,
+                    if dependency_satisfied(dependency) {
+                        "satisfied"
+                    } else {
+                        "blocking"
+                    }
+                )),
+                None => lines.push(format!("  -> #{} [missing] (blocking)", dep_id)),
+            }
+        }
+    }
+
+    let cycles = find_dependency_cycles(&task_by_id);
+    if !cycles.is_empty() {
+        lines.push("Circular dependencies:".to_string());
+        for cycle in cycles {
+            lines.push(format!(
+                "  WARN: {}",
+                cycle
+                    .iter()
+                    .map(|task_id| format!("#{task_id}"))
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            ));
+        }
+    }
+
+    lines
+}
+
+fn dependency_satisfied(task: &crate::task::Task) -> bool {
+    matches!(task.status.as_str(), "done" | "archived")
+}
+
+fn find_dependency_cycles(task_by_id: &HashMap<u32, &crate::task::Task>) -> Vec<Vec<u32>> {
+    let mut cycle_keys = HashSet::new();
+    let mut cycles = Vec::new();
+    let mut task_ids: Vec<_> = task_by_id.keys().copied().collect();
+    task_ids.sort_unstable();
+
+    for task_id in task_ids {
+        let mut path = Vec::new();
+        find_dependency_cycles_from(task_id, task_by_id, &mut path, &mut cycle_keys, &mut cycles);
+    }
+
+    cycles.sort();
+    cycles
+}
+
+fn find_dependency_cycles_from(
+    task_id: u32,
+    task_by_id: &HashMap<u32, &crate::task::Task>,
+    path: &mut Vec<u32>,
+    cycle_keys: &mut HashSet<String>,
+    cycles: &mut Vec<Vec<u32>>,
+) {
+    let Some(task) = task_by_id.get(&task_id) else {
+        return;
+    };
+
+    path.push(task_id);
+    for dep_id in &task.depends_on {
+        if let Some(position) = path.iter().position(|seen| seen == dep_id) {
+            let cycle = canonicalize_cycle(&path[position..]);
+            let key = cycle
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join("->");
+            if cycle_keys.insert(key) {
+                cycles.push(cycle);
+            }
+            continue;
+        }
+        if task_by_id.contains_key(dep_id) {
+            find_dependency_cycles_from(*dep_id, task_by_id, path, cycle_keys, cycles);
+        }
+    }
+    path.pop();
+}
+
+fn canonicalize_cycle(cycle: &[u32]) -> Vec<u32> {
+    if cycle.is_empty() {
+        return Vec::new();
+    }
+
+    let mut best = cycle.to_vec();
+    for idx in 1..cycle.len() {
+        let rotated = cycle[idx..]
+            .iter()
+            .chain(cycle[..idx].iter())
+            .copied()
+            .collect::<Vec<_>>();
+        if rotated < best {
+            best = rotated;
+        }
+    }
+    best.push(best[0]);
+    best
 }
 
 fn build_performance_checks(project_root: &Path) -> Vec<CheckLine> {
@@ -1152,6 +1302,26 @@ roles:
         fs::write(tasks_dir.join(format!("{id:03}-task-{id}.md")), content).unwrap();
     }
 
+    fn write_dependency_task(root: &Path, id: u32, title: &str, status: &str, depends_on: &[u32]) {
+        let tasks_dir = root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        let mut content = format!(
+            "---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: medium\nclass: standard\n"
+        );
+        if !depends_on.is_empty() {
+            content.push_str("depends_on:\n");
+            for dep_id in depends_on {
+                content.push_str(&format!("  - {dep_id}\n"));
+            }
+        }
+        content.push_str("---\n\nTask body.\n");
+        fs::write(tasks_dir.join(format!("{id:03}-task-{id}.md")), content).unwrap();
+    }
+
     #[test]
     fn test_doctor_parses_launch_state() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1243,6 +1413,7 @@ roles:
         assert!(report.contains("== Resume Eligibility =="));
         assert!(report.contains("== Worktree Status =="));
         assert!(report.contains("== Board-Git Consistency =="));
+        assert!(report.contains("== Board Dependency Graph =="));
         assert!(report.contains("== Performance Regression =="));
         assert!(report.contains("== Log Sizes =="));
         assert!(report.contains("manager: agent=codex-cli"));
@@ -1263,6 +1434,8 @@ roles:
         assert!(report.contains("== Daemon State =="));
         assert!(report.contains("== Resume Eligibility =="));
         assert!(report.contains("== Board-Git Consistency =="));
+        assert!(report.contains("== Board Dependency Graph =="));
+        assert!(report.contains("PASS: board tasks directory missing; nothing to visualize"));
         assert!(report.contains("== Performance Regression =="));
         assert!(report.contains("(no team config or members)"));
         assert!(report.contains("daemon.log: missing"));
@@ -1300,12 +1473,42 @@ roles:
         let report = build_report(tmp.path()).unwrap();
 
         assert!(report.contains("== Board-Git Consistency =="));
+        assert!(report.contains("== Board Dependency Graph =="));
+        assert!(report.contains("PASS: no task dependencies declared"));
         assert!(report.contains("PASS: all 1 active task branches exist and are ahead of main"));
         assert!(
             report.contains("PASS: all 1 active task worktrees exist and match board metadata")
         );
         assert!(report.contains("PASS: no orphan task branches found"));
         assert!(report.contains("PASS: no orphan task worktrees found"));
+    }
+
+    #[test]
+    fn doctor_dependency_graph_marks_satisfied_and_blocking_deps() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_dependency_task(tmp.path(), 10, "Completed dependency", "done", &[]);
+        write_dependency_task(tmp.path(), 11, "Active dependency", "in-progress", &[]);
+        write_dependency_task(tmp.path(), 12, "Consumer task", "todo", &[10, 11, 99]);
+
+        let report = build_report(tmp.path()).unwrap();
+
+        assert!(report.contains("== Board Dependency Graph =="));
+        assert!(report.contains("#12 [todo] Consumer task"));
+        assert!(report.contains("  -> #10 [done] Completed dependency (satisfied)"));
+        assert!(report.contains("  -> #11 [in-progress] Active dependency (blocking)"));
+        assert!(report.contains("  -> #99 [missing] (blocking)"));
+    }
+
+    #[test]
+    fn doctor_dependency_graph_detects_cycles() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_dependency_task(tmp.path(), 20, "Task 20", "todo", &[21]);
+        write_dependency_task(tmp.path(), 21, "Task 21", "todo", &[20]);
+
+        let report = build_report(tmp.path()).unwrap();
+
+        assert!(report.contains("Circular dependencies:"));
+        assert!(report.contains("  WARN: #20 -> #21 -> #20"));
     }
 
     #[test]
