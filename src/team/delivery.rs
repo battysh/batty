@@ -623,6 +623,7 @@ mod tests {
             idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            dispatch_queue: Vec::new(),
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),

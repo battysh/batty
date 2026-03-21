@@ -9,6 +9,7 @@ use tracing::{debug, info, warn};
 use super::git_cmd;
 use super::retry::{RetryConfig, retry_sync};
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn priority_rank(p: &str) -> u32 {
     match p {
         "critical" => 0,
@@ -19,6 +20,7 @@ fn priority_rank(p: &str) -> u32 {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn next_unclaimed_task(board_dir: &Path) -> Result<Option<crate::task::Task>> {
     let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
     let task_status_by_id: HashMap<u32, String> = tasks
@@ -505,6 +507,60 @@ pub(crate) fn branch_is_merged_into(
         retry_git(|| git_cmd::merge_base_is_ancestor(project_root, branch_name, base_branch)),
         &format!("failed to compare branch '{branch_name}' with '{base_branch}'"),
     )
+}
+
+pub(crate) fn engineer_worktree_ready_for_dispatch(
+    project_root: &Path,
+    worktree_dir: &Path,
+    engineer_name: &str,
+) -> Result<()> {
+    if !worktree_dir.exists() {
+        return Ok(());
+    }
+
+    if !worktree_registered(project_root, worktree_dir)? {
+        bail!(
+            "engineer worktree path exists but is not registered in git worktree list: {}",
+            worktree_dir.display()
+        );
+    }
+
+    let base_branch = engineer_base_branch_name(engineer_name);
+    let current_branch = current_worktree_branch(worktree_dir)?;
+    if current_branch != base_branch {
+        bail!(
+            "engineer worktree '{}' is checked out on '{}' instead of '{}'",
+            engineer_name,
+            current_branch,
+            base_branch
+        );
+    }
+
+    if worktree_has_user_changes(worktree_dir)? {
+        bail!(
+            "engineer worktree '{}' has uncommitted changes",
+            engineer_name
+        );
+    }
+
+    let ahead_of_main = map_git_error(
+        retry_git(|| git_cmd::rev_list_count(worktree_dir, "main..HEAD")),
+        "failed to compare worktree against main",
+    )?;
+    let behind_main = map_git_error(
+        retry_git(|| git_cmd::rev_list_count(worktree_dir, "HEAD..main")),
+        "failed to compare worktree against main",
+    )?;
+    if ahead_of_main != 0 || behind_main != 0 {
+        bail!(
+            "engineer worktree '{}' is not based on current main (ahead {}, behind {})",
+            engineer_name,
+            ahead_of_main,
+            behind_main
+        );
+    }
+
+    Ok(())
 }
 
 pub(crate) fn delete_branch(project_root: &Path, branch_name: &str) -> Result<()> {

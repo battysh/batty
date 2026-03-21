@@ -10,6 +10,12 @@ use super::board::{read_workflow_metadata, write_workflow_metadata};
 use super::workflow::{ReviewDisposition, TaskState, can_transition};
 
 pub fn cmd_transition(board_dir: &Path, task_id: u32, target: &str) -> Result<()> {
+    transition_task(board_dir, task_id, target)?;
+    println!("Task #{task_id} transitioned to {}.", target.trim());
+    Ok(())
+}
+
+pub(crate) fn transition_task(board_dir: &Path, task_id: u32, target: &str) -> Result<()> {
     let task_path = find_task_path(board_dir, task_id)?;
     let task = Task::from_file(&task_path)?;
     let current = parse_task_state(&task.status)?;
@@ -23,12 +29,26 @@ pub fn cmd_transition(board_dir: &Path, task_id: u32, target: &str) -> Result<()
             clear_blocked(mapping);
         }
     })?;
-
-    println!("Task #{task_id} transitioned to {}.", state_name(target));
     Ok(())
 }
 
 pub fn cmd_assign(
+    board_dir: &Path,
+    task_id: u32,
+    exec_owner: Option<&str>,
+    review_owner: Option<&str>,
+) -> Result<()> {
+    if exec_owner.is_none() && review_owner.is_none() {
+        bail!("at least one owner must be provided");
+    }
+
+    assign_task_owners(board_dir, task_id, exec_owner, review_owner)?;
+
+    println!("Task #{task_id} ownership updated.");
+    Ok(())
+}
+
+pub(crate) fn assign_task_owners(
     board_dir: &Path,
     task_id: u32,
     exec_owner: Option<&str>,
@@ -47,8 +67,6 @@ pub fn cmd_assign(
             set_optional_string(mapping, "review_owner", normalize_optional(owner));
         }
     })?;
-
-    println!("Task #{task_id} ownership updated.");
     Ok(())
 }
 

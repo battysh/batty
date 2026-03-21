@@ -141,6 +141,8 @@ pub struct BoardConfig {
     pub rotation_threshold: u32,
     #[serde(default = "default_board_auto_dispatch")]
     pub auto_dispatch: bool,
+    #[serde(default = "default_dispatch_stabilization_delay_secs")]
+    pub dispatch_stabilization_delay_secs: u64,
 }
 
 impl Default for BoardConfig {
@@ -148,6 +150,7 @@ impl Default for BoardConfig {
         Self {
             rotation_threshold: default_rotation_threshold(),
             auto_dispatch: default_board_auto_dispatch(),
+            dispatch_stabilization_delay_secs: default_dispatch_stabilization_delay_secs(),
         }
     }
 }
@@ -316,6 +319,10 @@ fn default_workflow_mode() -> WorkflowMode {
 
 fn default_board_auto_dispatch() -> bool {
     true
+}
+
+fn default_dispatch_stabilization_delay_secs() -> u64 {
+    30
 }
 
 fn default_standup_interval() -> u64 {

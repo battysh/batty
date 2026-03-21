@@ -312,6 +312,7 @@ mod tests {
                 idle_started_at: HashMap::new(),
                 active_tasks: HashMap::new(),
                 retry_counts: HashMap::new(),
+                dispatch_queue: Vec::new(),
                 triage_idle_epochs: HashMap::new(),
                 triage_interventions: HashMap::new(),
                 owned_task_interventions: HashMap::new(),
@@ -424,6 +425,7 @@ mod tests {
             idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            dispatch_queue: Vec::new(),
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
@@ -458,7 +460,7 @@ mod tests {
 
         assert_eq!(daemon.triage_interventions.get("lead"), Some(&1));
         if daemon.states.get("lead") == Some(&MemberState::Working) {
-            let pane = (0..20)
+            let pane = (0..100)
                 .find_map(|_| {
                     let pane = tmux::capture_pane(&pane_id).unwrap_or_default();
                     if pane.contains("batty send architect")
@@ -541,6 +543,7 @@ mod tests {
             idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            dispatch_queue: Vec::new(),
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),

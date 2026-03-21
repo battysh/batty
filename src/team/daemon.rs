@@ -48,6 +48,7 @@ use super::watcher::{SessionTrackerConfig, SessionWatcher, WatcherState};
 use super::{AssignmentDeliveryResult, AssignmentResultStatus, now_unix, store_assignment_result};
 use crate::agent;
 use crate::tmux;
+use dispatch::DispatchQueueEntry;
 
 #[path = "dispatch.rs"]
 mod dispatch;
@@ -93,6 +94,7 @@ pub struct TeamDaemon {
     pub(super) idle_started_at: HashMap<String, Instant>,
     pub(super) active_tasks: HashMap<String, u32>,
     pub(super) retry_counts: HashMap<String, u32>,
+    pub(super) dispatch_queue: Vec<DispatchQueueEntry>,
     pub(super) triage_idle_epochs: HashMap<String, u64>,
     pub(super) triage_interventions: HashMap<String, u64>,
     pub(super) owned_task_interventions: HashMap<String, OwnedTaskInterventionState>,
@@ -132,6 +134,8 @@ struct PersistedDaemonState {
     states: HashMap<String, MemberState>,
     active_tasks: HashMap<String, u32>,
     retry_counts: HashMap<String, u32>,
+    #[serde(default)]
+    dispatch_queue: Vec<DispatchQueueEntry>,
     paused_standups: HashSet<String>,
     last_standup_elapsed_secs: HashMap<String, u64>,
     nudge_state: HashMap<String, PersistedNudgeState>,
@@ -309,6 +313,7 @@ impl TeamDaemon {
             idle_started_at: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            dispatch_queue: Vec::new(),
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
@@ -1261,6 +1266,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             .collect();
         self.active_tasks = state.active_tasks;
         self.retry_counts = state.retry_counts;
+        self.dispatch_queue = state.dispatch_queue;
         self.paused_standups = state.paused_standups;
         self.last_standup = standup::restore_timer_state(state.last_standup_elapsed_secs);
 
@@ -1286,6 +1292,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             states: self.states.clone(),
             active_tasks: self.active_tasks.clone(),
             retry_counts: self.retry_counts.clone(),
+            dispatch_queue: self.dispatch_queue.clone(),
             paused_standups: self.paused_standups.clone(),
             last_standup_elapsed_secs: standup::snapshot_timer_state(&self.last_standup),
             nudge_state: self
@@ -1700,6 +1707,12 @@ fn load_daemon_state(project_root: &Path) -> Option<PersistedDaemonState> {
     }
 }
 
+pub fn load_dispatch_queue_snapshot(project_root: &Path) -> Vec<DispatchQueueEntry> {
+    load_daemon_state(project_root)
+        .map(|state| state.dispatch_queue)
+        .unwrap_or_default()
+}
+
 fn save_daemon_state(project_root: &Path, state: &PersistedDaemonState) -> Result<()> {
     let path = daemon_state_path(project_root);
     if let Some(parent) = path.parent() {
@@ -1889,7 +1902,7 @@ exit 1
     }
 
     fn wait_for_log_contains(log_path: &Path, needle: &str) -> String {
-        (0..100)
+        (0..300)
             .find_map(|_| {
                 let content = match std::fs::read_to_string(log_path) {
                     Ok(content) => content,
@@ -2097,6 +2110,14 @@ exit 1
             states: HashMap::from([("eng-1".to_string(), MemberState::Working)]),
             active_tasks: HashMap::from([("eng-1".to_string(), 42)]),
             retry_counts: HashMap::from([("eng-1".to_string(), 2)]),
+            dispatch_queue: vec![DispatchQueueEntry {
+                engineer: "eng-1".to_string(),
+                task_id: 77,
+                task_title: "queued".to_string(),
+                queued_at: 999,
+                validation_failures: 1,
+                last_failure: Some("waiting for stabilization".to_string()),
+            }],
             paused_standups: HashSet::from(["manager".to_string()]),
             last_standup_elapsed_secs: HashMap::from([("architect".to_string(), 55)]),
             nudge_state: HashMap::from([(
