@@ -5,9 +5,9 @@ use super::launcher::{
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct AssignmentLaunch {
-    pub(super) branch: Option<String>,
-    pub(super) work_dir: PathBuf,
+pub(crate) struct AssignmentLaunch {
+    pub(crate) branch: Option<String>,
+    pub(crate) work_dir: PathBuf,
 }
 
 impl TeamDaemon {
@@ -202,7 +202,7 @@ impl TeamDaemon {
         }
     }
 
-    pub(super) fn notify_assignment_sender_success(
+    pub(crate) fn notify_assignment_sender_success(
         &mut self,
         sender: &str,
         engineer: &str,
@@ -224,7 +224,7 @@ impl TeamDaemon {
         }
     }
 
-    pub(super) fn record_assignment_success(
+    pub(crate) fn record_assignment_success(
         &self,
         engineer: &str,
         msg_id: &str,
@@ -246,7 +246,7 @@ impl TeamDaemon {
         }
     }
 
-    pub(super) fn notify_assignment_sender_failure(
+    pub(crate) fn notify_assignment_sender_failure(
         &mut self,
         sender: &str,
         engineer: &str,
@@ -268,7 +268,7 @@ impl TeamDaemon {
         }
     }
 
-    pub(super) fn record_assignment_failure(
+    pub(crate) fn record_assignment_failure(
         &self,
         engineer: &str,
         msg_id: &str,
@@ -296,7 +296,7 @@ impl TeamDaemon {
         }
     }
 
-    pub(super) fn assign_task(&mut self, engineer: &str, task: &str) -> Result<AssignmentLaunch> {
+    pub(crate) fn assign_task(&mut self, engineer: &str, task: &str) -> Result<AssignmentLaunch> {
         self.assign_task_with_task_id(engineer, task, None)
     }
 

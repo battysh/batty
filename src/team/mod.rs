@@ -12,6 +12,7 @@ pub mod comms;
 pub mod completion;
 pub mod config;
 pub mod daemon;
+pub mod delivery;
 pub mod doctor;
 pub mod events;
 pub mod failure_patterns;
