@@ -64,6 +64,10 @@ struct NudgeSchedule {
     paused: bool,
 }
 
+const DELIVERY_VERIFICATION_CAPTURE_LINES: u32 = 50;
+const FAILED_DELIVERY_RETRY_DELAY: Duration = Duration::from_secs(30);
+const FAILED_DELIVERY_MAX_ATTEMPTS: u32 = 3;
+
 /// The running team daemon.
 pub struct TeamDaemon {
     config: DaemonConfig,
@@ -88,6 +92,7 @@ pub struct TeamDaemon {
     last_auto_dispatch: Instant,
     pipeline_starvation_fired: bool,
     retro_generated: bool,
+    failed_deliveries: Vec<FailedDelivery>,
     poll_interval: Duration,
 }
 
@@ -97,6 +102,39 @@ struct OwnedTaskInterventionState {
     signature: String,
     detected_at: Instant,
     escalation_sent: bool,
+}
+
+#[derive(Debug, Clone)]
+struct FailedDelivery {
+    recipient: String,
+    from: String,
+    body: String,
+    attempts: u32,
+    last_attempt: Instant,
+}
+
+impl FailedDelivery {
+    fn new(recipient: &str, from: &str, body: &str) -> Self {
+        Self {
+            recipient: recipient.to_string(),
+            from: from.to_string(),
+            body: body.to_string(),
+            attempts: 1,
+            last_attempt: Instant::now(),
+        }
+    }
+
+    fn message_marker(&self) -> String {
+        message_delivery_marker(&self.from)
+    }
+
+    fn is_ready_for_retry(&self, now: Instant) -> bool {
+        now.duration_since(self.last_attempt) >= FAILED_DELIVERY_RETRY_DELAY
+    }
+
+    fn has_attempts_remaining(&self) -> bool {
+        self.attempts < FAILED_DELIVERY_MAX_ATTEMPTS
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -272,6 +310,7 @@ impl TeamDaemon {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         })
     }
@@ -336,6 +375,9 @@ impl TeamDaemon {
             });
             self.run_loop_step("deliver_inbox_messages", |daemon| {
                 daemon.deliver_inbox_messages()
+            });
+            self.run_loop_step("retry_failed_deliveries", |daemon| {
+                daemon.retry_failed_deliveries()
             });
             self.run_loop_step("maybe_intervene_triage_backlog", |daemon| {
                 daemon.maybe_intervene_triage_backlog()
@@ -1076,59 +1118,223 @@ impl TeamDaemon {
         self.update_automation_timers_for_state(member_name, MemberState::Working);
     }
 
-    /// After injecting a message, verify the agent started working.
-    ///
-    /// Polls the pane for up to `max_attempts` rounds. If the pane still shows
-    /// an agent prompt (idle), resends Enter to unstick the submission.
-    /// Returns true if the agent transitioned to working, false if still stuck.
-    fn verify_message_delivered(&mut self, recipient: &str, max_attempts: u32) -> bool {
-        let Some(pane_id) = self.config.pane_map.get(recipient).cloned() else {
-            return true; // No pane to verify
+    fn verify_message_content_in_pane(&self, pane_id: &str, message_marker: &str) -> bool {
+        match tmux::capture_pane_recent(pane_id, DELIVERY_VERIFICATION_CAPTURE_LINES) {
+            Ok(capture) => capture_contains_message_marker(&capture, message_marker),
+            Err(error) => {
+                warn!(
+                    pane_id,
+                    error = %error,
+                    "failed to capture pane for content-based delivery verification"
+                );
+                false
+            }
+        }
+    }
+
+    fn record_failed_delivery(&mut self, recipient: &str, from: &str, body: &str) {
+        if let Some(existing) = self.failed_deliveries.iter_mut().find(|delivery| {
+            delivery.recipient == recipient && delivery.from == from && delivery.body == body
+        }) {
+            existing.last_attempt = Instant::now();
+            return;
+        }
+
+        self.failed_deliveries
+            .push(FailedDelivery::new(recipient, from, body));
+    }
+
+    fn clear_failed_delivery(&mut self, recipient: &str, from: &str, body: &str) {
+        self.failed_deliveries.retain(|delivery| {
+            delivery.recipient != recipient || delivery.from != from || delivery.body != body
+        });
+    }
+
+    fn failed_delivery_escalation_recipient(&self, recipient: &str) -> Option<String> {
+        self.config
+            .members
+            .iter()
+            .find(|member| member.name == recipient)
+            .and_then(|member| member.reports_to.clone())
+            .or_else(|| {
+                self.config
+                    .members
+                    .iter()
+                    .find(|member| {
+                        member.role_type == RoleType::Manager && member.name != recipient
+                    })
+                    .map(|member| member.name.clone())
+            })
+            .or_else(|| {
+                let sender = self.automation_sender_for(recipient);
+                (sender != recipient
+                    && self
+                        .config
+                        .members
+                        .iter()
+                        .any(|member| member.name == sender))
+                .then_some(sender)
+            })
+    }
+
+    fn escalate_failed_delivery(&mut self, delivery: &FailedDelivery) -> Result<()> {
+        let Some(manager) = self.failed_delivery_escalation_recipient(&delivery.recipient) else {
+            warn!(
+                recipient = %delivery.recipient,
+                from = %delivery.from,
+                "failed delivery exhausted retries without escalation target"
+            );
+            return Ok(());
         };
 
-        for attempt in 1..=max_attempts {
-            // Wait for the agent to start processing
-            std::thread::sleep(Duration::from_secs(2));
+        let body = format!(
+            "Live message delivery failed after {} attempts.\nRecipient: {}\nFrom: {}\nMarker: {}\nMessage body:\n{}",
+            delivery.attempts,
+            delivery.recipient,
+            delivery.from,
+            delivery.message_marker(),
+            delivery.body
+        );
+        let root = inbox::inboxes_root(&self.config.project_root);
+        let msg = inbox::InboxMessage::new_send("daemon", &manager, &body);
+        inbox::deliver_to_inbox(&root, &msg)?;
+        self.emit_event(TeamEvent::message_routed("daemon", &manager));
+        warn!(
+            recipient = %delivery.recipient,
+            from = %delivery.from,
+            escalation_target = %manager,
+            attempts = delivery.attempts,
+            "failed delivery escalated to manager inbox"
+        );
+        Ok(())
+    }
 
-            // Capture the pane and check state
-            let capture = match tmux::capture_pane(&pane_id) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(recipient, error = %e, "failed to capture pane for delivery verification");
-                    return true; // Can't verify, assume OK
+    fn retry_failed_deliveries(&mut self) -> Result<()> {
+        if self.failed_deliveries.is_empty() {
+            return Ok(());
+        }
+
+        let now = Instant::now();
+        let pending = std::mem::take(&mut self.failed_deliveries);
+        for mut delivery in pending {
+            if !delivery.is_ready_for_retry(now) {
+                self.failed_deliveries.push(delivery);
+                continue;
+            }
+
+            let is_ready = self
+                .watchers
+                .get(&delivery.recipient)
+                .map(|watcher| matches!(watcher.state, WatcherState::Idle))
+                .unwrap_or(true);
+            if !is_ready {
+                self.failed_deliveries.push(delivery);
+                continue;
+            }
+
+            let Some(pane_id) = self.config.pane_map.get(&delivery.recipient).cloned() else {
+                self.escalate_failed_delivery(&delivery)?;
+                continue;
+            };
+
+            delivery.attempts += 1;
+            delivery.last_attempt = now;
+            info!(
+                recipient = %delivery.recipient,
+                from = %delivery.from,
+                attempts = delivery.attempts,
+                "retrying failed live delivery"
+            );
+
+            let injected = match message::inject_message(&pane_id, &delivery.from, &delivery.body) {
+                Ok(()) => true,
+                Err(error) => {
+                    warn!(
+                        recipient = %delivery.recipient,
+                        from = %delivery.from,
+                        attempts = delivery.attempts,
+                        error = %error,
+                        "failed to re-inject message during delivery retry"
+                    );
+                    false
                 }
             };
 
-            // If pane shows spinner or interrupt footer, agent is working
-            if !super::watcher::is_at_agent_prompt(&capture) {
+            if injected
+                && self.verify_message_delivered(
+                    &delivery.from,
+                    &delivery.recipient,
+                    &delivery.body,
+                    3,
+                    false,
+                )
+            {
+                continue;
+            }
+
+            if delivery.has_attempts_remaining() {
+                self.failed_deliveries.push(delivery);
+            } else {
+                self.escalate_failed_delivery(&delivery)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// After injecting a message, verify the injected marker appears in the pane.
+    ///
+    /// Polls the pane for up to `max_attempts` rounds. If the marker still
+    /// does not appear, resends Enter to unstick the submission.
+    fn verify_message_delivered(
+        &mut self,
+        from: &str,
+        recipient: &str,
+        body: &str,
+        max_attempts: u32,
+        record_failure: bool,
+    ) -> bool {
+        let Some(pane_id) = self.config.pane_map.get(recipient).cloned() else {
+            return true; // No pane to verify
+        };
+        let message_marker = message_delivery_marker(from);
+
+        for attempt in 1..=max_attempts {
+            std::thread::sleep(Duration::from_secs(2));
+
+            if self.verify_message_content_in_pane(&pane_id, &message_marker) {
+                self.clear_failed_delivery(recipient, from, body);
                 debug!(
                     recipient,
-                    attempt, "message delivery verified: agent is working"
+                    attempt,
+                    marker = %message_marker,
+                    "message delivery verified: marker found in pane"
                 );
                 return true;
             }
 
-            // Agent is still at prompt — the Enter didn't land. Retry.
             warn!(
                 recipient,
-                attempt, "agent still at prompt after message injection; resending Enter"
+                attempt,
+                marker = %message_marker,
+                "message marker missing after injection; resending Enter"
             );
             if let Err(e) = tmux::send_keys(&pane_id, "", true) {
                 warn!(recipient, error = %e, "failed to resend Enter");
             }
         }
 
-        // After all attempts, check one final time
-        std::thread::sleep(Duration::from_secs(2));
-        let capture = tmux::capture_pane(&pane_id).unwrap_or_default();
-        let accepted = !super::watcher::is_at_agent_prompt(&capture);
-        if !accepted {
+        if record_failure {
+            self.record_failed_delivery(recipient, from, body);
             warn!(
                 recipient,
-                max_attempts, "message may be stuck — agent still at prompt after retries"
+                max_attempts,
+                marker = %message_marker,
+                "message delivery failed after retries; queued for daemon retry"
             );
         }
-        accepted
+
+        false
     }
 
     fn active_task_id(&self, engineer: &str) -> Option<u32> {
@@ -1225,7 +1431,7 @@ impl TeamDaemon {
             match message::inject_message(pane_id, from, body) {
                 Ok(()) => {
                     self.emit_event(TeamEvent::message_routed(from, recipient));
-                    self.verify_message_delivered(recipient, 3);
+                    self.verify_message_delivered(from, recipient, body, 3, true);
                     return Ok(MessageDelivery::LivePane);
                 }
                 Err(error) => {
@@ -1495,7 +1701,7 @@ impl TeamDaemon {
                         delivered_any = true;
                         mark_delivered = true;
                         if is_send {
-                            self.verify_message_delivered(name, 3);
+                            self.verify_message_delivered(&msg.from, name, &msg.body, 3, true);
                         }
                     }
                     Err(error) => {
@@ -3829,6 +4035,14 @@ Recover throughput now:\n\
     }
 }
 
+fn message_delivery_marker(sender: &str) -> String {
+    format!("--- Message from {sender} ---")
+}
+
+fn capture_contains_message_marker(capture: &str, message_marker: &str) -> bool {
+    capture.contains(message_marker)
+}
+
 fn describe_command_failure(command: &str, args: &[&str], output: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -4957,6 +5171,81 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
+            poll_interval: Duration::from_secs(5),
+        }
+    }
+
+    fn failed_delivery_test_daemon(tmp: &tempfile::TempDir) -> TeamDaemon {
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+        };
+        let architect = MemberInstance {
+            name: "architect".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+
+        TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![architect, manager, engineer],
+                pane_map: HashMap::from([("eng-1".to_string(), "%9999999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            idle_started_at: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
+            retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         }
     }
@@ -5622,6 +5911,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -5687,6 +5977,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -5878,6 +6169,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6204,6 +6496,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6259,6 +6552,7 @@ mod tests {
             last_auto_dispatch: Instant::now() - Duration::from_secs(30),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6311,6 +6605,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6368,6 +6663,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6423,6 +6719,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6482,6 +6779,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6669,6 +6967,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6739,6 +7038,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6751,6 +7051,75 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].from, "eng-1");
         assert!(messages[0].body.contains("Need review on merge handling."));
+    }
+
+    #[test]
+    fn delivery_confirm_marker_detection_matches_captured_text() {
+        let marker = message_delivery_marker("manager");
+        let capture = format!("prompt\n{marker}\nbody\n");
+        assert!(capture_contains_message_marker(&capture, &marker));
+        assert!(!capture_contains_message_marker("prompt only", &marker));
+    }
+
+    #[test]
+    fn delivery_confirm_marker_generation_uses_sender_header() {
+        assert_eq!(
+            message_delivery_marker("eng-1-4"),
+            "--- Message from eng-1-4 ---"
+        );
+    }
+
+    #[test]
+    fn failed_delivery_new_sets_expected_fields() {
+        let delivery = FailedDelivery::new("eng-1", "manager", "Please retry this.");
+        assert_eq!(delivery.recipient, "eng-1");
+        assert_eq!(delivery.from, "manager");
+        assert_eq!(delivery.body, "Please retry this.");
+        assert_eq!(delivery.attempts, 1);
+        assert_eq!(delivery.message_marker(), "--- Message from manager ---");
+        assert!(delivery.has_attempts_remaining());
+    }
+
+    #[test]
+    fn failed_delivery_retry_requeues_before_attempt_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let mut delivery = FailedDelivery::new("eng-1", "manager", "Please retry this.");
+        delivery.attempts = 1;
+        delivery.last_attempt = Instant::now() - FAILED_DELIVERY_RETRY_DELAY;
+        daemon.failed_deliveries.push(delivery);
+
+        daemon.retry_failed_deliveries().unwrap();
+
+        assert_eq!(daemon.failed_deliveries.len(), 1);
+        assert_eq!(daemon.failed_deliveries[0].attempts, 2);
+        let messages =
+            inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "manager").unwrap();
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn failed_delivery_retry_respects_attempt_cap_and_escalates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let mut delivery = FailedDelivery::new("eng-1", "manager", "Please retry this.");
+        delivery.attempts = FAILED_DELIVERY_MAX_ATTEMPTS - 1;
+        delivery.last_attempt = Instant::now() - FAILED_DELIVERY_RETRY_DELAY;
+        daemon.failed_deliveries.push(delivery);
+
+        daemon.retry_failed_deliveries().unwrap();
+
+        assert!(daemon.failed_deliveries.is_empty());
+        let messages =
+            inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "manager").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].from, "daemon");
+        assert!(
+            messages[0]
+                .body
+                .contains("Live message delivery failed after 3 attempts.")
+        );
+        assert!(messages[0].body.contains("Recipient: eng-1"));
     }
 
     #[test]
@@ -6838,6 +7207,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7073,6 +7443,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7168,6 +7539,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7260,6 +7632,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7366,6 +7739,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7468,6 +7842,7 @@ mod tests {
                 last_auto_dispatch: Instant::now(),
                 pipeline_starvation_fired: false,
                 retro_generated: false,
+                failed_deliveries: Vec::new(),
                 poll_interval: Duration::from_secs(5),
             };
 
@@ -7569,6 +7944,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7665,6 +8041,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7757,6 +8134,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7837,6 +8215,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7938,6 +8317,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -8015,6 +8395,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -8084,6 +8465,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -8158,6 +8540,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -8226,6 +8609,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -8726,6 +9110,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             failure_window: FailureWindow::new(20),
             last_pattern_notifications: HashMap::new(),
             poll_interval: Duration::from_secs(5),
@@ -8806,6 +9191,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             failure_window: FailureWindow::new(20),
             last_pattern_notifications: HashMap::new(),
             poll_interval: Duration::from_secs(5),
@@ -8899,6 +9285,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -9003,6 +9390,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -9104,6 +9492,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -9229,6 +9618,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -9426,6 +9816,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -9519,6 +9910,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -9599,6 +9991,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -9691,6 +10084,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 

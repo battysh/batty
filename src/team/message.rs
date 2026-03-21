@@ -312,7 +312,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         inject_message(session, "manager", "").unwrap();
-        let content = (0..10)
+        let content = (0..30)
             .find_map(|_| {
                 let content = std::fs::read_to_string(&log_path).unwrap_or_default();
                 let ready = content.contains("--- Message from manager ---")
@@ -352,9 +352,20 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         inject_message(session, "architect", &long_message).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(400));
-
-        let content = std::fs::read_to_string(&log_path).unwrap_or_default();
+        let content = (0..30)
+            .find_map(|_| {
+                let content = std::fs::read_to_string(&log_path).unwrap_or_default();
+                let ready = content.contains("--- Message from architect ---")
+                    && content.contains("symbols: !@#$%^&*()[]{}<>?/\\\\|~`'\"")
+                    && content.contains("line-2");
+                if ready {
+                    Some(content)
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    None
+                }
+            })
+            .unwrap_or_else(|| std::fs::read_to_string(&log_path).unwrap_or_default());
         assert!(content.contains("--- Message from architect ---"));
         assert!(content.contains("symbols: !@#$%^&*()[]{}<>?/\\\\|~`'\""));
         assert!(content.contains(&"x".repeat(200)));
