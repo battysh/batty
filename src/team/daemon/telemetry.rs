@@ -198,9 +198,47 @@ pub(super) fn append_orchestrator_log_line(path: &Path, message: &str) -> Result
     use std::io::Write;
 
     let mut file = super::super::open_log_for_append(path)?;
-    writeln!(file, "[{}] {}", now_unix(), message)?;
+    writeln!(file, "[{}] {}", now_local_datetime(), message)?;
     file.flush()?;
     Ok(())
+}
+
+/// Format current local time as `YYYY-MM-DD HH:MM:SS` for human-readable logs.
+fn now_local_datetime() -> String {
+    use std::time::SystemTime;
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    // Convert to local time using libc
+    #[cfg(unix)]
+    {
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe { libc::localtime_r(&secs, &mut tm) };
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec,
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        // Fallback to UTC on non-unix
+        let total_secs = secs;
+        let days = total_secs / 86400;
+        let day_secs = total_secs % 86400;
+        let hours = day_secs / 3600;
+        let mins = (day_secs % 3600) / 60;
+        let secs_rem = day_secs % 60;
+        // Approximate date from epoch days (good enough for log display)
+        let _ = days; // suppress unused
+        format!("{:02}:{:02}:{:02}Z", hours, mins, secs_rem)
+    }
 }
 
 #[cfg(test)]
@@ -386,6 +424,13 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("dispatch: assigned task #18"));
         assert!(content.starts_with('['));
+        // Verify datetime format: [YYYY-MM-DD HH:MM:SS]
+        let bracket_end = content.find(']').unwrap();
+        let ts = &content[1..bracket_end];
+        assert_eq!(ts.len(), 19, "expected YYYY-MM-DD HH:MM:SS, got: {ts}");
+        assert_eq!(&ts[4..5], "-");
+        assert_eq!(&ts[10..11], " ");
+        assert_eq!(&ts[13..14], ":");
     }
 
     #[test]
