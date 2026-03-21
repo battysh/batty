@@ -1797,6 +1797,15 @@ mod tests {
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+
+    fn production_unwrap_expect_count(path: &Path) -> usize {
+        let content = std::fs::read_to_string(path).unwrap();
+        let test_split = content.split("\n#[cfg(test)]").next().unwrap_or(&content);
+        test_split
+            .lines()
+            .filter(|line| line.contains(".unwrap(") || line.contains(".expect("))
+            .count()
+    }
     use std::sync::{LazyLock, Mutex};
 
     static PATH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -5715,5 +5724,11 @@ exit 1
         let content =
             fs::read_to_string(tmp.path().join(".batty").join("orchestrator.log")).unwrap();
         assert!(content.contains("resume: architect=no (resume disabled)"));
+    }
+
+    #[test]
+    fn production_daemon_has_no_unwrap_or_expect_calls() {
+        let count = production_unwrap_expect_count(Path::new(file!()));
+        assert_eq!(count, 0, "production daemon.rs should avoid unwrap/expect");
     }
 }
