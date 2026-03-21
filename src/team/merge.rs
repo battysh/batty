@@ -476,8 +476,16 @@ mod tests {
     use crate::team::standup::MemberState;
     use crate::team::task_loop::{prepare_engineer_assignment_worktree, setup_engineer_worktree};
     use crate::team::test_helpers::make_test_daemon;
-    use crate::team::test_support::{git, git_ok, git_stdout, init_git_repo};
+    use crate::team::test_support::{
+        engineer_member, git, git_ok, git_stdout, init_git_repo, manager_member,
+    };
     use std::path::Path;
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::thread;
+    use std::time::Duration;
 
     fn write_task_file(project_root: &Path, id: u32, title: &str) {
         let tasks_dir = project_root
@@ -493,6 +501,44 @@ mod tests {
             ),
         )
         .unwrap();
+    }
+
+    fn engineer_worktree_paths(repo: &Path, engineer: &str) -> (PathBuf, PathBuf) {
+        let worktree_dir = repo.join(".batty").join("worktrees").join(engineer);
+        let team_config_dir = repo.join(".batty").join("team_config");
+        (worktree_dir, team_config_dir)
+    }
+
+    fn setup_completion_daemon(repo: &Path, engineer: &str) -> TeamDaemon {
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member(engineer, Some("manager"), true),
+        ];
+        make_test_daemon(repo, members)
+    }
+
+    fn setup_rebase_conflict_repo(
+        engineer: &str,
+    ) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, engineer);
+
+        std::fs::write(repo.join("conflict.txt"), "original\n").unwrap();
+        git_ok(&repo, &["add", "conflict.txt"]);
+        git_ok(&repo, &["commit", "-m", "add conflict file"]);
+
+        setup_engineer_worktree(&repo, &worktree_dir, engineer, &team_config_dir).unwrap();
+
+        std::fs::write(worktree_dir.join("conflict.txt"), "engineer version\n").unwrap();
+        git_ok(&worktree_dir, &["add", "conflict.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "engineer change"]);
+
+        std::fs::write(repo.join("conflict.txt"), "main version\n").unwrap();
+        git_ok(&repo, &["add", "conflict.txt"]);
+        git_ok(&repo, &["commit", "-m", "main change"]);
+
+        (tmp, repo, worktree_dir, team_config_dir)
     }
 
     #[test]
@@ -514,6 +560,34 @@ mod tests {
             drop(lock);
         }
         assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn merge_lock_second_acquire_waits_for_release() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+
+        let first_lock = MergeLock::acquire(tmp.path()).unwrap();
+        let project_root = tmp.path().to_path_buf();
+        let barrier = Arc::new(Barrier::new(2));
+        let acquired = Arc::new(AtomicBool::new(false));
+
+        let thread_barrier = Arc::clone(&barrier);
+        let thread_acquired = Arc::clone(&acquired);
+        let handle = thread::spawn(move || {
+            thread_barrier.wait();
+            let second_lock = MergeLock::acquire(&project_root).unwrap();
+            thread_acquired.store(true, Ordering::SeqCst);
+            drop(second_lock);
+        });
+
+        barrier.wait();
+        thread::sleep(Duration::from_millis(600));
+        assert!(!acquired.load(Ordering::SeqCst));
+
+        drop(first_lock);
+        handle.join().unwrap();
+        assert!(acquired.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -558,6 +632,66 @@ mod tests {
         let main_head = git_stdout(&repo, &["rev-parse", "HEAD"]);
         let worktree_head = git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
         assert_eq!(main_head, worktree_head);
+    }
+
+    #[test]
+    fn merge_empty_diff_returns_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-empty");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-empty", &team_config_dir).unwrap();
+        let main_before = git_stdout(&repo, &["rev-parse", "main"]);
+
+        let result = merge_engineer_branch(&repo, "eng-empty").unwrap();
+
+        assert!(matches!(result, MergeOutcome::Success));
+        assert_eq!(git_stdout(&repo, &["rev-parse", "main"]), main_before);
+    }
+
+    #[test]
+    fn merge_empty_diff_resets_worktree_to_engineer_base_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-empty");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-empty", &team_config_dir).unwrap();
+
+        let result = merge_engineer_branch(&repo, "eng-empty").unwrap();
+
+        assert!(matches!(result, MergeOutcome::Success));
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            engineer_base_branch_name("eng-empty")
+        );
+    }
+
+    #[test]
+    fn merge_with_two_main_advances_rebases_cleanly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-stale");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-stale", &team_config_dir).unwrap();
+
+        std::fs::write(worktree_dir.join("feature.txt"), "engineer work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "feature.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "engineer feature"]);
+
+        std::fs::write(repo.join("main-one.txt"), "main one\n").unwrap();
+        git_ok(&repo, &["add", "main-one.txt"]);
+        git_ok(&repo, &["commit", "-m", "main advance 1"]);
+
+        std::fs::write(repo.join("main-two.txt"), "main two\n").unwrap();
+        git_ok(&repo, &["add", "main-two.txt"]);
+        git_ok(&repo, &["commit", "-m", "main advance 2"]);
+
+        let result = merge_engineer_branch(&repo, "eng-stale").unwrap();
+
+        assert!(matches!(result, MergeOutcome::Success));
+        assert!(repo.join("feature.txt").exists());
+        assert!(repo.join("main-one.txt").exists());
+        assert!(repo.join("main-two.txt").exists());
     }
 
     #[test]
@@ -623,6 +757,89 @@ mod tests {
     }
 
     #[test]
+    fn reset_worktree_noops_when_worktree_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+
+        reset_engineer_worktree(&repo, "eng-missing").unwrap();
+    }
+
+    #[test]
+    fn reset_worktree_keeps_unmerged_task_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-keep");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-keep",
+            "eng-keep/task-77",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        std::fs::write(worktree_dir.join("feature.txt"), "keep me\n").unwrap();
+        git_ok(&worktree_dir, &["add", "feature.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "unmerged feature"]);
+
+        reset_engineer_worktree(&repo, "eng-keep").unwrap();
+
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            engineer_base_branch_name("eng-keep")
+        );
+        assert!(
+            git(&repo, &["rev-parse", "--verify", "eng-keep/task-77"])
+                .status
+                .success()
+        );
+    }
+
+    #[test]
+    fn reset_worktree_keeps_non_engineer_namespace_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-keep");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-keep", &team_config_dir).unwrap();
+        git_ok(&worktree_dir, &["checkout", "-B", "feature/custom", "main"]);
+        std::fs::write(worktree_dir.join("feature.txt"), "non engineer branch\n").unwrap();
+        git_ok(&worktree_dir, &["add", "feature.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "feature branch work"]);
+
+        reset_engineer_worktree(&repo, "eng-keep").unwrap();
+
+        assert!(
+            git(&repo, &["rev-parse", "--verify", "feature/custom"])
+                .status
+                .success()
+        );
+    }
+
+    #[test]
+    fn merge_success_deletes_merged_engineer_branch_namespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-delete");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-delete", &team_config_dir).unwrap();
+
+        std::fs::write(worktree_dir.join("feature.txt"), "remove branch\n").unwrap();
+        git_ok(&worktree_dir, &["add", "feature.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "engineer work"]);
+
+        let result = merge_engineer_branch(&repo, "eng-delete").unwrap();
+
+        assert!(matches!(result, MergeOutcome::Success));
+        assert!(
+            !git(&repo, &["rev-parse", "--verify", "eng-delete"])
+                .status
+                .success()
+        );
+    }
+
+    #[test]
     fn merge_rebase_conflict_returns_conflict() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "batty-merge-test");
@@ -648,6 +865,20 @@ mod tests {
 
         let status = git(&worktree_dir, &["status", "--porcelain"]);
         assert!(status.status.success());
+    }
+
+    #[test]
+    fn merge_rebase_conflict_aborts_rebase_state() {
+        let (_tmp, repo, worktree_dir, _team_config_dir) = setup_rebase_conflict_repo("eng-4");
+
+        let result = merge_engineer_branch(&repo, "eng-4").unwrap();
+
+        assert!(matches!(result, MergeOutcome::RebaseConflict(_)));
+        assert!(
+            !git(&worktree_dir, &["rev-parse", "--verify", "REBASE_HEAD"])
+                .status
+                .success()
+        );
     }
 
     #[test]
@@ -680,6 +911,35 @@ mod tests {
             }
             other => panic!("expected merge failure outcome, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn merge_failure_retains_engineer_branch_for_manual_recovery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-3");
+
+        std::fs::write(repo.join("journal.md"), "base\n").unwrap();
+        git_ok(&repo, &["add", "journal.md"]);
+        git_ok(&repo, &["commit", "-m", "add journal"]);
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-3", &team_config_dir).unwrap();
+
+        std::fs::write(worktree_dir.join("journal.md"), "engineer version\n").unwrap();
+        git_ok(&worktree_dir, &["add", "journal.md"]);
+        git_ok(&worktree_dir, &["commit", "-m", "engineer update"]);
+
+        std::fs::write(repo.join("journal.md"), "dirty main\n").unwrap();
+
+        let result = merge_engineer_branch(&repo, "eng-3").unwrap();
+
+        assert!(matches!(result, MergeOutcome::MergeFailure(_)));
+        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-3");
+        assert!(
+            git(&repo, &["rev-parse", "--verify", "eng-3"])
+                .status
+                .success()
+        );
     }
 
     #[test]
@@ -835,6 +1095,114 @@ mod tests {
         let manager_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
         assert!(manager_messages.is_empty());
+    }
+
+    #[test]
+    fn rebase_conflict_first_retry_messages_engineer() {
+        let (_tmp, repo, _worktree_dir, _team_config_dir) = setup_rebase_conflict_repo("eng-1");
+        write_task_file(&repo, 42, "rebase-conflict-retry");
+
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        let engineer_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
+        assert_eq!(engineer_messages.len(), 1);
+        assert_eq!(engineer_messages[0].from, "batty");
+        assert!(
+            engineer_messages[0]
+                .body
+                .contains("Merge conflict during rebase onto main")
+        );
+    }
+
+    #[test]
+    fn rebase_conflict_first_retry_keeps_task_active_and_counts_retry() {
+        let (_tmp, repo, _worktree_dir, _team_config_dir) = setup_rebase_conflict_repo("eng-1");
+        write_task_file(&repo, 42, "rebase-conflict-state");
+
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+        assert_eq!(daemon.retry_count_for_test("eng-1"), Some(1));
+        assert_eq!(
+            daemon.member_state_for_test("eng-1"),
+            Some(MemberState::Working)
+        );
+    }
+
+    #[test]
+    fn rebase_conflict_third_attempt_escalates_to_manager() {
+        let (_tmp, repo, _worktree_dir, _team_config_dir) = setup_rebase_conflict_repo("eng-1");
+        write_task_file(&repo, 42, "rebase-conflict-escalation");
+
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+        daemon.increment_retry("eng-1");
+        daemon.increment_retry("eng-1");
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        let manager_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
+        assert!(manager_messages.iter().any(|msg| {
+            msg.from == "eng-1"
+                && msg
+                    .body
+                    .contains("unresolvable merge conflicts after 2 retries")
+        }));
+    }
+
+    #[test]
+    fn rebase_conflict_third_attempt_clears_task_and_sets_idle() {
+        let (_tmp, repo, _worktree_dir, _team_config_dir) = setup_rebase_conflict_repo("eng-1");
+        write_task_file(&repo, 42, "rebase-conflict-reset");
+
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+        daemon.increment_retry("eng-1");
+        daemon.increment_retry("eng-1");
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        assert_eq!(daemon.active_task_id("eng-1"), None);
+        assert_eq!(daemon.retry_count_for_test("eng-1"), None);
+        assert_eq!(
+            daemon.member_state_for_test("eng-1"),
+            Some(MemberState::Idle)
+        );
+    }
+
+    #[test]
+    fn rebase_conflict_third_attempt_records_escalation_event() {
+        let (_tmp, repo, _worktree_dir, _team_config_dir) = setup_rebase_conflict_repo("eng-1");
+        write_task_file(&repo, 42, "rebase-conflict-event");
+
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.increment_retry("eng-1");
+        daemon.increment_retry("eng-1");
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        let events = crate::team::events::read_events(
+            &repo.join(".batty").join("team_config").join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "task_escalated"
+                && event.role.as_deref() == Some("eng-1")
+                && event.task.as_deref() == Some("42")
+        }));
     }
 
     #[test]
