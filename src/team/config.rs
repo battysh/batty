@@ -187,6 +187,8 @@ pub struct AutomationConfig {
     pub manager_dispatch_interventions: bool,
     #[serde(default = "default_enabled")]
     pub architect_utilization_interventions: bool,
+    #[serde(default)]
+    pub replenishment_threshold: Option<usize>,
     #[serde(default = "default_intervention_idle_grace_secs")]
     pub intervention_idle_grace_secs: u64,
     #[serde(default = "default_intervention_cooldown_secs")]
@@ -204,6 +206,7 @@ impl Default for AutomationConfig {
             owned_task_interventions: default_enabled(),
             manager_dispatch_interventions: default_enabled(),
             architect_utilization_interventions: default_enabled(),
+            replenishment_threshold: None,
             intervention_idle_grace_secs: default_intervention_idle_grace_secs(),
             intervention_cooldown_secs: default_intervention_cooldown_secs(),
         }
@@ -1208,6 +1211,7 @@ automation:
   owned_task_interventions: false
   manager_dispatch_interventions: false
   architect_utilization_interventions: false
+  replenishment_threshold: 1
 roles:
   - name: worker
     role_type: engineer
@@ -1223,6 +1227,13 @@ roles:
         assert!(!config.automation.owned_task_interventions);
         assert!(!config.automation.manager_dispatch_interventions);
         assert!(!config.automation.architect_utilization_interventions);
+        assert_eq!(config.automation.replenishment_threshold, Some(1));
+    }
+
+    #[test]
+    fn automation_replenishment_threshold_defaults_to_none() {
+        let config: TeamConfig = serde_yaml::from_str(minimal_yaml()).unwrap();
+        assert_eq!(config.automation.replenishment_threshold, None);
     }
 
     #[test]
