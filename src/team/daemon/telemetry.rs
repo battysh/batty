@@ -187,20 +187,95 @@ impl TeamDaemon {
         if !self.orchestrator_enabled() {
             return;
         }
-        let path = super::super::orchestrator_log_path(&self.config.project_root);
-        if let Err(error) = append_orchestrator_log_line(&path, action.as_ref()) {
-            warn!(log = %path.display(), error = %error, "failed to append orchestrator log");
+        let plain_path = super::super::orchestrator_log_path(&self.config.project_root);
+        let ansi_path = super::super::orchestrator_ansi_log_path(&self.config.project_root);
+        if let Err(error) = append_orchestrator_log_line(&plain_path, &ansi_path, action.as_ref()) {
+            warn!(log = %plain_path.display(), error = %error, "failed to append orchestrator log");
         }
     }
 }
 
-pub(super) fn append_orchestrator_log_line(path: &Path, message: &str) -> Result<()> {
+pub(super) fn append_orchestrator_log_line(
+    plain_path: &Path,
+    ansi_path: &Path,
+    message: &str,
+) -> Result<()> {
     use std::io::Write;
 
-    let mut file = super::super::open_log_for_append(path)?;
-    writeln!(file, "[{}] {}", now_local_datetime(), message)?;
-    file.flush()?;
+    let timestamp = now_local_datetime();
+    let plain_line = format_orchestrator_line(&timestamp, message, false);
+    let ansi_line = format_orchestrator_line(&timestamp, message, true);
+
+    let mut plain_file = super::super::open_log_for_append(plain_path)?;
+    writeln!(plain_file, "{plain_line}")?;
+    plain_file.flush()?;
+
+    let mut ansi_file = super::super::open_log_for_append(ansi_path)?;
+    writeln!(ansi_file, "{ansi_line}")?;
+    ansi_file.flush()?;
     Ok(())
+}
+
+fn format_orchestrator_line(timestamp: &str, message: &str, ansi: bool) -> String {
+    if !ansi {
+        return format!("[{timestamp}] {message}");
+    }
+
+    const RESET: &str = "\x1b[0m";
+    const DIM: &str = "\x1b[2;90m";
+    const BOLD: &str = "\x1b[1m";
+    const AMBER: &str = "\x1b[1;33m";
+    const CYAN: &str = "\x1b[1;36m";
+    const GREEN: &str = "\x1b[1;32m";
+    const RED: &str = "\x1b[1;31m";
+    const MAGENTA: &str = "\x1b[1;35m";
+    const BLUE: &str = "\x1b[1;34m";
+    const HILITE: &str = "\x1b[4;97m";
+
+    let lower = message.to_ascii_lowercase();
+    let (label, color) = if lower.contains("triage") {
+        ("TRIAGE", AMBER)
+    } else if lower.contains("review") {
+        ("REVIEW", CYAN)
+    } else if lower.contains("dispatch") {
+        ("DISPATCH", GREEN)
+    } else if lower.contains("escalat") {
+        ("ESCALATION", RED)
+    } else if lower.contains("utilization") {
+        ("UTILIZATION", MAGENTA)
+    } else if lower.contains("replenishment") {
+        ("REPLENISH", BLUE)
+    } else if lower.contains("runtime") || lower.contains("restart") || lower.contains("resume") {
+        ("RUNTIME", BOLD)
+    } else {
+        ("ACTION", BOLD)
+    };
+
+    let highlighted = highlight_references(message, HILITE, RESET);
+    format!("{DIM}[{timestamp}]{RESET} {color}{label:>10}{RESET}  {highlighted}")
+}
+
+fn highlight_references(message: &str, start: &str, reset: &str) -> String {
+    let mut result = String::with_capacity(message.len() + 32);
+    for token in message.split(' ') {
+        if !result.is_empty() {
+            result.push(' ');
+        }
+        let trimmed = token.trim_matches(|c: char| matches!(c, ',' | '.' | ';' | ':' | ')' | '('));
+        let should_highlight = trimmed.starts_with("Task")
+            || trimmed.starts_with('#')
+            || trimmed.contains("eng-")
+            || trimmed.contains("manager")
+            || trimmed.contains("architect");
+        if should_highlight {
+            result.push_str(start);
+            result.push_str(token);
+            result.push_str(reset);
+        } else {
+            result.push_str(token);
+        }
+    }
+    result
 }
 
 /// Format current local time as `YYYY-MM-DD HH:MM:SS` for human-readable logs.
@@ -453,7 +528,8 @@ mod tests {
     fn append_orchestrator_log_line_writes_timestamped_activity() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join(".batty").join("orchestrator.log");
-        append_orchestrator_log_line(&path, "dispatch: assigned task #18").unwrap();
+        let ansi_path = tmp.path().join(".batty").join("orchestrator.ansi.log");
+        append_orchestrator_log_line(&path, &ansi_path, "dispatch: assigned task #18").unwrap();
         let content = fs::read_to_string(&path).unwrap();
         let line = content.trim_end();
         let format =
@@ -482,29 +558,46 @@ mod tests {
         let content =
             fs::read_to_string(tmp.path().join(".batty").join("orchestrator.log")).unwrap();
         assert!(content.contains("dispatch: active"));
+        let ansi =
+            fs::read_to_string(tmp.path().join(".batty").join("orchestrator.ansi.log")).unwrap();
+        assert!(ansi.contains("\u{1b}["));
+        assert!(ansi.contains("DISPATCH"));
     }
 
     #[test]
     fn append_orchestrator_log_line_writes_to_fresh_log_after_rotation() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join(".batty").join("orchestrator.log");
+        let ansi_path = tmp.path().join(".batty").join("orchestrator.ansi.log");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "stale log entry\n").unwrap();
+        fs::write(&ansi_path, "stale ansi entry\n").unwrap();
         fs::OpenOptions::new()
             .write(true)
             .open(&path)
             .unwrap()
             .set_len(LOG_ROTATION_BYTES + 1)
             .unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&ansi_path)
+            .unwrap()
+            .set_len(LOG_ROTATION_BYTES + 1)
+            .unwrap();
 
-        append_orchestrator_log_line(&path, "dispatch: after rotation").unwrap();
+        append_orchestrator_log_line(&path, &ansi_path, "dispatch: after rotation").unwrap();
 
         let rotated = fs::read_to_string(format!("{}.1", path.display())).unwrap();
         assert!(rotated.contains("stale log entry"));
+        let ansi_rotated = fs::read_to_string(format!("{}.1", ansi_path.display())).unwrap();
+        assert!(ansi_rotated.contains("stale ansi entry"));
 
         let fresh = fs::read_to_string(&path).unwrap();
         assert!(fresh.contains("dispatch: after rotation"));
         assert!(!fresh.contains("stale log entry"));
+        let ansi_fresh = fs::read_to_string(&ansi_path).unwrap();
+        assert!(ansi_fresh.contains("\u{1b}["));
+        assert!(!ansi_fresh.contains("stale ansi entry"));
     }
 
     #[test]
@@ -512,11 +605,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let malformed_path = tmp.path().join(".batty").join("orchestrator.log");
         fs::create_dir_all(&malformed_path).unwrap();
+        let malformed_ansi_path = tmp.path().join(".batty").join("orchestrator.ansi.log");
+        fs::create_dir_all(&malformed_ansi_path).unwrap();
         let daemon = daemon_for_orchestrator_logging(tmp.path(), WorkflowMode::Hybrid, true);
 
         daemon.record_orchestrator_action("dispatch: malformed");
 
         assert!(malformed_path.is_dir());
+        assert!(malformed_ansi_path.is_dir());
         assert!(
             !tmp.path()
                 .join(".batty")
@@ -553,6 +649,29 @@ mod tests {
         );
         assert!(lines[0].ends_with("dispatch: first"));
         assert!(lines[1].ends_with("dispatch: second"));
+    }
+
+    #[test]
+    fn format_orchestrator_line_includes_ansi_codes_for_triage() {
+        let formatted = format_orchestrator_line(
+            "2026-03-21 18:46:00",
+            "recovery: triage intervention for eng-1 with 2 pending direct-report result(s)",
+            true,
+        );
+        assert!(formatted.contains("\u{1b}["));
+        assert!(formatted.contains("TRIAGE"));
+        assert!(formatted.contains("eng-1"));
+    }
+
+    #[test]
+    fn format_orchestrator_line_keeps_plain_text_fallback() {
+        let formatted =
+            format_orchestrator_line("2026-03-21 18:46:00", "dispatch: assigned task #18", false);
+        assert_eq!(
+            formatted,
+            "[2026-03-21 18:46:00] dispatch: assigned task #18"
+        );
+        assert!(!formatted.contains("\u{1b}["));
     }
 
     #[test]

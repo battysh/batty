@@ -158,8 +158,10 @@ fn launch_orchestrator_pane(
     project_root: &Path,
     position: OrchestratorPosition,
 ) -> Result<String> {
-    let log_path = super::orchestrator_log_path(project_root);
-    ensure_orchestrator_log(&log_path)?;
+    let plain_log_path = super::orchestrator_log_path(project_root);
+    let ansi_log_path = super::orchestrator_ansi_log_path(project_root);
+    ensure_orchestrator_log(&plain_log_path)?;
+    ensure_orchestrator_log(&ansi_log_path)?;
 
     let (orchestrator_target, agent_root_pane) = match position {
         OrchestratorPosition::Left => {
@@ -183,7 +185,7 @@ fn launch_orchestrator_pane(
 
     let tail_command = format!(
         "bash -lc 'touch {path}; exec tail -n 200 -F {path}'",
-        path = shell_single_quote(log_path.to_string_lossy().as_ref())
+        path = shell_single_quote(ansi_log_path.to_string_lossy().as_ref())
     );
     tmux::respawn_pane(&orchestrator_target, &tail_command)?;
     set_pane_title(session, &orchestrator_target, ORCHESTRATOR_ROLE)?;

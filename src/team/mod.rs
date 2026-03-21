@@ -109,6 +109,10 @@ pub(crate) fn orchestrator_log_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("orchestrator.log")
 }
 
+pub(crate) fn orchestrator_ansi_log_path(project_root: &Path) -> PathBuf {
+    project_root.join(".batty").join("orchestrator.ansi.log")
+}
+
 /// Returns `~/.batty/templates/`.
 pub fn templates_base_dir() -> Result<PathBuf> {
     let home = std::env::var("HOME").context("cannot determine home directory")?;
