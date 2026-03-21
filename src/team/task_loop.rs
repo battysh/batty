@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use tracing::{debug, info, warn};
 
+use super::git_cmd;
+use super::retry::{RetryConfig, retry_sync};
+
 fn priority_rank(p: &str) -> u32 {
     match p {
         "critical" => 0,
@@ -68,6 +71,17 @@ pub(crate) fn run_tests_in_worktree(worktree_dir: &Path) -> Result<(bool, String
     Ok((output.status.success(), trimmed))
 }
 
+fn retry_git<T, F>(operation: F) -> std::result::Result<T, git_cmd::GitError>
+where
+    F: Fn() -> std::result::Result<T, git_cmd::GitError>,
+{
+    retry_sync(&RetryConfig::fast(), operation)
+}
+
+fn map_git_error<T>(result: std::result::Result<T, git_cmd::GitError>, action: &str) -> Result<T> {
+    result.map_err(|error| anyhow::anyhow!("{action}: {error}"))
+}
+
 pub(crate) fn read_task_title(board_dir: &Path, task_id: u32) -> String {
     let tasks_dir = board_dir.join("tasks");
     let prefix = format!("{task_id:03}-");
@@ -106,39 +120,21 @@ pub(crate) fn setup_engineer_worktree(
     }
 
     if !worktree_dir.exists() {
-        let output = std::process::Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                "-b",
-                branch_name,
-                &worktree_dir.to_string_lossy(),
-                "main",
-            ])
-            .current_dir(project_root)
-            .output()
-            .context("failed to create git worktree")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("already exists") {
-                let output = std::process::Command::new("git")
-                    .args([
-                        "worktree",
-                        "add",
-                        &worktree_dir.to_string_lossy(),
-                        branch_name,
-                    ])
-                    .current_dir(project_root)
-                    .output()
-                    .context("failed to create git worktree")?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    bail!("git worktree add failed: {stderr}");
-                }
-            } else {
-                bail!("git worktree add failed: {stderr}");
+        let path = worktree_dir.to_string_lossy().to_string();
+        match retry_git(|| git_cmd::worktree_add(project_root, worktree_dir, branch_name, "main")) {
+            Ok(_) => {}
+            Err(git_cmd::GitError::Permanent { stderr, .. })
+                if stderr.contains("already exists") =>
+            {
+                map_git_error(
+                    retry_git(|| {
+                        git_cmd::run_git(project_root, &["worktree", "add", &path, branch_name])
+                    }),
+                    "failed to create git worktree",
+                )?;
+            }
+            Err(error) => {
+                return Err(anyhow::anyhow!("failed to create git worktree: {error}"));
             }
         }
 
@@ -241,21 +237,15 @@ pub(crate) fn refresh_engineer_worktree(
         return Ok(());
     }
 
-    let up_to_date = std::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", "main", branch_name])
-        .current_dir(project_root)
-        .output()
-        .context("failed to compare worktree branch with main")?;
-    if up_to_date.status.success() {
+    if map_git_error(
+        retry_git(|| git_cmd::merge_base_is_ancestor(project_root, "main", branch_name)),
+        "failed to compare worktree branch with main",
+    )? {
         return Ok(());
     }
 
-    let rebase = std::process::Command::new("git")
-        .args(["rebase", "main"])
-        .current_dir(worktree_dir)
-        .output()
-        .context("failed to rebase engineer worktree")?;
-    if rebase.status.success() {
+    let rebase_result = retry_git(|| git_cmd::rebase(worktree_dir, "main"));
+    if rebase_result.is_ok() {
         info!(
             worktree = %worktree_dir.display(),
             branch = branch_name,
@@ -264,36 +254,23 @@ pub(crate) fn refresh_engineer_worktree(
         return Ok(());
     }
 
-    let stderr = String::from_utf8_lossy(&rebase.stderr).trim().to_string();
-    let _ = std::process::Command::new("git")
-        .args(["rebase", "--abort"])
-        .current_dir(worktree_dir)
-        .output();
+    let stderr = match rebase_result {
+        Ok(_) => unreachable!("successful rebase returned early"),
+        Err(git_cmd::GitError::Transient { stderr, .. })
+        | Err(git_cmd::GitError::Permanent { stderr, .. }) => stderr.trim().to_string(),
+        Err(git_cmd::GitError::Exec(error)) => error.to_string(),
+    };
+    let _ = retry_git(|| git_cmd::rebase_abort(worktree_dir));
 
-    let remove = std::process::Command::new("git")
-        .args([
-            "worktree",
-            "remove",
-            "--force",
-            &worktree_dir.to_string_lossy(),
-        ])
-        .current_dir(project_root)
-        .output()
-        .context("failed to remove conflicted worktree")?;
-    if !remove.status.success() {
-        let remove_stderr = String::from_utf8_lossy(&remove.stderr);
-        bail!("git worktree remove --force failed after rebase error '{stderr}': {remove_stderr}");
-    }
+    map_git_error(
+        retry_git(|| git_cmd::worktree_remove(project_root, worktree_dir, true)),
+        &format!("failed to remove conflicted worktree after rebase error '{stderr}'"),
+    )?;
 
-    let delete = std::process::Command::new("git")
-        .args(["branch", "-D", branch_name])
-        .current_dir(project_root)
-        .output()
-        .context("failed to delete conflicted worktree branch")?;
-    if !delete.status.success() {
-        let delete_stderr = String::from_utf8_lossy(&delete.stderr);
-        bail!("git branch -D failed after rebase error '{stderr}': {delete_stderr}");
-    }
+    map_git_error(
+        retry_git(|| git_cmd::branch_delete(project_root, branch_name)),
+        &format!("failed to delete conflicted worktree branch after rebase error '{stderr}'"),
+    )?;
 
     warn!(
         worktree = %worktree_dir.display(),
@@ -419,31 +396,20 @@ fn ensure_engineer_worktree_links(worktree_dir: &Path, team_config_dir: &Path) -
 }
 
 fn worktree_has_user_changes(worktree_dir: &Path) -> Result<bool> {
-    let status = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(worktree_dir)
-        .output()
-        .context("failed to inspect worktree status")?;
-    if !status.status.success() {
-        let stderr = String::from_utf8_lossy(&status.stderr);
-        bail!("git status --porcelain failed: {stderr}");
-    }
-
-    Ok(String::from_utf8_lossy(&status.stdout)
-        .lines()
-        .any(|line| !line.starts_with("?? .batty/")))
+    Ok(map_git_error(
+        retry_git(|| git_cmd::status_porcelain(worktree_dir)),
+        "failed to inspect worktree status",
+    )?
+    .lines()
+    .any(|line| !line.starts_with("?? .batty/")))
 }
 
 fn auto_clean_worktree(worktree_dir: &Path) -> Result<()> {
     // Try stash first — preserves work for manual recovery.
-    let stash = std::process::Command::new("git")
-        .args(["stash", "--include-untracked"])
-        .current_dir(worktree_dir)
-        .output()
-        .context("failed to run git stash")?;
-
-    if stash.status.success() {
-        let stdout = String::from_utf8_lossy(&stash.stdout);
+    if let Ok(stash) =
+        retry_git(|| git_cmd::run_git(worktree_dir, &["stash", "--include-untracked"]))
+    {
+        let stdout = stash.stdout;
         if !stdout.contains("No local changes to save") {
             warn!(
                 worktree = %worktree_dir.display(),
@@ -458,14 +424,8 @@ fn auto_clean_worktree(worktree_dir: &Path) -> Result<()> {
         worktree = %worktree_dir.display(),
         "force-cleaning engineer worktree"
     );
-    let _ = std::process::Command::new("git")
-        .args(["checkout", "--", "."])
-        .current_dir(worktree_dir)
-        .output();
-    let _ = std::process::Command::new("git")
-        .args(["clean", "-fd", "--exclude=.batty/"])
-        .current_dir(worktree_dir)
-        .output();
+    let _ = retry_git(|| git_cmd::run_git(worktree_dir, &["checkout", "--", "."]));
+    let _ = retry_git(|| git_cmd::run_git(worktree_dir, &["clean", "-fd", "--exclude=.batty/"]));
 
     if worktree_has_user_changes(worktree_dir)? {
         bail!(
@@ -477,63 +437,39 @@ fn auto_clean_worktree(worktree_dir: &Path) -> Result<()> {
 }
 
 pub(crate) fn current_worktree_branch(worktree_dir: &Path) -> Result<String> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(worktree_dir)
-        .output()
-        .context("failed to determine worktree branch")?;
-    if !output.status.success() {
-        bail!("failed to determine worktree branch");
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    map_git_error(
+        retry_git(|| git_cmd::rev_parse_branch(worktree_dir)),
+        "failed to determine worktree branch",
+    )
 }
 
 pub(crate) fn checkout_worktree_branch_from_main(
     worktree_dir: &Path,
     branch_name: &str,
 ) -> Result<()> {
-    let output = std::process::Command::new("git")
-        .args(["checkout", "-B", branch_name, "main"])
-        .current_dir(worktree_dir)
-        .output()
-        .with_context(|| format!("failed to switch worktree to branch '{branch_name}'"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git checkout -B {branch_name} main failed: {stderr}");
-    }
-    Ok(())
+    map_git_error(
+        retry_git(|| git_cmd::checkout_new_branch(worktree_dir, branch_name, "main")),
+        &format!("failed to switch worktree to branch '{branch_name}'"),
+    )
 }
 
 fn branch_exists(project_root: &Path, branch_name: &str) -> Result<bool> {
-    let output = std::process::Command::new("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch_name}"),
-        ])
-        .current_dir(project_root)
-        .output()
-        .with_context(|| format!("failed to check whether branch '{branch_name}' exists"))?;
-    Ok(output.status.success())
+    map_git_error(
+        retry_git(|| git_cmd::show_ref_exists(project_root, branch_name)),
+        &format!("failed to check whether branch '{branch_name}' exists"),
+    )
 }
 
 fn worktree_registered(project_root: &Path, worktree_dir: &Path) -> Result<bool> {
-    let output = std::process::Command::new("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(project_root)
-        .output()
-        .context("failed to list git worktrees")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git worktree list --porcelain failed: {stderr}");
-    }
-
+    let output = map_git_error(
+        retry_git(|| git_cmd::worktree_list(project_root)),
+        "failed to list git worktrees",
+    )?;
     let target = worktree_dir
         .canonicalize()
         .unwrap_or_else(|_| worktree_dir.to_path_buf());
 
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+    for line in output.lines() {
         let Some(candidate) = line.strip_prefix("worktree ") else {
             continue;
         };
@@ -548,20 +484,12 @@ fn worktree_registered(project_root: &Path, worktree_dir: &Path) -> Result<bool>
 }
 
 fn branch_is_checked_out_in_any_worktree(project_root: &Path, branch_name: &str) -> Result<bool> {
-    let output = std::process::Command::new("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(project_root)
-        .output()
-        .context("failed to list git worktrees")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git worktree list --porcelain failed: {stderr}");
-    }
-
+    let output = map_git_error(
+        retry_git(|| git_cmd::worktree_list(project_root)),
+        "failed to list git worktrees",
+    )?;
     let target = format!("branch refs/heads/{branch_name}");
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .any(|line| line.trim() == target))
+    Ok(output.lines().any(|line| line.trim() == target))
 }
 
 pub(crate) fn branch_is_merged_into(
@@ -569,41 +497,27 @@ pub(crate) fn branch_is_merged_into(
     branch_name: &str,
     base_branch: &str,
 ) -> Result<bool> {
-    let output = std::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", branch_name, base_branch])
-        .current_dir(project_root)
-        .output()
-        .with_context(|| {
-            format!("failed to compare branch '{branch_name}' with '{base_branch}'")
-        })?;
-    Ok(output.status.success())
+    map_git_error(
+        retry_git(|| git_cmd::merge_base_is_ancestor(project_root, branch_name, base_branch)),
+        &format!("failed to compare branch '{branch_name}' with '{base_branch}'"),
+    )
 }
 
 pub(crate) fn delete_branch(project_root: &Path, branch_name: &str) -> Result<()> {
-    let output = std::process::Command::new("git")
-        .args(["branch", "-D", branch_name])
-        .current_dir(project_root)
-        .output()
-        .with_context(|| format!("failed to delete branch '{branch_name}'"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git branch -D {branch_name} failed: {stderr}");
-    }
-    Ok(())
+    map_git_error(
+        retry_git(|| git_cmd::branch_delete(project_root, branch_name)),
+        &format!("failed to delete branch '{branch_name}'"),
+    )
 }
 
 fn archived_legacy_branch_name(project_root: &Path, engineer_name: &str) -> Result<String> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--short", engineer_name])
-        .current_dir(project_root)
-        .output()
-        .with_context(|| format!("failed to resolve legacy branch '{engineer_name}'"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git rev-parse --short {engineer_name} failed: {stderr}");
-    }
-
-    let short_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let short_sha = map_git_error(
+        retry_git(|| git_cmd::run_git(project_root, &["rev-parse", "--short", engineer_name])),
+        &format!("failed to resolve legacy branch '{engineer_name}'"),
+    )?
+    .stdout
+    .trim()
+    .to_string();
     let mut candidate = format!("legacy/{engineer_name}-{short_sha}");
     let mut counter = 1usize;
     while branch_exists(project_root, &candidate)? {
@@ -614,53 +528,16 @@ fn archived_legacy_branch_name(project_root: &Path, engineer_name: &str) -> Resu
 }
 
 fn rename_branch(project_root: &Path, old_branch: &str, new_branch: &str) -> Result<()> {
-    let output = std::process::Command::new("git")
-        .args(["branch", "-m", old_branch, new_branch])
-        .current_dir(project_root)
-        .output()
-        .with_context(|| format!("failed to rename branch '{old_branch}' to '{new_branch}'"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git branch -m {old_branch} {new_branch} failed: {stderr}");
-    }
-    Ok(())
+    map_git_error(
+        retry_git(|| git_cmd::branch_rename(project_root, old_branch, new_branch)),
+        &format!("failed to rename branch '{old_branch}' to '{new_branch}'"),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::{Command, Output};
-
-    fn git(dir: &Path, args: &[&str]) -> Output {
-        Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap_or_else(|e| panic!("git {:?} failed to run: {e}", args))
-    }
-
-    fn git_ok(dir: &Path, args: &[&str]) {
-        let output = git(dir, args);
-        assert!(
-            output.status.success(),
-            "git {:?} failed: stdout={} stderr={}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    fn git_stdout(dir: &Path, args: &[&str]) -> String {
-        let output = git(dir, args);
-        assert!(
-            output.status.success(),
-            "git {:?} failed: stdout={} stderr={}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    }
+    use crate::team::test_support::{git, git_ok, git_stdout};
 
     fn init_git_repo(tmp: &tempfile::TempDir) -> PathBuf {
         let repo = tmp.path();
