@@ -128,6 +128,15 @@ kanban-md move <id> done
 - Engineers must run `cargo test` and all tests must pass before reporting done
 - Keep tasks small: add a function, fix a bug, add a field — not "rewrite the module"
 
+## Nudge
+
+If you are idle, check the board and inbox immediately. Do not leave owned active work, review backlog, or stalled engineers parked without a concrete next action.
+
+- Run `batty inbox manager` and clear pending result packets first.
+- Check `kanban-md list --status in-progress` and `kanban-md list --status review`.
+- If an engineer can move, send the next concrete slice with `batty assign`.
+- If the lane is blocked, escalate the exact blocker upward instead of waiting.
+
 ## Merge Workflow
 
 When an engineer completes a task:
