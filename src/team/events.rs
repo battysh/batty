@@ -154,6 +154,14 @@ impl TeamEvent {
         }
     }
 
+    pub fn task_unblocked(role: &str, task: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            ..Self::base("task_unblocked")
+        }
+    }
+
     pub fn task_completed(role: &str) -> Self {
         Self {
             role: Some(role.into()),
@@ -354,6 +362,7 @@ mod tests {
             ),
             ("task_assigned", TeamEvent::task_assigned("eng-1", "task")),
             ("task_escalated", TeamEvent::task_escalated("eng-1", "task")),
+            ("task_unblocked", TeamEvent::task_unblocked("eng-1", "task")),
             ("task_completed", TeamEvent::task_completed("eng-1")),
             ("standup_generated", TeamEvent::standup_generated("manager")),
             ("retro_generated", TeamEvent::retro_generated()),
@@ -459,6 +468,15 @@ mod tests {
         assert_eq!(parsed["task"].as_str().unwrap(), "67");
         assert_eq!(parsed["reason"].as_str().unwrap(), "context_exhausted");
         assert_eq!(parsed["restart_count"].as_u64().unwrap(), 2);
+    }
+
+    #[test]
+    fn task_unblocked_serializes_role_and_task() {
+        let event = TeamEvent::task_unblocked("eng-1-1", "42");
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"task_unblocked\""));
+        assert!(json.contains("\"role\":\"eng-1-1\""));
+        assert!(json.contains("\"task\":\"42\""));
     }
 
     #[test]
