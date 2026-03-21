@@ -408,8 +408,8 @@ fn main() -> Result<()> {
             team::cost::show_cost(&root)?;
         }
 
-        Command::Doctor { fix } => {
-            print!("{}", team::doctor::run(&root, fix)?);
+        Command::Doctor { fix, yes } => {
+            print!("{}", team::doctor::run(&root, fix, yes)?);
         }
 
         Command::Telegram => {
