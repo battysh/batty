@@ -10,7 +10,6 @@ use anyhow::Result;
 use tracing::{info, warn};
 
 use super::super::events::TeamEvent;
-use super::super::failure_patterns;
 use super::*;
 
 impl TeamDaemon {
@@ -24,7 +23,7 @@ impl TeamDaemon {
     }
 
     pub(super) fn emit_event(&mut self, event: TeamEvent) {
-        self.failure_window.push(&event);
+        self.failure_tracker.push(&event);
         if let Err(error) = self.event_sink.emit(event) {
             warn!(error = %error, "failed to write daemon event; continuing");
         }
@@ -134,33 +133,7 @@ impl TeamDaemon {
             return Ok(());
         }
 
-        let patterns = self.failure_window.detect_failure_patterns();
-        if patterns.is_empty() {
-            return Ok(());
-        }
-
-        let notifications = failure_patterns::generate_pattern_notifications(&patterns, 3, 5);
-        for (pattern, notification) in patterns
-            .iter()
-            .filter(|pattern| pattern.frequency >= 3)
-            .zip(notifications)
-        {
-            let signature = format!(
-                "{}:{}",
-                pattern.pattern_type.as_str(),
-                pattern.affected_entities.join(",")
-            );
-            let last_frequency = self
-                .last_pattern_notifications
-                .get(&signature)
-                .copied()
-                .unwrap_or(0);
-            if notification.frequency <= last_frequency {
-                continue;
-            }
-            self.last_pattern_notifications
-                .insert(signature, notification.frequency);
-
+        for notification in self.failure_tracker.pattern_notifications(3, 5) {
             let managers: Vec<String> = self
                 .config
                 .members
@@ -223,7 +196,6 @@ pub(super) fn append_orchestrator_log_line(path: &Path, message: &str) -> Result
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::fs;
     use std::io;
     use std::sync::{Arc, Mutex};
@@ -235,6 +207,7 @@ mod tests {
         WorkflowMode, WorkflowPolicy,
     };
     use crate::team::events::{EventSink, read_events};
+    use crate::team::failure_patterns::FailureTracker;
     use crate::team::test_helpers::{RecordingChannel, daemon_config_with_roles};
     use serial_test::serial;
 
@@ -285,8 +258,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::from_writer(
                 tmp.path().join("broken-events.jsonl").as_path(),
                 FailingWriter,
@@ -567,8 +539,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&events_path).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),

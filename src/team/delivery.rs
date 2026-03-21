@@ -657,7 +657,7 @@ mod tests {
     };
     use crate::team::daemon::{DaemonConfig, TeamDaemon};
     use crate::team::events::EventSink;
-    use crate::team::failure_patterns::FailureWindow;
+    use crate::team::failure_patterns::FailureTracker;
     use crate::team::hierarchy::MemberInstance;
 
     struct RecordingChannel {
@@ -732,8 +732,7 @@ mod tests {
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
+            failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
