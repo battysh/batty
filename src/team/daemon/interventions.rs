@@ -160,7 +160,10 @@ impl TeamDaemon {
             };
 
             if fire {
-                let text = self.nudges[&name].text.clone();
+                let prompt_text = self.nudges[&name].text.clone();
+                let text = format!(
+                    "{prompt_text}\n\nIdle nudge: you have been idle past your configured timeout. Move the current lane forward now or report the exact blocker."
+                );
                 info!(member = %name, "firing nudge (idle timeout)");
                 let delivered_live = match self.queue_daemon_message(&name, &text) {
                     Ok(MessageDelivery::LivePane) => true,
@@ -905,7 +908,7 @@ Resolve it with Batty commands now:\n\
         message.push_str(
             "\nDo the triage now and drive the backlog to zero. Batty will remind you again the next time you become idle while triage backlog remains.",
         );
-        message
+        self.prepend_member_nudge(member, message)
     }
 
     fn build_owned_task_intervention_message(
@@ -980,7 +983,7 @@ Retrieve task context now:\n\
         message.push_str(
             "\nDo not stay idle while owning active work. Either move the task forward, split it, or escalate the blocker now. Batty will remind you again the next time you become idle while you still own unfinished tasks.",
         );
-        message
+        self.prepend_member_nudge(member, message)
     }
 
     fn build_review_intervention_message(
@@ -1104,7 +1107,7 @@ Review and disposition it now:\n\
         message.push_str(
             "\nDo not leave completed direct-report work parked in review. Merge it, discard it, or send exact rework now. Batty will remind you again if review backlog remains unchanged.",
         );
-        message
+        self.prepend_member_nudge(member, message)
     }
 
     fn build_stuck_task_escalation_message(
@@ -1179,7 +1182,7 @@ Intervene now:\n\
         message.push_str(
             "\nDo not leave the task parked. Re-dispatch it, block it with a specific reason, or escalate the exact decision needed now.",
         );
-        message
+        self.prepend_member_nudge(member, message)
     }
 
     fn build_manager_dispatch_gap_message(
@@ -1272,7 +1275,7 @@ Recover the lane now:\n\
         message.push_str(
             "\nDo not let the entire lane sit idle. Either wake an active task, assign new executable work, or escalate the exact blockage now.",
         );
-        message
+        self.prepend_member_nudge(member, message)
     }
 
     fn build_architect_utilization_message(
@@ -1366,7 +1369,7 @@ Recover throughput now:\n\
                 "\n8. Report the recovery decision upward with `batty send {parent} \"utilization recovery: <what was dispatched or why the board is blocked>\"`."
             ));
         }
-        message
+        self.prepend_member_nudge(member, message)
     }
 }
 
@@ -1547,6 +1550,14 @@ mod tests {
         for message in harness.pending_inbox_messages(member).unwrap() {
             inbox::mark_delivered(&harness.inbox_root(), member, &message.id).unwrap();
         }
+    }
+
+    fn write_prompt_nudge(project_root: &std::path::Path, filename: &str, body: &str) {
+        std::fs::write(
+            crate::team::team_config_dir(project_root).join(filename),
+            format!("# Prompt\n\n## Nudge\n\n{body}\n"),
+        )
+        .unwrap();
     }
 
     fn owned_task_harness() -> TestHarness {
@@ -2614,6 +2625,7 @@ mod tests {
     #[test]
     fn build_owned_task_intervention_message_includes_parent_escalation() {
         let harness = triage_harness().with_board_task(70, "task-70", "in-progress", Some("lead"));
+        write_prompt_nudge(harness.project_root(), "manager.md", "Manager nudge text.");
         let daemon = harness.build_daemon().unwrap();
         let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
         let member = daemon
@@ -2631,6 +2643,7 @@ mod tests {
         );
 
         assert!(message.contains("Owned active task backlog detected"));
+        assert!(message.starts_with("Manager nudge text.\n\n"));
         assert!(message.contains("kanban-md list --dir"));
         assert!(message.contains("batty assign eng-1"));
         assert!(message.contains("batty send architect"));
@@ -2662,6 +2675,11 @@ mod tests {
     #[test]
     fn build_stuck_task_escalation_message_uses_assign_for_engineer() {
         let harness = triage_harness().with_board_task(72, "task-72", "in-progress", Some("eng-1"));
+        write_prompt_nudge(
+            harness.project_root(),
+            "engineer.md",
+            "Engineer nudge text.",
+        );
         let daemon = harness.build_daemon().unwrap();
         let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
         let member = daemon
@@ -2675,6 +2693,7 @@ mod tests {
         let message = daemon.build_stuck_task_escalation_message(&member, &[&tasks[0]], 125);
 
         assert!(message.contains("Stuck task escalation"));
+        assert!(message.starts_with("Engineer nudge text.\n\n"));
         assert!(message.contains("2m"));
         assert!(message.contains("batty assign eng-1"));
         assert!(message.contains("batty send lead"));

@@ -275,13 +275,8 @@ impl TeamDaemon {
         let mut nudges = HashMap::new();
         for role in &config.team_config.roles {
             if let Some(interval_secs) = role.nudge_interval_secs {
-                let prompt_file = role.prompt.as_deref().unwrap_or(match role.role_type {
-                    RoleType::Architect => "architect.md",
-                    RoleType::Manager => "manager.md",
-                    RoleType::Engineer => "engineer.md",
-                    RoleType::User => "architect.md",
-                });
-                let prompt_path = team_config_dir.join(prompt_file);
+                let prompt_path =
+                    role_prompt_path(&team_config_dir, role.prompt.as_deref(), role.role_type);
                 if let Some(nudge_text) = extract_nudge_section(&prompt_path) {
                     // Apply nudge to all instances of this role
                     let instance_names: Vec<String> = config
@@ -333,6 +328,27 @@ impl TeamDaemon {
             failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         })
+    }
+
+    pub(super) fn member_nudge_text(&self, member: &MemberInstance) -> Option<String> {
+        let prompt_path = role_prompt_path(
+            &super::team_config_dir(&self.config.project_root),
+            member.prompt.as_deref(),
+            member.role_type,
+        );
+        extract_nudge_section(&prompt_path)
+    }
+
+    pub(super) fn prepend_member_nudge(
+        &self,
+        member: &MemberInstance,
+        body: impl AsRef<str>,
+    ) -> String {
+        let body = body.as_ref();
+        match self.member_nudge_text(member) {
+            Some(nudge) => format!("{nudge}\n\n{body}"),
+            None => body.to_string(),
+        }
     }
 
     /// Run the daemon loop. Blocks until the session is killed or an error occurs.
@@ -1455,6 +1471,23 @@ fn describe_command_failure(command: &str, args: &[&str], output: &std::process:
     format!("`{command} {}` failed: {details}", args.join(" "))
 }
 
+fn default_prompt_file_for_role(role_type: RoleType) -> &'static str {
+    match role_type {
+        RoleType::Architect => "architect.md",
+        RoleType::Manager => "manager.md",
+        RoleType::Engineer => "engineer.md",
+        RoleType::User => "architect.md",
+    }
+}
+
+fn role_prompt_path(
+    team_config_dir: &Path,
+    prompt_override: Option<&str>,
+    role_type: RoleType,
+) -> PathBuf {
+    team_config_dir.join(prompt_override.unwrap_or(default_prompt_file_for_role(role_type)))
+}
+
 /// Extract the `## Nudge` section from a prompt .md file.
 ///
 /// Returns the text after `## Nudge` up to the next `## ` heading or EOF.
@@ -1911,6 +1944,130 @@ exit 1
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), "# Engineer\n\n## Workflow\n\n- code\n").unwrap();
         assert!(extract_nudge_section(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn extract_nudge_returns_none_when_malformed() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            "# Engineer\n\n## Nudge\n\n## Workflow\n\n- code\n",
+        )
+        .unwrap();
+        assert!(extract_nudge_section(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn daemon_registers_per_role_nudge_intervals_from_prompt_sections() {
+        let tmp = tempfile::tempdir().unwrap();
+        let team_config_dir = tmp.path().join(".batty").join("team_config");
+        std::fs::create_dir_all(&team_config_dir).unwrap();
+        std::fs::write(
+            team_config_dir.join("manager.md"),
+            "# Manager\n\n## Nudge\n\nManager follow-up.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            team_config_dir.join("engineer.md"),
+            "# Engineer\n\n## Nudge\n\nEngineer follow-up.\n",
+        )
+        .unwrap();
+
+        let daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode: WorkflowMode::Legacy,
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                workflow_policy: WorkflowPolicy::default(),
+                cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+                roles: vec![
+                    RoleDef {
+                        name: "manager".to_string(),
+                        role_type: RoleType::Manager,
+                        agent: Some("claude".to_string()),
+                        instances: 1,
+                        prompt: None,
+                        talks_to: vec![],
+                        channel: None,
+                        channel_config: None,
+                        nudge_interval_secs: Some(120),
+                        receives_standup: None,
+                        standup_interval_secs: None,
+                        owns: Vec::new(),
+                        use_worktrees: false,
+                    },
+                    RoleDef {
+                        name: "engineer".to_string(),
+                        role_type: RoleType::Engineer,
+                        agent: Some("codex".to_string()),
+                        instances: 1,
+                        prompt: None,
+                        talks_to: vec![],
+                        channel: None,
+                        channel_config: None,
+                        nudge_interval_secs: Some(300),
+                        receives_standup: None,
+                        standup_interval_secs: None,
+                        owns: Vec::new(),
+                        use_worktrees: false,
+                    },
+                ],
+            },
+            session: "test".to_string(),
+            members: vec![
+                MemberInstance {
+                    name: "lead".to_string(),
+                    role_name: "manager".to_string(),
+                    role_type: RoleType::Manager,
+                    agent: Some("claude".to_string()),
+                    prompt: None,
+                    reports_to: None,
+                    use_worktrees: false,
+                },
+                MemberInstance {
+                    name: "eng-1".to_string(),
+                    role_name: "engineer".to_string(),
+                    role_type: RoleType::Engineer,
+                    agent: Some("codex".to_string()),
+                    prompt: None,
+                    reports_to: Some("lead".to_string()),
+                    use_worktrees: true,
+                },
+            ],
+            pane_map: HashMap::new(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            daemon
+                .nudges
+                .get("lead")
+                .map(|schedule| schedule.text.as_str()),
+            Some("Manager follow-up.")
+        );
+        assert_eq!(
+            daemon.nudges.get("lead").map(|schedule| schedule.interval),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            daemon
+                .nudges
+                .get("eng-1")
+                .map(|schedule| schedule.text.as_str()),
+            Some("Engineer follow-up.")
+        );
+        assert_eq!(
+            daemon.nudges.get("eng-1").map(|schedule| schedule.interval),
+            Some(Duration::from_secs(300))
+        );
     }
 
     #[test]
@@ -4866,6 +5023,7 @@ exit 1
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].from, "daemon");
         assert!(pending[0].body.contains("Solo mode should keep moving."));
+        assert!(pending[0].body.contains("Idle nudge:"));
         assert_eq!(daemon.states.get("solo"), Some(&MemberState::Idle));
         assert!(
             daemon
@@ -5248,6 +5406,7 @@ exit 1
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].from, "daemon");
         assert!(messages[0].body.contains("Please make progress."));
+        assert!(messages[0].body.contains("Idle nudge:"));
     }
 
     #[test]

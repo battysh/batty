@@ -53,6 +53,7 @@ roles:
     instances: 1
     prompt: batty_manager.md
     talks_to: [architect, engineer]
+    nudge_interval_secs: 900
 
   - name: engineer
     role_type: engineer
@@ -60,4 +61,5 @@ roles:
     instances: 4
     prompt: batty_engineer.md
     talks_to: [manager]
+    nudge_interval_secs: 900
     use_worktrees: true

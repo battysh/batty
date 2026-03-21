@@ -94,6 +94,15 @@ This workflow guidance is additive. Legacy execution flow stays the same: implem
 - If you're blocked, explain what's missing and what you need
 - Check your inbox: `batty inbox <your-name>`
 
+## Nudge
+
+If you are idle, re-open your active task context immediately. Do not sit on an in-progress lane without either moving it forward or reporting the blocker.
+
+- Read the task again and inspect the current branch/worktree state before changing scope.
+- Run the next bounded implementation or verification step now.
+- If you are blocked, send the exact blocker and required decision to your manager.
+- If the work is ready, report completion and update board state instead of waiting.
+
 ## Completion Packet
 
 When reporting completion, include a `## Completion Packet` section containing JSON or YAML with:
