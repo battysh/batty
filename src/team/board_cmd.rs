@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), allow(dead_code))]
+
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
@@ -143,7 +145,12 @@ fn run_board_with_program(
     board_dir: &Path,
     args: &[&str],
 ) -> Result<BoardOutput, BoardError> {
+    let current_dir = board_dir
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let output = Command::new(program)
+        .current_dir(current_dir)
         .args(build_board_args(board_dir, args))
         .output()?;
 
@@ -234,6 +241,8 @@ fn extract_task_id(text: &str, prefix: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     use tempfile::TempDir;
 
@@ -294,6 +303,28 @@ mod tests {
             rendered,
             vec!["move", "60", "review", "--dir", "/tmp/test board"]
         );
+    }
+
+    #[test]
+    fn run_board_uses_board_parent_as_cwd() {
+        let temp = TempDir::new().unwrap();
+        let board_dir = temp.path().join("board");
+        let script_path = temp.path().join("fake-kanban.sh");
+        let output_path = temp.path().join("cwd.txt");
+        let script = format!("#!/bin/sh\npwd > \"{}\"\n", output_path.display());
+        fs::write(&script_path, script).unwrap();
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(&script_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions).unwrap();
+        }
+
+        run_board_with_program(script_path.to_str().unwrap(), &board_dir, &["list"]).unwrap();
+
+        let cwd = fs::canonicalize(fs::read_to_string(&output_path).unwrap().trim()).unwrap();
+        let expected = fs::canonicalize(temp.path()).unwrap();
+        assert_eq!(cwd, expected);
     }
 
     #[test]
