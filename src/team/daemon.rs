@@ -75,6 +75,7 @@ pub struct TeamDaemon {
     triage_idle_epochs: HashMap<String, u64>,
     triage_interventions: HashMap<String, u64>,
     owned_task_interventions: HashMap<String, OwnedTaskInterventionState>,
+    intervention_cooldowns: HashMap<String, Instant>,
     channels: HashMap<String, Box<dyn Channel>>,
     nudges: HashMap<String, NudgeSchedule>,
     telegram_bot: Option<super::telegram::TelegramBot>,
@@ -90,10 +91,11 @@ pub struct TeamDaemon {
     poll_interval: Duration,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct OwnedTaskInterventionState {
     idle_epoch: u64,
     signature: String,
+    fired_at: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,6 +258,7 @@ impl TeamDaemon {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels,
             nudges,
             telegram_bot,
@@ -849,6 +852,17 @@ impl TeamDaemon {
             .iter()
             .find(|m| m.name == engineer)
             .and_then(|member| member.reports_to.clone());
+
+        if commits_ahead_of_main(&worktree_dir)? == 0 {
+            let msg = "Completion rejected: your branch has no commits ahead of main. Commit your changes before reporting done again.";
+            self.queue_message("batty", engineer, msg)?;
+            self.mark_member_working(engineer);
+            info!(
+                engineer,
+                task_id, "completion rejected because branch has no commits"
+            );
+            return Ok(());
+        }
 
         let (tests_passed, output_truncated) = run_tests_in_worktree(&worktree_dir)?;
         if tests_passed {
@@ -1959,6 +1973,18 @@ impl TeamDaemon {
             && !self.member_has_pending_inbox(inbox_root, member_name)
     }
 
+    fn intervention_on_cooldown(&self, key: &str) -> bool {
+        let cooldown = Duration::from_secs(
+            self.config
+                .team_config
+                .automation
+                .intervention_cooldown_secs,
+        );
+        self.intervention_cooldowns
+            .get(key)
+            .is_some_and(|fired_at| fired_at.elapsed() < cooldown)
+    }
+
     fn sync_launch_state_session_ids(&self) -> Result<()> {
         let mut launch_state = load_launch_state(&self.config.project_root);
         let mut changed = false;
@@ -2189,6 +2215,11 @@ impl TeamDaemon {
                 continue;
             }
 
+            let triage_cooldown_key = format!("triage::{name}");
+            if self.intervention_on_cooldown(&triage_cooldown_key) {
+                continue;
+            }
+
             let text = self.build_triage_intervention_message(member, reports, triage_state.count);
             info!(member = %name, triage_backlog = triage_state.count, "firing triage intervention");
             let delivered_live = match self.queue_daemon_message(&name, &text) {
@@ -2204,6 +2235,8 @@ impl TeamDaemon {
                 name, triage_state.count
             ));
             self.triage_interventions.insert(name.clone(), idle_epoch);
+            self.intervention_cooldowns
+                .insert(triage_cooldown_key, Instant::now());
             if delivered_live {
                 self.mark_member_working(&name);
             }
@@ -2271,6 +2304,10 @@ impl TeamDaemon {
                 }
             }
 
+            if self.intervention_on_cooldown(&name) {
+                continue;
+            }
+
             if !self.ready_for_idle_automation(&inbox_root, &name) {
                 continue;
             }
@@ -2300,8 +2337,11 @@ impl TeamDaemon {
                 OwnedTaskInterventionState {
                     idle_epoch,
                     signature,
+                    fired_at: Instant::now(),
                 },
             );
+            self.intervention_cooldowns
+                .insert(name.clone(), Instant::now());
             if delivered_live {
                 self.mark_member_working(&name);
             }
@@ -2380,6 +2420,10 @@ impl TeamDaemon {
                 continue;
             }
 
+            if self.intervention_on_cooldown(&review_key) {
+                continue;
+            }
+
             let text = self.build_review_intervention_message(member, &review_tasks);
             info!(
                 member = %name,
@@ -2400,12 +2444,15 @@ impl TeamDaemon {
                 review_tasks.len()
             ));
             self.owned_task_interventions.insert(
-                review_key,
+                review_key.clone(),
                 OwnedTaskInterventionState {
                     idle_epoch,
                     signature,
+                    fired_at: Instant::now(),
                 },
             );
+            self.intervention_cooldowns
+                .insert(review_key, Instant::now());
             if delivered_live {
                 self.mark_member_working(&name);
             }
@@ -2532,6 +2579,10 @@ impl TeamDaemon {
                 continue;
             }
 
+            if self.intervention_on_cooldown(&dispatch_key) {
+                continue;
+            }
+
             let text = self.build_manager_dispatch_gap_message(
                 member,
                 &idle_active_reports,
@@ -2562,12 +2613,15 @@ impl TeamDaemon {
             ));
             let idle_epoch = self.triage_idle_epochs.get(&name).copied().unwrap_or(0);
             self.owned_task_interventions.insert(
-                dispatch_key,
+                dispatch_key.clone(),
                 OwnedTaskInterventionState {
                     idle_epoch,
                     signature,
+                    fired_at: Instant::now(),
                 },
             );
+            self.intervention_cooldowns
+                .insert(dispatch_key, Instant::now());
             if delivered_live {
                 self.mark_member_working(&name);
             }
@@ -2687,6 +2741,10 @@ impl TeamDaemon {
                 continue;
             }
 
+            if self.intervention_on_cooldown(&utilization_key) {
+                continue;
+            }
+
             let text = self.build_architect_utilization_message(
                 architect,
                 &working_engineers,
@@ -2724,12 +2782,15 @@ impl TeamDaemon {
                 .copied()
                 .unwrap_or(0);
             self.owned_task_interventions.insert(
-                utilization_key,
+                utilization_key.clone(),
                 OwnedTaskInterventionState {
                     idle_epoch,
                     signature,
+                    fired_at: Instant::now(),
                 },
             );
+            self.intervention_cooldowns
+                .insert(utilization_key, Instant::now());
             if delivered_live {
                 self.mark_member_working(&architect.name);
             }
@@ -3955,7 +4016,14 @@ fn write_launch_script(
     resume: bool,
     session_id: Option<&str>,
 ) -> Result<String> {
-    let script_path = std::env::temp_dir().join(format!("batty-launch-{member_name}.sh"));
+    // Namespace temp paths by project to avoid collisions when multiple batty
+    // instances run concurrently (e.g. batty + mafia_solver both have "architect").
+    let project_slug = project_root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "default".to_string());
+    let script_path =
+        std::env::temp_dir().join(format!("batty-launch-{project_slug}-{member_name}.sh"));
     let escaped_prompt = prompt.replace('\'', "'\\''");
     let launch_dir = match agent_name {
         "codex" | "codex-cli" => prepare_codex_context(member_name, role_context, work_dir)?,
@@ -4001,7 +4069,7 @@ fn write_launch_script(
 
     // Create wrapper scripts in a per-member bin directory prepended to PATH.
     // This ensures agents use the correct binaries regardless of their environment.
-    let wrapper_dir = std::env::temp_dir().join(format!("batty-bin-{member_name}"));
+    let wrapper_dir = std::env::temp_dir().join(format!("batty-bin-{project_slug}-{member_name}"));
     std::fs::create_dir_all(&wrapper_dir).ok();
 
     #[cfg(unix)]
@@ -4396,6 +4464,27 @@ fn short_session_summary(session_id: &str) -> String {
     }
 }
 
+fn commits_ahead_of_main(worktree_dir: &Path) -> Result<u32> {
+    let output = std::process::Command::new("git")
+        .args(["rev-list", "--count", "main..HEAD"])
+        .current_dir(worktree_dir)
+        .output()
+        .context("failed to run git rev-list --count main..HEAD")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git rev-list --count main..HEAD failed: {stderr}");
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.trim().parse::<u32>().with_context(|| {
+        format!(
+            "failed to parse git rev-list --count main..HEAD output: {:?}",
+            stdout.trim()
+        )
+    })
+}
+
 fn member_session_tracker_config(
     project_root: &Path,
     member: &MemberInstance,
@@ -4553,6 +4642,58 @@ mod tests {
         .unwrap();
     }
 
+    fn make_test_daemon(project_root: &Path, members: Vec<MemberInstance>) -> TeamDaemon {
+        TeamDaemon {
+            config: DaemonConfig {
+                project_root: project_root.to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members,
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            idle_started_at: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
+            event_sink: EventSink::new(
+                &project_root
+                    .join(".batty")
+                    .join("team_config")
+                    .join("events.jsonl"),
+            )
+            .unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
+            retro_generated: false,
+            poll_interval: Duration::from_secs(5),
+        }
+    }
+
     fn write_owned_task_file(
         project_root: &Path,
         id: u32,
@@ -4654,6 +4795,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -4705,8 +4847,8 @@ mod tests {
             Some("11111111-1111-4111-8111-111111111111"),
         )
         .unwrap();
-        assert!(cmd.contains("batty-launch-arch-1.sh"));
-        let script_path = std::env::temp_dir().join("batty-launch-arch-1.sh");
+        assert!(cmd.contains("batty-launch-project-arch-1.sh"));
+        let script_path = std::env::temp_dir().join("batty-launch-project-arch-1.sh");
         let content = std::fs::read_to_string(&script_path).unwrap();
         assert!(content.contains(
             "claude --dangerously-skip-permissions --session-id '11111111-1111-4111-8111-111111111111' 'plan the project'"
@@ -4728,8 +4870,8 @@ mod tests {
             Some("22222222-2222-4222-8222-222222222222"),
         )
         .unwrap();
-        assert!(cmd.contains("batty-launch-mgr-1.sh"));
-        let script_path = std::env::temp_dir().join("batty-launch-mgr-1.sh");
+        assert!(cmd.contains("batty-launch-project-mgr-1.sh"));
+        let script_path = std::env::temp_dir().join("batty-launch-project-mgr-1.sh");
         let content = std::fs::read_to_string(&script_path).unwrap();
         assert!(content.contains(
             "--session-id '22222222-2222-4222-8222-222222222222' --append-system-prompt"
@@ -4756,7 +4898,9 @@ mod tests {
             None,
         )
         .unwrap();
-        let script_path = std::env::temp_dir().join("batty-launch-eng-1.sh");
+        let project_slug = tmp.path().file_name().unwrap().to_string_lossy();
+        let script_path =
+            std::env::temp_dir().join(format!("batty-launch-{project_slug}-eng-1.sh"));
         let content = std::fs::read_to_string(&script_path).unwrap();
         let context_dir = work_dir.join(".batty").join("codex-context").join("eng-1");
         let agents_path = context_dir.join("AGENTS.md");
@@ -4787,8 +4931,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(cmd.contains("batty-launch-codex-active-test.sh"));
-        let script_path = std::env::temp_dir().join("batty-launch-codex-active-test.sh");
+        let project_slug = tmp.path().file_name().unwrap().to_string_lossy();
+        assert!(cmd.contains(&format!("batty-launch-{project_slug}-codex-active-test.sh")));
+        let script_path =
+            std::env::temp_dir().join(format!("batty-launch-{project_slug}-codex-active-test.sh"));
         let content = std::fs::read_to_string(&script_path).unwrap();
         let context_dir = work_dir
             .join(".batty")
@@ -4884,7 +5030,7 @@ mod tests {
             Some("44444444-4444-4444-8444-444444444444"),
         )
         .unwrap();
-        let script_path = std::env::temp_dir().join("batty-launch-architect.sh");
+        let script_path = std::env::temp_dir().join("batty-launch-project-architect.sh");
         let content = std::fs::read_to_string(&script_path).unwrap();
         assert!(content.contains(
             "exec claude --dangerously-skip-permissions --resume '44444444-4444-4444-8444-444444444444'"
@@ -5314,6 +5460,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -5375,6 +5522,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -5565,6 +5713,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::from([(
                 "human".to_string(),
                 Box::new(FailingChannel) as Box<dyn Channel>,
@@ -5893,6 +6042,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -5947,6 +6097,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -5998,6 +6149,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -6054,6 +6206,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -6108,6 +6261,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -6166,6 +6320,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -6184,6 +6339,132 @@ mod tests {
         daemon.active_tasks.insert("eng-1".into(), 42);
         daemon.handle_engineer_completion("eng-1").unwrap();
         assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+    }
+
+    #[test]
+    fn test_completion_gate_rejects_zero_commits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        write_task_file(&repo, 42, "zero-commit-task");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        std::fs::remove_file(worktree_dir.join("Cargo.toml")).unwrap();
+
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng-1".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: true,
+        };
+        let mut daemon = make_test_daemon(&repo, vec![engineer]);
+
+        daemon.active_tasks.insert("eng-1".to_string(), 42);
+        daemon.handle_engineer_completion("eng-1").unwrap();
+
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+        assert_eq!(daemon.retry_counts.get("eng-1"), None);
+        assert_eq!(daemon.states.get("eng-1"), Some(&MemberState::Working));
+    }
+
+    #[test]
+    fn test_completion_gate_passes_with_commits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        write_task_file(&repo, 42, "commit-gate-success");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        std::fs::write(worktree_dir.join("note.txt"), "done\n").unwrap();
+        git_ok(&worktree_dir, &["add", "note.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "add note"]);
+
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng-1".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: true,
+        };
+        let mut daemon = make_test_daemon(&repo, vec![engineer]);
+
+        daemon.active_tasks.insert("eng-1".to_string(), 42);
+        daemon
+            .states
+            .insert("eng-1".to_string(), MemberState::Working);
+
+        daemon.handle_engineer_completion("eng-1").unwrap();
+
+        assert_eq!(daemon.active_task_id("eng-1"), None);
+        assert_eq!(daemon.states.get("eng-1"), Some(&MemberState::Idle));
+        assert_eq!(
+            std::fs::read_to_string(repo.join("note.txt")).unwrap(),
+            "done\n"
+        );
+    }
+
+    #[test]
+    fn test_zero_commit_retry_message_sent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        write_task_file(&repo, 42, "zero-commit-message");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        std::fs::remove_file(worktree_dir.join("Cargo.toml")).unwrap();
+
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng-1".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: true,
+        };
+        let mut daemon = make_test_daemon(&repo, vec![manager, engineer]);
+
+        daemon.active_tasks.insert("eng-1".to_string(), 42);
+        daemon.handle_engineer_completion("eng-1").unwrap();
+
+        let engineer_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
+        assert_eq!(engineer_messages.len(), 1);
+        assert_eq!(engineer_messages[0].from, "batty");
+        assert!(
+            engineer_messages[0]
+                .body
+                .contains("no commits ahead of main")
+        );
+        assert!(
+            engineer_messages[0]
+                .body
+                .contains("Commit your changes before reporting done again")
+        );
+
+        let manager_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
+        assert!(manager_messages.is_empty());
     }
 
     #[test]
@@ -6226,6 +6507,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -6295,6 +6577,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -6390,6 +6673,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -6457,7 +6741,12 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
 
         let member_name = "architect-restart";
-        let fake_bin = std::env::temp_dir().join(format!("batty-bin-{member_name}"));
+        let project_slug = tmp
+            .path()
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "default".to_string());
+        let fake_bin = std::env::temp_dir().join(format!("batty-bin-{project_slug}-{member_name}"));
         let _ = std::fs::remove_dir_all(&fake_bin);
         std::fs::create_dir_all(&fake_bin).unwrap();
         let fake_log = tmp.path().join("fake-claude.log");
@@ -6622,6 +6911,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -6704,6 +6994,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::from([(
                 "manager".to_string(),
@@ -6807,6 +7098,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -6909,6 +7201,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -7004,6 +7297,7 @@ mod tests {
                 triage_idle_epochs: HashMap::new(),
                 triage_interventions: HashMap::new(),
                 owned_task_interventions: HashMap::new(),
+                intervention_cooldowns: HashMap::new(),
                 channels: HashMap::new(),
                 nudges: HashMap::from([(
                     "scientist".to_string(),
@@ -7113,6 +7407,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -7208,6 +7503,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -7299,6 +7595,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -7378,6 +7675,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -7478,6 +7776,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -7554,6 +7853,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -7622,6 +7922,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -7695,6 +7996,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -7762,6 +8064,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -7803,6 +8106,212 @@ mod tests {
                 .get("lead")
                 .map(|state| state.idle_epoch),
             Some(2)
+        );
+    }
+
+    fn backdate_intervention_cooldown(daemon: &mut TeamDaemon, key: &str) {
+        let cooldown = Duration::from_secs(
+            daemon
+                .config
+                .team_config
+                .automation
+                .intervention_cooldown_secs,
+        ) + Duration::from_secs(1);
+        daemon
+            .intervention_cooldowns
+            .insert(key.to_string(), Instant::now() - cooldown);
+    }
+
+    #[test]
+    fn owned_task_intervention_respects_cooldown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lead = MemberInstance {
+            name: "lead".to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![lead],
+                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
+            retro_generated: false,
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        write_owned_task_file(tmp.path(), 191, "first-task", "in-progress", "lead");
+
+        // First fire: should deliver intervention.
+        backdate_idle_grace(&mut daemon, "lead");
+        daemon.maybe_intervene_owned_tasks().unwrap();
+        let pending = inbox::pending_messages(&root, "lead").unwrap();
+        assert_eq!(pending.len(), 1, "first intervention should fire");
+
+        // Acknowledge the message so inbox is clear for next check.
+        for msg in pending {
+            inbox::mark_delivered(&root, "lead", &msg.id).unwrap();
+        }
+
+        // Change signature (add another task) — should still be blocked by cooldown.
+        write_owned_task_file(tmp.path(), 192, "second-task", "in-progress", "lead");
+        daemon.maybe_intervene_owned_tasks().unwrap();
+        let pending = inbox::pending_messages(&root, "lead").unwrap();
+        assert_eq!(pending.len(), 0, "cooldown should prevent refire");
+
+        // Expire the cooldown — should fire again.
+        backdate_intervention_cooldown(&mut daemon, "lead");
+        daemon.maybe_intervene_owned_tasks().unwrap();
+        let pending = inbox::pending_messages(&root, "lead").unwrap();
+        assert_eq!(pending.len(), 1, "should fire after cooldown expires");
+    }
+
+    #[test]
+    fn triage_intervention_respects_cooldown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lead = MemberInstance {
+            name: "lead".to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let eng = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("lead".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![lead, eng],
+                pane_map: HashMap::from([
+                    ("lead".to_string(), "%999".to_string()),
+                    ("eng-1".to_string(), "%998".to_string()),
+                ]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::from([("lead".to_string(), 1)]),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
+            retro_generated: false,
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        inbox::init_inbox(&root, "eng-1").unwrap();
+
+        // Deliver a message from eng-1 to lead's inbox so triage finds something.
+        let msg = inbox::InboxMessage::new_send("eng-1", "lead", "done with task 42");
+        let msg_id = inbox::deliver_to_inbox(&root, &msg).unwrap();
+        inbox::mark_delivered(&root, "lead", &msg_id).unwrap();
+
+        // First fire: should work.
+        backdate_idle_grace(&mut daemon, "lead");
+        daemon.maybe_intervene_triage_backlog().unwrap();
+        let pending = inbox::pending_messages(&root, "lead").unwrap();
+        assert_eq!(pending.len(), 1, "first triage intervention should fire");
+
+        // Acknowledge so inbox is clear.
+        for p in pending {
+            inbox::mark_delivered(&root, "lead", &p.id).unwrap();
+        }
+
+        // Advance epoch (Working → Idle transition).
+        daemon.update_automation_timers_for_state("lead", MemberState::Working);
+        daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        backdate_idle_grace(&mut daemon, "lead");
+
+        // New epoch should normally allow refire, but cooldown blocks it.
+        daemon.maybe_intervene_triage_backlog().unwrap();
+        let pending = inbox::pending_messages(&root, "lead").unwrap();
+        assert_eq!(pending.len(), 0, "cooldown should prevent triage refire");
+
+        // Expire cooldown — should fire.
+        backdate_intervention_cooldown(&mut daemon, "triage::lead");
+        daemon.maybe_intervene_triage_backlog().unwrap();
+        let pending = inbox::pending_messages(&root, "lead").unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "triage should fire after cooldown expires"
         );
     }
 
@@ -7853,6 +8362,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -7932,6 +8442,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -8019,6 +8530,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -8125,6 +8637,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -8225,6 +8738,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -8349,6 +8863,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -8545,6 +9060,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -8628,6 +9144,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::from([(
                 "scientist".to_string(),
@@ -8707,6 +9224,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::from([(
                 "scientist".to_string(),
@@ -8807,6 +9325,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
