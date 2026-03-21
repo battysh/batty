@@ -32,6 +32,7 @@ pub mod watcher;
 pub mod workflow;
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -50,6 +51,8 @@ pub const TEAM_CONFIG_FILE: &str = "team.yaml";
 const LOAD_GRAPH_WINDOW_SECONDS: u64 = 3_600;
 const LOAD_GRAPH_WIDTH: usize = 30;
 const INBOX_BODY_PREVIEW_CHARS: usize = 140;
+const LOG_ROTATION_BYTES: u64 = 5 * 1024 * 1024;
+const LOG_ROTATION_KEEP: usize = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -456,6 +459,80 @@ fn daemon_log_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("daemon.log")
 }
 
+fn rotated_log_path(path: &Path, generation: usize) -> PathBuf {
+    PathBuf::from(format!("{}.{}", path.display(), generation))
+}
+
+pub(crate) fn rotate_log_if_needed(path: &Path) -> Result<()> {
+    let len = match std::fs::metadata(path) {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to stat {}", path.display()));
+        }
+    };
+
+    if len <= LOG_ROTATION_BYTES {
+        return Ok(());
+    }
+
+    let oldest = rotated_log_path(path, LOG_ROTATION_KEEP);
+    if oldest.exists() {
+        std::fs::remove_file(&oldest)
+            .with_context(|| format!("failed to remove {}", oldest.display()))?;
+    }
+
+    for generation in (1..LOG_ROTATION_KEEP).rev() {
+        let source = rotated_log_path(path, generation);
+        if !source.exists() {
+            continue;
+        }
+        let destination = rotated_log_path(path, generation + 1);
+        std::fs::rename(&source, &destination).with_context(|| {
+            format!(
+                "failed to rotate {} to {}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+    }
+
+    let rotated = rotated_log_path(path, 1);
+    std::fs::rename(path, &rotated).with_context(|| {
+        format!(
+            "failed to rotate {} to {}",
+            path.display(),
+            rotated.display()
+        )
+    })?;
+    Ok(())
+}
+
+pub(crate) fn open_log_for_append(path: &Path) -> Result<File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    rotate_log_if_needed(path)?;
+    File::options()
+        .append(true)
+        .create(true)
+        .open(path)
+        .with_context(|| format!("failed to open log file: {}", path.display()))
+}
+
+fn daemon_spawn_args(root_str: &str, resume: bool) -> Vec<String> {
+    let mut args = vec![
+        "-v".to_string(),
+        "daemon".to_string(),
+        "--project-root".to_string(),
+        root_str.to_string(),
+    ];
+    if resume {
+        args.push("--resume".to_string());
+    }
+    args
+}
+
 pub(crate) fn daemon_state_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("daemon-state.json")
 }
@@ -500,7 +577,6 @@ fn migration_validation_notes(
 /// The daemon runs in its own process group with stdio redirected to a log
 /// file, so it survives terminal closure. PID is saved to `.batty/daemon.pid`.
 fn spawn_daemon(project_root: &Path, resume: bool) -> Result<u32> {
-    use std::fs::File;
     use std::process::{Command, Stdio};
 
     let log_path = daemon_log_path(project_root);
@@ -511,8 +587,7 @@ fn spawn_daemon(project_root: &Path, resume: bool) -> Result<u32> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let log_file = File::create(&log_path)
-        .with_context(|| format!("failed to create daemon log: {}", log_path.display()))?;
+    let log_file = open_log_for_append(&log_path)?;
     let log_err = log_file
         .try_clone()
         .context("failed to clone log file handle")?;
@@ -525,10 +600,7 @@ fn spawn_daemon(project_root: &Path, resume: bool) -> Result<u32> {
         .to_string();
 
     let mut cmd = Command::new(exe);
-    let mut args = vec!["daemon", "--project-root", &root_str];
-    if resume {
-        args.push("--resume");
-    }
+    let args = daemon_spawn_args(&root_str, resume);
     cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(log_file)
@@ -2419,6 +2491,130 @@ mod tests {
         std::fs::write(&path, r#"{"clean_shutdown":true}"#).unwrap();
 
         assert!(!should_resume_from_daemon_state(tmp.path()));
+    }
+
+    #[test]
+    fn test_rotate_log_shifts_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = daemon_log_path(tmp.path());
+        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        std::fs::write(&log_path, b"current").unwrap();
+        std::fs::write(rotated_log_path(&log_path, 1), b"older-1").unwrap();
+        std::fs::write(rotated_log_path(&log_path, 2), b"older-2").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&log_path)
+            .unwrap()
+            .set_len(LOG_ROTATION_BYTES + 1)
+            .unwrap();
+
+        rotate_log_if_needed(&log_path).unwrap();
+
+        assert!(!log_path.exists());
+        assert_eq!(
+            std::fs::read(rotated_log_path(&log_path, 1)).unwrap().len() as u64,
+            LOG_ROTATION_BYTES + 1
+        );
+        assert_eq!(
+            std::fs::read_to_string(rotated_log_path(&log_path, 2)).unwrap(),
+            "older-1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(rotated_log_path(&log_path, 3)).unwrap(),
+            "older-2"
+        );
+    }
+
+    #[test]
+    fn test_rotate_log_keeps_max_3() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = orchestrator_log_path(tmp.path());
+        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        std::fs::write(&log_path, b"current").unwrap();
+        std::fs::write(rotated_log_path(&log_path, 1), b"older-1").unwrap();
+        std::fs::write(rotated_log_path(&log_path, 2), b"older-2").unwrap();
+        std::fs::write(rotated_log_path(&log_path, 3), b"older-3").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&log_path)
+            .unwrap()
+            .set_len(LOG_ROTATION_BYTES + 1)
+            .unwrap();
+
+        rotate_log_if_needed(&log_path).unwrap();
+
+        assert_eq!(
+            std::fs::read(rotated_log_path(&log_path, 1)).unwrap().len() as u64,
+            LOG_ROTATION_BYTES + 1
+        );
+        assert_eq!(
+            std::fs::read_to_string(rotated_log_path(&log_path, 2)).unwrap(),
+            "older-1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(rotated_log_path(&log_path, 3)).unwrap(),
+            "older-2"
+        );
+        assert!(!rotated_log_path(&log_path, 4).exists());
+    }
+
+    #[test]
+    fn test_rotate_log_noop_under_threshold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = daemon_log_path(tmp.path());
+        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        std::fs::write(&log_path, b"small-log").unwrap();
+
+        rotate_log_if_needed(&log_path).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&log_path).unwrap(), "small-log");
+        assert!(!rotated_log_path(&log_path, 1).exists());
+    }
+
+    #[test]
+    fn test_daemon_log_append_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = daemon_log_path(tmp.path());
+
+        {
+            let mut file = open_log_for_append(&log_path).unwrap();
+            use std::io::Write;
+            writeln!(file, "first").unwrap();
+        }
+
+        {
+            let mut file = open_log_for_append(&log_path).unwrap();
+            use std::io::Write;
+            writeln!(file, "second").unwrap();
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(&log_path).unwrap(),
+            "first\nsecond\n"
+        );
+    }
+
+    #[test]
+    fn daemon_spawn_args_include_verbose_and_resume() {
+        assert_eq!(
+            daemon_spawn_args("/tmp/project", false),
+            vec![
+                "-v".to_string(),
+                "daemon".to_string(),
+                "--project-root".to_string(),
+                "/tmp/project".to_string()
+            ]
+        );
+        assert_eq!(
+            daemon_spawn_args("/tmp/project", true),
+            vec![
+                "-v".to_string(),
+                "daemon".to_string(),
+                "--project-root".to_string(),
+                "/tmp/project".to_string(),
+                "--resume".to_string()
+            ]
+        );
     }
 
     #[test]
