@@ -404,6 +404,10 @@ fn main() -> Result<()> {
             team::show_load(&root)?;
         }
 
+        Command::Doctor => {
+            print!("{}", team::doctor::build_report(&root)?);
+        }
+
         Command::Telegram => {
             team::setup_telegram(&root)?;
         }
