@@ -4,17 +4,20 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 use tracing::warn;
 
 use crate::task;
 
 use super::config::{self, RoleType};
 use super::daemon::NudgeSchedule;
+use super::events;
 use super::hierarchy::MemberInstance;
 use super::inbox;
 use super::standup::MemberState;
 use super::{
-    TRIAGE_RESULT_FRESHNESS_SECONDS, now_unix, pause_marker_path, team_config_dir, team_config_path,
+    TRIAGE_RESULT_FRESHNESS_SECONDS, daemon_state_path, now_unix, pause_marker_path,
+    team_config_dir, team_config_path, team_events_path,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +41,8 @@ pub(crate) struct TeamStatusRow {
     pub(crate) review_owned_tasks: Vec<u32>,
     pub(crate) signal: Option<String>,
     pub(crate) runtime_label: Option<String>,
+    pub(crate) health: AgentHealthSummary,
+    pub(crate) health_summary: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +55,22 @@ pub(crate) struct TriageBacklogState {
 pub(crate) struct OwnedTaskBuckets {
     pub(crate) active: Vec<u32>,
     pub(crate) review: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AgentHealthSummary {
+    pub(crate) restart_count: u32,
+    pub(crate) context_exhaustion_count: u32,
+    pub(crate) delivery_failure_count: u32,
+    pub(crate) task_elapsed_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PersistedDaemonHealthState {
+    #[serde(default)]
+    active_tasks: HashMap<String, u32>,
+    #[serde(default)]
+    retry_counts: HashMap<String, u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -193,6 +214,7 @@ pub(crate) fn build_team_status_rows(
     pending_inbox_counts: &HashMap<String, usize>,
     triage_backlog_counts: &HashMap<String, usize>,
     owned_task_buckets: &HashMap<String, OwnedTaskBuckets>,
+    agent_health: &HashMap<String, AgentHealthSummary>,
 ) -> Vec<TeamStatusRow> {
     members
         .iter()
@@ -231,6 +253,8 @@ pub(crate) fn build_team_status_rows(
             };
 
             let signal = merge_status_signal(signal, triage_backlog, review_backlog);
+            let health = agent_health.get(&member.name).cloned().unwrap_or_default();
+            let health_summary = format_agent_health_summary(&health);
 
             TeamStatusRow {
                 name: member.name.clone(),
@@ -245,9 +269,186 @@ pub(crate) fn build_team_status_rows(
                 review_owned_tasks: owned_tasks.review,
                 signal,
                 runtime_label,
+                health,
+                health_summary,
             }
         })
         .collect()
+}
+
+pub(crate) fn agent_health_by_member(
+    project_root: &Path,
+    members: &[MemberInstance],
+) -> HashMap<String, AgentHealthSummary> {
+    let mut health_by_member = members
+        .iter()
+        .map(|member| (member.name.clone(), AgentHealthSummary::default()))
+        .collect::<HashMap<_, _>>();
+
+    let daemon_state = match load_persisted_daemon_health_state(&daemon_state_path(project_root)) {
+        Ok(state) => state.unwrap_or_default(),
+        Err(error) => {
+            warn!(error = %error, "failed to load daemon health state");
+            PersistedDaemonHealthState::default()
+        }
+    };
+
+    for (member, retry_count) in &daemon_state.retry_counts {
+        health_by_member
+            .entry(member.clone())
+            .or_default()
+            .restart_count = health_by_member
+            .get(member)
+            .map(|health| health.restart_count.max(*retry_count))
+            .unwrap_or(*retry_count);
+    }
+
+    let mut restart_events = HashMap::<String, u32>::new();
+    let mut latest_assignment_ts = HashMap::<String, u64>::new();
+    let mut latest_assignment_ts_by_task = HashMap::<(String, u32), u64>::new();
+    match events::read_events(&team_events_path(project_root)) {
+        Ok(events) => {
+            for event in events {
+                let Some(role) = event.role.as_deref() else {
+                    continue;
+                };
+
+                match event.event.as_str() {
+                    "agent_restarted" => {
+                        *restart_events.entry(role.to_string()).or_insert(0) += 1;
+                        if let Some(restart_count) = event.restart_count {
+                            health_by_member
+                                .entry(role.to_string())
+                                .or_default()
+                                .restart_count = health_by_member
+                                .get(role)
+                                .map(|health| health.restart_count.max(restart_count))
+                                .unwrap_or(restart_count);
+                        }
+                    }
+                    "context_exhausted" => {
+                        health_by_member
+                            .entry(role.to_string())
+                            .or_default()
+                            .context_exhaustion_count += 1;
+                    }
+                    "delivery_failed" => {
+                        health_by_member
+                            .entry(role.to_string())
+                            .or_default()
+                            .delivery_failure_count += 1;
+                    }
+                    "task_assigned" => {
+                        latest_assignment_ts.insert(role.to_string(), event.ts);
+                        if let Some(task_id) =
+                            event.task.as_deref().and_then(parse_assigned_task_id)
+                        {
+                            latest_assignment_ts_by_task
+                                .insert((role.to_string(), task_id), event.ts);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Err(error) => {
+            warn!(error = %error, "failed to read team events for status health summary");
+        }
+    }
+
+    for (member, event_count) in restart_events {
+        let health = health_by_member.entry(member).or_default();
+        health.restart_count = health.restart_count.max(event_count);
+    }
+
+    let now = now_unix();
+    for (member, task_id) in daemon_state.active_tasks {
+        let assigned_ts = latest_assignment_ts_by_task
+            .get(&(member.clone(), task_id))
+            .copied()
+            .or_else(|| latest_assignment_ts.get(&member).copied());
+        if let Some(assigned_ts) = assigned_ts {
+            health_by_member
+                .entry(member)
+                .or_default()
+                .task_elapsed_secs = Some(now.saturating_sub(assigned_ts));
+        }
+    }
+
+    health_by_member
+}
+
+fn load_persisted_daemon_health_state(path: &Path) -> Result<Option<PersistedDaemonHealthState>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let state = serde_json::from_str::<PersistedDaemonHealthState>(&content)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(Some(state))
+}
+
+fn parse_assigned_task_id(task: &str) -> Option<u32> {
+    let trimmed = task.trim();
+    trimmed
+        .parse::<u32>()
+        .ok()
+        .or_else(|| {
+            trimmed
+                .split("Task #")
+                .nth(1)
+                .and_then(parse_leading_task_id)
+        })
+        .or_else(|| {
+            trimmed
+                .find('#')
+                .and_then(|idx| parse_leading_task_id(&trimmed[idx + 1..]))
+        })
+}
+
+fn parse_leading_task_id(value: &str) -> Option<u32> {
+    let digits = value
+        .trim_start()
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+pub(crate) fn format_agent_health_summary(health: &AgentHealthSummary) -> String {
+    let mut parts = Vec::new();
+    if health.restart_count > 0 {
+        parts.push(format!("r{}", health.restart_count));
+    }
+    if health.context_exhaustion_count > 0 {
+        parts.push(format!("c{}", health.context_exhaustion_count));
+    }
+    if health.delivery_failure_count > 0 {
+        parts.push(format!("d{}", health.delivery_failure_count));
+    }
+    if let Some(task_elapsed_secs) = health.task_elapsed_secs {
+        parts.push(format!("t{}", format_health_duration(task_elapsed_secs)));
+    }
+
+    if parts.is_empty() {
+        "-".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn format_health_duration(task_elapsed_secs: u64) -> String {
+    if task_elapsed_secs < 60 {
+        format!("{task_elapsed_secs}s")
+    } else if task_elapsed_secs < 3_600 {
+        format!("{}m", task_elapsed_secs / 60)
+    } else if task_elapsed_secs < 86_400 {
+        format!("{}h", task_elapsed_secs / 3_600)
+    } else {
+        format!("{}d", task_elapsed_secs / 86_400)
+    }
 }
 
 fn merge_status_signal(
@@ -848,6 +1049,23 @@ pub(crate) fn format_standup_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    use crate::team::config::RoleType;
+    use crate::team::events::{EventSink, TeamEvent};
+    use crate::team::hierarchy::MemberInstance;
+
+    fn engineer(name: &str) -> MemberInstance {
+        MemberInstance {
+            name: name.to_string(),
+            role_name: name.to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+        }
+    }
 
     #[test]
     fn format_standup_status_marks_paused_while_member_is_working() {
@@ -899,5 +1117,64 @@ mod tests {
         assert!(label.contains("working"));
         assert!(label.contains("inbox 0"));
         assert!(label.contains("PAUSED"));
+    }
+
+    #[test]
+    fn format_agent_health_summary_compacts_metrics() {
+        let summary = format_agent_health_summary(&AgentHealthSummary {
+            restart_count: 2,
+            context_exhaustion_count: 1,
+            delivery_failure_count: 3,
+            task_elapsed_secs: Some(750),
+        });
+
+        assert_eq!(summary, "r2 c1 d3 t12m");
+        assert_eq!(
+            format_agent_health_summary(&AgentHealthSummary::default()),
+            "-"
+        );
+    }
+
+    #[test]
+    fn agent_health_by_member_aggregates_events_and_active_task_elapsed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events_path = team_events_path(tmp.path());
+        let mut sink = EventSink::new(&events_path).unwrap();
+
+        let mut assigned = TeamEvent::task_assigned("eng-1", "Task #42: fix it");
+        assigned.ts = now_unix().saturating_sub(600);
+        sink.emit(assigned).unwrap();
+
+        let mut restarted = TeamEvent::agent_restarted("eng-1", "42", "context_exhausted", 2);
+        restarted.ts = now_unix().saturating_sub(590);
+        sink.emit(restarted).unwrap();
+
+        let mut exhausted = TeamEvent::context_exhausted("eng-1", Some(42), Some(4_096));
+        exhausted.ts = now_unix().saturating_sub(580);
+        sink.emit(exhausted).unwrap();
+
+        let mut delivery_failed =
+            TeamEvent::delivery_failed("eng-1", "manager", "message delivery failed after retries");
+        delivery_failed.ts = now_unix().saturating_sub(570);
+        sink.emit(delivery_failed).unwrap();
+
+        let daemon_state = serde_json::json!({
+            "active_tasks": {"eng-1": 42},
+            "retry_counts": {"eng-1": 1}
+        });
+        fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+        fs::write(
+            daemon_state_path(tmp.path()),
+            serde_json::to_vec_pretty(&daemon_state).unwrap(),
+        )
+        .unwrap();
+
+        let health = agent_health_by_member(tmp.path(), &[engineer("eng-1"), engineer("eng-2")]);
+        let eng_1 = health.get("eng-1").unwrap();
+        assert_eq!(eng_1.restart_count, 2);
+        assert_eq!(eng_1.context_exhaustion_count, 1);
+        assert_eq!(eng_1.delivery_failure_count, 1);
+        assert!(eng_1.task_elapsed_secs.unwrap() >= 600);
+        assert_eq!(health.get("eng-2").unwrap(), &AgentHealthSummary::default());
     }
 }

@@ -242,6 +242,15 @@ impl TeamEvent {
         }
     }
 
+    pub fn delivery_failed(role: &str, from: &str, reason: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            from: Some(from.into()),
+            reason: Some(reason.into()),
+            ..Self::base("delivery_failed")
+        }
+    }
+
     pub fn load_snapshot(working_members: u32, total_members: u32, session_running: bool) -> Self {
         let load = if total_members == 0 {
             0.0
@@ -405,6 +414,10 @@ mod tests {
                 "agent_restarted",
                 TeamEvent::agent_restarted("eng-1", "42", "context_exhausted", 1),
             ),
+            (
+                "delivery_failed",
+                TeamEvent::delivery_failed("eng-1", "manager", "message marker missing"),
+            ),
             ("load_snapshot", TeamEvent::load_snapshot(2, 5, true)),
         ];
         for (expected_event, event) in &variants {
@@ -524,6 +537,17 @@ mod tests {
         assert_eq!(parsed["task"].as_str().unwrap(), "67");
         assert_eq!(parsed["reason"].as_str().unwrap(), "context_exhausted");
         assert_eq!(parsed["restart_count"].as_u64().unwrap(), 2);
+    }
+
+    #[test]
+    fn delivery_failed_includes_role_sender_and_reason() {
+        let event = TeamEvent::delivery_failed("eng-1-2", "manager", "message marker missing");
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"].as_str().unwrap(), "delivery_failed");
+        assert_eq!(parsed["role"].as_str().unwrap(), "eng-1-2");
+        assert_eq!(parsed["from"].as_str().unwrap(), "manager");
+        assert_eq!(parsed["reason"].as_str().unwrap(), "message marker missing");
     }
 
     #[test]

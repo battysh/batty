@@ -92,6 +92,10 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::context_exhausted(role, task, session_size_bytes));
     }
 
+    pub(crate) fn record_delivery_failed(&mut self, role: &str, from: &str, reason: &str) {
+        self.emit_event(TeamEvent::delivery_failed(role, from, reason));
+    }
+
     pub(crate) fn record_task_escalated(&mut self, role: &str, task: impl Into<String>) {
         let task = task.into();
         self.emit_event(TeamEvent::task_escalated(role, &task));

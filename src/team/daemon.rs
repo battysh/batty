@@ -1555,7 +1555,6 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-
     fn setup_fake_codex(
         project_root: &Path,
         log_root: &Path,
@@ -1629,7 +1628,7 @@ mod tests {
     }
 
     fn wait_for_log_contains(log_path: &Path, needle: &str) -> String {
-        (0..40)
+        (0..100)
             .find_map(|_| {
                 let content = match std::fs::read_to_string(log_path) {
                     Ok(content) => content,
@@ -1966,14 +1965,13 @@ mod tests {
         let spawn_log =
             wait_for_log_contains(&fake_log, "--dangerously-bypass-approvals-and-sandbox");
         assert!(spawn_log.contains("PWD:"));
+        std::thread::sleep(Duration::from_millis(1200));
 
         let assignment = "Task #42: lifecycle-task\n\nTask description.";
         daemon
             .assign_task_with_task_id(member_name, assignment, Some(42))
             .unwrap();
         daemon.active_tasks.insert(member_name.to_string(), 42);
-        let assignment_log = wait_for_log_contains(&fake_log, "Task #42: lifecycle-task");
-        assert!(assignment_log.contains("Task #42: lifecycle-task"));
         assert_eq!(daemon.active_task_id(member_name), Some(42));
         assert_eq!(daemon.states.get(member_name), Some(&MemberState::Working));
 

@@ -991,6 +991,7 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
     let pending_inbox_counts = status::pending_inbox_counts(project_root, &members);
     let triage_backlog_counts = status::triage_backlog_counts(project_root, &members);
     let owned_task_buckets = status::owned_task_buckets(project_root, &members);
+    let agent_health = status::agent_health_by_member(project_root, &members);
     let rows = status::build_team_status_rows(
         &members,
         session_running,
@@ -998,6 +999,7 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
         &pending_inbox_counts,
         &triage_backlog_counts,
         &owned_task_buckets,
+        &agent_health,
     );
     let workflow_metrics = status::workflow_metrics_section(project_root, &members);
 
@@ -1030,6 +1032,13 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
                     "review_owned_tasks": row.review_owned_tasks,
                     "signal": row.signal,
                     "runtime_label": row.runtime_label,
+                    "health_summary": row.health_summary,
+                    "health": {
+                        "restart_count": row.health.restart_count,
+                        "context_exhaustion_count": row.health.context_exhaustion_count,
+                        "delivery_failure_count": row.health.delivery_failure_count,
+                        "task_elapsed_secs": row.health.task_elapsed_secs,
+                    },
                 })
             }).collect::<Vec<_>>(),
         });
@@ -1047,7 +1056,7 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
         );
         println!();
         println!(
-            "{:<20} {:<12} {:<10} {:<12} {:>5} {:>6} {:<14} {:<14} {:<24} {:<20}",
+            "{:<20} {:<12} {:<10} {:<12} {:>5} {:>6} {:<14} {:<14} {:<18} {:<24} {:<20}",
             "MEMBER",
             "ROLE",
             "AGENT",
@@ -1056,13 +1065,14 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
             "TRIAGE",
             "ACTIVE",
             "REVIEW",
+            "HEALTH",
             "SIGNAL",
             "REPORTS TO"
         );
-        println!("{}", "-".repeat(160));
+        println!("{}", "-".repeat(179));
         for row in &rows {
             println!(
-                "{:<20} {:<12} {:<10} {:<12} {:>5} {:>6} {:<14} {:<14} {:<24} {:<20}",
+                "{:<20} {:<12} {:<10} {:<12} {:>5} {:>6} {:<14} {:<14} {:<18} {:<24} {:<20}",
                 row.name,
                 row.role,
                 row.agent.as_deref().unwrap_or("-"),
@@ -1071,6 +1081,7 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
                 row.triage_backlog,
                 status::format_owned_tasks_summary(&row.active_owned_tasks),
                 status::format_owned_tasks_summary(&row.review_owned_tasks),
+                row.health_summary,
                 row.signal.as_deref().unwrap_or("-"),
                 row.reports_to.as_deref().unwrap_or("-"),
             );
@@ -1164,6 +1175,7 @@ fn capture_team_load(project_root: &Path) -> Result<TeamLoadSnapshot> {
         &Default::default(),
         &triage_backlog_counts,
         &owned_task_buckets,
+        &Default::default(),
     );
     let mut total_members = 0usize;
     let mut working_members = 0usize;
@@ -2714,12 +2726,14 @@ roles:
             &pending,
             &triage,
             &owned,
+            &Default::default(),
         );
         assert_eq!(rows[0].state, "stopped");
         assert_eq!(rows[0].pending_inbox, 3);
         assert_eq!(rows[0].triage_backlog, 2);
         assert_eq!(rows[0].active_owned_tasks, vec![191]);
         assert_eq!(rows[0].review_owned_tasks, vec![193]);
+        assert_eq!(rows[0].health_summary, "-");
         assert_eq!(rows[1].state, "user");
         assert_eq!(rows[1].pending_inbox, 1);
         assert_eq!(rows[1].triage_backlog, 0);
@@ -2734,8 +2748,15 @@ roles:
                 label: Some("idle standup 2:00".to_string()),
             },
         )]);
-        let rows =
-            status::build_team_status_rows(&[architect], true, &runtime, &pending, &triage, &owned);
+        let rows = status::build_team_status_rows(
+            &[architect],
+            true,
+            &runtime,
+            &pending,
+            &triage,
+            &owned,
+            &Default::default(),
+        );
         assert_eq!(rows[0].state, "reviewing");
         assert_eq!(rows[0].pending_inbox, 3);
         assert_eq!(rows[0].triage_backlog, 2);
@@ -2879,6 +2900,8 @@ roles:
             review_owned_tasks: vec![193],
             signal: Some("needs triage (2)".to_string()),
             runtime_label: Some("idle".to_string()),
+            health: status::AgentHealthSummary::default(),
+            health_summary: "-".to_string(),
         };
         let reviewing = status::TeamStatusRow {
             state: "reviewing".to_string(),
