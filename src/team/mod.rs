@@ -87,6 +87,12 @@ pub(crate) fn orchestrator_log_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("orchestrator.log")
 }
 
+/// Returns `~/.batty/templates/`.
+pub fn templates_base_dir() -> Result<PathBuf> {
+    let home = std::env::var("HOME").context("cannot determine home directory")?;
+    Ok(PathBuf::from(home).join(".batty").join("templates"))
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct TeamLoadSnapshot {
     pub timestamp: u64,
@@ -297,13 +303,8 @@ pub fn init_team(project_root: &Path, template: &str) -> Result<Vec<PathBuf>> {
     Ok(created)
 }
 
-fn user_templates_root() -> Result<PathBuf> {
-    let home = std::env::var("HOME").context("HOME is not set")?;
-    Ok(PathBuf::from(home).join(".batty").join("templates"))
-}
-
 pub fn list_available_templates() -> Result<Vec<String>> {
-    let templates_dir = user_templates_root()?;
+    let templates_dir = templates_base_dir()?;
     if !templates_dir.is_dir() {
         bail!(
             "no templates directory found at {}",
@@ -349,7 +350,7 @@ fn copy_template_dir(src: &Path, dst: &Path, created: &mut Vec<PathBuf>) -> Resu
 }
 
 pub fn init_from_template(project_root: &Path, template_name: &str) -> Result<Vec<PathBuf>> {
-    let templates_dir = user_templates_root()?;
+    let templates_dir = templates_base_dir()?;
     if !templates_dir.is_dir() {
         bail!(
             "no templates directory found at {}",
@@ -393,6 +394,57 @@ pub fn init_from_template(project_root: &Path, template_name: &str) -> Result<Ve
     );
     Ok(created)
 }
+
+/// Export the current team config as a reusable template.
+pub fn export_template(project_root: &Path, name: &str) -> Result<usize> {
+    let config_dir = team_config_dir(project_root);
+    let team_yaml = config_dir.join(TEAM_CONFIG_FILE);
+    if !team_yaml.is_file() {
+        bail!("team config missing at {}", team_yaml.display());
+    }
+
+    let template_dir = templates_base_dir()?.join(name);
+    if template_dir.exists() {
+        eprintln!(
+            "warning: overwriting existing template at {}",
+            template_dir.display()
+        );
+    }
+    std::fs::create_dir_all(&template_dir)
+        .with_context(|| format!("failed to create {}", template_dir.display()))?;
+
+    let mut copied = 0usize;
+    copy_template_file(&team_yaml, &template_dir.join(TEAM_CONFIG_FILE))?;
+    copied += 1;
+
+    let mut prompt_paths = std::fs::read_dir(&config_dir)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
+        .collect::<Vec<_>>();
+    prompt_paths.sort();
+
+    for source in prompt_paths {
+        let file_name = source
+            .file_name()
+            .context("template source missing file name")?;
+        copy_template_file(&source, &template_dir.join(file_name))?;
+        copied += 1;
+    }
+
+    Ok(copied)
+}
+
+fn copy_template_file(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::copy(source, destination).with_context(|| {
+        format!(
+            "failed to copy {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    Ok(())
+}
+
 
 /// Path to the daemon PID file.
 fn daemon_pid_path(project_root: &Path) -> PathBuf {
@@ -2001,6 +2053,61 @@ mod tests {
         }
     }
 
+    struct HomeGuard {
+        original: Option<String>,
+    }
+
+    impl HomeGuard {
+        fn set(path: &Path) -> Self {
+            let original = std::env::var("HOME").ok();
+            unsafe {
+                std::env::set_var("HOME", path);
+            }
+            Self { original }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.original.as_deref() {
+                Some(value) => unsafe {
+                    std::env::set_var("HOME", value);
+                },
+                None => unsafe {
+                    std::env::remove_var("HOME");
+                },
+            }
+        }
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn unset(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.original.as_deref() {
+                Some(value) => unsafe {
+                    std::env::set_var(self.key, value);
+                },
+                None => unsafe {
+                    std::env::remove_var(self.key);
+                },
+            }
+        }
+    }
+
     #[test]
     fn team_config_dir_is_under_batty() {
         let root = Path::new("/tmp/project");
@@ -2208,6 +2315,74 @@ mod tests {
                 .join("batty_engineer.md")
                 .exists()
         );
+    }
+
+    #[test]
+    #[serial]
+    fn export_template_creates_directory_and_copies_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(tmp.path());
+        let project_root = tmp.path().join("project");
+        let config_dir = team_config_dir(&project_root);
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("team.yaml"), "name: demo\n").unwrap();
+        std::fs::write(config_dir.join("architect.md"), "architect prompt\n").unwrap();
+
+        let copied = export_template(&project_root, "demo-template").unwrap();
+        let template_dir = templates_base_dir().unwrap().join("demo-template");
+
+        assert_eq!(copied, 2);
+        assert_eq!(
+            std::fs::read_to_string(template_dir.join("team.yaml")).unwrap(),
+            "name: demo\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(template_dir.join("architect.md")).unwrap(),
+            "architect prompt\n"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn export_template_overwrites_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(tmp.path());
+        let project_root = tmp.path().join("project");
+        let config_dir = team_config_dir(&project_root);
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("team.yaml"), "name: first\n").unwrap();
+        std::fs::write(config_dir.join("manager.md"), "v1\n").unwrap();
+
+        export_template(&project_root, "demo-template").unwrap();
+
+        std::fs::write(config_dir.join("team.yaml"), "name: second\n").unwrap();
+        std::fs::write(config_dir.join("manager.md"), "v2\n").unwrap();
+
+        let copied = export_template(&project_root, "demo-template").unwrap();
+        let template_dir = templates_base_dir().unwrap().join("demo-template");
+
+        assert_eq!(copied, 2);
+        assert_eq!(
+            std::fs::read_to_string(template_dir.join("team.yaml")).unwrap(),
+            "name: second\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(template_dir.join("manager.md")).unwrap(),
+            "v2\n"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn export_template_missing_team_yaml_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(tmp.path());
+        let project_root = tmp.path().join("project");
+        std::fs::create_dir_all(team_config_dir(&project_root)).unwrap();
+
+        let error = export_template(&project_root, "demo-template").unwrap_err();
+
+        assert!(error.to_string().contains("team config missing"));
     }
 
     #[test]
@@ -2458,6 +2633,7 @@ roles:
     #[serial]
     fn send_message_delivers_to_unique_instance_inbox() {
         let tmp = tempfile::tempdir().unwrap();
+        let _tmux_pane = EnvVarGuard::unset("TMUX_PANE");
         write_team_config(
             tmp.path(),
             r#"

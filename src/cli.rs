@@ -27,6 +27,12 @@ pub enum Command {
         from: Option<String>,
     },
 
+    /// Export the current team config as a reusable template
+    ExportTemplate {
+        /// Template name
+        name: String,
+    },
+
     /// Start the team daemon and tmux session
     Start {
         /// Auto-attach to the tmux session after startup
@@ -294,6 +300,15 @@ mod tests {
     fn init_subcommand_rejects_from_with_template() {
         let result = Cli::try_parse_from(["batty", "init", "--template", "large", "--from", "x"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn export_template_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "export-template", "myteam"]);
+        match cli.command {
+            Command::ExportTemplate { name } => assert_eq!(name, "myteam"),
+            other => panic!("expected export-template command, got {other:?}"),
+        }
     }
 
     #[test]
