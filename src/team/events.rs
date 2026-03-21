@@ -8,6 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use super::DEFAULT_EVENT_LOG_MAX_BYTES;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
 pub struct TeamEvent {
@@ -278,13 +280,19 @@ impl TeamEvent {
 pub struct EventSink {
     writer: Box<dyn Write + Send>,
     path: PathBuf,
+    max_bytes: Option<u64>,
 }
 
 impl EventSink {
     pub fn new(path: &Path) -> Result<Self> {
+        Self::new_with_max_bytes(path, DEFAULT_EVENT_LOG_MAX_BYTES)
+    }
+
+    pub fn new_with_max_bytes(path: &Path, max_bytes: u64) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        rotate_event_log_if_needed(path, max_bytes, 0)?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -293,6 +301,7 @@ impl EventSink {
         Ok(Self {
             writer: Box::new(BufWriter::new(file)),
             path: path.to_path_buf(),
+            max_bytes: Some(max_bytes),
         })
     }
 
@@ -301,11 +310,13 @@ impl EventSink {
         Self {
             writer: Box::new(writer),
             path: path.to_path_buf(),
+            max_bytes: None,
         }
     }
 
     pub fn emit(&mut self, event: TeamEvent) -> Result<()> {
         let json = serde_json::to_string(&event)?;
+        self.rotate_if_needed((json.len() + 1) as u64)?;
         writeln!(self.writer, "{json}")?;
         self.writer.flush()?;
         Ok(())
@@ -315,6 +326,61 @@ impl EventSink {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    fn rotate_if_needed(&mut self, next_entry_bytes: u64) -> Result<()> {
+        let Some(max_bytes) = self.max_bytes else {
+            return Ok(());
+        };
+        self.writer.flush()?;
+        if rotate_event_log_if_needed(&self.path, max_bytes, next_entry_bytes)? {
+            self.writer = Box::new(BufWriter::new(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)
+                    .with_context(|| {
+                        format!("failed to reopen event sink: {}", self.path.display())
+                    })?,
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn rotated_event_log_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.1", path.display()))
+}
+
+fn rotate_event_log_if_needed(path: &Path, max_bytes: u64, next_entry_bytes: u64) -> Result<bool> {
+    let len = match fs::metadata(path) {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to stat {}", path.display()));
+        }
+    };
+
+    if len == 0 {
+        return Ok(false);
+    }
+
+    if len.saturating_add(next_entry_bytes) <= max_bytes {
+        return Ok(false);
+    }
+
+    let rotated = rotated_event_log_path(path);
+    if rotated.exists() {
+        fs::remove_file(&rotated)
+            .with_context(|| format!("failed to remove {}", rotated.display()))?;
+    }
+    fs::rename(path, &rotated).with_context(|| {
+        format!(
+            "failed to rotate event log {} to {}",
+            path.display(),
+            rotated.display()
+        )
+    })?;
+    Ok(true)
 }
 
 pub fn read_events(path: &Path) -> Result<Vec<TeamEvent>> {
@@ -662,5 +728,41 @@ mod tests {
         sink.emit(TeamEvent::daemon_started()).unwrap();
         assert!(path.exists());
         assert_eq!(sink.path(), path);
+    }
+
+    #[test]
+    fn event_sink_rotates_oversized_log_on_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("events.jsonl");
+        fs::write(&path, "0123456789").unwrap();
+
+        let mut sink = EventSink::new_with_max_bytes(&path, 5).unwrap();
+        sink.emit(TeamEvent::daemon_started()).unwrap();
+
+        let rotated = rotated_event_log_path(&path);
+        assert_eq!(fs::read_to_string(&rotated).unwrap(), "0123456789");
+        let current = fs::read_to_string(&path).unwrap();
+        assert!(current.contains("daemon_started"));
+    }
+
+    #[test]
+    fn event_sink_rotates_before_write_that_would_exceed_threshold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("events.jsonl");
+        let first_line = "{\"event\":\"first\"}\n";
+        fs::write(&path, first_line).unwrap();
+
+        let mut sink = EventSink::new_with_max_bytes(&path, first_line.len() as u64 + 10).unwrap();
+        sink.emit(TeamEvent::task_assigned(
+            "eng-1",
+            "this assignment is long enough to rotate",
+        ))
+        .unwrap();
+
+        let rotated = rotated_event_log_path(&path);
+        assert_eq!(fs::read_to_string(&rotated).unwrap(), first_line);
+        let current = fs::read_to_string(&path).unwrap();
+        assert!(current.contains("task_assigned"));
+        assert!(!current.contains("\"event\":\"first\""));
     }
 }

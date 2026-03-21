@@ -674,6 +674,7 @@ mod tests {
             layout: None,
             workflow_policy: Default::default(),
             cost: CostConfig { models },
+            event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
             roles: vec![
                 crate::team::config::RoleDef {
                     name: "architect".to_string(),

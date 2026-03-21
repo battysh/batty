@@ -720,6 +720,7 @@ mod tests {
             orchestrator_position: OrchestratorPosition::Bottom,
             layout: None,
             cost: Default::default(),
+            event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
             roles: vec![role],
         };
         let members = vec![member];
@@ -788,6 +789,7 @@ mod tests {
             orchestrator_position: OrchestratorPosition::Bottom,
             layout: None,
             cost: Default::default(),
+            event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
             roles: vec![role],
         };
         let members = vec![member];
@@ -876,6 +878,7 @@ mod tests {
             orchestrator_position: OrchestratorPosition::Bottom,
             layout: None,
             cost: Default::default(),
+            event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
             roles: vec![user_role, architect_role],
         };
         let members = vec![user.clone(), architect];

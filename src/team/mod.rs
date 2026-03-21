@@ -66,6 +66,7 @@ const INBOX_BODY_PREVIEW_CHARS: usize = 140;
 const TRIAGE_RESULT_FRESHNESS_SECONDS: u64 = 300;
 const LOG_ROTATION_BYTES: u64 = 5 * 1024 * 1024;
 const LOG_ROTATION_KEEP: usize = 3;
+pub(crate) const DEFAULT_EVENT_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 const DAEMON_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
 const DAEMON_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 

@@ -138,6 +138,15 @@ pub fn build_report(project_root: &Path) -> Result<String> {
             name: "orchestrator.log",
             bytes: file_size(&project_root.join(".batty").join("orchestrator.log")),
         },
+        LogSize {
+            name: "events.jsonl",
+            bytes: file_size(
+                &project_root
+                    .join(".batty")
+                    .join("team_config")
+                    .join("events.jsonl"),
+            ),
+        },
     ];
 
     Ok(render_report(
@@ -1405,6 +1414,15 @@ roles:
             "orchestrator",
         )
         .unwrap();
+        fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+        fs::write(
+            tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+            "events",
+        )
+        .unwrap();
 
         let report = build_report(tmp.path()).unwrap();
 
@@ -1421,6 +1439,7 @@ roles:
         assert!(report.contains("path="));
         assert!(report.contains("status=missing"));
         assert!(report.contains("daemon.log: 6 bytes"));
+        assert!(report.contains("events.jsonl: 6 bytes"));
     }
 
     #[test]
@@ -1440,6 +1459,7 @@ roles:
         assert!(report.contains("(no team config or members)"));
         assert!(report.contains("daemon.log: missing"));
         assert!(report.contains("orchestrator.log: missing"));
+        assert!(report.contains("events.jsonl: missing"));
     }
 
     #[test]
