@@ -1541,6 +1541,30 @@ mod tests {
         }
     }
 
+    fn owned_task_harness() -> TestHarness {
+        TestHarness::new()
+            .with_member(architect_member("architect"))
+            .with_member(manager_member("lead", Some("architect")))
+            .with_member(engineer_member("eng-1", Some("lead"), false))
+            .with_member_state("eng-1", MemberState::Idle)
+            .with_pane("eng-1", "%999998")
+    }
+
+    fn expire_owned_task_cooldown(daemon: &mut TeamDaemon, member: &str) {
+        daemon.intervention_cooldowns.insert(
+            member.to_string(),
+            Instant::now()
+                - Duration::from_secs(
+                    daemon
+                        .config
+                        .team_config
+                        .automation
+                        .intervention_cooldown_secs
+                        + 1,
+                ),
+        );
+    }
+
     #[test]
     fn maybe_intervene_triage_backlog_queues_expected_message_for_idle_manager() {
         let harness =
@@ -1678,5 +1702,169 @@ mod tests {
                 .contains("2 delivered direct-report result packet")
         );
         assert!(pending[0].body.contains("Reports in scope: eng-1, eng-2."));
+    }
+
+    #[test]
+    fn maybe_intervene_owned_tasks_queues_task_message_for_idle_engineer() {
+        let harness =
+            owned_task_harness().with_board_task(191, "owned-task", "in-progress", Some("eng-1"));
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "eng-1");
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        let pending = harness.pending_inbox_messages("eng-1").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "lead");
+        assert!(
+            pending[0]
+                .body
+                .contains("Owned active task backlog detected")
+        );
+        assert!(pending[0].body.contains("Task #191"));
+        assert!(pending[0].body.contains("batty send lead"));
+
+        let state = daemon.owned_task_interventions.get("eng-1").unwrap();
+        assert_eq!(state.idle_epoch, 1);
+        assert_eq!(state.signature, "191:in-progress");
+        assert!(!state.escalation_sent);
+    }
+
+    #[test]
+    fn maybe_intervene_owned_tasks_updates_idle_epoch_across_state_transitions() {
+        let harness =
+            owned_task_harness().with_board_task(191, "owned-task", "in-progress", Some("eng-1"));
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "eng-1");
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        enter_idle_epoch(&mut daemon, "eng-1");
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        let pending = harness.pending_inbox_messages("eng-1").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            daemon
+                .owned_task_interventions
+                .get("eng-1")
+                .map(|state| state.idle_epoch),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn maybe_intervene_owned_tasks_escalates_to_manager_after_threshold() {
+        let harness =
+            owned_task_harness().with_board_task(191, "owned-task", "in-progress", Some("eng-1"));
+        let mut daemon = harness.build_daemon().unwrap();
+        daemon
+            .config
+            .team_config
+            .workflow_policy
+            .escalation_threshold_secs = 120;
+
+        enter_idle_epoch(&mut daemon, "eng-1");
+        daemon.maybe_intervene_owned_tasks().unwrap();
+        daemon
+            .owned_task_interventions
+            .get_mut("eng-1")
+            .unwrap()
+            .detected_at = Instant::now() - Duration::from_secs(121);
+
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        let lead_pending = harness.pending_inbox_messages("lead").unwrap();
+        assert_eq!(lead_pending.len(), 1);
+        assert_eq!(lead_pending[0].from, "daemon");
+        assert!(lead_pending[0].body.contains("Stuck task escalation"));
+        assert!(lead_pending[0].body.contains("eng-1"));
+        assert!(lead_pending[0].body.contains("Task #191"));
+        assert!(
+            daemon
+                .owned_task_interventions
+                .get("eng-1")
+                .is_some_and(|state| state.escalation_sent)
+        );
+    }
+
+    #[test]
+    fn maybe_intervene_owned_tasks_only_escalates_once_per_signature() {
+        let harness =
+            owned_task_harness().with_board_task(191, "owned-task", "in-progress", Some("eng-1"));
+        let mut daemon = harness.build_daemon().unwrap();
+        daemon
+            .config
+            .team_config
+            .workflow_policy
+            .escalation_threshold_secs = 120;
+
+        enter_idle_epoch(&mut daemon, "eng-1");
+        daemon.maybe_intervene_owned_tasks().unwrap();
+        daemon
+            .owned_task_interventions
+            .get_mut("eng-1")
+            .unwrap()
+            .detected_at = Instant::now() - Duration::from_secs(121);
+
+        daemon.maybe_intervene_owned_tasks().unwrap();
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        let lead_pending = harness.pending_inbox_messages("lead").unwrap();
+        assert_eq!(lead_pending.len(), 1);
+        assert!(
+            daemon
+                .owned_task_interventions
+                .get("eng-1")
+                .is_some_and(|state| state.escalation_sent)
+        );
+    }
+
+    #[test]
+    fn maybe_intervene_owned_tasks_signature_change_resets_state() {
+        let harness =
+            owned_task_harness().with_board_task(191, "first-task", "in-progress", Some("eng-1"));
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "eng-1");
+        daemon.maybe_intervene_owned_tasks().unwrap();
+        mark_pending_delivered(&harness, "eng-1");
+
+        let tasks_dir = harness.board_tasks_dir();
+        let second_task_path = tasks_dir.join("192-second-task.md");
+        std::fs::write(
+            &second_task_path,
+            "---\nid: 192\ntitle: second-task\nstatus: in-progress\npriority: high\nclass: standard\nclaimed_by: eng-1\n---\n\nTask description.\n",
+        )
+        .unwrap();
+        expire_owned_task_cooldown(&mut daemon, "eng-1");
+
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        let pending = harness.pending_inbox_messages("eng-1").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].body.contains("Task #191"));
+        assert!(pending[0].body.contains("#192 (in-progress) second-task"));
+
+        let state = daemon.owned_task_interventions.get("eng-1").unwrap();
+        assert_eq!(state.signature, "191:in-progress|192:in-progress");
+        assert!(!state.escalation_sent);
+    }
+
+    #[test]
+    fn maybe_intervene_owned_tasks_skips_working_engineer() {
+        let harness = TestHarness::new()
+            .with_member(architect_member("architect"))
+            .with_member(manager_member("lead", Some("architect")))
+            .with_member(engineer_member("eng-1", Some("lead"), false))
+            .with_member_state("eng-1", MemberState::Working)
+            .with_pane("eng-1", "%999998")
+            .with_board_task(191, "owned-task", "in-progress", Some("eng-1"));
+        let mut daemon = harness.build_daemon().unwrap();
+
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        assert!(harness.pending_inbox_messages("eng-1").unwrap().is_empty());
+        assert!(daemon.owned_task_interventions.get("eng-1").is_none());
     }
 }
