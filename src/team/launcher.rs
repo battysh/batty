@@ -18,16 +18,10 @@ pub(super) struct MemberLaunchPlan {
 }
 
 impl TeamDaemon {
-    pub(super) fn prepare_member_launch(
-        &self,
-        member: &MemberInstance,
-        resume: bool,
-        previous_launch_state: &HashMap<String, LaunchIdentity>,
-        duplicate_claude_session_ids: &HashSet<&str>,
-    ) -> Result<MemberLaunchPlan> {
+    pub(super) fn member_work_dir(&self, member: &MemberInstance) -> PathBuf {
         let team_config_dir = self.config.project_root.join(".batty").join("team_config");
 
-        let work_dir = if member.use_worktrees {
+        if member.use_worktrees {
             let wt_dir = self
                 .config
                 .project_root
@@ -53,7 +47,42 @@ impl TeamDaemon {
             }
         } else {
             self.config.project_root.clone()
-        };
+        }
+    }
+
+    pub(super) fn validate_member_panes_on_startup(&mut self) {
+        let members = self.config.members.clone();
+        for member in &members {
+            if member.role_type == RoleType::User {
+                continue;
+            }
+
+            let Some(pane_id) = self.config.pane_map.get(&member.name).cloned() else {
+                warn!(member = %member.name, "no pane found for member");
+                continue;
+            };
+
+            let expected_dir = self.member_work_dir(member);
+            if let Err(error) = self.ensure_member_pane_cwd(&member.name, &pane_id, &expected_dir) {
+                warn!(
+                    member = %member.name,
+                    pane = %pane_id,
+                    error = %error,
+                    "failed to validate pane cwd on daemon startup"
+                );
+            }
+        }
+    }
+
+    pub(super) fn prepare_member_launch(
+        &self,
+        member: &MemberInstance,
+        resume: bool,
+        previous_launch_state: &HashMap<String, LaunchIdentity>,
+        duplicate_claude_session_ids: &HashSet<&str>,
+    ) -> Result<MemberLaunchPlan> {
+        let team_config_dir = self.config.project_root.join(".batty").join("team_config");
+        let work_dir = self.member_work_dir(member);
 
         let agent_name = member.agent.as_deref().unwrap_or("claude");
         let prompt_text = strip_nudge_section(&self.load_prompt(member, &team_config_dir));

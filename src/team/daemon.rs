@@ -346,6 +346,8 @@ impl TeamDaemon {
             warn!(error = %e, "failed to install signal handler");
         }
 
+        self.validate_member_panes_on_startup();
+
         // Spawn agents in all panes
         self.spawn_all_agents(resume)?;
         if resume {
@@ -3114,6 +3116,113 @@ mod tests {
             events.iter().all(|event| event.event != "cwd_corrected"),
             "did not expect cwd_corrected event when pane cwd already matched"
         );
+
+        crate::tmux::kill_session(&session).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn startup_cwd_validation_corrects_all_agent_panes() {
+        let session = format!("batty-test-startup-cwd-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "startup-cwd");
+        let wrong_architect_dir = tmp.path().join("wrong-architect");
+        let wrong_engineer_dir = tmp.path().join("wrong-engineer");
+        std::fs::create_dir_all(&wrong_architect_dir).unwrap();
+        std::fs::create_dir_all(&wrong_engineer_dir).unwrap();
+
+        crate::tmux::create_session(
+            &session,
+            "bash",
+            &[],
+            wrong_architect_dir.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        crate::tmux::create_window(
+            &session,
+            "eng-1",
+            "bash",
+            &[],
+            wrong_engineer_dir.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        let architect_pane = crate::tmux::pane_id(&session).unwrap();
+        let engineer_pane = crate::tmux::pane_id(&format!("{session}:eng-1")).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+
+        let architect = MemberInstance {
+            name: "architect".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: true,
+        };
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: repo.clone(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                cost: Default::default(),
+                roles: Vec::new(),
+            },
+            session: session.clone(),
+            members: vec![architect, engineer],
+            pane_map: HashMap::from([
+                ("architect".to_string(), architect_pane.clone()),
+                ("eng-1".to_string(), engineer_pane.clone()),
+            ]),
+        })
+        .unwrap();
+
+        daemon.validate_member_panes_on_startup();
+
+        let engineer_expected_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let architect_current = crate::tmux::pane_current_path(&architect_pane).unwrap();
+        let engineer_current = crate::tmux::pane_current_path(&engineer_pane).unwrap();
+        assert_eq!(
+            normalized_assignment_dir(Path::new(&architect_current)),
+            normalized_assignment_dir(&repo)
+        );
+        assert_eq!(
+            normalized_assignment_dir(Path::new(&engineer_current)),
+            normalized_assignment_dir(&engineer_expected_dir)
+        );
+
+        let events = crate::team::events::read_events(
+            &repo.join(".batty").join("team_config").join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "cwd_corrected"
+                && event.role.as_deref() == Some("architect")
+                && event.reason.as_deref() == Some(repo.to_string_lossy().as_ref())
+        }));
+        assert!(events.iter().any(|event| {
+            event.event == "cwd_corrected"
+                && event.role.as_deref() == Some("eng-1")
+                && event.reason.as_deref() == Some(engineer_expected_dir.to_string_lossy().as_ref())
+        }));
 
         crate::tmux::kill_session(&session).unwrap();
     }
