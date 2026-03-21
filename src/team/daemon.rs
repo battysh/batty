@@ -6348,7 +6348,12 @@ mod tests {
             .insert(member_name.to_string(), MemberState::Working);
 
         crate::tmux::send_keys(&pane_id, "exit", true).unwrap();
-        std::thread::sleep(Duration::from_millis(300));
+        for _ in 0..5 {
+            if crate::tmux::pane_dead(&pane_id).unwrap_or(false) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
         assert!(crate::tmux::pane_dead(&pane_id).unwrap());
 
         daemon.restart_dead_members().unwrap();
