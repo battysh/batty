@@ -1,24 +1,15 @@
-mod agent;
-mod cli;
-mod config;
-mod events;
-mod log;
-mod paths;
-mod prompt;
-mod task;
-mod team;
-mod tmux;
-mod worktree;
-
 use anyhow::{Context, Result, bail};
+use batty_cli::{
+    cli::{
+        self, BoardCommand, Cli, Command, InboxCommand, ReviewDispositionArg, TaskCommand,
+        TaskStateArg,
+    },
+    team,
+};
 use clap::Parser;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::debug;
-
-use cli::{
-    BoardCommand, Cli, Command, InboxCommand, ReviewDispositionArg, TaskCommand, TaskStateArg,
-};
 
 /// Resolve the project root directory.
 ///

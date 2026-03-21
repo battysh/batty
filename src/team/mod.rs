@@ -18,6 +18,7 @@ pub mod doctor;
 pub mod events;
 pub mod failure_patterns;
 pub mod git_cmd;
+pub mod harness;
 pub mod hierarchy;
 pub mod inbox;
 pub mod layout;
