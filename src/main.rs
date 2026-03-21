@@ -96,18 +96,22 @@ fn main() -> Result<()> {
     debug!(root = %root.display(), "project root");
 
     match cli.command {
-        Command::Init { template } => {
-            let template_name = match template {
-                cli::InitTemplate::Solo => "solo",
-                cli::InitTemplate::Pair => "pair",
-                cli::InitTemplate::Simple => "simple",
-                cli::InitTemplate::Squad => "squad",
-                cli::InitTemplate::Large => "large",
-                cli::InitTemplate::Research => "research",
-                cli::InitTemplate::Software => "software",
-                cli::InitTemplate::Batty => "batty",
+        Command::Init { template, from } => {
+            let created = if let Some(template_name) = from.as_deref() {
+                team::init_from_template(&root, template_name)?
+            } else {
+                let template_name = match template.unwrap_or(cli::InitTemplate::Simple) {
+                    cli::InitTemplate::Solo => "solo",
+                    cli::InitTemplate::Pair => "pair",
+                    cli::InitTemplate::Simple => "simple",
+                    cli::InitTemplate::Squad => "squad",
+                    cli::InitTemplate::Large => "large",
+                    cli::InitTemplate::Research => "research",
+                    cli::InitTemplate::Software => "software",
+                    cli::InitTemplate::Batty => "batty",
+                };
+                team::init_team(&root, template_name)?
             };
-            let created = team::init_team(&root, template_name)?;
             println!("Initialized team config ({} files):", created.len());
             for path in &created {
                 println!("  {}", path.display());

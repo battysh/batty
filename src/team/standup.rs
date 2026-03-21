@@ -381,7 +381,6 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
     fn board_aware_standup_appends_task_ids_and_workflow_signals() {
         let tmp = tempfile::tempdir().unwrap();
         let board_dir = tmp.path().join(".batty").join("team_config").join("board");

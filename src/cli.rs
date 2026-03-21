@@ -20,8 +20,11 @@ pub enum Command {
     /// Scaffold .batty/team_config/ with default team.yaml and prompt templates
     Init {
         /// Template to use for scaffolding
-        #[arg(long, value_enum, default_value_t = InitTemplate::Simple)]
-        template: InitTemplate,
+        #[arg(long, value_enum, conflicts_with = "from")]
+        template: Option<InitTemplate>,
+        /// Copy team config from $HOME/.batty/templates/<name>/
+        #[arg(long, conflicts_with = "template")]
+        from: Option<String>,
     },
 
     /// Start the team daemon and tmux session
@@ -255,7 +258,10 @@ mod tests {
     fn init_subcommand_defaults_to_simple() {
         let cli = Cli::parse_from(["batty", "init"]);
         match cli.command {
-            Command::Init { template } => assert_eq!(template, InitTemplate::Simple),
+            Command::Init { template, from } => {
+                assert_eq!(template, None);
+                assert_eq!(from, None);
+            }
             other => panic!("expected init command, got {other:?}"),
         }
     }
@@ -264,9 +270,30 @@ mod tests {
     fn init_subcommand_accepts_large_template() {
         let cli = Cli::parse_from(["batty", "init", "--template", "large"]);
         match cli.command {
-            Command::Init { template } => assert_eq!(template, InitTemplate::Large),
+            Command::Init { template, from } => {
+                assert_eq!(template, Some(InitTemplate::Large));
+                assert_eq!(from, None);
+            }
             other => panic!("expected init command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn init_subcommand_accepts_from_template_name() {
+        let cli = Cli::parse_from(["batty", "init", "--from", "custom-team"]);
+        match cli.command {
+            Command::Init { template, from } => {
+                assert_eq!(template, None);
+                assert_eq!(from.as_deref(), Some("custom-team"));
+            }
+            other => panic!("expected init command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn init_subcommand_rejects_from_with_template() {
+        let result = Cli::try_parse_from(["batty", "init", "--template", "large", "--from", "x"]);
+        assert!(result.is_err());
     }
 
     #[test]
