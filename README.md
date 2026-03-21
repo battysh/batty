@@ -228,6 +228,7 @@ This session shows Batty coordinating a live team in `~/mafia_solver`: the `arch
 - [CLI Reference](docs/reference/cli.md)
 - [Runtime Config Reference](docs/reference/config.md)
 - [Module Reference](docs/reference/modules.md)
+- [Orchestrator Guide](docs/orchestrator.md)
 - [Architecture](docs/architecture.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Full docs site](https://battysh.github.io/batty/)
