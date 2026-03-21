@@ -170,6 +170,14 @@ impl TeamEvent {
         }
     }
 
+    pub fn performance_regression(task: &str, reason: &str) -> Self {
+        Self {
+            task: Some(task.into()),
+            reason: Some(reason.into()),
+            ..Self::base("performance_regression")
+        }
+    }
+
     pub fn task_completed(role: &str) -> Self {
         Self {
             role: Some(role.into()),
@@ -398,6 +406,10 @@ mod tests {
             ),
             ("task_escalated", TeamEvent::task_escalated("eng-1", "task")),
             ("task_unblocked", TeamEvent::task_unblocked("eng-1", "task")),
+            (
+                "performance_regression",
+                TeamEvent::performance_regression("42", "runtime_ms=1300 avg_ms=1000 pct=30"),
+            ),
             ("task_completed", TeamEvent::task_completed("eng-1")),
             ("standup_generated", TeamEvent::standup_generated("manager")),
             ("retro_generated", TeamEvent::retro_generated()),
@@ -557,6 +569,19 @@ mod tests {
         assert!(json.contains("\"event\":\"task_unblocked\""));
         assert!(json.contains("\"role\":\"eng-1-1\""));
         assert!(json.contains("\"task\":\"42\""));
+    }
+
+    #[test]
+    fn performance_regression_serializes_task_and_reason() {
+        let event = TeamEvent::performance_regression("42", "runtime_ms=1300 avg_ms=1000 pct=30");
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"].as_str().unwrap(), "performance_regression");
+        assert_eq!(parsed["task"].as_str().unwrap(), "42");
+        assert_eq!(
+            parsed["reason"].as_str().unwrap(),
+            "runtime_ms=1300 avg_ms=1000 pct=30"
+        );
     }
 
     #[test]
