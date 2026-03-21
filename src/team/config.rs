@@ -129,6 +129,8 @@ pub struct AutomationConfig {
     #[serde(default = "default_enabled")]
     pub standups: bool,
     #[serde(default = "default_enabled")]
+    pub failure_pattern_detection: bool,
+    #[serde(default = "default_enabled")]
     pub triage_interventions: bool,
     #[serde(default = "default_enabled")]
     pub review_interventions: bool,
@@ -147,6 +149,7 @@ impl Default for AutomationConfig {
         Self {
             timeout_nudges: default_enabled(),
             standups: default_enabled(),
+            failure_pattern_detection: default_enabled(),
             triage_interventions: default_enabled(),
             review_interventions: default_enabled(),
             owned_task_interventions: default_enabled(),
@@ -545,6 +548,7 @@ roles:
         assert_eq!(config.standup.output_lines, 30);
         assert!(config.automation.timeout_nudges);
         assert!(config.automation.standups);
+        assert!(config.automation.failure_pattern_detection);
         assert!(config.automation.triage_interventions);
         assert_eq!(config.automation.intervention_idle_grace_secs, 60);
         assert_eq!(config.roles[0].instances, 1);
@@ -588,6 +592,7 @@ name: test
 automation:
   timeout_nudges: false
   standups: true
+  failure_pattern_detection: false
   triage_interventions: true
   review_interventions: false
   owned_task_interventions: true
@@ -602,6 +607,7 @@ roles:
         let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(!config.automation.timeout_nudges);
         assert!(config.automation.standups);
+        assert!(!config.automation.failure_pattern_detection);
         assert!(config.automation.triage_interventions);
         assert!(!config.automation.review_interventions);
         assert!(config.automation.owned_task_interventions);
