@@ -95,7 +95,8 @@ pub struct TeamDaemon {
 struct OwnedTaskInterventionState {
     idle_epoch: u64,
     signature: String,
-    fired_at: Instant,
+    detected_at: Instant,
+    escalation_sent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2168,6 +2169,7 @@ impl TeamDaemon {
                 .members
                 .iter()
                 .find(|member| member.name == name)
+                .cloned()
             else {
                 continue;
             };
@@ -2220,7 +2222,7 @@ impl TeamDaemon {
                 continue;
             }
 
-            let text = self.build_triage_intervention_message(member, reports, triage_state.count);
+            let text = self.build_triage_intervention_message(&member, reports, triage_state.count);
             info!(member = %name, triage_backlog = triage_state.count, "firing triage intervention");
             let delivered_live = match self.queue_daemon_message(&name, &text) {
                 Ok(MessageDelivery::LivePane) => true,
@@ -2270,6 +2272,7 @@ impl TeamDaemon {
                 .members
                 .iter()
                 .find(|member| member.name == name)
+                .cloned()
             else {
                 continue;
             };
@@ -2297,9 +2300,62 @@ impl TeamDaemon {
             let idle_epoch = self.triage_idle_epochs.get(&name).copied().unwrap_or(0);
 
             let signature = owned_task_intervention_signature(&owned_tasks);
-            if let Some(state) = self.owned_task_interventions.get_mut(&name) {
-                if state.signature == signature {
-                    state.idle_epoch = idle_epoch;
+            if let Some(existing) = self.owned_task_interventions.get(&name) {
+                if existing.signature == signature {
+                    let stuck_age_secs = existing.detected_at.elapsed().as_secs();
+                    let should_escalate = !existing.escalation_sent
+                        && super::policy::should_escalate(
+                            &self.config.team_config.workflow_policy,
+                            stuck_age_secs,
+                        );
+                    if let Some(state) = self.owned_task_interventions.get_mut(&name) {
+                        state.idle_epoch = idle_epoch;
+                        if !should_escalate {
+                            continue;
+                        }
+                    }
+
+                    let Some(parent) = member.reports_to.clone() else {
+                        if let Some(state) = self.owned_task_interventions.get_mut(&name) {
+                            state.escalation_sent = true;
+                        }
+                        continue;
+                    };
+                    let text = self.build_stuck_task_escalation_message(
+                        &member,
+                        &owned_tasks,
+                        stuck_age_secs,
+                    );
+                    info!(
+                        member = %name,
+                        parent = %parent,
+                        owned_task_count = owned_tasks.len(),
+                        stuck_age_secs,
+                        "escalating stuck owned task"
+                    );
+                    match self.queue_message("daemon", &parent, &text) {
+                        Ok(()) => {
+                            self.record_orchestrator_action(format!(
+                                "recovery: stuck-task escalation for {} to {} after {}s on {} active task(s)",
+                                name,
+                                parent,
+                                stuck_age_secs,
+                                owned_tasks.len()
+                            ));
+                            for task in &owned_tasks {
+                                self.emit_event(TeamEvent::task_escalated(
+                                    &name,
+                                    &task.id.to_string(),
+                                ));
+                            }
+                            if let Some(state) = self.owned_task_interventions.get_mut(&name) {
+                                state.escalation_sent = true;
+                            }
+                        }
+                        Err(error) => {
+                            warn!(member = %name, parent = %parent, error = %error, "failed to escalate stuck task");
+                        }
+                    }
                     continue;
                 }
             }
@@ -2313,7 +2369,7 @@ impl TeamDaemon {
             }
 
             let reports = direct_reports.get(&name).cloned().unwrap_or_default();
-            let text = self.build_owned_task_intervention_message(member, &owned_tasks, &reports);
+            let text = self.build_owned_task_intervention_message(&member, &owned_tasks, &reports);
             info!(
                 member = %name,
                 owned_task_count = owned_tasks.len(),
@@ -2337,7 +2393,8 @@ impl TeamDaemon {
                 OwnedTaskInterventionState {
                     idle_epoch,
                     signature,
-                    fired_at: Instant::now(),
+                    detected_at: Instant::now(),
+                    escalation_sent: false,
                 },
             );
             self.intervention_cooldowns
@@ -2448,7 +2505,8 @@ impl TeamDaemon {
                 OwnedTaskInterventionState {
                     idle_epoch,
                     signature,
-                    fired_at: Instant::now(),
+                    detected_at: Instant::now(),
+                    escalation_sent: false,
                 },
             );
             self.intervention_cooldowns
@@ -2617,7 +2675,8 @@ impl TeamDaemon {
                 OwnedTaskInterventionState {
                     idle_epoch,
                     signature,
-                    fired_at: Instant::now(),
+                    detected_at: Instant::now(),
+                    escalation_sent: false,
                 },
             );
             self.intervention_cooldowns
@@ -2786,7 +2845,8 @@ impl TeamDaemon {
                 OwnedTaskInterventionState {
                     idle_epoch,
                     signature,
-                    fired_at: Instant::now(),
+                    detected_at: Instant::now(),
+                    escalation_sent: false,
                 },
             );
             self.intervention_cooldowns
@@ -3102,6 +3162,81 @@ Review and disposition it now:\n\
 
         message.push_str(
             "\nDo not leave completed direct-report work parked in review. Merge it, discard it, or send exact rework now. Batty will remind you again if review backlog remains unchanged.",
+        );
+        message
+    }
+
+    fn build_stuck_task_escalation_message(
+        &self,
+        member: &MemberInstance,
+        owned_tasks: &[&crate::task::Task],
+        stuck_age_secs: u64,
+    ) -> String {
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let board_dir_str = board_dir.display();
+        let task_summary = owned_tasks
+            .iter()
+            .map(|task| format!("#{} ({}) {}", task.id, task.status, task.title))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let task_context_cmds = owned_tasks
+            .iter()
+            .map(|task| {
+                format!(
+                    "- `kanban-md show --dir {board_dir_str} {task_id}`\n- `sed -n '1,220p' {task_path}`",
+                    task_id = task.id,
+                    task_path = task.source_path.display(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let first_task = owned_tasks[0];
+        let redirect_command = if member.role_type == RoleType::Engineer {
+            format!(
+                "`batty assign {member_name} \"Task #{task_id}: <next concrete step or unblock plan>\"`",
+                member_name = member.name,
+                task_id = first_task.id,
+            )
+        } else {
+            format!(
+                "`batty send {member_name} \"Task #{task_id}: <next concrete step or unblock plan>\"`",
+                member_name = member.name,
+                task_id = first_task.id,
+            )
+        };
+
+        let mut message = format!(
+            "Stuck task escalation: {member_name} has remained idle while still owning active board task(s) for at least {stuck_duration}: {task_summary}.\n\
+Intervene now:\n\
+1. `batty status`\n\
+2. `kanban-md list --dir {board_dir_str} --status in-progress`\n\
+3. Review the stuck task context:\n{task_context_cmds}\n\
+4. If the lane is executable, push the next action now with {redirect_command}.",
+            member_name = member.name,
+            stuck_duration = format_stuck_duration(stuck_age_secs),
+        );
+
+        message.push_str(&format!(
+            "\n5. If the lane is blocked, record it now with `kanban-md edit --dir {board_dir_str} {task_id} --block \"<exact blocker>\" --claim {member_name}` and send the decision back to `{member_name}`.",
+            task_id = first_task.id,
+            member_name = member.name,
+        ));
+
+        if let Some(parent) = &member.reports_to {
+            message.push_str(&format!(
+                "\n6. If you need a higher-level decision, escalate again with `batty send {parent} \"Task #{task_id} stuck under {member_name}: <decision needed>\"`.",
+                task_id = first_task.id,
+                member_name = member.name,
+            ));
+        }
+
+        message.push_str(
+            "\nDo not leave the task parked. Re-dispatch it, block it with a specific reason, or escalate the exact decision needed now.",
         );
         message
     }
@@ -3797,6 +3932,20 @@ fn format_inbox_status(pending_count: usize) -> String {
         " #[fg=244]inbox 0#[default]".to_string()
     } else {
         format!(" #[fg=colour214,bold]inbox {pending_count}#[default]")
+    }
+}
+
+fn format_stuck_duration(stuck_age_secs: u64) -> String {
+    if stuck_age_secs >= 3600 {
+        let hours = stuck_age_secs / 3600;
+        let mins = (stuck_age_secs % 3600) / 60;
+        format!("{hours}h {mins}m")
+    } else if stuck_age_secs >= 60 {
+        let mins = stuck_age_secs / 60;
+        let secs = stuck_age_secs % 60;
+        format!("{mins}m {secs}s")
+    } else {
+        format!("{stuck_age_secs}s")
     }
 }
 
@@ -8312,6 +8461,210 @@ mod tests {
             pending.len(),
             1,
             "triage should fire after cooldown expires"
+        );
+    }
+
+    #[test]
+    fn maybe_intervene_owned_tasks_escalates_stuck_signature_to_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lead = MemberInstance {
+            name: "lead".to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("lead".to_string()),
+            use_worktrees: false,
+        };
+        let events_path = tmp.path().join("events.jsonl");
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy {
+                        escalation_threshold_secs: 120,
+                        ..WorkflowPolicy::default()
+                    },
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![lead, engineer],
+                pane_map: HashMap::from([("eng-1".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([("eng-1".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
+            event_sink: EventSink::new(&events_path).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
+            retro_generated: false,
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "eng-1").unwrap();
+        inbox::init_inbox(&root, "lead").unwrap();
+        write_owned_task_file(tmp.path(), 191, "owned-task", "in-progress", "eng-1");
+
+        daemon.update_automation_timers_for_state("eng-1", MemberState::Working);
+        daemon.update_automation_timers_for_state("eng-1", MemberState::Idle);
+        backdate_idle_grace(&mut daemon, "eng-1");
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        let state = daemon.owned_task_interventions.get_mut("eng-1").unwrap();
+        state.detected_at = Instant::now() - Duration::from_secs(121);
+
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        let engineer_pending = inbox::pending_messages(&root, "eng-1").unwrap();
+        assert_eq!(engineer_pending.len(), 1);
+        let lead_pending = inbox::pending_messages(&root, "lead").unwrap();
+        assert_eq!(lead_pending.len(), 1);
+        assert_eq!(lead_pending[0].from, "daemon");
+        assert!(lead_pending[0].body.contains("Stuck task escalation"));
+        assert!(lead_pending[0].body.contains("eng-1"));
+        assert!(lead_pending[0].body.contains("Task #191"));
+        assert!(lead_pending[0].body.contains("kanban-md edit --dir"));
+        assert!(lead_pending[0].body.contains("batty assign eng-1"));
+        assert!(
+            daemon
+                .owned_task_interventions
+                .get("eng-1")
+                .is_some_and(|state| state.escalation_sent)
+        );
+
+        let events = super::super::events::read_events(&events_path).unwrap();
+        assert!(
+            events.iter().any(|event| {
+                event.event == "task_escalated"
+                    && event.role.as_deref() == Some("eng-1")
+                    && event.task.as_deref() == Some("191")
+            }),
+            "expected task_escalated event for stuck owned task"
+        );
+    }
+
+    #[test]
+    fn maybe_intervene_owned_tasks_waits_for_escalation_threshold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lead = MemberInstance {
+            name: "lead".to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("lead".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy {
+                        escalation_threshold_secs: 120,
+                        ..WorkflowPolicy::default()
+                    },
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![lead, engineer],
+                pane_map: HashMap::from([("eng-1".to_string(), "%999".to_string())]),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([("eng-1".to_string(), MemberState::Idle)]),
+            idle_started_at: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
+            retro_generated: false,
+            poll_interval: Duration::from_secs(5),
+        };
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "eng-1").unwrap();
+        inbox::init_inbox(&root, "lead").unwrap();
+        write_owned_task_file(tmp.path(), 191, "owned-task", "in-progress", "eng-1");
+
+        daemon.update_automation_timers_for_state("eng-1", MemberState::Working);
+        daemon.update_automation_timers_for_state("eng-1", MemberState::Idle);
+        backdate_idle_grace(&mut daemon, "eng-1");
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        let state = daemon.owned_task_interventions.get_mut("eng-1").unwrap();
+        state.detected_at = Instant::now() - Duration::from_secs(119);
+
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        assert!(inbox::pending_messages(&root, "lead").unwrap().is_empty());
+        assert!(
+            daemon
+                .owned_task_interventions
+                .get("eng-1")
+                .is_some_and(|state| !state.escalation_sent)
         );
     }
 
