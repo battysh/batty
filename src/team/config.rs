@@ -31,6 +31,7 @@ pub struct TeamConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct WorkflowPolicy {
     #[serde(default)]
     pub wip_limit_per_engineer: Option<u32>,
@@ -80,10 +81,12 @@ pub enum OrchestratorPosition {
 }
 
 impl WorkflowMode {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn legacy_runtime_enabled(self) -> bool {
         matches!(self, Self::Legacy | Self::Hybrid)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn workflow_state_primary(self) -> bool {
         matches!(self, Self::WorkflowFirst)
     }

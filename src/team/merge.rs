@@ -17,7 +17,6 @@ use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use super::daemon::TeamDaemon;
-use super::standup::MemberState;
 use super::task_loop::{
     branch_is_merged_into, checkout_worktree_branch_from_main, current_worktree_branch,
     delete_branch, engineer_base_branch_name, read_task_title, run_tests_in_worktree,
@@ -404,6 +403,7 @@ mod tests {
     use super::*;
     use crate::team::hierarchy::MemberInstance;
     use crate::team::inbox;
+    use crate::team::standup::MemberState;
     use crate::team::task_loop::{prepare_engineer_assignment_worktree, setup_engineer_worktree};
     use crate::team::test_helpers::make_test_daemon;
     use crate::team::test_support::{git, git_ok, git_stdout, init_git_repo};

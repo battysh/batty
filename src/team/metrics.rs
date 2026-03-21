@@ -1,4 +1,7 @@
-pub use super::status::{WorkflowMetrics, compute_metrics, format_metrics};
+pub use super::status::{WorkflowMetrics, compute_metrics};
+
+#[cfg(test)]
+use super::status::format_metrics;
 
 #[cfg(test)]
 mod tests {

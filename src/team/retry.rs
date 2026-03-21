@@ -46,6 +46,7 @@ impl Default for RetryConfig {
 }
 
 impl RetryConfig {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn no_retry() -> Self {
         Self {
             max_retries: 0,
@@ -62,6 +63,7 @@ impl RetryConfig {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn conservative() -> Self {
         Self {
             max_retries: 5,

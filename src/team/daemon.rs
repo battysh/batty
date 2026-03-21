@@ -32,7 +32,6 @@ use super::config::OrchestratorPosition;
 use super::config::{RoleType, TeamConfig};
 use super::delivery::FailedDelivery;
 use super::events::EventSink;
-#[cfg(test)]
 use super::events::TeamEvent;
 use super::failure_patterns::FailureTracker;
 use super::hierarchy::MemberInstance;

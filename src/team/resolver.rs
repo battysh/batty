@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), allow(dead_code))]
+
 //! Resolve board tasks into runnable workflow states.
 
 use std::collections::HashSet;

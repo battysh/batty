@@ -247,6 +247,7 @@ fn contains_conflict(value: &str) -> bool {
     value.to_ascii_lowercase().contains("conflict")
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn generate_pattern_notifications(
     patterns: &[PatternMatch],
     notification_threshold: u32,
