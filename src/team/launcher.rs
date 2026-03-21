@@ -377,6 +377,14 @@ pub(super) fn write_launch_script(
                 }
             }
         }
+        "kiro" | "kiro-cli" => {
+            let prefix = "exec kiro chat --mode agent";
+            if idle {
+                prefix.to_string()
+            } else {
+                format!("{prefix} '{escaped_prompt}'")
+            }
+        }
         _ => {
             if resume {
                 let session_id = session_id.context("missing Claude session ID for resume")?;
@@ -522,6 +530,7 @@ fn default_codex_sessions_root() -> PathBuf {
 fn session_id_exists(agent_name: &str, session_id: &str) -> bool {
     match agent_name {
         "codex-cli" => codex_session_id_exists_in(&default_codex_sessions_root(), session_id),
+        "kiro-cli" => false,
         _ => claude_session_id_exists_in(&default_claude_projects_root(), session_id),
     }
 }
@@ -579,6 +588,10 @@ fn resolve_member_launch_session(
             return (true, Some(previous_session_id));
         }
 
+        return (false, None);
+    }
+
+    if agent_name == "kiro-cli" {
         return (false, None);
     }
 
@@ -724,6 +737,7 @@ pub(super) fn member_session_tracker_config(
                 .join("codex-context")
                 .join(&member.name),
         }),
+        Some("kiro") | Some("kiro-cli") => None,
         Some("claude") | Some("claude-code") | None => {
             Some(SessionTrackerConfig::Claude { cwd: work_dir })
         }
@@ -942,6 +956,48 @@ mod tests {
     }
 
     #[test]
+    fn launch_script_idle_kiro_uses_chat_agent_mode_without_prompt() {
+        write_launch_script(
+            "eng-kiro",
+            "kiro",
+            "ignored idle prompt",
+            None,
+            Path::new("/project"),
+            Path::new("/project"),
+            true,
+            false,
+            None,
+        )
+        .unwrap();
+        let script_path = std::env::temp_dir().join("batty-launch-project-eng-kiro.sh");
+        let content = std::fs::read_to_string(&script_path).unwrap();
+        assert!(content.contains("cd '/project'"));
+        assert_eq!(
+            content.trim().lines().last().unwrap().trim(),
+            "exec kiro chat --mode agent"
+        );
+    }
+
+    #[test]
+    fn launch_script_active_kiro_passes_prompt_to_chat() {
+        write_launch_script(
+            "eng-kiro-active",
+            "kiro",
+            "solve the bug",
+            None,
+            Path::new("/project"),
+            Path::new("/project"),
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+        let script_path = std::env::temp_dir().join("batty-launch-project-eng-kiro-active.sh");
+        let content = std::fs::read_to_string(&script_path).unwrap();
+        assert!(content.contains("exec kiro chat --mode agent 'solve the bug'"));
+    }
+
+    #[test]
     fn strip_nudge_removes_section() {
         let prompt = "# Architect\n\n## Responsibilities\n\n- plan\n\n## Nudge\n\nDo a check-in.\n1. Review work\n2. Update roadmap\n\n## Communication\n\n- talk to manager\n";
         let stripped = strip_nudge_section(prompt);
@@ -965,6 +1021,8 @@ mod tests {
         assert_eq!(canonical_agent_name("claude-code"), "claude-code");
         assert_eq!(canonical_agent_name("codex"), "codex-cli");
         assert_eq!(canonical_agent_name("codex-cli"), "codex-cli");
+        assert_eq!(canonical_agent_name("kiro"), "kiro-cli");
+        assert_eq!(canonical_agent_name("kiro-cli"), "kiro-cli");
     }
 
     #[test]
@@ -1216,6 +1274,21 @@ mod tests {
     }
 
     #[test]
+    fn resolve_member_launch_session_never_resumes_kiro_without_session_support() {
+        let previous = LaunchIdentity {
+            agent: "kiro-cli".to_string(),
+            prompt: "same prompt".to_string(),
+            session_id: Some("kiro-session-1".to_string()),
+        };
+
+        let (resume, session_id) =
+            resolve_member_launch_session("kiro-cli", Some(&previous), true, true, false);
+
+        assert!(!resume);
+        assert!(session_id.is_none());
+    }
+
+    #[test]
     fn claude_session_id_exists_in_finds_exact_session_file() {
         let tmp = tempfile::tempdir().unwrap();
         let projects_root = tmp.path();
@@ -1272,5 +1345,23 @@ mod tests {
                     .join("worktrees")
                     .join("eng-1-1")
         ));
+    }
+
+    #[test]
+    fn member_session_tracker_config_disables_tracker_for_kiro() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member = MemberInstance {
+            name: "eng-1-1".to_string(),
+            role_name: "engineer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("kiro".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: true,
+        };
+
+        let tracker = member_session_tracker_config(tmp.path(), &member);
+
+        assert!(tracker.is_none());
     }
 }

@@ -12,6 +12,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod kiro;
 
 use std::path::Path;
 
@@ -90,6 +91,7 @@ pub fn adapter_from_name(name: &str) -> Option<Box<dyn AgentAdapter>> {
     match name {
         "claude" | "claude-code" => Some(Box::new(claude::ClaudeCodeAdapter::new(None))),
         "codex" | "codex-cli" => Some(Box::new(codex::CodexCliAdapter::new(None))),
+        "kiro" | "kiro-cli" => Some(Box::new(kiro::KiroCliAdapter::new(None))),
         _ => None,
     }
 }
@@ -144,6 +146,12 @@ mod tests {
 
         let adapter = adapter_from_name("codex-cli").unwrap();
         assert_eq!(adapter.name(), "codex-cli");
+
+        let adapter = adapter_from_name("kiro").unwrap();
+        assert_eq!(adapter.name(), "kiro-cli");
+
+        let adapter = adapter_from_name("kiro-cli").unwrap();
+        assert_eq!(adapter.name(), "kiro-cli");
 
         assert!(adapter_from_name("unknown-agent").is_none());
     }

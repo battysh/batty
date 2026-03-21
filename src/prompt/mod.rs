@@ -158,6 +158,34 @@ impl PromptPatterns {
         }
     }
 
+    /// Build prompt patterns for Kiro CLI.
+    ///
+    /// Kiro's installed CLI surface is currently narrower than the published
+    /// docs in this environment, so keep detection conservative and focused on
+    /// generic confirmations and context-limit failures.
+    pub fn kiro_cli() -> Self {
+        Self {
+            patterns: vec![
+                (
+                    Regex::new(r"(?i)context (window|limit).*(exceeded|reached|full)").unwrap(),
+                    |s| PromptKind::Error {
+                        detail: s.to_string(),
+                    },
+                ),
+                (Regex::new(r"(?i)conversation is too long").unwrap(), |s| {
+                    PromptKind::Error {
+                        detail: s.to_string(),
+                    }
+                }),
+                (Regex::new(r"(?i)continue\?").unwrap(), |s| {
+                    PromptKind::Confirmation {
+                        detail: s.to_string(),
+                    }
+                }),
+            ],
+        }
+    }
+
     /// Build prompt patterns for Aider.
     ///
     /// Aider uses a line-oriented interface, making it the most reliable
@@ -305,6 +333,22 @@ mod tests {
             .detect(r#"Do you want to approve network access to "api.example.com"?"#)
             .unwrap();
         assert!(matches!(d.kind, PromptKind::Permission { .. }));
+    }
+
+    #[test]
+    fn kiro_detects_context_error() {
+        let p = PromptPatterns::kiro_cli();
+        let d = p
+            .detect("Kiro cannot continue because the context limit was reached.")
+            .unwrap();
+        assert!(matches!(d.kind, PromptKind::Error { .. }));
+    }
+
+    #[test]
+    fn kiro_detects_continue_confirmation() {
+        let p = PromptPatterns::kiro_cli();
+        let d = p.detect("Continue?").unwrap();
+        assert!(matches!(d.kind, PromptKind::Confirmation { .. }));
     }
 
     // ── Aider patterns ──

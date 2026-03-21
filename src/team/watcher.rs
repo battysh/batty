@@ -420,6 +420,10 @@ pub fn is_at_agent_prompt(capture: &str) -> bool {
         if starts_with_agent_prompt(l, '›') {
             return true;
         }
+        // Kiro idle prompt
+        if looks_like_kiro_prompt(l) {
+            return true;
+        }
         // Fell back to shell
         if l.ends_with("$ ") || l == "$" {
             return true;
@@ -438,6 +442,10 @@ fn starts_with_agent_prompt(line: &str, prompt: char) -> bool {
             .next()
             .map(char::is_whitespace)
             .unwrap_or(false)
+}
+
+fn looks_like_kiro_prompt(line: &str) -> bool {
+    matches!(line, "Kiro>" | "kiro>" | "Kiro >" | "kiro >" | ">")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -486,6 +494,13 @@ fn classify_capture_state(capture: &str) -> ScreenState {
         return ScreenState::Active;
     }
 
+    if trimmed
+        .iter()
+        .any(|line| looks_like_kiro_spinner_status(line))
+    {
+        return ScreenState::Active;
+    }
+
     ScreenState::Unknown
 }
 
@@ -500,6 +515,15 @@ fn looks_like_claude_spinner_status(line: &str) -> bool {
     };
     matches!(first, '·' | '✢' | '✳' | '✶' | '✻' | '✽')
         && (trimmed.contains('…') || trimmed.contains("(thinking"))
+}
+
+fn looks_like_kiro_spinner_status(line: &str) -> bool {
+    let trimmed = line.trim().to_ascii_lowercase();
+    (trimmed.contains("kiro") || trimmed.contains("agent"))
+        && (trimmed.contains("thinking")
+            || trimmed.contains("planning")
+            || trimmed.contains("applying")
+            || trimmed.contains("working"))
 }
 
 fn is_live_interrupt_footer(line: &str) -> bool {
@@ -1138,6 +1162,13 @@ mod tests {
     }
 
     #[test]
+    fn detects_kiro_prompt() {
+        let capture = "Kiro>\n";
+        assert!(is_at_agent_prompt(capture));
+        assert_eq!(classify_capture_state(capture), ScreenState::Idle);
+    }
+
+    #[test]
     fn no_prompt_when_working() {
         let capture = "⏺ Bash(python -m pytest)\n  ⎿  running tests...\n";
         assert!(!is_at_agent_prompt(capture));
@@ -1204,6 +1235,19 @@ mod tests {
             "Request truncated due to context limit.\n",
             "Please start a fresh session with a smaller prompt.\n",
             "› \n",
+        );
+        assert_eq!(
+            classify_capture_state(capture),
+            ScreenState::ContextExhausted
+        );
+    }
+
+    #[test]
+    fn kiro_context_limit_message_marks_capture_exhausted() {
+        let capture = concat!(
+            "Kiro cannot continue because the conversation is too long.\n",
+            "Please start a fresh session.\n",
+            "Kiro>\n",
         );
         assert_eq!(
             classify_capture_state(capture),
@@ -1342,6 +1386,15 @@ mod tests {
             "❯ \n",
             "────────────────────────────\n",
             "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt\n",
+        );
+        assert_eq!(classify_capture_state(capture), ScreenState::Active);
+    }
+
+    #[test]
+    fn kiro_spinner_status_marks_capture_active() {
+        let capture = concat!(
+            "Kiro Agent: thinking through the implementation plan\n",
+            "Reviewing files and preparing edits\n",
         );
         assert_eq!(classify_capture_state(capture), ScreenState::Active);
     }
