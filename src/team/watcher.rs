@@ -68,6 +68,7 @@ enum TrackerKind {
 struct CodexSessionTracker {
     sessions_root: PathBuf,
     cwd: PathBuf,
+    session_id: Option<String>,
     session_file: Option<PathBuf>,
     offset: u64,
     quality: CodexQualitySignals,
@@ -109,6 +110,7 @@ impl SessionWatcher {
                 SessionTrackerConfig::Codex { cwd } => SessionTracker::Codex(CodexSessionTracker {
                     sessions_root: default_codex_sessions_root(),
                     cwd,
+                    session_id: None,
                     session_file: None,
                     offset: 0,
                     quality: CodexQualitySignals::default(),
@@ -230,15 +232,30 @@ impl SessionWatcher {
     }
 
     pub fn set_session_id(&mut self, session_id: Option<String>) {
-        if let Some(SessionTracker::Claude(claude)) = self.tracker.as_mut() {
-            if claude.session_id == session_id {
-                return;
+        if let Some(tracker) = self.tracker.as_mut() {
+            match tracker {
+                SessionTracker::Codex(codex) => {
+                    if codex.session_id == session_id {
+                        return;
+                    }
+                    self.completion_observed = false;
+                    codex.session_id = session_id;
+                    codex.session_file = None;
+                    codex.offset = 0;
+                    codex.quality = CodexQualitySignals::default();
+                    codex.last_response_hash = None;
+                }
+                SessionTracker::Claude(claude) => {
+                    if claude.session_id == session_id {
+                        return;
+                    }
+                    self.completion_observed = false;
+                    claude.session_id = session_id;
+                    claude.session_file = None;
+                    claude.offset = 0;
+                    claude.last_state = TrackerState::Unknown;
+                }
             }
-            self.completion_observed = false;
-            claude.session_id = session_id;
-            claude.session_file = None;
-            claude.offset = 0;
-            claude.last_state = TrackerState::Unknown;
         }
     }
 
@@ -300,8 +317,11 @@ impl SessionWatcher {
         match tracker {
             SessionTracker::Codex(codex) => {
                 if codex.session_file.is_none() {
-                    codex.session_file =
-                        discover_codex_session_file(&codex.sessions_root, &codex.cwd)?;
+                    codex.session_file = discover_codex_session_file(
+                        &codex.sessions_root,
+                        &codex.cwd,
+                        codex.session_id.as_deref(),
+                    )?;
                     if let Some(session_file) = codex.session_file.as_ref() {
                         codex.offset = current_file_len(session_file)?;
                     }
@@ -333,9 +353,11 @@ impl SessionWatcher {
                 // appeared (agent started a new task). Re-discover so the
                 // tracker picks up the latest session.
                 if state == TrackerState::Unknown && current_state == WatcherState::Idle {
-                    if let Some(latest) =
-                        discover_codex_session_file(&codex.sessions_root, &codex.cwd)?
-                    {
+                    if let Some(latest) = discover_codex_session_file(
+                        &codex.sessions_root,
+                        &codex.cwd,
+                        codex.session_id.as_deref(),
+                    )? {
                         if latest != session_file {
                             codex.session_file = Some(latest.clone());
                             codex.offset = 0;
@@ -575,8 +597,28 @@ fn session_file_id(path: Option<&PathBuf>) -> Option<String> {
     })
 }
 
-fn discover_codex_session_file(sessions_root: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
+fn discover_codex_session_file(
+    sessions_root: &Path,
+    cwd: &Path,
+    session_id: Option<&str>,
+) -> Result<Option<PathBuf>> {
     if !sessions_root.exists() {
+        return Ok(None);
+    }
+
+    if let Some(session_id) = session_id {
+        for year in read_dir_paths(sessions_root)? {
+            for month in read_dir_paths(&year)? {
+                for day in read_dir_paths(&month)? {
+                    let entry = day.join(format!("{session_id}.jsonl"));
+                    if entry.is_file()
+                        && session_meta_cwd(&entry)?.as_deref() == Some(cwd.as_os_str())
+                    {
+                        return Ok(Some(entry));
+                    }
+                }
+            }
+        }
         return Ok(None);
     }
 
@@ -1585,8 +1627,36 @@ mod tests {
         )
         .unwrap();
 
-        let discovered = discover_codex_session_file(&sessions_root, &wanted_cwd).unwrap();
+        let discovered = discover_codex_session_file(&sessions_root, &wanted_cwd, None).unwrap();
         assert_eq!(discovered.as_deref(), Some(wanted_file.as_path()));
+    }
+
+    #[test]
+    fn discover_codex_session_file_requires_exact_session_id_when_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions_root = tmp.path().join("sessions");
+        let session_dir = sessions_root.join("2026").join("03").join("21");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let cwd = tmp
+            .path()
+            .join("repo")
+            .join(".batty")
+            .join("codex-context")
+            .join("eng-1");
+        let other_file = session_dir.join("other-session.jsonl");
+        std::fs::write(
+            &other_file,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"{}\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+
+        let discovered =
+            discover_codex_session_file(&sessions_root, &cwd, Some("missing-session")).unwrap();
+        assert!(discovered.is_none());
     }
 
     #[test]
@@ -1673,6 +1743,7 @@ mod tests {
         let mut tracker = CodexSessionTracker {
             sessions_root,
             cwd,
+            session_id: None,
             session_file: None,
             offset: 0,
             quality: CodexQualitySignals::default(),
@@ -1681,7 +1752,7 @@ mod tests {
 
         if tracker.session_file.is_none() {
             tracker.session_file =
-                discover_codex_session_file(&tracker.sessions_root, &tracker.cwd).unwrap();
+                discover_codex_session_file(&tracker.sessions_root, &tracker.cwd, None).unwrap();
             if let Some(found) = tracker.session_file.as_ref() {
                 tracker.offset = current_file_len(found).unwrap();
             }
@@ -1821,6 +1892,7 @@ mod tests {
         watcher.tracker = Some(SessionTracker::Codex(CodexSessionTracker {
             sessions_root: PathBuf::from("/tmp"),
             cwd: PathBuf::from("/repo"),
+            session_id: None,
             session_file: None,
             offset: 0,
             quality: CodexQualitySignals {
@@ -1845,6 +1917,38 @@ mod tests {
                 tool_failure_message: Some("exec_command failed".to_string()),
             })
         );
+    }
+
+    #[test]
+    fn watcher_set_session_id_rebinds_codex_tracker() {
+        let mut watcher = SessionWatcher::new("%0", "eng-1", 300, None);
+        watcher.tracker = Some(SessionTracker::Codex(CodexSessionTracker {
+            sessions_root: PathBuf::from("/tmp"),
+            cwd: PathBuf::from("/repo"),
+            session_id: Some("old-session".to_string()),
+            session_file: Some(PathBuf::from("/tmp/old-session.jsonl")),
+            offset: 42,
+            quality: CodexQualitySignals {
+                last_response_chars: Some(12),
+                shortening_streak: 1,
+                repeated_output_streak: 2,
+                shrinking_responses: true,
+                repeated_identical_outputs: true,
+                tool_failure_message: Some("failure".to_string()),
+            },
+            last_response_hash: Some(simple_hash("old")),
+        }));
+
+        watcher.set_session_id(Some("new-session".to_string()));
+
+        let Some(SessionTracker::Codex(codex)) = watcher.tracker.as_ref() else {
+            panic!("expected codex tracker");
+        };
+        assert_eq!(codex.session_id.as_deref(), Some("new-session"));
+        assert!(codex.session_file.is_none());
+        assert_eq!(codex.offset, 0);
+        assert_eq!(codex.quality, CodexQualitySignals::default());
+        assert!(codex.last_response_hash.is_none());
     }
 
     #[test]

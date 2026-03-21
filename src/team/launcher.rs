@@ -96,14 +96,14 @@ impl TeamDaemon {
             &prompt_text,
         );
         let previous_identity = previous_launch_state.get(&member.name);
-        let claude_session_available = previous_identity
+        let session_available = previous_identity
             .and_then(|identity| identity.session_id.as_deref())
-            .is_none_or(claude_session_id_exists);
+            .is_none_or(|session_id| session_id_exists(&normalized_agent, session_id));
         let (member_resume, session_id) = resolve_member_launch_session(
             &normalized_agent,
             previous_identity,
             requested_resume,
-            claude_session_available,
+            session_available,
             previous_identity
                 .and_then(|identity| identity.session_id.as_deref())
                 .is_some_and(|existing| duplicate_claude_session_ids.contains(existing)),
@@ -114,7 +114,7 @@ impl TeamDaemon {
             previous_identity,
             resume,
             &prompt_text,
-            claude_session_available,
+            session_available,
             previous_identity
                 .and_then(|identity| identity.session_id.as_deref())
                 .is_some_and(|existing| duplicate_claude_session_ids.contains(existing)),
@@ -364,7 +364,10 @@ pub(super) fn write_launch_script(
     let agent_cmd = match agent_name {
         "codex" | "codex-cli" => {
             if resume {
-                "exec codex resume --last --dangerously-bypass-approvals-and-sandbox".to_string()
+                let session_id = session_id.context("missing Codex session ID for resume")?;
+                format!(
+                    "exec codex resume '{session_id}' --dangerously-bypass-approvals-and-sandbox"
+                )
             } else {
                 let prefix = "exec codex --dangerously-bypass-approvals-and-sandbox";
                 if idle {
@@ -508,8 +511,19 @@ fn default_claude_projects_root() -> PathBuf {
         .join("projects")
 }
 
-fn claude_session_id_exists(session_id: &str) -> bool {
-    claude_session_id_exists_in(&default_claude_projects_root(), session_id)
+fn default_codex_sessions_root() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+        .join(".codex")
+        .join("sessions")
+}
+
+fn session_id_exists(agent_name: &str, session_id: &str) -> bool {
+    match agent_name {
+        "codex-cli" => codex_session_id_exists_in(&default_codex_sessions_root(), session_id),
+        _ => claude_session_id_exists_in(&default_claude_projects_root(), session_id),
+    }
 }
 
 fn claude_session_id_exists_in(projects_root: &Path, session_id: &str) -> bool {
@@ -524,13 +538,50 @@ fn claude_session_id_exists_in(projects_root: &Path, session_id: &str) -> bool {
     })
 }
 
+fn codex_session_id_exists_in(sessions_root: &Path, session_id: &str) -> bool {
+    let session_file = format!("{session_id}.jsonl");
+    let Ok(years) = fs::read_dir(sessions_root) else {
+        return false;
+    };
+
+    years.flatten().any(|year| {
+        let Ok(months) = fs::read_dir(year.path()) else {
+            return false;
+        };
+        months.flatten().any(|month| {
+            let Ok(days) = fs::read_dir(month.path()) else {
+                return false;
+            };
+            days.flatten()
+                .any(|day| day.path().join(&session_file).exists())
+        })
+    })
+}
+
 fn resolve_member_launch_session(
     agent_name: &str,
     previous_identity: Option<&LaunchIdentity>,
     resume_requested: bool,
-    claude_session_available: bool,
+    session_available: bool,
     duplicate_session_id: bool,
 ) -> (bool, Option<String>) {
+    if agent_name == "codex-cli" {
+        if !resume_requested || duplicate_session_id {
+            return (false, None);
+        }
+
+        if let Some(previous_session_id) =
+            previous_identity.and_then(|identity| identity.session_id.clone())
+        {
+            if !session_available {
+                return (false, None);
+            }
+            return (true, Some(previous_session_id));
+        }
+
+        return (false, None);
+    }
+
     let Some(session_id) = new_member_session_id(agent_name) else {
         return (resume_requested, None);
     };
@@ -546,7 +597,7 @@ fn resolve_member_launch_session(
     if let Some(previous_session_id) =
         previous_identity.and_then(|identity| identity.session_id.clone())
     {
-        if !claude_session_available {
+        if !session_available {
             return (false, Some(session_id));
         }
         return (true, Some(previous_session_id));
@@ -611,7 +662,7 @@ fn format_resume_decision_summary(
     previous_identity: Option<&LaunchIdentity>,
     resume_requested: bool,
     current_prompt: &str,
-    claude_session_available: bool,
+    session_available: bool,
     duplicate_session_id: bool,
     member_resume: bool,
     session_id: Option<&str>,
@@ -626,7 +677,7 @@ fn format_resume_decision_summary(
             "prompt changed".to_string()
         } else if duplicate_session_id {
             "session duplicated".to_string()
-        } else if previous.session_id.is_some() && !claude_session_available {
+        } else if previous.session_id.is_some() && !session_available {
             "session missing".to_string()
         } else if member_resume {
             session_id
@@ -860,6 +911,34 @@ mod tests {
         assert!(content.contains(
             "exec claude --dangerously-skip-permissions --resume '44444444-4444-4444-8444-444444444444'"
         ));
+    }
+
+    #[test]
+    fn launch_script_resume_codex_uses_explicit_session_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work_dir = tmp.path().join("wt");
+        std::fs::create_dir_all(&work_dir).unwrap();
+
+        write_launch_script(
+            "eng-1",
+            "codex",
+            "ignored",
+            Some("role context"),
+            &work_dir,
+            tmp.path(),
+            true,
+            true,
+            Some("55555555-5555-4555-8555-555555555555"),
+        )
+        .unwrap();
+        let project_slug = tmp.path().file_name().unwrap().to_string_lossy();
+        let script_path =
+            std::env::temp_dir().join(format!("batty-launch-{project_slug}-eng-1.sh"));
+        let content = std::fs::read_to_string(&script_path).unwrap();
+        assert!(content.contains(
+            "exec codex resume '55555555-5555-4555-8555-555555555555' --dangerously-bypass-approvals-and-sandbox"
+        ));
+        assert!(!content.contains("--last"));
     }
 
     #[test]
@@ -1107,6 +1186,36 @@ mod tests {
     }
 
     #[test]
+    fn resolve_member_launch_session_reuses_saved_codex_session_id() {
+        let previous = LaunchIdentity {
+            agent: "codex-cli".to_string(),
+            prompt: "same prompt".to_string(),
+            session_id: Some("codex-session-1".to_string()),
+        };
+
+        let (resume, session_id) =
+            resolve_member_launch_session("codex-cli", Some(&previous), true, true, false);
+
+        assert!(resume);
+        assert_eq!(session_id.as_deref(), Some("codex-session-1"));
+    }
+
+    #[test]
+    fn resolve_member_launch_session_starts_fresh_when_saved_codex_session_is_missing() {
+        let previous = LaunchIdentity {
+            agent: "codex-cli".to_string(),
+            prompt: "same prompt".to_string(),
+            session_id: Some("codex-session-1".to_string()),
+        };
+
+        let (resume, session_id) =
+            resolve_member_launch_session("codex-cli", Some(&previous), true, false, false);
+
+        assert!(!resume);
+        assert!(session_id.is_none());
+    }
+
+    #[test]
     fn claude_session_id_exists_in_finds_exact_session_file() {
         let tmp = tempfile::tempdir().unwrap();
         let projects_root = tmp.path();
@@ -1126,6 +1235,17 @@ mod tests {
             projects_root,
             "22222222-2222-4222-8222-222222222222"
         ));
+    }
+
+    #[test]
+    fn codex_session_id_exists_in_finds_exact_session_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_dir = tmp.path().join("2026").join("03").join("21");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(session_dir.join("codex-session-1.jsonl"), "{}\n").unwrap();
+
+        assert!(codex_session_id_exists_in(tmp.path(), "codex-session-1"));
+        assert!(!codex_session_id_exists_in(tmp.path(), "codex-session-2"));
     }
 
     #[test]
