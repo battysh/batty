@@ -4,16 +4,16 @@
 //! instead of tmux panes. Each channel provider is a CLI tool that the
 //! daemon invokes for outbound messages.
 
-use anyhow::{Result, bail};
 use tracing::{debug, warn};
 
 use super::config::ChannelConfig;
+use super::errors::DeliveryError;
 use super::telegram::TelegramBot;
 
 /// Trait for outbound message delivery to external channels.
 pub trait Channel: Send + Sync {
     /// Send a text message to the channel destination.
-    fn send(&self, message: &str) -> Result<()>;
+    fn send(&self, message: &str) -> std::result::Result<(), DeliveryError>;
     /// Channel type identifier (e.g., "telegram").
     #[allow(dead_code)] // Reserved for diagnostics and provider-specific routing.
     fn channel_type(&self) -> &str;
@@ -36,7 +36,7 @@ impl TelegramChannel {
 }
 
 impl Channel for TelegramChannel {
-    fn send(&self, message: &str) -> Result<()> {
+    fn send(&self, message: &str) -> std::result::Result<(), DeliveryError> {
         debug!(target = %self.target, provider = %self.provider, len = message.len(), "sending via telegram channel");
 
         let output = std::process::Command::new(&self.provider)
@@ -58,11 +58,17 @@ impl Channel for TelegramChannel {
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 warn!(status = ?out.status, stderr = %stderr, "telegram send failed");
-                bail!("channel send failed: {stderr}")
+                Err(DeliveryError::ChannelSend {
+                    recipient: self.target.clone(),
+                    detail: stderr.to_string(),
+                })
             }
             Err(e) => {
                 warn!(error = %e, provider = %self.provider, "failed to execute channel provider");
-                bail!("failed to execute provider '{}': {e}", self.provider)
+                Err(DeliveryError::ProviderExec {
+                    provider: self.provider.clone(),
+                    source: e,
+                })
             }
         }
     }
@@ -90,9 +96,14 @@ impl NativeTelegramChannel {
 }
 
 impl Channel for NativeTelegramChannel {
-    fn send(&self, message: &str) -> Result<()> {
+    fn send(&self, message: &str) -> std::result::Result<(), DeliveryError> {
         debug!(target = %self.target, len = message.len(), "sending via native telegram channel");
-        self.bot.send_message(&self.target, message)
+        self.bot
+            .send_message(&self.target, message)
+            .map_err(|error| DeliveryError::ChannelSend {
+                recipient: self.target.clone(),
+                detail: error.to_string(),
+            })
     }
 
     fn channel_type(&self) -> &str {
@@ -101,7 +112,10 @@ impl Channel for NativeTelegramChannel {
 }
 
 /// Create a channel from config fields.
-pub fn channel_from_config(channel_type: &str, config: &ChannelConfig) -> Result<Box<dyn Channel>> {
+pub fn channel_from_config(
+    channel_type: &str,
+    config: &ChannelConfig,
+) -> std::result::Result<Box<dyn Channel>, DeliveryError> {
     match channel_type {
         "telegram" => {
             if let Some(native) = NativeTelegramChannel::from_config(config) {
@@ -110,7 +124,9 @@ pub fn channel_from_config(channel_type: &str, config: &ChannelConfig) -> Result
                 Ok(Box::new(TelegramChannel::from_config(config)))
             }
         }
-        other => bail!("unsupported channel type: '{other}'"),
+        other => Err(DeliveryError::UnsupportedChannel {
+            channel_type: other.to_string(),
+        }),
     }
 }
 

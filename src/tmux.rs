@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result, bail};
 use tracing::{debug, info, warn};
 
+use crate::team::errors::TmuxError;
+
 static PROBE_COUNTER: AtomicU64 = AtomicU64::new(1);
 const SUPERVISOR_CONTROL_OPTION: &str = "@batty_supervisor_control";
 
@@ -71,15 +73,18 @@ pub struct PaneDetails {
 
 /// Check that tmux is installed and reachable.
 pub fn check_tmux() -> Result<String> {
-    let output = Command::new("tmux").arg("-V").output().context(
-        "tmux not found — install tmux (e.g., `apt install tmux` or `brew install tmux`)",
-    )?;
+    let output = Command::new("tmux")
+        .arg("-V")
+        .output()
+        .map_err(|error| TmuxError::exec("tmux -V", error))?;
 
     if !output.status.success() {
-        bail!(
-            "tmux -V failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        return Err(TmuxError::command_failed(
+            "tmux -V",
+            None,
+            &String::from_utf8_lossy(&output.stderr),
+        )
+        .into());
     }
 
     let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -133,7 +138,7 @@ where
     Command::new("tmux")
         .args(args)
         .output()
-        .context("failed to run tmux command")
+        .map_err(|error| TmuxError::exec("tmux", error).into())
 }
 
 /// Probe tmux capabilities used by Batty and choose compatible behavior.
@@ -273,7 +278,12 @@ pub fn pane_dead(target: &str) -> Result<bool> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("tmux display-message pane_dead failed: {stderr}");
+        return Err(TmuxError::command_failed(
+            "display-message #{pane_dead}",
+            Some(target),
+            &stderr,
+        )
+        .into());
     }
 
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -305,12 +315,17 @@ pub fn pane_id(target: &str) -> Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("tmux display-message failed: {stderr}");
+        return Err(
+            TmuxError::command_failed("display-message #{pane_id}", Some(target), &stderr).into(),
+        );
     }
 
     let pane = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if pane.is_empty() {
-        bail!("tmux returned empty pane id for target '{target}'");
+        return Err(TmuxError::EmptyPaneId {
+            target: target.to_string(),
+        }
+        .into());
     }
     Ok(pane)
 }
@@ -365,10 +380,10 @@ pub fn session_path(session: &str) -> Result<String> {
 /// The executor command is the initial command the session runs.
 pub fn create_session(session: &str, program: &str, args: &[String], work_dir: &str) -> Result<()> {
     if session_exists(session) {
-        bail!(
-            "tmux session '{session}' already exists — use `batty attach` to reconnect, \
-             or kill it with `tmux kill-session -t {session}`"
-        );
+        return Err(TmuxError::SessionExists {
+            session: session.to_string(),
+        }
+        .into());
     }
 
     // Build the full command string for tmux
@@ -392,7 +407,7 @@ pub fn create_session(session: &str, program: &str, args: &[String], work_dir: &
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("tmux new-session failed: {stderr}");
+        return Err(TmuxError::command_failed("new-session", Some(session), &stderr).into());
     }
 
     if let Err(e) = set_mouse(session, true) {
@@ -579,7 +594,7 @@ pub fn send_keys(target: &str, keys: &str, press_enter: bool) -> Result<()> {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("tmux send-keys failed: {stderr}");
+            return Err(TmuxError::command_failed("send-keys", Some(target), &stderr).into());
         }
     }
 
@@ -597,7 +612,7 @@ pub fn send_keys(target: &str, keys: &str, press_enter: bool) -> Result<()> {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("tmux send-keys Enter failed: {stderr}");
+            return Err(TmuxError::command_failed("send-keys Enter", Some(target), &stderr).into());
         }
     }
 
@@ -669,7 +684,7 @@ pub fn capture_pane_recent(target: &str, lines: u32) -> Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("tmux capture-pane failed: {stderr}");
+        return Err(TmuxError::command_failed("capture-pane", Some(target), &stderr).into());
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())

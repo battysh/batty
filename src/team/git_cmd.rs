@@ -3,23 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum GitError {
-    #[error("transient git error: {message}")]
-    Transient { message: String, stderr: String },
-    #[error("permanent git error: {message}")]
-    Permanent { message: String, stderr: String },
-    #[error("git command not found or failed to execute: {0}")]
-    Exec(#[from] std::io::Error),
-}
-
-impl GitError {
-    pub fn is_transient(&self) -> bool {
-        matches!(self, GitError::Transient { .. })
-    }
-}
+pub use super::errors::GitError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitOutput {
@@ -100,8 +84,19 @@ pub fn worktree_list(repo: &Path) -> Result<String, GitError> {
 }
 
 pub fn rebase(repo: &Path, onto: &str) -> Result<(), GitError> {
-    run_git(repo, &["rebase", onto])?;
-    Ok(())
+    run_git(repo, &["rebase", onto])
+        .map(|_| ())
+        .map_err(|error| match error {
+            GitError::Transient { .. } | GitError::Exec(_) => error,
+            GitError::Permanent { stderr, .. } => GitError::RebaseFailed {
+                branch: onto.to_string(),
+                stderr,
+            },
+            GitError::RebaseFailed { .. }
+            | GitError::MergeFailed { .. }
+            | GitError::RevParseFailed { .. }
+            | GitError::InvalidRevListCount { .. } => error,
+        })
 }
 
 pub fn rebase_abort(repo: &Path) -> Result<(), GitError> {
@@ -110,8 +105,19 @@ pub fn rebase_abort(repo: &Path) -> Result<(), GitError> {
 }
 
 pub fn merge(repo: &Path, branch: &str) -> Result<(), GitError> {
-    run_git(repo, &["merge", branch, "--no-edit"])?;
-    Ok(())
+    run_git(repo, &["merge", branch, "--no-edit"])
+        .map(|_| ())
+        .map_err(|error| match error {
+            GitError::Transient { .. } | GitError::Exec(_) => error,
+            GitError::Permanent { stderr, .. } => GitError::MergeFailed {
+                branch: branch.to_string(),
+                stderr,
+            },
+            GitError::RebaseFailed { .. }
+            | GitError::MergeFailed { .. }
+            | GitError::RevParseFailed { .. }
+            | GitError::InvalidRevListCount { .. } => error,
+        })
 }
 
 pub fn merge_base_is_ancestor(repo: &Path, commit: &str, base: &str) -> Result<bool, GitError> {
@@ -124,10 +130,19 @@ pub fn merge_base_is_ancestor(repo: &Path, commit: &str, base: &str) -> Result<b
 }
 
 pub fn rev_parse_branch(repo: &Path) -> Result<String, GitError> {
-    Ok(run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])?
-        .stdout
-        .trim()
-        .to_string())
+    run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .map(|output| output.stdout.trim().to_string())
+        .map_err(|error| match error {
+            GitError::Transient { .. } | GitError::Exec(_) => error,
+            GitError::Permanent { stderr, .. } => GitError::RevParseFailed {
+                spec: "--abbrev-ref HEAD".to_string(),
+                stderr,
+            },
+            GitError::RebaseFailed { .. }
+            | GitError::MergeFailed { .. }
+            | GitError::RevParseFailed { .. }
+            | GitError::InvalidRevListCount { .. } => error,
+        })
 }
 
 pub fn rev_parse_toplevel(repo: &Path) -> Result<PathBuf, GitError> {
@@ -168,13 +183,14 @@ pub fn branch_rename(repo: &Path, old: &str, new: &str) -> Result<(), GitError> 
 }
 
 pub fn rev_list_count(repo: &Path, range: &str) -> Result<u32, GitError> {
-    let count = run_git(repo, &["rev-list", "--count", range])?
+    let output = run_git(repo, &["rev-list", "--count", range])?;
+    let count = output
         .stdout
         .trim()
         .parse()
-        .map_err(|_| GitError::Permanent {
-            message: format!("invalid rev-list count for range '{range}'"),
-            stderr: String::new(),
+        .map_err(|_| GitError::InvalidRevListCount {
+            range: range.to_string(),
+            output: output.stdout.trim().to_string(),
         })?;
     Ok(count)
 }
