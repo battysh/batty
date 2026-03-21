@@ -1,0 +1,10 @@
+{
+  "message_id": "1774021658.#0M900878000P44689V16777230I18171316.macmini.local,S=2710",
+  "status": "failed",
+  "engineer": "eng-1-1",
+  "task_summary": "TASK 18: WF-001 — Define topology-independent workflow capabilities",
+  "branch": null,
+  "work_dir": "/Users/zedmor/batty/.batty/worktrees/eng-1-1",
+  "detail": "engineer worktree 'eng-1-1' at /Users/zedmor/batty/.batty/worktrees/eng-1-1 has uncommitted changes",
+  "ts": 1774021966
+}

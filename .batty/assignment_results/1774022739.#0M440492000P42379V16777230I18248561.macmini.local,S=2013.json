@@ -1,0 +1,10 @@
+{
+  "message_id": "1774022739.#0M440492000P42379V16777230I18248561.macmini.local,S=2013",
+  "status": "failed",
+  "engineer": "eng-1-4",
+  "task_summary": "TASK 27: WF-009 — Add structured completion packets (Wave 2)",
+  "branch": null,
+  "work_dir": "/Users/zedmor/batty/.batty/worktrees/eng-1-4",
+  "detail": "engineer worktree 'eng-1-4' at /Users/zedmor/batty/.batty/worktrees/eng-1-4 has uncommitted changes",
+  "ts": 1774023459
+}

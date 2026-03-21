@@ -1,0 +1,10 @@
+{
+  "message_id": "1774059736.#0M245252000P29361V16777230I18488120.macmini.local,S=2667",
+  "status": "failed",
+  "engineer": "eng-1-2",
+  "task_summary": "Task #41: T-102 — Board-aware standup content",
+  "branch": null,
+  "work_dir": "/Users/zedmor/batty/.batty/worktrees/eng-1-2",
+  "detail": "engineer worktree 'eng-1-2' is on unmerged branch 'task-41-board-aware-standup'",
+  "ts": 1774060866
+}

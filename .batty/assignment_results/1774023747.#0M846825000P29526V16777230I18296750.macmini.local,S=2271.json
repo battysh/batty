@@ -1,0 +1,10 @@
+{
+  "message_id": "1774023747.#0M846825000P29526V16777230I18296750.macmini.local,S=2271",
+  "status": "delivered",
+  "engineer": "eng-1-1",
+  "task_summary": "TASK 28: WF-010 — Implement review and merge state machine (Wave 2, CRITICAL PATH)",
+  "branch": "eng-1-1/task-task-28-wf-010-implement-1448b26a",
+  "work_dir": "/Users/zedmor/batty/.batty/worktrees/eng-1-1",
+  "detail": "assignment launched",
+  "ts": 1774023753
+}

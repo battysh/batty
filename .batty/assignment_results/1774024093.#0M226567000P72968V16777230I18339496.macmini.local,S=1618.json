@@ -1,0 +1,10 @@
+{
+  "message_id": "1774024093.#0M226567000P72968V16777230I18339496.macmini.local,S=1618",
+  "status": "delivered",
+  "engineer": "eng-1-2",
+  "task_summary": "TASK 24: WF-005 — Expose orchestrator actions through CLI/API (REDO on current codebase)",
+  "branch": "eng-1-2/task-task-24-wf-005-expose-or-153f978e",
+  "work_dir": "/Users/zedmor/batty/.batty/worktrees/eng-1-2",
+  "detail": "assignment launched",
+  "ts": 1774024102
+}

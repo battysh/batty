@@ -1,0 +1,10 @@
+{
+  "message_id": "1774021694.#0M408169000P46774V16777230I18171339.macmini.local,S=2110",
+  "status": "failed",
+  "engineer": "eng-1-4",
+  "task_summary": "TASK 21: WF-007 — Define rollout modes and backward-compatible adoption",
+  "branch": null,
+  "work_dir": "/Users/zedmor/batty/.batty/worktrees/eng-1-4",
+  "detail": "engineer worktree 'eng-1-4' at /Users/zedmor/batty/.batty/worktrees/eng-1-4 has uncommitted changes",
+  "ts": 1774021722
+}

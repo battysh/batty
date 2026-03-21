@@ -1,0 +1,10 @@
+{
+  "message_id": "1774022707.#0M153662000P40587V16777230I18248483.macmini.local,S=2701",
+  "status": "failed",
+  "engineer": "eng-1-3",
+  "task_summary": "TASK 26: WF-008 — Introduce runnable-work resolver (Wave 2)",
+  "branch": null,
+  "work_dir": "/Users/zedmor/batty/.batty/worktrees/eng-1-3",
+  "detail": "engineer worktree 'eng-1-3' at /Users/zedmor/batty/.batty/worktrees/eng-1-3 has uncommitted changes",
+  "ts": 1774023274
+}

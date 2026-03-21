@@ -1,0 +1,10 @@
+{
+  "message_id": "1774023802.#0M744055000P33379V16777230I18299208.macmini.local,S=853",
+  "status": "delivered",
+  "engineer": "eng-1-3",
+  "task_summary": "TASK 26: WF-008 — Introduce runnable-work resolver (REDO)",
+  "branch": "eng-1-3/task-task-26-wf-008-introduce-c8b4d604",
+  "work_dir": "/Users/zedmor/batty/.batty/worktrees/eng-1-3",
+  "detail": "assignment launched",
+  "ts": 1774023808
+}

@@ -1,0 +1,10 @@
+{
+  "message_id": "1774024461.#0M167175000P97299V16777230I18357005.macmini.local,S=1839",
+  "status": "delivered",
+  "engineer": "eng-1-3",
+  "task_summary": "TASK 33: WF-015 — Rewrite role prompts for workflow control plane (Wave 3, partial — start now)",
+  "branch": "eng-1-3/task-task-33-wf-015-rewrite-r-88587758",
+  "work_dir": "/Users/zedmor/batty/.batty/worktrees/eng-1-3",
+  "detail": "assignment launched",
+  "ts": 1774024471
+}

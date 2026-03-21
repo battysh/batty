@@ -1,0 +1,10 @@
+{
+  "message_id": "1774023755.#0M307880000P30062V16777230I18296789.macmini.local,S=1063",
+  "status": "failed",
+  "engineer": "eng-1-3",
+  "task_summary": "TASK 26: WF-008 — Introduce runnable-work resolver (REDO — previous work was lost)",
+  "branch": null,
+  "work_dir": "/Users/zedmor/batty/.batty/worktrees/eng-1-3",
+  "detail": "engineer worktree 'eng-1-3' is on unmerged branch 'eng-1-3/task-task-26-wf-008-introduce-55d1f1f2'",
+  "ts": 1774023768
+}

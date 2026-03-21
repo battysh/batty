@@ -1,0 +1,10 @@
+{
+  "message_id": "1774022386.#0M796220000P16683V16777230I18234564.macmini.local,S=3109",
+  "status": "failed",
+  "engineer": "eng-1-1",
+  "task_summary": "TASK 23: WF-004 — Introduce orchestrator runtime surface (Wave 2)",
+  "branch": null,
+  "work_dir": "/Users/zedmor/batty/.batty/worktrees/eng-1-1",
+  "detail": "engineer worktree 'eng-1-1' at /Users/zedmor/batty/.batty/worktrees/eng-1-1 has uncommitted changes",
+  "ts": 1774023210
+}

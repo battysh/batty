@@ -1,0 +1,10 @@
+{
+  "message_id": "1774060428.#0M840480000P8998V16777230I18537214.macmini.local,S=536",
+  "status": "failed",
+  "engineer": "eng-1-3",
+  "task_summary": "Task #42: T-103 — Standup delivery to user via Telegram or file. Create branch: git checkout -b task-42-standup-use...",
+  "branch": null,
+  "work_dir": "/Users/zedmor/batty/.batty/worktrees/eng-1-3",
+  "detail": "engineer worktree 'eng-1-3' is on unmerged branch 'task-42-standup-user-delivery'",
+  "ts": 1774061003
+}

@@ -1,0 +1,10 @@
+{
+  "message_id": "1774024397.#0M583098000P95263V16777230I18356898.macmini.local,S=1490",
+  "status": "delivered",
+  "engineer": "eng-1-1",
+  "task_summary": "TASK 28: WF-010 — Review and merge state machine (reassigned — worktree refreshed)",
+  "branch": "eng-1-1/task-task-28-wf-010-review-an-e5776b29",
+  "work_dir": "/Users/zedmor/batty/.batty/worktrees/eng-1-1",
+  "detail": "assignment launched",
+  "ts": 1774024414
+}

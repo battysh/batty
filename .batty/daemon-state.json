@@ -1,0 +1,26 @@
+{
+  "clean_shutdown": false,
+  "saved_at": 1774063304,
+  "states": {
+    "architect": "working",
+    "eng-1-1": "idle",
+    "eng-1-4": "idle",
+    "eng-1-3": "working",
+    "manager": "working",
+    "eng-1-2": "idle"
+  },
+  "active_tasks": {},
+  "retry_counts": {},
+  "paused_standups": [
+    "architect",
+    "manager"
+  ],
+  "last_standup_elapsed_secs": {},
+  "nudge_state": {
+    "architect": {
+      "idle_elapsed_secs": null,
+      "fired_this_idle": false,
+      "paused": true
+    }
+  }
+}
