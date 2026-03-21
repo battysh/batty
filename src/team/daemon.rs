@@ -5053,6 +5053,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         }
     }
@@ -5233,6 +5234,7 @@ mod tests {
             triage_idle_epochs: HashMap::new(),
             triage_interventions: HashMap::new(),
             owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
             telegram_bot: None,
@@ -8708,6 +8710,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -8804,6 +8807,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -8914,6 +8918,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
@@ -9025,6 +9030,7 @@ mod tests {
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             retro_generated: false,
+            failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
         };
 
