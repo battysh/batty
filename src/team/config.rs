@@ -1023,4 +1023,200 @@ roles:
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("zero instances"));
     }
+
+    #[test]
+    fn parse_rejects_malformed_yaml_missing_colon() {
+        let yaml = r#"
+name test
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#;
+
+        let err = serde_yaml::from_str::<TeamConfig>(yaml)
+            .unwrap_err()
+            .to_string();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn parse_rejects_malformed_yaml_bad_indentation() {
+        let yaml = r#"
+name: test
+roles:
+- name: worker
+   role_type: engineer
+   agent: codex
+"#;
+
+        let err = serde_yaml::from_str::<TeamConfig>(yaml)
+            .unwrap_err()
+            .to_string();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn parse_rejects_missing_name_field() {
+        let yaml = r#"
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#;
+
+        let err = serde_yaml::from_str::<TeamConfig>(yaml)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("name"));
+    }
+
+    #[test]
+    fn parse_rejects_missing_roles_field() {
+        let yaml = r#"
+name: test
+"#;
+
+        let err = serde_yaml::from_str::<TeamConfig>(yaml)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("roles"));
+    }
+
+    #[test]
+    fn legacy_mode_with_orchestrator_pane_true_disables_orchestrator_surface() {
+        let yaml = r#"
+name: test
+workflow_mode: legacy
+orchestrator_pane: true
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#;
+
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
+        assert!(config.orchestrator_pane);
+        assert!(!config.orchestrator_enabled());
+    }
+
+    #[test]
+    fn parse_all_automation_flags_false() {
+        let yaml = r#"
+name: test
+automation:
+  timeout_nudges: false
+  standups: false
+  failure_pattern_detection: false
+  triage_interventions: false
+  review_interventions: false
+  owned_task_interventions: false
+  manager_dispatch_interventions: false
+  architect_utilization_interventions: false
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#;
+
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.automation.timeout_nudges);
+        assert!(!config.automation.standups);
+        assert!(!config.automation.failure_pattern_detection);
+        assert!(!config.automation.triage_interventions);
+        assert!(!config.automation.review_interventions);
+        assert!(!config.automation.owned_task_interventions);
+        assert!(!config.automation.manager_dispatch_interventions);
+        assert!(!config.automation.architect_utilization_interventions);
+    }
+
+    #[test]
+    fn parse_standup_interval_zero() {
+        let yaml = r#"
+name: test
+standup:
+  interval_secs: 0
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#;
+
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.standup.interval_secs, 0);
+    }
+
+    #[test]
+    fn parse_standup_interval_u64_max() {
+        let yaml = format!(
+            r#"
+name: test
+standup:
+  interval_secs: {}
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#,
+            u64::MAX
+        );
+
+        let config: TeamConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(config.standup.interval_secs, u64::MAX);
+    }
+
+    #[test]
+    fn parse_ignores_unknown_top_level_fields_for_forward_compatibility() {
+        let yaml = r#"
+name: test
+future_flag: true
+future_section:
+  nested_value: 42
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+    extra_role_setting: keep-going
+"#;
+
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.name, "test");
+        assert_eq!(config.roles.len(), 1);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_role_names_with_mixed_role_types() {
+        let yaml = r#"
+name: test
+roles:
+  - name: lead
+    role_type: architect
+    agent: claude
+  - name: lead
+    role_type: manager
+    agent: claude
+"#;
+
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("duplicate role name"));
+    }
+
+    #[test]
+    fn validate_rejects_talks_to_reference_to_missing_role() {
+        let yaml = r#"
+name: test
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+    talks_to: [manager]
+"#;
+
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("talks_to unknown role"));
+    }
 }
