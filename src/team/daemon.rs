@@ -1327,14 +1327,6 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             return Ok(());
         };
 
-        // Hard cooldown: never fire more than once per 5 minutes
-        const STARVATION_COOLDOWN: Duration = Duration::from_secs(300);
-        if let Some(last) = self.pipeline_starvation_last_fired {
-            if last.elapsed() < STARVATION_COOLDOWN {
-                return Ok(());
-            }
-        }
-
         // Already fired — stay suppressed until condition fully clears
         if self.pipeline_starvation_fired {
             // Only reset when enough unclaimed work exists for all idle engineers
@@ -1353,8 +1345,17 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             let truly_idle = self.truly_idle_engineer_count(&all_tasks);
             if truly_idle == 0 || unclaimed_todo >= truly_idle {
                 self.pipeline_starvation_fired = false;
+                self.pipeline_starvation_last_fired = None;
             }
             return Ok(());
+        }
+
+        // Hard cooldown: never fire more than once per 5 minutes
+        const STARVATION_COOLDOWN: Duration = Duration::from_secs(300);
+        if let Some(last) = self.pipeline_starvation_last_fired {
+            if last.elapsed() < STARVATION_COOLDOWN {
+                return Ok(());
+            }
         }
 
         // Suppress if manager is actively working (likely processing directives)
@@ -1611,7 +1612,9 @@ fn ensure_kanban_available() -> Result<()> {
     let output = std::process::Command::new("kanban-md")
         .arg("--help")
         .output()
-        .context("daemon startup pre-flight failed: `kanban-md` is not installed or not on PATH")?;
+        .context(
+            "daemon startup pre-flight failed while verifying board tooling: could not execute `kanban-md --help`",
+        )?;
     if output.status.success() {
         return Ok(());
     }
@@ -2681,7 +2684,7 @@ exit 1
         assert!(!crate::tmux::pane_dead(&pane_id).unwrap_or(true));
         assert_eq!(daemon.states.get(member_name), Some(&MemberState::Idle));
 
-        let log = (0..20)
+        let log = (0..100)
             .find_map(|_| {
                 let content = match std::fs::read_to_string(&fake_log) {
                     Ok(content) => content,

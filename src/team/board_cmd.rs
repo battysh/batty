@@ -148,10 +148,15 @@ fn run_board_with_program(
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    let command = format_board_command(program, board_dir, args);
     let output = Command::new(program)
         .current_dir(current_dir)
         .args(build_board_args(board_dir, args))
-        .output()?;
+        .output()
+        .map_err(|source| BoardError::Exec {
+            command: command.clone(),
+            source,
+        })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -163,8 +168,16 @@ fn run_board_with_program(
         || "terminated by signal".to_string(),
         |code| format!("exit code {code}"),
     );
-    let message = format!("`{program} {}` failed with {status}", args.join(" "));
+    let message = format!("`{command}` failed with {status}");
     Err(classify_failure(message, stderr))
+}
+
+fn format_board_command(program: &str, board_dir: &Path, args: &[&str]) -> String {
+    let mut parts = vec![program.to_string()];
+    parts.extend(args.iter().map(|arg| arg.to_string()));
+    parts.push("--dir".to_string());
+    parts.push(board_dir.display().to_string());
+    parts.join(" ")
 }
 
 fn build_board_args(board_dir: &Path, args: &[&str]) -> Vec<OsString> {
@@ -376,7 +389,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let error =
             run_board_with_program("__batty_missing_kanban__", temp.path(), &["list"]).unwrap_err();
-        assert!(matches!(error, BoardError::Exec(_)));
+        assert!(matches!(error, BoardError::Exec { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("__batty_missing_kanban__ list --dir")
+        );
     }
 
     #[test]

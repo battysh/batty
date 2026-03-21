@@ -14,8 +14,12 @@ pub enum GitError {
     RevParseFailed { spec: String, stderr: String },
     #[error("invalid git rev-list count for '{range}': {output}")]
     InvalidRevListCount { range: String, output: String },
-    #[error("git command not found or failed to execute: {0}")]
-    Exec(#[from] std::io::Error),
+    #[error("failed to execute git command `{command}`: {source}")]
+    Exec {
+        command: String,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 impl GitError {
@@ -36,8 +40,12 @@ pub enum BoardError {
     InvalidFrontmatter { detail: String },
     #[error("failed to determine claim owner for blocked task #{task_id}")]
     ClaimOwnerUnknown { task_id: String, stderr: String },
-    #[error("kanban-md not found or failed to execute: {0}")]
-    Exec(#[from] std::io::Error),
+    #[error("failed to execute board command `{command}`: {source}")]
+    Exec {
+        command: String,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 impl BoardError {

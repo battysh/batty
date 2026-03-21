@@ -52,7 +52,12 @@ pub(crate) fn run_tests_in_worktree(worktree_dir: &Path) -> Result<(bool, String
         .arg("test")
         .current_dir(worktree_dir)
         .output()
-        .context("failed to run cargo test in worktree")?;
+        .with_context(|| {
+            format!(
+                "failed while running `cargo test` in engineer worktree {}",
+                worktree_dir.display()
+            )
+        })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -264,7 +269,7 @@ pub(crate) fn refresh_engineer_worktree(
         | Err(git_cmd::GitError::MergeFailed { stderr, .. }) => stderr.trim().to_string(),
         Err(git_cmd::GitError::RevParseFailed { stderr, .. }) => stderr.trim().to_string(),
         Err(git_cmd::GitError::InvalidRevListCount { output, .. }) => output.trim().to_string(),
-        Err(git_cmd::GitError::Exec(error)) => error.to_string(),
+        Err(git_cmd::GitError::Exec { source, .. }) => source.to_string(),
     };
     let _ = retry_git(|| git_cmd::rebase_abort(worktree_dir));
 
