@@ -25,6 +25,7 @@ use super::hierarchy::MemberInstance;
 use super::inbox;
 use super::message;
 use super::standup::{self, MemberState};
+use super::task_cmd;
 pub use super::task_loop::merge_engineer_branch;
 use super::task_loop::{
     MergeLock, MergeOutcome, engineer_base_branch_name, next_unclaimed_task,
@@ -480,6 +481,9 @@ impl TeamDaemon {
             });
             self.run_loop_step("maybe_intervene_owned_tasks", |daemon| {
                 daemon.maybe_intervene_owned_tasks()
+            });
+            self.run_loop_step("maybe_auto_unblock_blocked_tasks", |daemon| {
+                daemon.maybe_auto_unblock_blocked_tasks()
             });
             self.run_loop_step("maybe_auto_dispatch", |daemon| daemon.maybe_auto_dispatch());
             self.run_loop_step("maybe_intervene_manager_dispatch_gap", |daemon| {
@@ -2313,6 +2317,80 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         Ok(())
     }
 
+    fn maybe_auto_unblock_blocked_tasks(&mut self) -> Result<()> {
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
+        let done_task_ids: HashSet<u32> = tasks
+            .iter()
+            .filter(|task| task.status == "done")
+            .map(|task| task.id)
+            .collect();
+        let unblocked_tasks = tasks
+            .iter()
+            .filter(|task| task.status == "blocked")
+            .filter(|task| !task.depends_on.is_empty())
+            .filter(|task| {
+                task.depends_on
+                    .iter()
+                    .all(|dependency| done_task_ids.contains(dependency))
+            })
+            .map(|task| {
+                (
+                    task.id,
+                    task.title.clone(),
+                    task.depends_on.clone(),
+                    self.auto_unblock_notification_recipient(task),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for (task_id, title, dependencies, recipient) in unblocked_tasks {
+            task_cmd::cmd_transition(&board_dir, task_id, "todo")
+                .with_context(|| format!("failed to auto-unblock task #{task_id}"))?;
+
+            let dependency_list = dependencies
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let event_role = recipient.as_deref().unwrap_or("daemon");
+            self.emit_event(TeamEvent::task_unblocked(event_role, &task_id.to_string()));
+            self.record_orchestrator_action(format!(
+                "dependency resolution: auto-unblocked task #{} ({}) after dependencies [{}] completed",
+                task_id, title, dependency_list
+            ));
+            info!(
+                task_id,
+                task_title = %title,
+                dependencies = %dependency_list,
+                recipient = recipient.as_deref().unwrap_or("none"),
+                "auto-unblocked blocked task"
+            );
+
+            let Some(recipient) = recipient else {
+                continue;
+            };
+            let body = format!(
+                "Task #{task_id} ({title}) was automatically moved from `blocked` to `todo` because dependencies [{dependency_list}] are done."
+            );
+            if let Err(error) = self.queue_daemon_message(&recipient, &body) {
+                warn!(
+                    task_id,
+                    to = %recipient,
+                    error = %error,
+                    "failed to notify auto-unblocked task recipient"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Update `@batty_status` on each pane border with state + timer countdowns.
     fn update_pane_status_labels(&self) {
         let globally_paused = super::pause_marker_path(&self.config.project_root).exists();
@@ -2535,6 +2613,25 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             .iter()
             .find(|member| member.name == member_name)
             .and_then(|member| member.reports_to.as_deref())
+    }
+
+    fn auto_unblock_notification_recipient(&self, task: &crate::task::Task) -> Option<String> {
+        task.claimed_by
+            .as_deref()
+            .filter(|owner| {
+                self.config
+                    .members
+                    .iter()
+                    .any(|member| member.name == *owner)
+            })
+            .map(str::to_string)
+            .or_else(|| {
+                self.config
+                    .members
+                    .iter()
+                    .find(|member| member.role_type == RoleType::Manager)
+                    .map(|member| member.name.clone())
+            })
     }
 
     fn automation_idle_grace_duration(&self) -> Duration {
@@ -5600,6 +5697,42 @@ mod tests {
             ),
         )
         .unwrap();
+    }
+
+    fn write_board_task_file(
+        project_root: &Path,
+        id: u32,
+        title: &str,
+        status: &str,
+        claimed_by: Option<&str>,
+        depends_on: &[u32],
+        blocked_on: Option<&str>,
+    ) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        let mut content =
+            format!("---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: high\n");
+        if let Some(claimed_by) = claimed_by {
+            content.push_str(&format!("claimed_by: {claimed_by}\n"));
+        }
+        if !depends_on.is_empty() {
+            content.push_str("depends_on:\n");
+            for dependency in depends_on {
+                content.push_str(&format!("  - {dependency}\n"));
+            }
+        }
+        if let Some(blocked_on) = blocked_on {
+            content.push_str(&format!("blocked_on: {blocked_on}\n"));
+            content.push_str(&format!("blocked: {blocked_on}\n"));
+        }
+        content.push_str("class: standard\n---\n\nTask description.\n");
+
+        std::fs::write(tasks_dir.join(format!("{id:03}-{title}.md")), content).unwrap();
     }
 
     fn starvation_test_daemon(tmp: &tempfile::TempDir, threshold: Option<usize>) -> TeamDaemon {
@@ -9955,6 +10088,199 @@ mod tests {
                     && event.task.as_deref() == Some("191")
             }),
             "expected task_escalated event for stuck owned task"
+        );
+    }
+
+    #[test]
+    fn maybe_auto_unblock_moves_blocked_task_to_todo_and_notifies_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![manager, engineer]);
+        let board_tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        let events_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "eng-1").unwrap();
+
+        write_board_task_file(tmp.path(), 11, "dep-a", "done", None, &[], None);
+        write_board_task_file(tmp.path(), 12, "dep-b", "done", None, &[], None);
+        write_board_task_file(
+            tmp.path(),
+            13,
+            "blocked-task",
+            "blocked",
+            Some("eng-1"),
+            &[11, 12],
+            Some("waiting on dependencies"),
+        );
+
+        daemon.maybe_auto_unblock_blocked_tasks().unwrap();
+
+        let tasks = crate::task::load_tasks_from_dir(&board_tasks_dir).unwrap();
+        let task = tasks.iter().find(|task| task.id == 13).unwrap();
+        assert_eq!(task.status, "todo");
+        assert!(task.blocked_on.is_none());
+        assert!(task.blocked.is_none());
+
+        let pending = inbox::pending_messages(&inbox_root, "eng-1").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].body.contains("Task #13 (blocked-task)"));
+        assert!(
+            pending[0]
+                .body
+                .contains("automatically moved from `blocked` to `todo`")
+        );
+        assert!(pending[0].body.contains("[11, 12]"));
+
+        let events = super::super::events::read_events(&events_path).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "task_unblocked"
+                && event.role.as_deref() == Some("eng-1")
+                && event.task.as_deref() == Some("13")
+        }));
+    }
+
+    #[test]
+    fn maybe_auto_unblock_notifies_manager_when_task_is_unowned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![manager]);
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        let events_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        inbox::init_inbox(&inbox_root, "manager").unwrap();
+
+        write_board_task_file(tmp.path(), 21, "dep-a", "done", None, &[], None);
+        write_board_task_file(
+            tmp.path(),
+            22,
+            "blocked-task",
+            "blocked",
+            None,
+            &[21],
+            Some("waiting on dependencies"),
+        );
+
+        daemon.maybe_auto_unblock_blocked_tasks().unwrap();
+
+        let pending = inbox::pending_messages(&inbox_root, "manager").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].body.contains("Task #22 (blocked-task)"));
+
+        let events = super::super::events::read_events(&events_path).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "task_unblocked"
+                && event.role.as_deref() == Some("manager")
+                && event.task.as_deref() == Some("22")
+        }));
+    }
+
+    #[test]
+    fn maybe_auto_unblock_leaves_unresolved_or_dependency_free_tasks_blocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![manager]);
+        let board_tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        let events_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "manager").unwrap();
+
+        write_board_task_file(tmp.path(), 31, "dep-a", "done", None, &[], None);
+        write_board_task_file(tmp.path(), 32, "dep-b", "review", None, &[], None);
+        write_board_task_file(
+            tmp.path(),
+            33,
+            "blocked-partial",
+            "blocked",
+            None,
+            &[31, 32],
+            Some("waiting on dependencies"),
+        );
+        write_board_task_file(
+            tmp.path(),
+            34,
+            "blocked-no-deps",
+            "blocked",
+            None,
+            &[],
+            Some("manual hold"),
+        );
+
+        daemon.maybe_auto_unblock_blocked_tasks().unwrap();
+
+        let tasks = crate::task::load_tasks_from_dir(&board_tasks_dir).unwrap();
+        let partial = tasks.iter().find(|task| task.id == 33).unwrap();
+        assert_eq!(partial.status, "blocked");
+        assert_eq!(
+            partial.blocked_on.as_deref(),
+            Some("waiting on dependencies")
+        );
+
+        let no_deps = tasks.iter().find(|task| task.id == 34).unwrap();
+        assert_eq!(no_deps.status, "blocked");
+        assert_eq!(no_deps.blocked_on.as_deref(), Some("manual hold"));
+
+        let pending = inbox::pending_messages(&inbox_root, "manager").unwrap();
+        assert!(pending.is_empty());
+
+        let events = super::super::events::read_events(&events_path).unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.task.as_deref(), Some("33" | "34")))
         );
     }
 
