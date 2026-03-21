@@ -1,12 +1,15 @@
 //! Standup status gathering and injection into manager panes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use super::hierarchy::MemberInstance;
+use super::metrics;
 use super::watcher::SessionWatcher;
+use crate::task;
 use crate::tmux;
 
 /// Generate a standup report for a specific recipient, showing only their
@@ -18,6 +21,20 @@ pub fn generate_standup_for(
     states: &HashMap<String, MemberState>,
     output_lines: usize,
 ) -> String {
+    generate_board_aware_standup_for(recipient, members, watchers, states, output_lines, None)
+}
+
+/// Generate a standup report for a specific recipient, optionally enriching the
+/// report with board-derived task ownership and workflow signals.
+pub fn generate_board_aware_standup_for(
+    recipient: &MemberInstance,
+    members: &[MemberInstance],
+    watchers: &HashMap<String, SessionWatcher>,
+    states: &HashMap<String, MemberState>,
+    output_lines: usize,
+    board_dir: Option<&Path>,
+) -> String {
+    let board_context = load_board_context(board_dir, members);
     let mut report = String::new();
     report.push_str(&format!("=== STANDUP for {} ===\n", recipient.name));
 
@@ -42,6 +59,21 @@ pub fn generate_standup_for(
 
             report.push_str(&format!("\n[{}] status: {}\n", member.name, state_str));
 
+            if let Some(board_context) = &board_context {
+                let assigned_ids = board_context.assigned_task_ids.get(&member.name);
+                report.push_str(&format!(
+                    "  assigned tasks: {}\n",
+                    format_assigned_task_ids(assigned_ids)
+                ));
+
+                if board_context
+                    .idle_with_runnable
+                    .contains(member.name.as_str())
+                {
+                    report.push_str("  warning: idle while runnable work exists on the board\n");
+                }
+            }
+
             if let Some(watcher) = watchers.get(&member.name) {
                 let last = watcher.last_lines(output_lines);
                 if !last.trim().is_empty() {
@@ -51,6 +83,34 @@ pub fn generate_standup_for(
                     }
                 }
             }
+        }
+    }
+
+    if let Some(board_context) = &board_context {
+        let idle_reports = direct_reports
+            .iter()
+            .filter(|member| {
+                board_context
+                    .idle_with_runnable
+                    .contains(member.name.as_str())
+            })
+            .map(|member| member.name.as_str())
+            .collect::<Vec<_>>();
+
+        report.push_str("\nWorkflow signals:\n");
+        report.push_str(&format!(
+            "  blocked tasks: {}\n",
+            board_context.metrics.blocked_count
+        ));
+        report.push_str(&format!(
+            "  oldest review age: {}\n",
+            format_age(board_context.metrics.oldest_review_age_secs)
+        ));
+        if !idle_reports.is_empty() {
+            report.push_str(&format!(
+                "  idle with runnable: {}\n",
+                idle_reports.join(", ")
+            ));
         }
     }
 
@@ -76,10 +136,78 @@ pub enum MemberState {
     Working,
 }
 
+#[derive(Debug, Clone)]
+struct BoardContext {
+    metrics: metrics::WorkflowMetrics,
+    assigned_task_ids: HashMap<String, Vec<u32>>,
+    idle_with_runnable: HashSet<String>,
+}
+
+fn load_board_context(
+    board_dir: Option<&Path>,
+    members: &[MemberInstance],
+) -> Option<BoardContext> {
+    let board_dir = board_dir?;
+    let tasks_dir = board_dir.join("tasks");
+    if !tasks_dir.is_dir() {
+        return None;
+    }
+
+    let metrics = metrics::compute_metrics(board_dir, members).ok()?;
+    let tasks = task::load_tasks_from_dir(&tasks_dir).ok()?;
+    let mut assigned_task_ids = HashMap::<String, Vec<u32>>::new();
+
+    for task in tasks
+        .into_iter()
+        .filter(|task| !matches!(task.status.as_str(), "done" | "archived"))
+    {
+        let Some(claimed_by) = task.claimed_by else {
+            continue;
+        };
+        assigned_task_ids
+            .entry(claimed_by)
+            .or_default()
+            .push(task.id);
+    }
+
+    for task_ids in assigned_task_ids.values_mut() {
+        task_ids.sort_unstable();
+    }
+
+    Some(BoardContext {
+        idle_with_runnable: metrics.idle_with_runnable.iter().cloned().collect(),
+        metrics,
+        assigned_task_ids,
+    })
+}
+
+fn format_assigned_task_ids(task_ids: Option<&Vec<u32>>) -> String {
+    let Some(task_ids) = task_ids else {
+        return "none".to_string();
+    };
+
+    if task_ids.is_empty() {
+        "none".to_string()
+    } else {
+        task_ids
+            .iter()
+            .map(|task_id| format!("#{task_id}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+fn format_age(age_secs: Option<u64>) -> String {
+    age_secs
+        .map(|secs| format!("{secs}s"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::team::config::RoleType;
+    use std::path::Path;
 
     fn make_member(name: &str, role_type: RoleType, reports_to: Option<&str>) -> MemberInstance {
         MemberInstance {
@@ -91,6 +219,28 @@ mod tests {
             reports_to: reports_to.map(|s| s.to_string()),
             use_worktrees: false,
         }
+    }
+
+    fn write_task(
+        board_dir: &Path,
+        id: u32,
+        title: &str,
+        status: &str,
+        claimed_by: Option<&str>,
+        blocked: Option<&str>,
+    ) {
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let mut content =
+            format!("---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: medium\n");
+        if let Some(claimed_by) = claimed_by {
+            content.push_str(&format!("claimed_by: {claimed_by}\n"));
+        }
+        if let Some(blocked) = blocked {
+            content.push_str(&format!("blocked: {blocked}\n"));
+        }
+        content.push_str("class: standard\n---\n\nTask body.\n");
+        std::fs::write(tasks_dir.join(format!("{id:03}-{title}.md")), content).unwrap();
     }
 
     #[test]
@@ -210,5 +360,79 @@ mod tests {
         assert!(report.contains("[eng-1] status: working"));
         assert!(report.contains("[eng-2] status: working"));
         assert!(report.contains("[eng-3] status: working"));
+    }
+
+    #[test]
+    fn board_aware_standup_appends_task_ids_and_workflow_signals() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        write_task(&board_dir, 1, "active", "in-progress", Some("eng-1"), None);
+        write_task(
+            &board_dir,
+            2,
+            "blocked",
+            "blocked",
+            Some("eng-2"),
+            Some("waiting"),
+        );
+        write_task(&board_dir, 3, "review", "review", Some("eng-2"), None);
+        write_task(&board_dir, 4, "runnable", "todo", None, None);
+
+        let members = vec![
+            make_member("manager", RoleType::Manager, None),
+            make_member("eng-1", RoleType::Engineer, Some("manager")),
+            make_member("eng-2", RoleType::Engineer, Some("manager")),
+            make_member("eng-3", RoleType::Engineer, Some("manager")),
+        ];
+        let states = HashMap::from([
+            ("eng-1".to_string(), MemberState::Working),
+            ("eng-2".to_string(), MemberState::Working),
+            ("eng-3".to_string(), MemberState::Idle),
+        ]);
+
+        let report = generate_board_aware_standup_for(
+            &members[0],
+            &members,
+            &HashMap::new(),
+            &states,
+            5,
+            Some(&board_dir),
+        );
+
+        assert!(report.contains("assigned tasks: #1"));
+        assert!(report.contains("assigned tasks: #2, #3"));
+        assert!(report.contains("[eng-3] status: idle"));
+        assert!(report.contains("assigned tasks: none"));
+        assert!(report.contains("warning: idle while runnable work exists on the board"));
+        assert!(report.contains("Workflow signals:"));
+        assert!(report.contains("blocked tasks: 1"));
+        assert!(report.contains("idle with runnable: eng-3"));
+        assert!(report.contains("oldest review age: "));
+        assert!(!report.contains("oldest review age: n/a"));
+    }
+
+    #[test]
+    fn board_aware_standup_falls_back_when_board_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing_board_dir = tmp.path().join("missing-board");
+        let members = vec![
+            make_member("manager", RoleType::Manager, None),
+            make_member("eng-1", RoleType::Engineer, Some("manager")),
+        ];
+        let states = HashMap::from([("eng-1".to_string(), MemberState::Idle)]);
+
+        let report = generate_board_aware_standup_for(
+            &members[0],
+            &members,
+            &HashMap::new(),
+            &states,
+            5,
+            Some(&missing_board_dir),
+        );
+
+        assert!(report.contains("[eng-1] status: idle"));
+        assert!(!report.contains("assigned tasks:"));
+        assert!(!report.contains("Workflow signals:"));
+        assert!(!report.contains("warning: idle while runnable work exists on the board"));
     }
 }
