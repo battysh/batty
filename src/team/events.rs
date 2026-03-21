@@ -146,6 +146,14 @@ impl TeamEvent {
         }
     }
 
+    pub fn cwd_corrected(role: &str, path: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            reason: Some(path.into()),
+            ..Self::base("cwd_corrected")
+        }
+    }
+
     pub fn task_escalated(role: &str, task: &str) -> Self {
         Self {
             role: Some(role.into()),
@@ -361,6 +369,10 @@ mod tests {
                 TeamEvent::daemon_panic("index out of bounds"),
             ),
             ("task_assigned", TeamEvent::task_assigned("eng-1", "task")),
+            (
+                "cwd_corrected",
+                TeamEvent::cwd_corrected("eng-1", "/tmp/worktree"),
+            ),
             ("task_escalated", TeamEvent::task_escalated("eng-1", "task")),
             ("task_unblocked", TeamEvent::task_unblocked("eng-1", "task")),
             ("task_completed", TeamEvent::task_completed("eng-1")),
@@ -456,6 +468,16 @@ mod tests {
         assert!(json.contains("\"event\":\"task_escalated\""));
         assert!(json.contains("\"role\":\"eng-1-1\""));
         assert!(json.contains("\"task\":\"42\""));
+    }
+
+    #[test]
+    fn cwd_corrected_serializes_role_and_reason() {
+        let event = TeamEvent::cwd_corrected("eng-1-1", "/tmp/worktree");
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"].as_str().unwrap(), "cwd_corrected");
+        assert_eq!(parsed["role"].as_str().unwrap(), "eng-1-1");
+        assert_eq!(parsed["reason"].as_str().unwrap(), "/tmp/worktree");
     }
 
     #[test]
