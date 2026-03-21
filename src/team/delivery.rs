@@ -79,6 +79,7 @@ impl TeamDaemon {
 
         self.failed_deliveries
             .push(FailedDelivery::new(recipient, from, body));
+        self.record_delivery_failed(recipient, from, "message delivery failed after retries");
     }
 
     fn clear_failed_delivery(&mut self, recipient: &str, from: &str, body: &str) {
@@ -1003,6 +1004,24 @@ mod tests {
         assert_eq!(delivery.attempts, 1);
         assert_eq!(delivery.message_marker(), "--- Message from manager ---");
         assert!(delivery.has_attempts_remaining());
+    }
+
+    #[test]
+    fn failed_delivery_emits_single_health_event_per_unique_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+
+        daemon.record_failed_delivery("eng-1", "manager", "Please retry this.");
+        daemon.record_failed_delivery("eng-1", "manager", "Please retry this.");
+
+        let events = super::super::events::read_events(&tmp.path().join("events.jsonl")).unwrap();
+        let delivery_failed = events
+            .into_iter()
+            .filter(|event| event.event == "delivery_failed")
+            .collect::<Vec<_>>();
+        assert_eq!(delivery_failed.len(), 1);
+        assert_eq!(delivery_failed[0].role.as_deref(), Some("eng-1"));
+        assert_eq!(delivery_failed[0].from.as_deref(), Some("manager"));
     }
 
     #[test]
