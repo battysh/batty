@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::config::{RoleType, TeamConfig};
+use super::git_cmd;
 use super::hierarchy::{self, MemberInstance};
 use super::standup::MemberState;
 
@@ -51,6 +52,19 @@ struct LogSize {
     bytes: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckLevel {
+    Pass,
+    Warn,
+    Fail,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CheckLine {
+    level: CheckLevel,
+    message: String,
+}
+
 pub fn build_report(project_root: &Path) -> Result<String> {
     let launch_state = load_launch_state(&launch_state_path(project_root))?;
     let daemon_state = load_daemon_state(&super::daemon_state_path(project_root))?;
@@ -62,6 +76,7 @@ pub fn build_report(project_root: &Path) -> Result<String> {
     let resume =
         build_resume_eligibility(project_root, team_config.as_ref(), &members, &launch_state);
     let worktrees = build_worktree_statuses(project_root, &members);
+    let board_git_checks = build_board_git_checks(project_root);
     let log_sizes = vec![
         LogSize {
             name: "daemon.log",
@@ -79,6 +94,7 @@ pub fn build_report(project_root: &Path) -> Result<String> {
         daemon_state.as_ref(),
         &resume,
         &worktrees,
+        &board_git_checks,
         &log_sizes,
     ))
 }
@@ -89,6 +105,7 @@ fn render_report(
     daemon_state: Option<&DoctorDaemonState>,
     resume: &[ResumeEligibility],
     worktrees: &[WorktreeStatus],
+    board_git_checks: &[CheckLine],
     log_sizes: &[LogSize],
 ) -> String {
     let mut out = String::new();
@@ -177,6 +194,24 @@ fn render_report(
                 status.path.display(),
                 status.branch.as_deref().unwrap_or("-"),
                 dirty,
+            ));
+        }
+    }
+    out.push('\n');
+
+    out.push_str("== Board-Git Consistency ==\n");
+    if board_git_checks.is_empty() {
+        out.push_str("PASS: no active board tasks or git consistency issues detected\n");
+    } else {
+        for line in board_git_checks {
+            out.push_str(&format!(
+                "{}: {}\n",
+                match line.level {
+                    CheckLevel::Pass => "PASS",
+                    CheckLevel::Warn => "WARN",
+                    CheckLevel::Fail => "FAIL",
+                },
+                line.message
             ));
         }
     }
@@ -297,6 +332,342 @@ fn build_worktree_statuses(project_root: &Path, members: &[MemberInstance]) -> V
             }
         })
         .collect()
+}
+
+fn build_board_git_checks(project_root: &Path) -> Vec<CheckLine> {
+    let tasks_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    if !tasks_dir.exists() {
+        return vec![check_line(
+            CheckLevel::Pass,
+            "board tasks directory missing; nothing to verify",
+        )];
+    }
+
+    let tasks = match crate::task::load_tasks_from_dir(&tasks_dir) {
+        Ok(tasks) => tasks,
+        Err(error) => {
+            return vec![check_line(
+                CheckLevel::Fail,
+                format!("failed to load board tasks: {error:#}"),
+            )];
+        }
+    };
+    let active_tasks: Vec<_> = tasks
+        .iter()
+        .filter(|task| matches!(task.status.as_str(), "in-progress" | "review"))
+        .collect();
+
+    if active_tasks.is_empty() {
+        return vec![check_line(
+            CheckLevel::Pass,
+            "no in-progress or review tasks on the board",
+        )];
+    }
+
+    if git_cmd::rev_parse_toplevel(project_root).is_err() {
+        return vec![check_line(
+            CheckLevel::Fail,
+            "git state unavailable; cannot cross-check board metadata",
+        )];
+    }
+
+    let mut lines = Vec::new();
+    lines.extend(branch_consistency_checks(project_root, &active_tasks));
+    lines.extend(worktree_consistency_checks(project_root, &active_tasks));
+    lines.extend(orphan_branch_checks(project_root, &active_tasks));
+    lines.extend(orphan_worktree_checks(project_root, &active_tasks));
+    lines
+}
+
+fn branch_consistency_checks(project_root: &Path, tasks: &[&crate::task::Task]) -> Vec<CheckLine> {
+    let tasks_with_branch: Vec<_> = tasks
+        .iter()
+        .copied()
+        .filter(|task| {
+            task.branch
+                .as_deref()
+                .is_some_and(|branch| !branch.trim().is_empty())
+        })
+        .collect();
+
+    if tasks_with_branch.is_empty() {
+        return vec![check_line(
+            CheckLevel::Pass,
+            "no active tasks declare a branch",
+        )];
+    }
+
+    let mut warnings = Vec::new();
+    for task in tasks_with_branch.iter().copied() {
+        let branch = task.branch.as_deref().unwrap().trim();
+        match git_cmd::show_ref_exists(project_root, branch) {
+            Ok(false) => warnings.push(check_line(
+                CheckLevel::Warn,
+                format!("task #{} declares missing branch '{branch}'", task.id),
+            )),
+            Ok(true) => match git_cmd::rev_list_count(project_root, &format!("main..{branch}")) {
+                Ok(0) => warnings.push(check_line(
+                    CheckLevel::Warn,
+                    format!(
+                        "task #{} branch '{branch}' has no commits ahead of main",
+                        task.id
+                    ),
+                )),
+                Ok(_) => {}
+                Err(error) => warnings.push(check_line(
+                    CheckLevel::Warn,
+                    format!(
+                        "task #{} branch '{branch}' could not be compared to main: {error}",
+                        task.id
+                    ),
+                )),
+            },
+            Err(error) => warnings.push(check_line(
+                CheckLevel::Warn,
+                format!("task #{} branch '{branch}' lookup failed: {error}", task.id),
+            )),
+        }
+    }
+
+    if warnings.is_empty() {
+        vec![check_line(
+            CheckLevel::Pass,
+            format!(
+                "all {} active task branches exist and are ahead of main",
+                tasks_with_branch.len()
+            ),
+        )]
+    } else {
+        warnings
+    }
+}
+
+fn worktree_consistency_checks(
+    project_root: &Path,
+    tasks: &[&crate::task::Task],
+) -> Vec<CheckLine> {
+    let tasks_with_worktree: Vec<_> = tasks
+        .iter()
+        .copied()
+        .filter(|task| {
+            task.worktree_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty())
+        })
+        .collect();
+
+    if tasks_with_worktree.is_empty() {
+        return vec![check_line(
+            CheckLevel::Pass,
+            "no active tasks declare a worktree path",
+        )];
+    }
+
+    let mut warnings = Vec::new();
+    for task in tasks_with_worktree.iter().copied() {
+        let worktree = resolve_task_worktree(project_root, task.worktree_path.as_deref().unwrap());
+        if !worktree.exists() {
+            warnings.push(check_line(
+                CheckLevel::Warn,
+                format!(
+                    "task #{} declares missing worktree '{}'",
+                    task.id,
+                    worktree.display()
+                ),
+            ));
+            continue;
+        }
+
+        if let Some(expected_branch) = task.branch.as_deref() {
+            match git_cmd::rev_parse_branch(&worktree) {
+                Ok(current_branch) if current_branch != expected_branch => {
+                    warnings.push(check_line(
+                        CheckLevel::Warn,
+                        format!(
+                            "task #{} worktree '{}' is on branch '{}' instead of '{}'",
+                            task.id,
+                            worktree.display(),
+                            current_branch,
+                            expected_branch
+                        ),
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) => warnings.push(check_line(
+                    CheckLevel::Warn,
+                    format!(
+                        "task #{} worktree '{}' branch lookup failed: {error}",
+                        task.id,
+                        worktree.display()
+                    ),
+                )),
+            }
+        }
+
+        match git_cmd::status_porcelain(&worktree) {
+            Ok(status) if !status.trim().is_empty() => warnings.push(check_line(
+                CheckLevel::Warn,
+                format!(
+                    "task #{} worktree '{}' has uncommitted changes",
+                    task.id,
+                    worktree.display()
+                ),
+            )),
+            Ok(_) => {}
+            Err(error) => warnings.push(check_line(
+                CheckLevel::Warn,
+                format!(
+                    "task #{} worktree '{}' status check failed: {error}",
+                    task.id,
+                    worktree.display()
+                ),
+            )),
+        }
+    }
+
+    if warnings.is_empty() {
+        vec![check_line(
+            CheckLevel::Pass,
+            format!(
+                "all {} active task worktrees exist and match board metadata",
+                tasks_with_worktree.len()
+            ),
+        )]
+    } else {
+        warnings
+    }
+}
+
+fn orphan_branch_checks(project_root: &Path, tasks: &[&crate::task::Task]) -> Vec<CheckLine> {
+    let active_branches: std::collections::HashSet<_> = tasks
+        .iter()
+        .filter_map(|task| task.branch.as_deref())
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+
+    let branches = match git_cmd::for_each_ref_branches(project_root) {
+        Ok(branches) => branches,
+        Err(error) => {
+            return vec![check_line(
+                CheckLevel::Warn,
+                format!("failed to list git branches for orphan detection: {error}"),
+            )];
+        }
+    };
+
+    let orphans: Vec<_> = branches
+        .into_iter()
+        .filter(|branch| is_task_branch(branch))
+        .filter(|branch| !active_branches.contains(branch))
+        .collect();
+
+    if orphans.is_empty() {
+        vec![check_line(
+            CheckLevel::Pass,
+            "no orphan task branches found",
+        )]
+    } else {
+        orphans
+            .into_iter()
+            .map(|branch| {
+                check_line(
+                    CheckLevel::Warn,
+                    format!("orphan task branch '{branch}' has no active board task"),
+                )
+            })
+            .collect()
+    }
+}
+
+fn orphan_worktree_checks(project_root: &Path, tasks: &[&crate::task::Task]) -> Vec<CheckLine> {
+    let active_worktrees: std::collections::HashSet<_> = tasks
+        .iter()
+        .filter_map(|task| task.worktree_path.as_deref())
+        .map(|path| resolve_task_worktree(project_root, path))
+        .collect();
+    let active_branches: std::collections::HashSet<_> = tasks
+        .iter()
+        .filter_map(|task| task.branch.as_deref())
+        .map(ToOwned::to_owned)
+        .collect();
+
+    let worktrees_root = project_root.join(".batty").join("worktrees");
+    if !worktrees_root.exists() {
+        return vec![check_line(
+            CheckLevel::Pass,
+            "no worktree directory exists for orphan detection",
+        )];
+    }
+
+    let entries = match fs::read_dir(&worktrees_root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return vec![check_line(
+                CheckLevel::Warn,
+                format!(
+                    "failed to read worktree directory '{}': {error}",
+                    worktrees_root.display()
+                ),
+            )];
+        }
+    };
+
+    let mut orphans = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || active_worktrees.contains(&path) {
+            continue;
+        }
+
+        let Ok(branch) = git_cmd::rev_parse_branch(&path) else {
+            continue;
+        };
+        if is_task_branch(&branch) && !active_branches.contains(&branch) {
+            orphans.push(check_line(
+                CheckLevel::Warn,
+                format!(
+                    "orphan worktree '{}' is still checked out on task branch '{}'",
+                    path.display(),
+                    branch
+                ),
+            ));
+        }
+    }
+
+    if orphans.is_empty() {
+        vec![check_line(
+            CheckLevel::Pass,
+            "no orphan task worktrees found",
+        )]
+    } else {
+        orphans
+    }
+}
+
+fn check_line(level: CheckLevel, message: impl Into<String>) -> CheckLine {
+    CheckLine {
+        level,
+        message: message.into(),
+    }
+}
+
+fn resolve_task_worktree(project_root: &Path, worktree_path: &str) -> PathBuf {
+    let path = PathBuf::from(worktree_path);
+    if path.is_absolute() {
+        path
+    } else {
+        project_root.join(path)
+    }
+}
+
+fn is_task_branch(branch: &str) -> bool {
+    branch.starts_with("eng-") && branch.contains("/task-")
 }
 
 fn current_prompt(member: &MemberInstance, config_dir: &Path) -> String {
@@ -433,6 +804,7 @@ fn claude_session_id_exists(session_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::process::Command;
 
     use super::*;
 
@@ -464,6 +836,60 @@ roles:
         .unwrap();
         fs::write(team_dir.join("manager.md"), "Manager prompt").unwrap();
         fs::write(team_dir.join("engineer.md"), "Engineer prompt").unwrap();
+    }
+
+    fn init_git_repo(root: &Path) {
+        git_ok(root, &["init", "-b", "main"]);
+        git_ok(root, &["config", "user.email", "batty-test@example.com"]);
+        git_ok(root, &["config", "user.name", "Batty Test"]);
+        fs::write(root.join("README.md"), "initial\n").unwrap();
+        git_ok(root, &["add", "README.md"]);
+        git_ok(root, &["commit", "-m", "initial"]);
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> std::process::Output {
+        Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap_or_else(|error| panic!("git {:?} failed to run: {error}", args))
+    }
+
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let output = git(dir, args);
+        assert!(
+            output.status.success(),
+            "git {:?} failed: stdout={} stderr={}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn write_board_task(
+        root: &Path,
+        id: u32,
+        status: &str,
+        branch: Option<&str>,
+        worktree_path: Option<&str>,
+    ) {
+        let tasks_dir = root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        let mut content = format!(
+            "---\nid: {id}\ntitle: Task {id}\nstatus: {status}\npriority: medium\nclass: standard\n"
+        );
+        if let Some(branch) = branch {
+            content.push_str(&format!("branch: {branch}\n"));
+        }
+        if let Some(worktree_path) = worktree_path {
+            content.push_str(&format!("worktree_path: {worktree_path}\n"));
+        }
+        content.push_str("---\n\nTask body.\n");
+        fs::write(tasks_dir.join(format!("{id:03}-task-{id}.md")), content).unwrap();
     }
 
     #[test]
@@ -501,6 +927,7 @@ roles:
     #[test]
     fn test_doctor_formats_output() {
         let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
         write_team_config(tmp.path());
         fs::create_dir_all(tmp.path().join(".batty").join("worktrees").join("engineer")).unwrap();
         let launch_state = HashMap::from([
@@ -555,6 +982,7 @@ roles:
         assert!(report.contains("== Daemon State =="));
         assert!(report.contains("== Resume Eligibility =="));
         assert!(report.contains("== Worktree Status =="));
+        assert!(report.contains("== Board-Git Consistency =="));
         assert!(report.contains("== Log Sizes =="));
         assert!(report.contains("manager: agent=codex-cli"));
         assert!(report.contains("clean_shutdown: false"));
@@ -573,8 +1001,125 @@ roles:
         assert!(report.contains("(missing)"));
         assert!(report.contains("== Daemon State =="));
         assert!(report.contains("== Resume Eligibility =="));
+        assert!(report.contains("== Board-Git Consistency =="));
         assert!(report.contains("(no team config or members)"));
         assert!(report.contains("daemon.log: missing"));
         assert!(report.contains("orchestrator.log: missing"));
+    }
+
+    #[test]
+    fn doctor_board_clean_state_reports_passes() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        write_board_task(
+            tmp.path(),
+            69,
+            "in-progress",
+            Some("eng-1-3/task-69"),
+            Some(".batty/worktrees/eng-1-3"),
+        );
+
+        let worktree_path = tmp.path().join(".batty").join("worktrees").join("eng-1-3");
+        git_ok(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-1-3/task-69",
+                worktree_path.to_string_lossy().as_ref(),
+                "main",
+            ],
+        );
+        fs::write(worktree_path.join("feature.txt"), "feature\n").unwrap();
+        git_ok(&worktree_path, &["add", "feature.txt"]);
+        git_ok(&worktree_path, &["commit", "-m", "task work"]);
+
+        let report = build_report(tmp.path()).unwrap();
+
+        assert!(report.contains("== Board-Git Consistency =="));
+        assert!(report.contains("PASS: all 1 active task branches exist and are ahead of main"));
+        assert!(
+            report.contains("PASS: all 1 active task worktrees exist and match board metadata")
+        );
+        assert!(report.contains("PASS: no orphan task branches found"));
+        assert!(report.contains("PASS: no orphan task worktrees found"));
+    }
+
+    #[test]
+    fn doctor_board_warns_on_missing_branch_and_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        write_board_task(
+            tmp.path(),
+            69,
+            "review",
+            Some("eng-1-3/task-69"),
+            Some(".batty/worktrees/eng-1-3"),
+        );
+
+        let report = build_report(tmp.path()).unwrap();
+
+        assert!(report.contains("WARN: task #69 declares missing branch 'eng-1-3/task-69'"));
+        assert!(report.contains("WARN: task #69 declares missing worktree"));
+    }
+
+    #[test]
+    fn doctor_board_warns_on_dirty_and_orphaned_git_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        write_board_task(
+            tmp.path(),
+            69,
+            "in-progress",
+            Some("eng-1-3/task-69"),
+            Some(".batty/worktrees/eng-1-3"),
+        );
+
+        let active_worktree = tmp.path().join(".batty").join("worktrees").join("eng-1-3");
+        git_ok(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-1-3/task-69",
+                active_worktree.to_string_lossy().as_ref(),
+                "main",
+            ],
+        );
+        fs::write(active_worktree.join("feature.txt"), "feature\n").unwrap();
+        git_ok(&active_worktree, &["add", "feature.txt"]);
+        git_ok(&active_worktree, &["commit", "-m", "task work"]);
+        fs::write(active_worktree.join("dirty.txt"), "dirty\n").unwrap();
+
+        git_ok(tmp.path(), &["checkout", "-b", "eng-9/task-99"]);
+        fs::write(tmp.path().join("orphan.txt"), "orphan\n").unwrap();
+        git_ok(tmp.path(), &["add", "orphan.txt"]);
+        git_ok(tmp.path(), &["commit", "-m", "orphan branch"]);
+        git_ok(tmp.path(), &["checkout", "main"]);
+
+        let orphan_worktree = tmp.path().join(".batty").join("worktrees").join("orphan");
+        git_ok(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-9/task-100",
+                orphan_worktree.to_string_lossy().as_ref(),
+                "main",
+            ],
+        );
+
+        let report = build_report(tmp.path()).unwrap();
+
+        assert!(report.contains("WARN: task #69 worktree"));
+        assert!(report.contains("has uncommitted changes"));
+        assert!(
+            report.contains("WARN: orphan task branch 'eng-9/task-99' has no active board task")
+        );
+        assert!(report.contains("WARN: orphan worktree"));
+        assert!(report.contains("eng-9/task-100"));
     }
 }
