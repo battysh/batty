@@ -37,6 +37,16 @@ pub struct SessionWatcher {
     tracker: Option<SessionTracker>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodexQualitySignals {
+    pub last_response_chars: Option<usize>,
+    pub shortening_streak: u32,
+    pub repeated_output_streak: u32,
+    pub shrinking_responses: bool,
+    pub repeated_identical_outputs: bool,
+    pub tool_failure_message: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum SessionTrackerConfig {
     Codex { cwd: PathBuf },
@@ -60,6 +70,8 @@ struct CodexSessionTracker {
     cwd: PathBuf,
     session_file: Option<PathBuf>,
     offset: u64,
+    quality: CodexQualitySignals,
+    last_response_hash: Option<u64>,
 }
 
 struct ClaudeSessionTracker {
@@ -99,6 +111,8 @@ impl SessionWatcher {
                     cwd,
                     session_file: None,
                     offset: 0,
+                    quality: CodexQualitySignals::default(),
+                    last_response_hash: None,
                 }),
                 SessionTrackerConfig::Claude { cwd } => {
                     SessionTracker::Claude(ClaudeSessionTracker {
@@ -203,6 +217,8 @@ impl SessionWatcher {
                 SessionTracker::Codex(codex) => {
                     codex.session_file = None;
                     codex.offset = 0;
+                    codex.quality = CodexQualitySignals::default();
+                    codex.last_response_hash = None;
                 }
                 SessionTracker::Claude(claude) => {
                     claude.session_file = None;
@@ -262,6 +278,13 @@ impl SessionWatcher {
         fs::metadata(path).ok().map(|metadata| metadata.len())
     }
 
+    pub fn codex_quality_signals(&self) -> Option<CodexQualitySignals> {
+        match self.tracker.as_ref() {
+            Some(SessionTracker::Codex(codex)) => Some(codex.quality.clone()),
+            _ => None,
+        }
+    }
+
     pub fn take_completion_event(&mut self) -> bool {
         let observed = self.completion_observed;
         self.completion_observed = false;
@@ -282,6 +305,8 @@ impl SessionWatcher {
                     if let Some(session_file) = codex.session_file.as_ref() {
                         codex.offset = current_file_len(session_file)?;
                     }
+                    codex.quality = CodexQualitySignals::default();
+                    codex.last_response_hash = None;
                     return Ok(TrackerState::Unknown);
                 }
 
@@ -292,10 +317,17 @@ impl SessionWatcher {
                 if !session_file.exists() {
                     codex.session_file = None;
                     codex.offset = 0;
+                    codex.quality = CodexQualitySignals::default();
+                    codex.last_response_hash = None;
                     return Ok(TrackerState::Unknown);
                 }
 
-                let state = poll_codex_session_file(&session_file, &mut codex.offset)?;
+                let state = poll_codex_session_file(
+                    &session_file,
+                    &mut codex.offset,
+                    &mut codex.quality,
+                    &mut codex.last_response_hash,
+                )?;
 
                 // When idle with no new events, check if a newer session file
                 // appeared (agent started a new task). Re-discover so the
@@ -307,7 +339,14 @@ impl SessionWatcher {
                         if latest != session_file {
                             codex.session_file = Some(latest.clone());
                             codex.offset = 0;
-                            return poll_codex_session_file(&latest, &mut codex.offset);
+                            codex.quality = CodexQualitySignals::default();
+                            codex.last_response_hash = None;
+                            return poll_codex_session_file(
+                                &latest,
+                                &mut codex.offset,
+                                &mut codex.quality,
+                                &mut codex.last_response_hash,
+                            );
                         }
                     }
                 }
@@ -679,7 +718,12 @@ fn session_file_cwd(path: &Path) -> Result<Option<std::ffi::OsString>> {
     Ok(None)
 }
 
-fn poll_codex_session_file(path: &Path, offset: &mut u64) -> Result<TrackerState> {
+fn poll_codex_session_file(
+    path: &Path,
+    offset: &mut u64,
+    quality: &mut CodexQualitySignals,
+    last_response_hash: &mut Option<u64>,
+) -> Result<TrackerState> {
     let file_len = fs::metadata(path)?.len();
     if file_len < *offset {
         *offset = 0;
@@ -706,6 +750,7 @@ fn poll_codex_session_file(path: &Path, offset: &mut u64) -> Result<TrackerState
         had_new_events = true;
 
         if let Ok(entry) = serde_json::from_str::<Value>(&line) {
+            update_codex_quality_signals(&entry, quality, last_response_hash);
             if entry.get("type").and_then(Value::as_str) == Some("event_msg")
                 && entry
                     .get("payload")
@@ -727,6 +772,106 @@ fn poll_codex_session_file(path: &Path, offset: &mut u64) -> Result<TrackerState
     } else {
         Ok(TrackerState::Unknown)
     }
+}
+
+fn update_codex_quality_signals(
+    entry: &Value,
+    quality: &mut CodexQualitySignals,
+    last_response_hash: &mut Option<u64>,
+) {
+    if let Some(text) = codex_assistant_output_text(entry) {
+        let normalized = normalize_codex_response_text(&text);
+        let response_chars = normalized.chars().count();
+        let previous_len = quality.last_response_chars;
+        if let Some(previous_len) = previous_len {
+            if response_chars < previous_len {
+                quality.shortening_streak += 1;
+            } else {
+                quality.shortening_streak = 0;
+            }
+        } else {
+            quality.shortening_streak = 0;
+        }
+
+        let response_hash = simple_hash(&normalized);
+        if Some(response_hash) == *last_response_hash && !normalized.is_empty() {
+            quality.repeated_output_streak += 1;
+        } else {
+            quality.repeated_output_streak = 1;
+        }
+
+        quality.shrinking_responses = quality.shortening_streak >= 2;
+        quality.repeated_identical_outputs = quality.repeated_output_streak >= 3;
+        *last_response_hash = Some(response_hash);
+        quality.last_response_chars = Some(response_chars);
+    }
+
+    if let Some(tool_failure_message) = codex_tool_failure_message(entry) {
+        quality.tool_failure_message = Some(tool_failure_message);
+    }
+}
+
+fn codex_assistant_output_text(entry: &Value) -> Option<String> {
+    let payload = entry.get("payload")?;
+    if entry.get("type").and_then(Value::as_str) != Some("response_item") {
+        return None;
+    }
+    if payload.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    if payload.get("role").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+
+    let mut text = String::new();
+    for item in payload.get("content")?.as_array()? {
+        if item.get("type").and_then(Value::as_str) == Some("output_text") {
+            if let Some(chunk) = item.get("text").and_then(Value::as_str) {
+                text.push_str(chunk);
+            }
+        }
+    }
+
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn codex_tool_failure_message(entry: &Value) -> Option<String> {
+    if entry.get("type").and_then(Value::as_str) != Some("response_item") {
+        return None;
+    }
+    let payload = entry.get("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("function_call_output") {
+        return None;
+    }
+
+    let output = payload.get("output").and_then(Value::as_str)?.trim();
+    if !looks_like_codex_tool_failure(output) {
+        return None;
+    }
+
+    Some(first_non_empty_line(output).unwrap_or(output).to_string())
+}
+
+fn normalize_codex_response_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn looks_like_codex_tool_failure(output: &str) -> bool {
+    let lowered = output.to_ascii_lowercase();
+    lowered.contains("sandboxdenied")
+        || lowered.contains("timed out")
+        || lowered.contains("failed to run")
+        || lowered.contains("exec_command failed")
+        || (lowered.contains("failed") && lowered.contains("exit code"))
+        || (lowered.contains("error") && lowered.contains("process exited"))
+}
+
+fn first_non_empty_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).find(|line| !line.is_empty())
 }
 
 fn poll_claude_session(tracker: &mut ClaudeSessionTracker) -> Result<TrackerState> {
@@ -1457,9 +1602,17 @@ mod tests {
         handle.flush().unwrap();
 
         let mut offset = 0;
+        let mut quality = CodexQualitySignals::default();
+        let mut last_response_hash = None;
         // session_meta is a new event but not task_complete → Active
         assert_eq!(
-            poll_codex_session_file(&session_file, &mut offset).unwrap(),
+            poll_codex_session_file(
+                &session_file,
+                &mut offset,
+                &mut quality,
+                &mut last_response_hash,
+            )
+            .unwrap(),
             TrackerState::Active
         );
 
@@ -1471,12 +1624,24 @@ mod tests {
         handle.flush().unwrap();
 
         assert_eq!(
-            poll_codex_session_file(&session_file, &mut offset).unwrap(),
+            poll_codex_session_file(
+                &session_file,
+                &mut offset,
+                &mut quality,
+                &mut last_response_hash,
+            )
+            .unwrap(),
             TrackerState::Completed
         );
         // No new events → Unknown
         assert_eq!(
-            poll_codex_session_file(&session_file, &mut offset).unwrap(),
+            poll_codex_session_file(
+                &session_file,
+                &mut offset,
+                &mut quality,
+                &mut last_response_hash,
+            )
+            .unwrap(),
             TrackerState::Unknown
         );
     }
@@ -1510,6 +1675,8 @@ mod tests {
             cwd,
             session_file: None,
             offset: 0,
+            quality: CodexQualitySignals::default(),
+            last_response_hash: None,
         };
 
         if tracker.session_file.is_none() {
@@ -1522,8 +1689,13 @@ mod tests {
 
         // After binding at EOF, no new events → Unknown
         assert_eq!(
-            poll_codex_session_file(tracker.session_file.as_ref().unwrap(), &mut tracker.offset)
-                .unwrap(),
+            poll_codex_session_file(
+                tracker.session_file.as_ref().unwrap(),
+                &mut tracker.offset,
+                &mut tracker.quality,
+                &mut tracker.last_response_hash,
+            )
+            .unwrap(),
             TrackerState::Unknown
         );
 
@@ -1539,9 +1711,139 @@ mod tests {
         handle.flush().unwrap();
 
         assert_eq!(
-            poll_codex_session_file(tracker.session_file.as_ref().unwrap(), &mut tracker.offset)
-                .unwrap(),
+            poll_codex_session_file(
+                tracker.session_file.as_ref().unwrap(),
+                &mut tracker.offset,
+                &mut tracker.quality,
+                &mut tracker.last_response_hash,
+            )
+            .unwrap(),
             TrackerState::Completed
+        );
+    }
+
+    #[test]
+    fn codex_session_quality_detects_shrinking_responses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_file = tmp.path().join("session.jsonl");
+        std::fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"This is a fairly detailed reply with enough content.\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Shorter follow-up reply.\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Tiny.\"}]}}\n",
+            ),
+        )
+        .unwrap();
+
+        let mut offset = 0;
+        let mut quality = CodexQualitySignals::default();
+        let mut last_response_hash = None;
+        assert_eq!(
+            poll_codex_session_file(
+                &session_file,
+                &mut offset,
+                &mut quality,
+                &mut last_response_hash,
+            )
+            .unwrap(),
+            TrackerState::Active
+        );
+
+        assert_eq!(quality.last_response_chars, Some(5));
+        assert_eq!(quality.shortening_streak, 2);
+        assert!(quality.shrinking_responses);
+        assert!(!quality.repeated_identical_outputs);
+    }
+
+    #[test]
+    fn codex_session_quality_detects_repeated_identical_outputs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_file = tmp.path().join("session.jsonl");
+        std::fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Same response.\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Same response.\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Same response.\"}]}}\n",
+            ),
+        )
+        .unwrap();
+
+        let mut offset = 0;
+        let mut quality = CodexQualitySignals::default();
+        let mut last_response_hash = None;
+        poll_codex_session_file(
+            &session_file,
+            &mut offset,
+            &mut quality,
+            &mut last_response_hash,
+        )
+        .unwrap();
+
+        assert_eq!(quality.repeated_output_streak, 3);
+        assert!(quality.repeated_identical_outputs);
+        assert!(!quality.shrinking_responses);
+    }
+
+    #[test]
+    fn codex_session_quality_detects_tool_failure_messages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_file = tmp.path().join("session.jsonl");
+        std::fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_123\",\"output\":\"exec_command failed: SandboxDenied { message: \\\"operation not permitted\\\" }\"}}\n",
+            ),
+        )
+        .unwrap();
+
+        let mut offset = 0;
+        let mut quality = CodexQualitySignals::default();
+        let mut last_response_hash = None;
+        poll_codex_session_file(
+            &session_file,
+            &mut offset,
+            &mut quality,
+            &mut last_response_hash,
+        )
+        .unwrap();
+
+        assert_eq!(
+            quality.tool_failure_message.as_deref(),
+            Some("exec_command failed: SandboxDenied { message: \"operation not permitted\" }")
+        );
+    }
+
+    #[test]
+    fn watcher_exposes_codex_quality_signals() {
+        let mut watcher = SessionWatcher::new("%0", "eng-1-1", 300, None);
+        watcher.tracker = Some(SessionTracker::Codex(CodexSessionTracker {
+            sessions_root: PathBuf::from("/tmp"),
+            cwd: PathBuf::from("/repo"),
+            session_file: None,
+            offset: 0,
+            quality: CodexQualitySignals {
+                last_response_chars: Some(12),
+                shortening_streak: 2,
+                repeated_output_streak: 3,
+                shrinking_responses: true,
+                repeated_identical_outputs: true,
+                tool_failure_message: Some("exec_command failed".to_string()),
+            },
+            last_response_hash: Some(simple_hash("same response")),
+        }));
+
+        assert_eq!(
+            watcher.codex_quality_signals(),
+            Some(CodexQualitySignals {
+                last_response_chars: Some(12),
+                shortening_streak: 2,
+                repeated_output_streak: 3,
+                shrinking_responses: true,
+                repeated_identical_outputs: true,
+                tool_failure_message: Some("exec_command failed".to_string()),
+            })
         );
     }
 
