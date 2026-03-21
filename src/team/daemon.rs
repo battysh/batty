@@ -25,7 +25,8 @@ use super::hierarchy::MemberInstance;
 use super::inbox;
 use super::merge;
 use super::message;
-use super::standup::{self, MemberState};
+use super::standup::MemberState;
+use super::status;
 use super::task_cmd;
 use super::task_loop::{
     engineer_base_branch_name, next_unclaimed_task, prepare_engineer_assignment_worktree,
@@ -39,7 +40,8 @@ use crate::tmux;
 #[path = "daemon/interventions.rs"]
 mod interventions;
 
-use self::interventions::{NudgeSchedule, OwnedTaskInterventionState, format_nudge_status};
+pub(crate) use self::interventions::NudgeSchedule;
+use self::interventions::OwnedTaskInterventionState;
 
 /// Daemon configuration derived from TeamConfig.
 pub struct DaemonConfig {
@@ -2191,93 +2193,16 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
 
     /// Update `@batty_status` on each pane border with state + timer countdowns.
     fn update_pane_status_labels(&self) {
-        let globally_paused = super::pause_marker_path(&self.config.project_root).exists();
-        let inbox_root = inbox::inboxes_root(&self.config.project_root);
-        let direct_reports = super::direct_reports_by_member(&self.config.members);
-        let owned_task_buckets =
-            super::owned_task_buckets(&self.config.project_root, &self.config.members);
-
-        for member in &self.config.members {
-            if member.role_type == RoleType::User {
-                continue;
-            }
-            let Some(pane_id) = self.config.pane_map.get(&member.name) else {
-                continue;
-            };
-
-            let state = self
-                .states
-                .get(&member.name)
-                .copied()
-                .unwrap_or(MemberState::Idle);
-
-            let pending_inbox = match inbox::pending_message_count(&inbox_root, &member.name) {
-                Ok(count) => count,
-                Err(error) => {
-                    warn!(member = %member.name, error = %error, "failed to count pending inbox messages");
-                    0
-                }
-            };
-            let triage_backlog = match direct_reports.get(&member.name) {
-                Some(reports) => {
-                    match super::delivered_direct_report_triage_count(
-                        &inbox_root,
-                        &member.name,
-                        reports,
-                    ) {
-                        Ok(count) => count,
-                        Err(error) => {
-                            warn!(member = %member.name, error = %error, "failed to compute triage backlog");
-                            0
-                        }
-                    }
-                }
-                None => 0,
-            };
-            let member_owned_tasks = owned_task_buckets
-                .get(&member.name)
-                .cloned()
-                .unwrap_or_default();
-
-            let label = if globally_paused {
-                compose_pane_status_label(
-                    state,
-                    pending_inbox,
-                    triage_backlog,
-                    &member_owned_tasks.active,
-                    &member_owned_tasks.review,
-                    true,
-                    "",
-                    "",
-                )
-            } else {
-                let nudge_str = format_nudge_status(self.nudges.get(&member.name));
-                let standup_str = self
-                    .standup_interval_for_member_name(&member.name)
-                    .map(|standup_interval| {
-                        format_standup_status(
-                            self.last_standup.get(&member.name).copied(),
-                            standup_interval,
-                            self.paused_standups.contains(&member.name),
-                        )
-                    })
-                    .unwrap_or_default();
-                compose_pane_status_label(
-                    state,
-                    pending_inbox,
-                    triage_backlog,
-                    &member_owned_tasks.active,
-                    &member_owned_tasks.review,
-                    false,
-                    &nudge_str,
-                    &standup_str,
-                )
-            };
-
-            let _ = std::process::Command::new("tmux")
-                .args(["set-option", "-p", "-t", pane_id, "@batty_status", &label])
-                .output();
-        }
+        status::update_pane_status_labels(
+            &self.config.project_root,
+            &self.config.members,
+            &self.config.pane_map,
+            &self.states,
+            &self.nudges,
+            &self.last_standup,
+            &self.paused_standups,
+            |member_name| self.standup_interval_for_member_name(member_name),
+        );
     }
 
     /// Update automation countdowns when a member's state changes.
@@ -2586,139 +2511,22 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
     /// takes precedence, falling back to the global `standup.interval_secs`.
     /// Skipped entirely when the pause marker file exists.
     fn maybe_generate_standup(&mut self) -> Result<()> {
-        if !self.config.team_config.automation.standups {
-            return Ok(());
-        }
-        if super::pause_marker_path(&self.config.project_root).exists() {
-            return Ok(());
-        }
-        let global_interval = self.config.team_config.standup.interval_secs;
-        if global_interval == 0 {
-            return Ok(());
-        }
+        let generated = status::maybe_generate_standup(
+            &self.config.project_root,
+            &self.config.team_config,
+            &self.config.members,
+            &self.watchers,
+            &self.states,
+            &self.config.pane_map,
+            self.telegram_bot.as_ref(),
+            &self.paused_standups,
+            &mut self.last_standup,
+        )?;
 
-        // Build list of recipients with their per-role intervals.
-        // Default: managers and architects get standups, others don't unless configured.
-        let mut recipients: Vec<(MemberInstance, Duration)> = Vec::new();
-        for role in &self.config.team_config.roles {
-            let receives = role.receives_standup.unwrap_or(matches!(
-                role.role_type,
-                RoleType::Manager | RoleType::Architect
-            ));
-            if !receives {
-                continue;
-            }
-            let interval_secs = role.standup_interval_secs.unwrap_or(global_interval);
-            let interval = Duration::from_secs(interval_secs);
-            for member in &self.config.members {
-                if member.role_name == role.name {
-                    recipients.push((member.clone(), interval));
-                }
-            }
+        for recipient in generated {
+            self.emit_event(TeamEvent::standup_generated(&recipient));
         }
 
-        let mut any_generated = false;
-
-        for (recipient, interval) in &recipients {
-            if self.paused_standups.contains(&recipient.name) {
-                continue;
-            }
-
-            // Check per-member timer
-            let last = self.last_standup.get(&recipient.name).copied();
-            let should_fire = match last {
-                Some(t) => t.elapsed() >= *interval,
-                None => true, // first standup — wait one full interval
-            };
-
-            if last.is_none() {
-                // Initialize timer so first standup fires after one interval
-                self.last_standup
-                    .insert(recipient.name.clone(), Instant::now());
-                continue;
-            }
-
-            if !should_fire {
-                continue;
-            }
-
-            let board_dir = super::team_config_dir(&self.config.project_root).join("board");
-            let report = standup::generate_board_aware_standup_for(
-                recipient,
-                &self.config.members,
-                &self.watchers,
-                &self.states,
-                self.config.team_config.standup.output_lines as usize,
-                Some(&board_dir),
-            );
-
-            match recipient.role_type {
-                RoleType::User => {
-                    if let Some(bot) = &self.telegram_bot {
-                        let chat_id = self
-                            .config
-                            .team_config
-                            .roles
-                            .iter()
-                            .find(|role| {
-                                role.role_type == RoleType::User && role.name == recipient.role_name
-                            })
-                            .and_then(|role| role.channel_config.as_ref())
-                            .map(|config| config.target.clone());
-
-                        match chat_id {
-                            Some(chat_id) => {
-                                if let Err(e) = bot.send_message(&chat_id, &report) {
-                                    warn!(
-                                        member = %recipient.name,
-                                        target = %chat_id,
-                                        error = %e,
-                                        "failed to send standup via telegram"
-                                    );
-                                } else {
-                                    self.emit_event(TeamEvent::standup_generated(&recipient.name));
-                                    any_generated = true;
-                                }
-                            }
-                            None => {
-                                warn!(
-                                    member = %recipient.name,
-                                    "telegram standup delivery skipped: missing target"
-                                );
-                            }
-                        }
-                    } else {
-                        match standup::write_standup_file(&self.config.project_root, &report) {
-                            Ok(path) => {
-                                info!(member = %recipient.name, path = %path.display(), "standup written to file");
-                                self.emit_event(TeamEvent::standup_generated(&recipient.name));
-                                any_generated = true;
-                            }
-                            Err(e) => {
-                                warn!(member = %recipient.name, error = %e, "failed to write standup file");
-                            }
-                        }
-                    }
-                }
-                _ => {
-                    if let Some(pane_id) = self.config.pane_map.get(&recipient.name) {
-                        if let Err(e) = standup::inject_standup(pane_id, &report) {
-                            warn!(member = %recipient.name, error = %e, "failed to inject standup");
-                        } else {
-                            self.emit_event(TeamEvent::standup_generated(&recipient.name));
-                            any_generated = true;
-                        }
-                    }
-                }
-            }
-
-            self.last_standup
-                .insert(recipient.name.clone(), Instant::now());
-        }
-
-        if any_generated {
-            info!("standups generated and delivered");
-        }
         Ok(())
     }
 
@@ -3027,14 +2835,6 @@ fn strip_nudge_section(prompt: &str) -> String {
     lines.join("\n").trim_end().to_string()
 }
 
-fn format_inbox_status(pending_count: usize) -> String {
-    if pending_count == 0 {
-        " #[fg=244]inbox 0#[default]".to_string()
-    } else {
-        format!(" #[fg=colour214,bold]inbox {pending_count}#[default]")
-    }
-}
-
 fn format_stuck_duration(stuck_age_secs: u64) -> String {
     if stuck_age_secs >= 3600 {
         let hours = stuck_age_secs / 3600;
@@ -3048,57 +2848,6 @@ fn format_stuck_duration(stuck_age_secs: u64) -> String {
         format!("{stuck_age_secs}s")
     }
 }
-
-fn format_active_task_status(active_task_ids: &[u32]) -> String {
-    match active_task_ids {
-        [] => String::new(),
-        [task_id] => format!(" #[fg=green,bold]task {task_id}#[default]"),
-        _ => format!(" #[fg=green,bold]tasks {}#[default]", active_task_ids.len()),
-    }
-}
-
-fn format_review_task_status(review_task_ids: &[u32]) -> String {
-    match review_task_ids {
-        [] => String::new(),
-        [task_id] => format!(" #[fg=blue,bold]review {task_id}#[default]"),
-        _ => format!(" #[fg=blue,bold]review {}#[default]", review_task_ids.len()),
-    }
-}
-
-fn compose_pane_status_label(
-    state: MemberState,
-    pending_inbox: usize,
-    triage_backlog: usize,
-    active_task_ids: &[u32],
-    review_task_ids: &[u32],
-    globally_paused: bool,
-    nudge_status: &str,
-    standup_status: &str,
-) -> String {
-    let state_str = match state {
-        MemberState::Idle => "#[fg=yellow]idle#[default]",
-        MemberState::Working => "#[fg=cyan]working#[default]",
-    };
-    let inbox_str = format_inbox_status(pending_inbox);
-    let triage_str = if triage_backlog > 0 {
-        format!(" #[fg=red,bold]triage {triage_backlog}#[default]")
-    } else {
-        String::new()
-    };
-    let active_task_str = format_active_task_status(active_task_ids);
-    let review_task_str = format_review_task_status(review_task_ids);
-
-    if globally_paused {
-        return format!(
-            "{state_str}{inbox_str}{triage_str}{active_task_str}{review_task_str} #[fg=red]PAUSED#[default]"
-        );
-    }
-
-    format!(
-        "{state_str}{inbox_str}{triage_str}{active_task_str}{review_task_str}{nudge_status}{standup_status}"
-    )
-}
-
 fn append_orchestrator_log_line(path: &Path, message: &str) -> Result<()> {
     use std::io::Write;
     let mut file = super::open_log_for_append(path)?;
@@ -3199,30 +2948,6 @@ fn exec_reloaded_daemon(executable: &Path, project_root: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn exec_reloaded_daemon(_executable: &Path, _project_root: &Path) -> Result<()> {
     bail!("daemon hot reload via exec is only supported on unix")
-}
-
-fn format_standup_status(
-    last_standup: Option<Instant>,
-    interval: Duration,
-    paused: bool,
-) -> String {
-    if paused {
-        return " #[fg=244]standup paused#[default]".to_string();
-    }
-
-    let Some(last_standup) = last_standup else {
-        return String::new();
-    };
-
-    let elapsed = last_standup.elapsed();
-    if elapsed < interval {
-        let remaining = interval - elapsed;
-        let mins = remaining.as_secs() / 60;
-        let secs = remaining.as_secs() % 60;
-        format!(" #[fg=blue]standup {mins}:{secs:02}#[default]")
-    } else {
-        " #[fg=blue]standup now#[default]".to_string()
-    }
 }
 
 /// Write a launch script to a temp file and return the short command to execute it.
@@ -4282,7 +4007,7 @@ mod tests {
         };
 
         assert_eq!(
-            format_nudge_status(Some(&schedule)),
+            status::format_nudge_status(Some(&schedule)),
             " #[fg=magenta]nudge sent#[default]"
         );
     }
@@ -4298,7 +4023,7 @@ mod tests {
         };
 
         assert_eq!(
-            format_nudge_status(Some(&schedule)),
+            status::format_nudge_status(Some(&schedule)),
             " #[fg=244]nudge paused#[default]"
         );
     }
@@ -4306,14 +4031,14 @@ mod tests {
     #[test]
     fn format_standup_status_marks_paused_while_member_is_working() {
         assert_eq!(
-            format_standup_status(Some(Instant::now()), Duration::from_secs(600), true),
+            status::format_standup_status(Some(Instant::now()), Duration::from_secs(600), true),
             " #[fg=244]standup paused#[default]"
         );
     }
 
     #[test]
     fn compose_pane_status_label_shows_pending_inbox_count() {
-        let label = compose_pane_status_label(
+        let label = status::compose_pane_status_label(
             MemberState::Idle,
             3,
             2,
@@ -4333,7 +4058,8 @@ mod tests {
 
     #[test]
     fn compose_pane_status_label_shows_zero_inbox_and_pause_state() {
-        let label = compose_pane_status_label(MemberState::Working, 0, 0, &[], &[], true, "", "");
+        let label =
+            status::compose_pane_status_label(MemberState::Working, 0, 0, &[], &[], true, "", "");
         assert!(label.contains("working"));
         assert!(label.contains("inbox 0"));
         assert!(label.contains("PAUSED"));
@@ -6558,126 +6284,6 @@ mod tests {
         daemon.maybe_generate_standup().unwrap();
 
         assert!(daemon.last_standup.is_empty());
-    }
-
-    #[test]
-    fn maybe_generate_standup_writes_user_report_to_file_without_telegram_bot() {
-        let tmp = tempfile::tempdir().unwrap();
-        let user = MemberInstance {
-            name: "user".to_string(),
-            role_name: "user".to_string(),
-            role_type: RoleType::User,
-            agent: None,
-            prompt: None,
-            reports_to: None,
-            use_worktrees: false,
-        };
-        let architect = MemberInstance {
-            name: "architect".to_string(),
-            role_name: "architect".to_string(),
-            role_type: RoleType::Architect,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("user".to_string()),
-            use_worktrees: false,
-        };
-        let user_role = RoleDef {
-            name: "user".to_string(),
-            role_type: RoleType::User,
-            agent: None,
-            instances: 1,
-            prompt: None,
-            talks_to: vec!["architect".to_string()],
-            channel: None,
-            channel_config: None,
-            nudge_interval_secs: None,
-            receives_standup: Some(true),
-            standup_interval_secs: Some(1),
-            owns: Vec::new(),
-            use_worktrees: false,
-        };
-        let architect_role = RoleDef {
-            name: "architect".to_string(),
-            role_type: RoleType::Architect,
-            agent: Some("claude".to_string()),
-            instances: 1,
-            prompt: None,
-            talks_to: vec![],
-            channel: None,
-            channel_config: None,
-            nudge_interval_secs: None,
-            receives_standup: Some(false),
-            standup_interval_secs: None,
-            owns: Vec::new(),
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig {
-                        interval_secs: 1,
-                        output_lines: 30,
-                    },
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: false,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: vec![user_role, architect_role],
-                },
-                session: "test".to_string(),
-                members: vec![user.clone(), architect],
-                pane_map: HashMap::new(),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([("architect".to_string(), MemberState::Working)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::from([(
-                user.name.clone(),
-                Instant::now() - Duration::from_secs(5),
-            )]),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
-
-        daemon.maybe_generate_standup().unwrap();
-
-        let standups_dir = tmp.path().join(".batty").join("standups");
-        let entries = std::fs::read_dir(&standups_dir)
-            .unwrap()
-            .collect::<std::io::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(entries.len(), 1);
-
-        let report = std::fs::read_to_string(entries[0].path()).unwrap();
-        assert!(report.contains("=== STANDUP for user ==="));
-        assert!(report.contains("[architect] status: working"));
-
-        let events = std::fs::read_to_string(tmp.path().join("events.jsonl")).unwrap();
-        assert!(events.contains("\"event\":\"standup_generated\""));
-        assert!(events.contains("\"recipient\":\"user\""));
     }
 
     #[test]

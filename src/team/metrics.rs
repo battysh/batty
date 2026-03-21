@@ -1,172 +1,12 @@
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::time::SystemTime;
-
-use anyhow::Result;
-
-use crate::task;
-
-use super::config::RoleType;
-use super::hierarchy::MemberInstance;
-use super::inbox;
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct WorkflowMetrics {
-    pub runnable_count: u32,
-    pub blocked_count: u32,
-    pub in_review_count: u32,
-    pub in_progress_count: u32,
-    pub idle_with_runnable: Vec<String>,
-    pub oldest_review_age_secs: Option<u64>,
-    pub oldest_assignment_age_secs: Option<u64>,
-}
-
-pub fn compute_metrics(board_dir: &Path, members: &[MemberInstance]) -> Result<WorkflowMetrics> {
-    let tasks_dir = board_dir.join("tasks");
-    if !tasks_dir.is_dir() {
-        return Ok(WorkflowMetrics::default());
-    }
-
-    let tasks = task::load_tasks_from_dir(&tasks_dir)?;
-    if tasks.is_empty() {
-        return Ok(WorkflowMetrics::default());
-    }
-
-    let task_status_by_id: HashMap<u32, String> = tasks
-        .iter()
-        .map(|task| (task.id, task.status.clone()))
-        .collect();
-
-    let now = SystemTime::now();
-    let runnable_count = tasks
-        .iter()
-        .filter(|task| matches!(task.status.as_str(), "backlog" | "todo"))
-        .filter(|task| task.claimed_by.is_none())
-        .filter(|task| task.blocked.is_none())
-        .filter(|task| {
-            task.depends_on.iter().all(|dep_id| {
-                task_status_by_id
-                    .get(dep_id)
-                    .is_none_or(|status| status == "done")
-            })
-        })
-        .count() as u32;
-
-    let blocked_count = tasks
-        .iter()
-        .filter(|task| task.status == "blocked" || task.blocked.is_some())
-        .count() as u32;
-    let in_review_count = tasks.iter().filter(|task| task.status == "review").count() as u32;
-    let in_progress_count = tasks
-        .iter()
-        .filter(|task| matches!(task.status.as_str(), "in-progress" | "in_progress"))
-        .count() as u32;
-
-    let oldest_review_age_secs = tasks
-        .iter()
-        .filter(|task| task.status == "review")
-        .filter_map(|task| file_age_secs(&task.source_path, now))
-        .max();
-    let oldest_assignment_age_secs = tasks
-        .iter()
-        .filter(|task| task.claimed_by.is_some())
-        .filter(|task| !matches!(task.status.as_str(), "done" | "archived"))
-        .filter_map(|task| file_age_secs(&task.source_path, now))
-        .max();
-
-    let idle_with_runnable = compute_idle_with_runnable(board_dir, members, &tasks, runnable_count);
-
-    Ok(WorkflowMetrics {
-        runnable_count,
-        blocked_count,
-        in_review_count,
-        in_progress_count,
-        idle_with_runnable,
-        oldest_review_age_secs,
-        oldest_assignment_age_secs,
-    })
-}
-
-pub fn format_metrics(metrics: &WorkflowMetrics) -> String {
-    let idle = if metrics.idle_with_runnable.is_empty() {
-        "-".to_string()
-    } else {
-        metrics.idle_with_runnable.join(", ")
-    };
-
-    format!(
-        "Workflow Metrics\n\
-Runnable: {}\n\
-Blocked: {}\n\
-In Review: {}\n\
-In Progress: {}\n\
-Idle With Runnable: {}\n\
-Oldest Review Age: {}\n\
-Oldest Assignment Age: {}",
-        metrics.runnable_count,
-        metrics.blocked_count,
-        metrics.in_review_count,
-        metrics.in_progress_count,
-        idle,
-        format_age(metrics.oldest_review_age_secs),
-        format_age(metrics.oldest_assignment_age_secs),
-    )
-}
-
-fn compute_idle_with_runnable(
-    board_dir: &Path,
-    members: &[MemberInstance],
-    tasks: &[task::Task],
-    runnable_count: u32,
-) -> Vec<String> {
-    if runnable_count == 0 {
-        return Vec::new();
-    }
-
-    let busy_engineers: HashSet<&str> = tasks
-        .iter()
-        .filter(|task| !matches!(task.status.as_str(), "done" | "archived"))
-        .filter_map(|task| task.claimed_by.as_deref())
-        .collect();
-
-    let pending_root = project_root_from_board_dir(board_dir).map(inbox::inboxes_root);
-    let mut idle = members
-        .iter()
-        .filter(|member| member.role_type == RoleType::Engineer)
-        .filter(|member| !busy_engineers.contains(member.name.as_str()))
-        .filter(|member| {
-            pending_root
-                .as_ref()
-                .and_then(|root| inbox::pending_message_count(root, &member.name).ok())
-                .unwrap_or(0)
-                == 0
-        })
-        .map(|member| member.name.clone())
-        .collect::<Vec<_>>();
-    idle.sort();
-    idle
-}
-
-fn project_root_from_board_dir(board_dir: &Path) -> Option<&Path> {
-    board_dir.parent()?.parent()?.parent()
-}
-
-fn file_age_secs(path: &Path, now: SystemTime) -> Option<u64> {
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    now.duration_since(modified)
-        .ok()
-        .map(|duration| duration.as_secs())
-}
-
-fn format_age(age_secs: Option<u64>) -> String {
-    age_secs
-        .map(|secs| format!("{secs}s"))
-        .unwrap_or_else(|| "n/a".to_string())
-}
+pub use super::status::{WorkflowMetrics, compute_metrics, format_metrics};
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+    use crate::team::config::RoleType;
+    use crate::team::hierarchy::MemberInstance;
 
     fn make_member(name: &str, role_type: RoleType) -> MemberInstance {
         MemberInstance {
@@ -269,14 +109,17 @@ mod tests {
             in_review_count: 3,
             in_progress_count: 4,
             idle_with_runnable: vec!["eng-1".to_string(), "eng-2".to_string()],
-            oldest_review_age_secs: Some(90),
-            oldest_assignment_age_secs: None,
+            oldest_review_age_secs: Some(120),
+            oldest_assignment_age_secs: Some(360),
         });
 
         assert!(text.contains("Workflow Metrics"));
         assert!(text.contains("Runnable: 2"));
+        assert!(text.contains("Blocked: 1"));
+        assert!(text.contains("In Review: 3"));
+        assert!(text.contains("In Progress: 4"));
         assert!(text.contains("Idle With Runnable: eng-1, eng-2"));
-        assert!(text.contains("Oldest Review Age: 90s"));
-        assert!(text.contains("Oldest Assignment Age: n/a"));
+        assert!(text.contains("Oldest Review Age: 120s"));
+        assert!(text.contains("Oldest Assignment Age: 360s"));
     }
 }
