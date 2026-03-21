@@ -5416,12 +5416,17 @@ exit 1
         daemon.maybe_detect_pipeline_starvation().unwrap();
         assert!(daemon.pipeline_starvation_fired);
 
-        // Adding a second task gives 2 unclaimed tasks for 2 idle engineers — starvation resolved
+        // Parity (2 tasks == 2 engineers) does NOT clear — need surplus to reset
         write_open_task_file(tmp.path(), 102, "queued-task-2", "backlog");
+        daemon.maybe_detect_pipeline_starvation().unwrap();
+        assert!(daemon.pipeline_starvation_fired);
+
+        // Surplus (3 tasks > 2 engineers) clears the flag
+        write_open_task_file(tmp.path(), 103, "queued-task-3", "backlog");
         daemon.maybe_detect_pipeline_starvation().unwrap();
         assert!(!daemon.pipeline_starvation_fired);
 
-        // Remove task 102 — back to 1 task for 2 engineers, starvation re-fires after cooldown
+        // Remove surplus — back to 1 task for 2 engineers, starvation re-fires after cooldown
         std::fs::remove_file(
             tmp.path()
                 .join(".batty")
@@ -5429,6 +5434,15 @@ exit 1
                 .join("board")
                 .join("tasks")
                 .join("102-queued-task-2.md"),
+        )
+        .unwrap();
+        std::fs::remove_file(
+            tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("103-queued-task-3.md"),
         )
         .unwrap();
         daemon.pipeline_starvation_last_fired = Some(Instant::now() - Duration::from_secs(301));
