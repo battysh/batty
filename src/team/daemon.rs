@@ -30,8 +30,10 @@ use super::comms::{self, Channel};
 #[cfg(test)]
 use super::config::OrchestratorPosition;
 use super::config::{RoleType, TeamConfig};
-use super::events::{EventSink, TeamEvent};
-use super::failure_patterns::{self, FailureWindow};
+use super::events::EventSink;
+#[cfg(test)]
+use super::events::TeamEvent;
+use super::failure_patterns::FailureWindow;
 use super::hierarchy::MemberInstance;
 use super::inbox;
 use super::merge;
@@ -51,6 +53,8 @@ use crate::tmux;
 mod dispatch;
 #[path = "daemon/interventions.rs"]
 mod interventions;
+#[path = "daemon/telemetry.rs"]
+mod telemetry;
 
 use self::dispatch::{
     canonical_agent_name, new_member_session_id, normalized_assignment_dir, strip_nudge_section,
@@ -388,7 +392,7 @@ impl TeamDaemon {
     /// If `resume` is true, agents are launched with session-resume flags
     /// (`claude --resume <session-id>` / `codex resume --last`) instead of fresh starts.
     pub fn run(&mut self, resume: bool) -> Result<()> {
-        self.emit_event(TeamEvent::daemon_started());
+        self.record_daemon_started();
         self.acknowledge_hot_reload_marker();
         info!(session = %self.config.session, resume, "daemon started");
         self.record_orchestrator_action(format!(
@@ -498,7 +502,7 @@ impl TeamDaemon {
             // Periodic heartbeat
             if last_heartbeat.elapsed() >= heartbeat_interval {
                 let uptime = started_at.elapsed().as_secs();
-                self.emit_event(TeamEvent::daemon_heartbeat(uptime));
+                self.record_daemon_heartbeat(uptime);
                 if let Err(error) = self.persist_runtime_state(false) {
                     warn!(error = %error, "failed to persist daemon checkpoint");
                 }
@@ -513,43 +517,8 @@ impl TeamDaemon {
         if let Err(error) = self.persist_runtime_state(true) {
             warn!(error = %error, "failed to persist final daemon checkpoint");
         }
-        self.emit_event(TeamEvent::daemon_stopped_with_reason(
-            shutdown_reason,
-            uptime,
-        ));
-        info!(
-            reason = shutdown_reason,
-            uptime_secs = uptime,
-            "daemon stopped"
-        );
+        self.record_daemon_stopped(shutdown_reason, uptime);
         Ok(())
-    }
-
-    fn run_loop_step<F>(&mut self, step: &str, action: F)
-    where
-        F: FnOnce(&mut Self) -> Result<()>,
-    {
-        if let Err(error) = action(self) {
-            warn!(step, error = %error, "daemon loop step failed; continuing");
-            self.emit_event(TeamEvent::loop_step_error(step, &error.to_string()));
-        }
-    }
-
-    pub(super) fn emit_event(&mut self, event: TeamEvent) {
-        self.failure_window.push(&event);
-        if let Err(error) = self.event_sink.emit(event) {
-            warn!(error = %error, "failed to write daemon event; continuing");
-        }
-    }
-
-    fn acknowledge_hot_reload_marker(&mut self) {
-        if !consume_hot_reload_marker(&self.config.project_root) {
-            return;
-        }
-
-        self.emit_event(TeamEvent::daemon_reloaded());
-        self.record_orchestrator_action("runtime: daemon hot-reloaded");
-        info!("daemon restarted via hot reload");
     }
 
     fn maybe_hot_reload_binary(&mut self, monitor: Option<&mut HotReloadMonitor>) -> Result<()> {
@@ -582,7 +551,7 @@ impl TeamDaemon {
 
         monitor.mark_reload_attempt();
         self.persist_runtime_state(false)?;
-        self.emit_event(TeamEvent::daemon_reloading());
+        self.record_daemon_reloading();
         self.record_orchestrator_action(format!(
             "runtime: daemon reloading after binary change ({})",
             updated_binary.path.display()
@@ -600,88 +569,6 @@ impl TeamDaemon {
         }
 
         Ok(())
-    }
-
-    fn maybe_notify_failure_patterns(&mut self) -> Result<()> {
-        if !self.config.team_config.automation.failure_pattern_detection {
-            return Ok(());
-        }
-
-        let patterns = self.failure_window.detect_failure_patterns();
-        if patterns.is_empty() {
-            return Ok(());
-        }
-
-        let notifications = failure_patterns::generate_pattern_notifications(&patterns, 3, 5);
-        for (pattern, notification) in patterns
-            .iter()
-            .filter(|pattern| pattern.frequency >= 3)
-            .zip(notifications)
-        {
-            let signature = format!(
-                "{}:{}",
-                pattern.pattern_type.as_str(),
-                pattern.affected_entities.join(",")
-            );
-            let last_frequency = self
-                .last_pattern_notifications
-                .get(&signature)
-                .copied()
-                .unwrap_or(0);
-            if notification.frequency <= last_frequency {
-                continue;
-            }
-            self.last_pattern_notifications
-                .insert(signature, notification.frequency);
-
-            let managers: Vec<String> = self
-                .config
-                .members
-                .iter()
-                .filter(|member| member.role_type == RoleType::Manager)
-                .map(|member| member.name.clone())
-                .collect();
-            let architects: Vec<String> = self
-                .config
-                .members
-                .iter()
-                .filter(|member| member.role_type == RoleType::Architect)
-                .map(|member| member.name.clone())
-                .collect();
-
-            self.emit_event(TeamEvent::pattern_detected(
-                notification.pattern_type.as_str(),
-                notification.frequency,
-            ));
-
-            if notification.notify_manager {
-                for recipient in &managers {
-                    self.queue_daemon_message(recipient, &notification.message)?;
-                }
-            }
-
-            if notification.notify_architect {
-                for recipient in &architects {
-                    self.queue_daemon_message(recipient, &notification.message)?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn orchestrator_enabled(&self) -> bool {
-        self.config.team_config.orchestrator_enabled()
-    }
-
-    fn record_orchestrator_action(&self, action: impl AsRef<str>) {
-        if !self.orchestrator_enabled() {
-            return;
-        }
-        let path = super::orchestrator_log_path(&self.config.project_root);
-        if let Err(error) = append_orchestrator_log_line(&path, action.as_ref()) {
-            warn!(log = %path.display(), error = %error, "failed to append orchestrator log");
-        }
     }
 
     fn prepare_member_launch(
@@ -810,7 +697,7 @@ impl TeamDaemon {
         {
             watcher.activate();
         }
-        self.emit_event(TeamEvent::agent_spawned(&member.name));
+        self.record_agent_spawned(&member.name);
         Ok(())
     }
 
@@ -877,7 +764,7 @@ impl TeamDaemon {
             member.name
         ));
         self.emit_event(TeamEvent::pane_respawned(&member.name));
-        self.emit_event(TeamEvent::member_crashed(&member.name, true));
+        self.record_member_crashed(&member.name, true);
         Ok(())
     }
 
@@ -964,12 +851,12 @@ impl TeamDaemon {
         ));
         self.intervention_cooldowns
             .insert(restart_cooldown_key, Instant::now());
-        self.emit_event(TeamEvent::agent_restarted(
+        self.record_agent_restarted(
             member_name,
-            &task.id.to_string(),
+            task.id.to_string(),
             "context_exhausted",
             prior_restarts + 1,
-        ));
+        );
         if let Some(branch) = launch.branch.as_deref() {
             info!(member = %member_name, task_id = task.id, branch, "context restart relaunched assignment");
         }
@@ -1005,10 +892,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             "restart: escalated context exhaustion for {} on task #{} after {} exhaustions",
             member.name, task.id, restart_count
         ));
-        self.emit_event(TeamEvent::task_escalated(
-            &member.name,
-            &task.id.to_string(),
-        ));
+        self.record_task_escalated(&member.name, task.id.to_string());
         Ok(())
     }
 
@@ -1168,11 +1052,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
                         session_size_bytes,
                         "detected context exhaustion"
                     );
-                    self.emit_event(TeamEvent::context_exhausted(
-                        name,
-                        task_id,
-                        session_size_bytes,
-                    ));
+                    self.record_context_exhausted(name, task_id, session_size_bytes);
                     self.record_orchestrator_action(format!(
                         "lifecycle: detected context exhaustion for {} (task={:?}, session_size_bytes={:?})",
                         name, task_id, session_size_bytes
@@ -1305,7 +1185,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         let root = inbox::inboxes_root(&self.config.project_root);
         let msg = inbox::InboxMessage::new_send("daemon", &manager, &body);
         inbox::deliver_to_inbox(&root, &msg)?;
-        self.emit_event(TeamEvent::message_routed("daemon", &manager));
+        self.record_message_routed("daemon", &manager);
         warn!(
             recipient = %delivery.recipient,
             from = %delivery.from,
@@ -1585,7 +1465,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
     ) -> Result<MessageDelivery> {
         if let Some(channel) = self.channels.get(recipient) {
             channel.send(body)?;
-            self.emit_event(TeamEvent::message_routed(from, recipient));
+            self.record_message_routed(from, recipient);
             return Ok(MessageDelivery::Channel);
         }
 
@@ -1603,7 +1483,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         if let Some(pane_id) = self.config.pane_map.get(recipient) {
             match message::inject_message(pane_id, from, body) {
                 Ok(()) => {
-                    self.emit_event(TeamEvent::message_routed(from, recipient));
+                    self.record_message_routed(from, recipient);
                     self.verify_message_delivered(from, recipient, body, 3, true);
                     return Ok(MessageDelivery::LivePane);
                 }
@@ -1621,7 +1501,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         let root = inbox::inboxes_root(&self.config.project_root);
         let msg = inbox::InboxMessage::new_send(from, recipient, body);
         inbox::deliver_to_inbox(&root, &msg)?;
-        self.emit_event(TeamEvent::message_routed(from, recipient));
+        self.record_message_routed(from, recipient);
         Ok(MessageDelivery::InboxQueued)
     }
 
@@ -1673,7 +1553,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
                             let formatted = format!("[From {from}]\n{msg}");
                             channel.send(&formatted)?;
                         }
-                        self.emit_event(TeamEvent::message_routed(from, to));
+                        self.record_message_routed(from, to);
                     } else {
                         let inbox_msg = inbox::InboxMessage::new_send(from, to, msg);
                         inbox::deliver_to_inbox(&root, &inbox_msg)?;
@@ -1814,7 +1694,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
                         "failed to mark delivered"
                     );
                 } else {
-                    self.emit_event(TeamEvent::message_routed(&msg.from, name));
+                    self.record_message_routed(&msg.from, name);
                 }
 
                 // Small delay between multiple messages
@@ -1872,7 +1752,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
                 .collect::<Vec<_>>()
                 .join(", ");
             let event_role = recipient.as_deref().unwrap_or("daemon");
-            self.emit_event(TeamEvent::task_unblocked(event_role, &task_id.to_string()));
+            self.record_task_unblocked(event_role, task_id.to_string());
             self.record_orchestrator_action(format!(
                 "dependency resolution: auto-unblocked task #{} ({}) after dependencies [{}] completed",
                 task_id, title, dependency_list
@@ -2237,7 +2117,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         )?;
 
         for recipient in generated {
-            self.emit_event(TeamEvent::standup_generated(&recipient));
+            self.record_standup_generated(&recipient);
         }
 
         Ok(())
@@ -2324,7 +2204,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         let report_path =
             super::retrospective::generate_retrospective(&self.config.project_root, &stats)?;
         self.retro_generated = true;
-        self.emit_event(TeamEvent::retro_generated());
+        self.record_retro_generated();
         info!(path = %report_path.display(), "retrospective generated");
         Ok(())
     }
@@ -2375,7 +2255,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
                 }
             }
 
-            self.emit_event(TeamEvent::message_routed("human", "telegram"));
+            self.record_message_routed("human", "telegram");
         }
 
         Ok(())
@@ -2430,7 +2310,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
                     warn!(user = %user_name, id = %msg.id, error = %e, "failed to mark delivered");
                 }
 
-                self.emit_event(TeamEvent::message_routed(&msg.from, user_name));
+                self.record_message_routed(&msg.from, user_name);
             }
         }
 
@@ -2540,13 +2420,6 @@ fn format_stuck_duration(stuck_age_secs: u64) -> String {
     } else {
         format!("{stuck_age_secs}s")
     }
-}
-fn append_orchestrator_log_line(path: &Path, message: &str) -> Result<()> {
-    use std::io::Write;
-    let mut file = super::open_log_for_append(path)?;
-    writeln!(file, "[{}] {}", now_unix(), message)?;
-    file.flush()?;
-    Ok(())
 }
 
 fn hot_reload_marker_path(project_root: &Path) -> PathBuf {
@@ -2948,7 +2821,6 @@ mod tests {
     use super::*;
     use crate::team::config::AutomationConfig;
     use std::collections::HashMap;
-    use std::io;
     use std::path::Path;
     use std::process::Command;
     use std::sync::{Arc, Mutex};
@@ -2957,7 +2829,7 @@ mod tests {
     use crate::team::config::{
         BoardConfig, ChannelConfig, RoleDef, StandupConfig, WorkflowMode, WorkflowPolicy,
     };
-    use crate::team::events::{EventSink, read_events};
+    use crate::team::events::EventSink;
     use crate::team::test_support::{
         init_git_repo, setup_fake_claude, write_owned_task_file, write_owned_task_file_with_context,
     };
@@ -2988,18 +2860,6 @@ mod tests {
 
         fn channel_type(&self) -> &str {
             "test-failing"
-        }
-    }
-
-    struct FailingWriter;
-
-    impl io::Write for FailingWriter {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::other("synthetic event sink failure"))
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Err(io::Error::other("synthetic event sink failure"))
         }
     }
 
@@ -3794,151 +3654,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(sent.lock().unwrap().as_slice(), ["Assignment delivered."]);
-    }
-
-    #[test]
-    fn queue_daemon_message_ignores_event_sink_failure() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: Vec::new(),
-                pane_map: HashMap::new(),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::new(),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
-            event_sink: EventSink::from_writer(
-                tmp.path().join("broken-events.jsonl").as_path(),
-                FailingWriter,
-            ),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
-
-        let sent = Arc::new(Mutex::new(Vec::new()));
-        daemon.channels.insert(
-            "human".to_string(),
-            Box::new(RecordingChannel {
-                messages: Arc::clone(&sent),
-            }),
-        );
-
-        daemon
-            .queue_daemon_message("human", "Event sink can fail without breaking delivery.")
-            .unwrap();
-
-        assert_eq!(
-            sent.lock().unwrap().as_slice(),
-            ["Event sink can fail without breaking delivery."]
-        );
-    }
-
-    #[test]
-    fn maybe_notify_failure_patterns_routes_severe_patterns_to_manager_and_architect() {
-        let tmp = tempfile::tempdir().unwrap();
-        let roles = vec![
-            RoleDef {
-                name: "architect".to_string(),
-                role_type: RoleType::Architect,
-                agent: Some("claude".to_string()),
-                instances: 1,
-                prompt: None,
-                talks_to: vec![],
-                channel: None,
-                channel_config: None,
-                nudge_interval_secs: None,
-                receives_standup: None,
-                standup_interval_secs: None,
-                owns: Vec::new(),
-                use_worktrees: false,
-            },
-            RoleDef {
-                name: "manager".to_string(),
-                role_type: RoleType::Manager,
-                agent: Some("claude".to_string()),
-                instances: 1,
-                prompt: None,
-                talks_to: vec![],
-                channel: None,
-                channel_config: None,
-                nudge_interval_secs: None,
-                receives_standup: None,
-                standup_interval_secs: None,
-                owns: Vec::new(),
-                use_worktrees: false,
-            },
-        ];
-        let mut config = daemon_config_with_roles(&tmp, roles);
-        config.members = vec![
-            MemberInstance {
-                name: "architect".to_string(),
-                role_name: "architect".to_string(),
-                role_type: RoleType::Architect,
-                agent: Some("claude".to_string()),
-                prompt: None,
-                reports_to: Some("human".to_string()),
-                use_worktrees: false,
-            },
-            MemberInstance {
-                name: "manager".to_string(),
-                role_name: "manager".to_string(),
-                role_type: RoleType::Manager,
-                agent: Some("claude".to_string()),
-                prompt: None,
-                reports_to: Some("architect".to_string()),
-                use_worktrees: false,
-            },
-        ];
-
-        let mut daemon = TeamDaemon::new(config).unwrap();
-        for index in 0..5 {
-            let mut event = TeamEvent::task_escalated("eng-1", &format!("{}", 100 + index));
-            event.ts = index as u64 + 1;
-            daemon.emit_event(event);
-        }
-
-        daemon.maybe_notify_failure_patterns().unwrap();
-
-        let root = inbox::inboxes_root(tmp.path());
-        let manager_messages = inbox::pending_messages(&root, "manager").unwrap();
-        let architect_messages = inbox::pending_messages(&root, "architect").unwrap();
-
-        assert_eq!(manager_messages.len(), 1);
-        assert_eq!(architect_messages.len(), 1);
-        assert!(manager_messages[0].body.contains("Review blockers"));
-        assert!(architect_messages[0].body.contains("Review blockers"));
     }
 
     #[test]
@@ -4798,92 +4513,6 @@ mod tests {
                 .contains("Live message delivery failed after 3 attempts.")
         );
         assert!(messages[0].body.contains("Recipient: eng-1"));
-    }
-
-    #[test]
-    #[serial]
-    fn poll_watchers_emits_context_exhausted_event() {
-        let session = format!("batty-test-context-exhausted-{}", std::process::id());
-        let _ = crate::tmux::kill_session(&session);
-
-        crate::tmux::create_session(&session, "cat", &[], "/tmp").unwrap();
-        let pane_id = crate::tmux::pane_id(&session).unwrap();
-        std::thread::sleep(Duration::from_millis(100));
-        tmux::send_keys(&pane_id, "Conversation is too long to continue.", true).unwrap();
-        tmux::send_keys(&pane_id, "prompt is too long", true).unwrap();
-        std::thread::sleep(Duration::from_millis(150));
-
-        let tmp = tempfile::tempdir().unwrap();
-        let events_path = tmp.path().join("events.jsonl");
-        let engineer = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("manager".to_string()),
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: false,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: session.clone(),
-                members: vec![engineer],
-                pane_map: HashMap::from([("eng-1".to_string(), pane_id.clone())]),
-            },
-            watchers: HashMap::from([(
-                "eng-1".to_string(),
-                SessionWatcher::new(&pane_id, "eng-1", 300, None),
-            )]),
-            states: HashMap::from([("eng-1".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::from([("eng-1".to_string(), 42)]),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
-            event_sink: EventSink::new(&events_path).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
-
-        daemon.poll_watchers().unwrap();
-
-        assert_eq!(daemon.states.get("eng-1"), Some(&MemberState::Working));
-        let events = read_events(&events_path).unwrap();
-        let event = events
-            .iter()
-            .find(|event| event.event == "context_exhausted")
-            .unwrap();
-        assert_eq!(event.role.as_deref(), Some("eng-1"));
-        assert_eq!(event.task.as_deref(), Some("42"));
-
-        let _ = crate::tmux::kill_session(&session);
     }
 
     fn make_test_daemon(project_root: &Path, members: Vec<MemberInstance>) -> TeamDaemon {
@@ -8350,76 +7979,6 @@ mod tests {
     }
 
     #[test]
-    fn append_orchestrator_log_line_writes_timestamped_activity() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join(".batty").join("orchestrator.log");
-        append_orchestrator_log_line(&path, "dispatch: assigned task #18").unwrap();
-        let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("dispatch: assigned task #18"));
-        assert!(content.starts_with('['));
-    }
-
-    #[test]
-    fn record_orchestrator_action_is_noop_when_orchestrator_disabled() {
-        let tmp = tempfile::tempdir().unwrap();
-        let daemon = TeamDaemon::new(DaemonConfig {
-            project_root: tmp.path().to_path_buf(),
-            team_config: TeamConfig {
-                name: "test".to_string(),
-                workflow_mode: WorkflowMode::Legacy,
-                workflow_policy: WorkflowPolicy::default(),
-                board: BoardConfig::default(),
-                standup: StandupConfig::default(),
-                automation: AutomationConfig::default(),
-                automation_sender: None,
-                orchestrator_pane: true,
-                orchestrator_position: OrchestratorPosition::Bottom,
-                layout: None,
-                roles: Vec::new(),
-            },
-            session: "test".to_string(),
-            members: Vec::new(),
-            pane_map: HashMap::new(),
-        })
-        .unwrap();
-
-        daemon.record_orchestrator_action("dispatch: no-op");
-
-        assert!(!tmp.path().join(".batty").join("orchestrator.log").exists());
-    }
-
-    #[test]
-    fn record_orchestrator_action_writes_when_orchestrator_enabled() {
-        let tmp = tempfile::tempdir().unwrap();
-        let daemon = TeamDaemon::new(DaemonConfig {
-            project_root: tmp.path().to_path_buf(),
-            team_config: TeamConfig {
-                name: "test".to_string(),
-                workflow_mode: WorkflowMode::Hybrid,
-                workflow_policy: WorkflowPolicy::default(),
-                board: BoardConfig::default(),
-                standup: StandupConfig::default(),
-                automation: AutomationConfig::default(),
-                automation_sender: None,
-                orchestrator_pane: true,
-                orchestrator_position: OrchestratorPosition::Bottom,
-                layout: None,
-                roles: Vec::new(),
-            },
-            session: "test".to_string(),
-            members: Vec::new(),
-            pane_map: HashMap::new(),
-        })
-        .unwrap();
-
-        daemon.record_orchestrator_action("dispatch: active");
-
-        let content =
-            fs::read_to_string(tmp.path().join(".batty").join("orchestrator.log")).unwrap();
-        assert!(content.contains("dispatch: active"));
-    }
-
-    #[test]
     fn hot_reload_marker_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
         let marker = hot_reload_marker_path(tmp.path());
@@ -8460,49 +8019,6 @@ mod tests {
         let after = BinaryFingerprint::capture(&binary).unwrap();
 
         assert!(after.changed_from(&before));
-    }
-
-    #[test]
-    fn hot_reload_acknowledgement_emits_event_and_log() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_hot_reload_marker(tmp.path()).unwrap();
-
-        let mut daemon = TeamDaemon::new(DaemonConfig {
-            project_root: tmp.path().to_path_buf(),
-            team_config: TeamConfig {
-                name: "test".to_string(),
-                workflow_mode: WorkflowMode::Hybrid,
-                workflow_policy: WorkflowPolicy::default(),
-                board: BoardConfig::default(),
-                standup: StandupConfig::default(),
-                automation: AutomationConfig::default(),
-                automation_sender: None,
-                orchestrator_pane: true,
-                orchestrator_position: OrchestratorPosition::Bottom,
-                layout: None,
-                roles: Vec::new(),
-            },
-            session: "test".to_string(),
-            members: Vec::new(),
-            pane_map: HashMap::new(),
-        })
-        .unwrap();
-
-        daemon.acknowledge_hot_reload_marker();
-
-        let events = super::super::events::read_events(
-            &tmp.path()
-                .join(".batty")
-                .join("team_config")
-                .join("events.jsonl"),
-        )
-        .unwrap();
-        assert!(events.iter().any(|event| event.event == "daemon_reloaded"));
-
-        let content =
-            fs::read_to_string(tmp.path().join(".batty").join("orchestrator.log")).unwrap();
-        assert!(content.contains("daemon hot-reloaded"));
-        assert!(!hot_reload_marker_path(tmp.path()).exists());
     }
 
     #[test]

@@ -17,7 +17,6 @@ use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use super::daemon::TeamDaemon;
-use super::events::TeamEvent;
 use super::standup::MemberState;
 use super::task_loop::{
     branch_is_merged_into, checkout_worktree_branch_from_main, current_worktree_branch,
@@ -141,7 +140,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                 }
 
                 daemon.clear_active_task(engineer);
-                daemon.emit_event(TeamEvent::task_completed(engineer));
+                daemon.record_task_completed(engineer);
                 daemon.set_member_idle(engineer);
             }
             MergeOutcome::RebaseConflict(conflict_info) => {
@@ -164,7 +163,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                         daemon.mark_member_working(manager_name);
                     }
 
-                    daemon.emit_event(TeamEvent::task_escalated(engineer, &task_id.to_string()));
+                    daemon.record_task_escalated(engineer, task_id.to_string());
 
                     if let Some(ref manager_name) = manager_name {
                         let escalation = format!(
@@ -210,7 +209,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                 );
                 daemon.queue_message("daemon", engineer, &engineer_notice)?;
 
-                daemon.emit_event(TeamEvent::task_escalated(engineer, &task_id.to_string()));
+                daemon.record_task_escalated(engineer, task_id.to_string());
                 daemon.clear_active_task(engineer);
                 daemon.set_member_idle(engineer);
                 warn!(
@@ -243,7 +242,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         daemon.mark_member_working(manager_name);
     }
 
-    daemon.emit_event(TeamEvent::task_escalated(engineer, &task_id.to_string()));
+    daemon.record_task_escalated(engineer, task_id.to_string());
 
     if let Some(ref manager_name) = manager_name {
         let escalation = format!(
