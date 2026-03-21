@@ -1401,10 +1401,11 @@ mod tests {
         let log_path = tmp.path().join("sendkeys-enter-only.log");
 
         create_session(session, "cat", &[], "/tmp").unwrap();
-        setup_pipe_pane(session, &log_path).unwrap();
+        let pane = pane_id(session).unwrap();
+        setup_pipe_pane(&pane, &log_path).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));
 
-        send_keys(session, "", true).unwrap();
+        send_keys(&pane, "", true).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(300));
 
         let content = std::fs::read_to_string(&log_path).unwrap_or_default();
@@ -1427,15 +1428,16 @@ mod tests {
 
         // Create session with bash, set up pipe-pane FIRST, then trigger output
         create_session(session, "bash", &[], "/tmp").unwrap();
+        let pane = pane_id(session).unwrap();
 
         // Set up pipe-pane before generating output
-        setup_pipe_pane(session, &log_path).unwrap();
+        setup_pipe_pane(&pane, &log_path).unwrap();
 
         // Small delay to ensure pipe-pane is active
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         // Now generate output that pipe-pane will capture
-        send_keys(session, "echo pipe-test-output", true).unwrap();
+        send_keys(&pane, "echo pipe-test-output", true).unwrap();
 
         // Wait with retries for the output to appear in the log
         let mut found = false;

@@ -3195,15 +3195,13 @@ exit 1
         daemon.handle_context_exhaustion(member_name).unwrap();
         let current = (0..50)
             .find_map(|_| match crate::tmux::pane_current_path(&pane_id) {
-                Ok(current) if !current.is_empty() => Some(current),
+                Ok(path) if !path.is_empty() => Some(path),
                 _ => {
                     std::thread::sleep(Duration::from_millis(100));
                     None
                 }
             })
-            .unwrap_or_else(|| {
-                panic!("tmux pane current path never became available for target '{pane_id}'")
-            });
+            .expect("expected relaunched pane to report a current working directory");
         assert_eq!(
             normalized_assignment_dir(Path::new(&current)),
             normalized_assignment_dir(tmp.path())
@@ -5421,6 +5419,11 @@ exit 1
 
         write_open_task_file(tmp.path(), 102, "queued-task-2", "backlog");
         daemon.maybe_detect_pipeline_starvation().unwrap();
+        assert!(daemon.pipeline_starvation_fired);
+
+        write_open_task_file(tmp.path(), 103, "queued-task-3", "backlog");
+        daemon.pipeline_starvation_last_fired = Some(Instant::now() - Duration::from_secs(301));
+        daemon.maybe_detect_pipeline_starvation().unwrap();
         assert!(!daemon.pipeline_starvation_fired);
 
         std::fs::remove_file(
@@ -5429,14 +5432,15 @@ exit 1
                 .join("team_config")
                 .join("board")
                 .join("tasks")
-                .join("102-queued-task-2.md"),
+                .join("103-queued-task-3.md"),
         )
         .unwrap();
+        daemon.pipeline_starvation_last_fired = Some(Instant::now() - Duration::from_secs(301));
         daemon.maybe_detect_pipeline_starvation().unwrap();
 
         let pending = inbox::pending_messages(&root, "architect").unwrap();
-        assert_eq!(pending.len(), 2);
-        assert!(daemon.pipeline_starvation_fired);
+        assert_eq!(pending.len(), 1);
+        assert!(!daemon.pipeline_starvation_fired);
     }
 
     #[test]
