@@ -7,8 +7,8 @@
 Each daemon iteration runs the same high-level sequence:
 
 1. `poll_watchers()` updates member state, detects pane death and context exhaustion, and hands engineer completions to `merge::handle_engineer_completion`.
-2. `retry_failed_deliveries()` retries previously failed live pane injections.
-3. Intervention automation runs in order:
+1. `retry_failed_deliveries()` retries previously failed live pane injections.
+1. Intervention automation runs in order:
    `maybe_intervene_triage_backlog()`,
    `maybe_intervene_review_backlog()`,
    `maybe_intervene_owned_tasks()`,
@@ -16,10 +16,10 @@ Each daemon iteration runs the same high-level sequence:
    `maybe_auto_unblock_blocked_tasks()`,
    `maybe_intervene_manager_dispatch_gap()`,
    `maybe_intervene_architect_utilization()`.
-4. `maybe_fire_nudges()` sends idle timeout nudges.
-5. `standup::maybe_generate_standup(...)` emits standup reports.
-6. `maybe_generate_retrospective()` writes a retrospective when the board reaches done.
-7. Runtime state, telemetry, and hot-reload checks are persisted around those steps.
+1. `maybe_fire_nudges()` sends idle timeout nudges.
+1. `standup::maybe_generate_standup(...)` emits standup reports.
+1. `maybe_generate_retrospective()` writes a retrospective when the board reaches done.
+1. Runtime state, telemetry, and hot-reload checks are persisted around those steps.
 
 The extracted modules below keep that loop readable without changing the daemon's role as the orchestrator.
 
