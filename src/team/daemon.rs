@@ -1543,7 +1543,9 @@ mod tests {
     use crate::team::events::EventSink;
     use crate::team::test_helpers::{make_test_daemon, write_event_log};
     use crate::team::test_support::{
-        init_git_repo, setup_fake_claude, write_owned_task_file, write_owned_task_file_with_context,
+        TestDaemonBuilder, architect_member, backdate_idle_grace, engineer_member, init_git_repo,
+        manager_member, setup_fake_claude, write_board_task_file, write_open_task_file,
+        write_owned_task_file, write_owned_task_file_with_context,
     };
     use crate::team::watcher::WatcherState;
     use serial_test::serial;
@@ -1551,146 +1553,23 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    fn write_open_task_file(project_root: &Path, id: u32, title: &str, status: &str) {
-        let tasks_dir = project_root
-            .join(".batty")
-            .join("team_config")
-            .join("board")
-            .join("tasks");
-        std::fs::create_dir_all(&tasks_dir).unwrap();
-        std::fs::write(
-            tasks_dir.join(format!("{id:03}-{title}.md")),
-            format!(
-                "---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: high\nclass: standard\n---\n\nTask description.\n"
-            ),
-        )
-        .unwrap();
-    }
-
-    fn write_board_task_file(
-        project_root: &Path,
-        id: u32,
-        title: &str,
-        status: &str,
-        claimed_by: Option<&str>,
-        depends_on: &[u32],
-        blocked_on: Option<&str>,
-    ) {
-        let tasks_dir = project_root
-            .join(".batty")
-            .join("team_config")
-            .join("board")
-            .join("tasks");
-        std::fs::create_dir_all(&tasks_dir).unwrap();
-
-        let mut content =
-            format!("---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: high\n");
-        if let Some(claimed_by) = claimed_by {
-            content.push_str(&format!("claimed_by: {claimed_by}\n"));
-        }
-        if !depends_on.is_empty() {
-            content.push_str("depends_on:\n");
-            for dependency in depends_on {
-                content.push_str(&format!("  - {dependency}\n"));
-            }
-        }
-        if let Some(blocked_on) = blocked_on {
-            content.push_str(&format!("blocked_on: {blocked_on}\n"));
-            content.push_str(&format!("blocked: {blocked_on}\n"));
-        }
-        content.push_str("class: standard\n---\n\nTask description.\n");
-
-        std::fs::write(tasks_dir.join(format!("{id:03}-{title}.md")), content).unwrap();
-    }
-
     fn starvation_test_daemon(tmp: &tempfile::TempDir, threshold: Option<usize>) -> TeamDaemon {
-        let architect = MemberInstance {
-            name: "architect".to_string(),
-            role_name: "architect".to_string(),
-            role_type: RoleType::Architect,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: None,
-            use_worktrees: false,
-        };
-        let eng_1 = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("codex".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let eng_2 = MemberInstance {
-            name: "eng-2".to_string(),
-            role_name: "eng".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("codex".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-
-        TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy {
-                        pipeline_starvation_threshold: threshold,
-                        ..WorkflowPolicy::default()
-                    },
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![architect, eng_1, eng_2],
-                pane_map: HashMap::new(),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([
-                ("eng-1".to_string(), MemberState::Idle),
-                ("eng-2".to_string(), MemberState::Idle),
-            ]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        }
-    }
-
-    fn backdate_idle_grace(daemon: &mut TeamDaemon, member_name: &str) {
-        let grace = daemon.automation_idle_grace_duration() + Duration::from_secs(1);
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                engineer_member("eng-1", Some("architect"), false),
+                engineer_member("eng-2", Some("architect"), false),
+            ])
+            .workflow_policy(WorkflowPolicy {
+                pipeline_starvation_threshold: threshold,
+                ..WorkflowPolicy::default()
+            })
+            .build();
+        daemon.states = HashMap::from([
+            ("eng-1".to_string(), MemberState::Idle),
+            ("eng-2".to_string(), MemberState::Idle),
+        ]);
         daemon
-            .idle_started_at
-            .insert(member_name.to_string(), Instant::now() - grace);
-        if let Some(schedule) = daemon.nudges.get_mut(member_name) {
-            schedule.idle_since = Some(Instant::now() - schedule.interval.max(grace));
-        }
     }
 
     #[test]
@@ -1911,49 +1790,7 @@ mod tests {
     #[test]
     fn test_maybe_auto_dispatch_respects_rate_limit() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: Vec::new(),
-                pane_map: HashMap::new(),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::new(),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
 
         let before = daemon.last_auto_dispatch;
         daemon.maybe_auto_dispatch().unwrap();
@@ -1963,52 +1800,13 @@ mod tests {
     #[test]
     fn test_maybe_auto_dispatch_skips_when_disabled() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig {
-                        auto_dispatch: false,
-                        ..BoardConfig::default()
-                    },
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: Vec::new(),
-                pane_map: HashMap::new(),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::new(),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now() - Duration::from_secs(30),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .board(BoardConfig {
+                auto_dispatch: false,
+                ..BoardConfig::default()
+            })
+            .build();
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
 
         let before = daemon.last_auto_dispatch;
         daemon.maybe_auto_dispatch().unwrap();
@@ -2018,49 +1816,7 @@ mod tests {
     #[test]
     fn test_retry_count_increments_and_resets() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: Vec::new(),
-                pane_map: HashMap::new(),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::new(),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
 
         daemon.active_tasks.insert("eng-1".into(), 42);
         assert_eq!(daemon.active_task_id("eng-1"), Some(42));
@@ -2075,49 +1831,7 @@ mod tests {
     #[test]
     fn test_retry_count_triggers_escalation_at_threshold() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: Vec::new(),
-                pane_map: HashMap::new(),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::new(),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
 
         daemon.active_tasks.insert("eng-1".into(), 42);
         assert_eq!(daemon.increment_retry("eng-1"), 1);
@@ -2130,49 +1844,7 @@ mod tests {
     #[test]
     fn test_active_task_id_returns_none_for_unassigned() {
         let tmp = tempfile::tempdir().unwrap();
-        let daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: Vec::new(),
-                pane_map: HashMap::new(),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::new(),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
 
         assert_eq!(daemon.active_task_id("eng-1"), None);
     }
@@ -2180,58 +1852,9 @@ mod tests {
     #[test]
     fn nonfatal_kanban_failures_are_relayed_to_known_members() {
         let tmp = tempfile::tempdir().unwrap();
-        let manager = MemberInstance {
-            name: "manager".to_string(),
-            role_name: "manager".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: None,
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![manager],
-                pane_map: HashMap::new(),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::new(),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![manager_member("manager", None)])
+            .build();
 
         daemon.report_nonfatal_kanban_failure(
             "move task #42 to done",
@@ -3099,49 +2722,9 @@ mod tests {
             SessionWatcher::new("%0", "architect", 300, None),
         );
 
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: Vec::new(),
-                pane_map: HashMap::new(),
-            },
-            watchers,
-            states: HashMap::new(),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .watchers(watchers)
+            .build();
 
         daemon.mark_member_working("architect");
 
@@ -3302,69 +2885,143 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn maybe_fire_nudges_marks_member_working_after_live_delivery() {
+        let session = "batty-test-nudge-live-delivery";
+        let mut delivered_live = false;
+
+        // A freshly created tmux pane can occasionally reject the first live
+        // injection under heavy suite load. Retry the full setup a few times so
+        // this test only fails on a real regression in the live-delivery path.
+        for _attempt in 0..3 {
+            let _ = crate::tmux::kill_session(session);
+
+            crate::tmux::create_session(session, "cat", &[], "/tmp").unwrap();
+            let pane_id = crate::tmux::pane_id(session).unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+
+            let tmp = tempfile::tempdir().unwrap();
+            let mut watchers = HashMap::new();
+            watchers.insert(
+                "scientist".to_string(),
+                SessionWatcher::new(&pane_id, "scientist", 300, None),
+            );
+            let mut daemon = TestDaemonBuilder::new(tmp.path())
+                .session(session)
+                .members(vec![architect_member("scientist")])
+                .pane_map(HashMap::from([("scientist".to_string(), pane_id.clone())]))
+                .watchers(watchers)
+                .states(HashMap::from([(
+                    "scientist".to_string(),
+                    MemberState::Idle,
+                )]))
+                .nudges(HashMap::from([(
+                    "scientist".to_string(),
+                    NudgeSchedule {
+                        text: "Please make progress.".to_string(),
+                        interval: Duration::from_secs(1),
+                        idle_since: Some(Instant::now() - Duration::from_secs(5)),
+                        fired_this_idle: false,
+                        paused: false,
+                    },
+                )]))
+                .build();
+
+            backdate_idle_grace(&mut daemon, "scientist");
+            daemon.maybe_fire_nudges().unwrap();
+
+            if daemon.states.get("scientist") == Some(&MemberState::Working) {
+                let schedule = daemon.nudges.get("scientist").unwrap();
+                assert!(schedule.paused);
+                assert!(schedule.idle_since.is_none());
+                assert!(!schedule.fired_this_idle);
+                delivered_live = true;
+                crate::tmux::kill_session(session).unwrap();
+                break;
+            }
+
+            crate::tmux::kill_session(session).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        assert!(
+            delivered_live,
+            "expected at least one successful live nudge delivery"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn maybe_intervene_triage_backlog_marks_member_working_after_live_delivery() {
+        let session = "batty-test-triage-live-delivery";
+        let _ = crate::tmux::kill_session(session);
+
+        crate::tmux::create_session(session, "cat", &[], "/tmp").unwrap();
+        let pane_id = crate::tmux::pane_id(session).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut watchers = HashMap::new();
+        watchers.insert(
+            "lead".to_string(),
+            SessionWatcher::new(&pane_id, "lead", 300, None),
+        );
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .session(session)
+            .members(vec![
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .pane_map(HashMap::from([("lead".to_string(), pane_id.clone())]))
+            .watchers(watchers)
+            .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
+            .build();
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        inbox::init_inbox(&root, "eng-1").unwrap();
+        let mut result = inbox::InboxMessage::new_send("eng-1", "lead", "Task complete.");
+        result.timestamp = super::now_unix();
+        let id = inbox::deliver_to_inbox(&root, &result).unwrap();
+        inbox::mark_delivered(&root, "lead", &id).unwrap();
+
+        daemon.update_automation_timers_for_state("lead", MemberState::Working);
+        daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+        backdate_idle_grace(&mut daemon, "lead");
+        daemon.maybe_intervene_triage_backlog().unwrap();
+
+        assert_eq!(daemon.triage_interventions.get("lead"), Some(&1));
+        if daemon.states.get("lead") == Some(&MemberState::Working) {
+            let pane = tmux::capture_pane(&pane_id).unwrap_or_default();
+            assert!(pane.contains("batty inbox lead"));
+            assert!(pane.contains("batty read lead <ref>"));
+            assert!(pane.contains("batty send eng-1"));
+            assert!(pane.contains("batty assign eng-1"));
+            assert!(pane.contains("batty send architect"));
+            assert!(pane.contains("next time you become idle"));
+        } else {
+            let pending = inbox::pending_messages(&root, "lead").unwrap();
+            assert_eq!(pending.len(), 1);
+            assert!(pending[0].body.contains("batty inbox lead"));
+        }
+
+        crate::tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
     fn maybe_intervene_triage_backlog_queues_when_live_delivery_falls_back_to_inbox() {
         let tmp = tempfile::tempdir().unwrap();
-        let lead = MemberInstance {
-            name: "lead".to_string(),
-            role_name: "lead".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let engineer = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("codex".to_string()),
-            prompt: None,
-            reports_to: Some("lead".to_string()),
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![lead, engineer],
-                pane_map: HashMap::from([("lead".to_string(), "%9999999".to_string())]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .pane_map(HashMap::from([(
+                "lead".to_string(),
+                "%9999999".to_string(),
+            )]))
+            .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
+            .build();
 
         let root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&root, "lead").unwrap();
@@ -3396,67 +3053,14 @@ mod tests {
     #[test]
     fn maybe_intervene_triage_backlog_does_not_fire_on_startup_idle() {
         let tmp = tempfile::tempdir().unwrap();
-        let lead = MemberInstance {
-            name: "lead".to_string(),
-            role_name: "lead".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let engineer = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("codex".to_string()),
-            prompt: None,
-            reports_to: Some("lead".to_string()),
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![lead, engineer],
-                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .pane_map(HashMap::from([("lead".to_string(), "%999".to_string())]))
+            .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
+            .build();
 
         let root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&root, "lead").unwrap();
@@ -3476,67 +3080,14 @@ mod tests {
     #[test]
     fn maybe_intervene_owned_tasks_queues_when_idle_member_owns_unfinished_task() {
         let tmp = tempfile::tempdir().unwrap();
-        let lead = MemberInstance {
-            name: "lead".to_string(),
-            role_name: "lead".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let engineer = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("codex".to_string()),
-            prompt: None,
-            reports_to: Some("lead".to_string()),
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![lead, engineer],
-                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .pane_map(HashMap::from([("lead".to_string(), "%999".to_string())]))
+            .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
+            .build();
 
         let root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&root, "lead").unwrap();
@@ -3577,67 +3128,14 @@ mod tests {
     #[test]
     fn maybe_intervene_owned_tasks_fires_for_persistent_startup_idle_state() {
         let tmp = tempfile::tempdir().unwrap();
-        let lead = MemberInstance {
-            name: "lead".to_string(),
-            role_name: "lead".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let engineer = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("codex".to_string()),
-            prompt: None,
-            reports_to: Some("lead".to_string()),
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![lead, engineer],
-                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .pane_map(HashMap::from([("lead".to_string(), "%999".to_string())]))
+            .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
+            .build();
 
         let root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&root, "lead").unwrap();
@@ -3663,58 +3161,11 @@ mod tests {
     #[test]
     fn maybe_intervene_owned_tasks_waits_for_idle_grace() {
         let tmp = tempfile::tempdir().unwrap();
-        let lead = MemberInstance {
-            name: "lead".to_string(),
-            role_name: "lead".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![lead],
-                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![manager_member("lead", Some("architect"))])
+            .pane_map(HashMap::from([("lead".to_string(), "%999".to_string())]))
+            .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
+            .build();
 
         let root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&root, "lead").unwrap();
@@ -3732,58 +3183,11 @@ mod tests {
     #[test]
     fn maybe_intervene_owned_tasks_skips_when_pending_inbox_exists() {
         let tmp = tempfile::tempdir().unwrap();
-        let lead = MemberInstance {
-            name: "lead".to_string(),
-            role_name: "lead".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![lead],
-                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![manager_member("lead", Some("architect"))])
+            .pane_map(HashMap::from([("lead".to_string(), "%999".to_string())]))
+            .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
+            .build();
 
         let root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&root, "lead").unwrap();
@@ -3806,58 +3210,11 @@ mod tests {
     #[test]
     fn maybe_intervene_owned_tasks_ignores_review_only_claims() {
         let tmp = tempfile::tempdir().unwrap();
-        let lead = MemberInstance {
-            name: "lead".to_string(),
-            role_name: "lead".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![lead],
-                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![manager_member("lead", Some("architect"))])
+            .pane_map(HashMap::from([("lead".to_string(), "%999".to_string())]))
+            .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
+            .build();
 
         let root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&root, "lead").unwrap();
@@ -3874,58 +3231,11 @@ mod tests {
     #[test]
     fn maybe_intervene_owned_tasks_dedupes_same_active_signature_across_idle_epochs() {
         let tmp = tempfile::tempdir().unwrap();
-        let lead = MemberInstance {
-            name: "lead".to_string(),
-            role_name: "lead".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![lead],
-                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![manager_member("lead", Some("architect"))])
+            .pane_map(HashMap::from([("lead".to_string(), "%999".to_string())]))
+            .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
+            .build();
 
         let root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&root, "lead").unwrap();
@@ -3972,58 +3282,11 @@ mod tests {
     #[test]
     fn owned_task_intervention_respects_cooldown() {
         let tmp = tempfile::tempdir().unwrap();
-        let lead = MemberInstance {
-            name: "lead".to_string(),
-            role_name: "lead".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![lead],
-                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![manager_member("lead", Some("architect"))])
+            .pane_map(HashMap::from([("lead".to_string(), "%999".to_string())]))
+            .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
+            .build();
 
         let root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&root, "lead").unwrap();
@@ -4056,70 +3319,18 @@ mod tests {
     #[test]
     fn triage_intervention_respects_cooldown() {
         let tmp = tempfile::tempdir().unwrap();
-        let lead = MemberInstance {
-            name: "lead".to_string(),
-            role_name: "lead".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let eng = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("codex".to_string()),
-            prompt: None,
-            reports_to: Some("lead".to_string()),
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![lead, eng],
-                pane_map: HashMap::from([
-                    ("lead".to_string(), "%999".to_string()),
-                    ("eng-1".to_string(), "%998".to_string()),
-                ]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::from([("lead".to_string(), 1)]),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .pane_map(HashMap::from([
+                ("lead".to_string(), "%999".to_string()),
+                ("eng-1".to_string(), "%998".to_string()),
+            ]))
+            .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.triage_idle_epochs = HashMap::from([("lead".to_string(), 1)]);
 
         let root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&root, "lead").unwrap();
@@ -4165,71 +3376,20 @@ mod tests {
     #[test]
     fn maybe_intervene_owned_tasks_escalates_stuck_signature_to_parent() {
         let tmp = tempfile::tempdir().unwrap();
-        let lead = MemberInstance {
-            name: "lead".to_string(),
-            role_name: "lead".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let engineer = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("codex".to_string()),
-            prompt: None,
-            reports_to: Some("lead".to_string()),
-            use_worktrees: false,
-        };
         let events_path = tmp.path().join("events.jsonl");
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy {
-                        escalation_threshold_secs: 120,
-                        ..WorkflowPolicy::default()
-                    },
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![lead, engineer],
-                pane_map: HashMap::from([("eng-1".to_string(), "%999".to_string())]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([("eng-1".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&events_path).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .pane_map(HashMap::from([("eng-1".to_string(), "%999".to_string())]))
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .workflow_policy(WorkflowPolicy {
+                escalation_threshold_secs: 120,
+                ..WorkflowPolicy::default()
+            })
+            .build();
+        daemon.event_sink = EventSink::new(&events_path).unwrap();
 
         let root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&root, "eng-1").unwrap();
@@ -4470,70 +3630,18 @@ mod tests {
     #[test]
     fn maybe_intervene_owned_tasks_waits_for_escalation_threshold() {
         let tmp = tempfile::tempdir().unwrap();
-        let lead = MemberInstance {
-            name: "lead".to_string(),
-            role_name: "lead".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let engineer = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("codex".to_string()),
-            prompt: None,
-            reports_to: Some("lead".to_string()),
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy {
-                        escalation_threshold_secs: 120,
-                        ..WorkflowPolicy::default()
-                    },
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![lead, engineer],
-                pane_map: HashMap::from([("eng-1".to_string(), "%999".to_string())]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([("eng-1".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .pane_map(HashMap::from([("eng-1".to_string(), "%999".to_string())]))
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .workflow_policy(WorkflowPolicy {
+                escalation_threshold_secs: 120,
+                ..WorkflowPolicy::default()
+            })
+            .build();
 
         let root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&root, "eng-1").unwrap();
@@ -4578,49 +3686,10 @@ mod tests {
             ],
         );
 
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: false,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: Vec::new(),
-                pane_map: HashMap::new(),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::new(),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            event_sink: EventSink::new(&events_path).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            failure_tracker: FailureTracker::new(20),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .orchestrator_pane(false)
+            .build();
+        daemon.event_sink = EventSink::new(&events_path).unwrap();
 
         daemon.maybe_generate_retrospective().unwrap();
 
@@ -4658,49 +3727,10 @@ mod tests {
             ],
         );
 
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: false,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: Vec::new(),
-                pane_map: HashMap::new(),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::new(),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            event_sink: EventSink::new(&events_path).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            failure_tracker: FailureTracker::new(20),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .orchestrator_pane(false)
+            .build();
+        daemon.event_sink = EventSink::new(&events_path).unwrap();
 
         daemon.maybe_generate_retrospective().unwrap();
         daemon.maybe_generate_retrospective().unwrap();
@@ -4728,70 +3758,14 @@ mod tests {
         setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
         write_owned_task_file(&repo, 191, "review-task", "review", "eng-1");
 
-        let lead = MemberInstance {
-            name: "lead".to_string(),
-            role_name: "lead".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let engineer = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("codex".to_string()),
-            prompt: None,
-            reports_to: Some("lead".to_string()),
-            use_worktrees: true,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: repo.clone(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![lead, engineer],
-                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(
-                &repo.join(".batty").join("team_config").join("events.jsonl"),
-            )
-            .unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(vec![
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), true),
+            ])
+            .pane_map(HashMap::from([("lead".to_string(), "%999".to_string())]))
+            .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
+            .build();
 
         let root = inbox::inboxes_root(&repo);
         inbox::init_inbox(&root, "lead").unwrap();
@@ -4835,67 +3809,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_owned_task_file(tmp.path(), 191, "review-task", "review", "eng-1");
 
-        let lead = MemberInstance {
-            name: "lead".to_string(),
-            role_name: "lead".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let engineer = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("codex".to_string()),
-            prompt: None,
-            reports_to: Some("lead".to_string()),
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![lead, engineer],
-                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .pane_map(HashMap::from([("lead".to_string(), "%999".to_string())]))
+            .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
+            .build();
 
         let root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&root, "lead").unwrap();
@@ -4914,89 +3835,20 @@ mod tests {
     #[test]
     fn maybe_intervene_manager_dispatch_gap_queues_for_idle_lead_with_idle_reports() {
         let tmp = tempfile::tempdir().unwrap();
-        let architect = MemberInstance {
-            name: "architect".to_string(),
-            role_name: "architect".to_string(),
-            role_type: RoleType::Architect,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: None,
-            use_worktrees: false,
-        };
-        let lead = MemberInstance {
-            name: "lead".to_string(),
-            role_name: "lead".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let eng_1 = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("codex".to_string()),
-            prompt: None,
-            reports_to: Some("lead".to_string()),
-            use_worktrees: false,
-        };
-        let eng_2 = MemberInstance {
-            name: "eng-2".to_string(),
-            role_name: "eng".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("codex".to_string()),
-            prompt: None,
-            reports_to: Some("lead".to_string()),
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![architect, lead, eng_1, eng_2],
-                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+                engineer_member("eng-2", Some("lead"), false),
+            ])
+            .pane_map(HashMap::from([("lead".to_string(), "%999".to_string())]))
+            .states(HashMap::from([
                 ("lead".to_string(), MemberState::Idle),
                 ("eng-1".to_string(), MemberState::Idle),
                 ("eng-2".to_string(), MemberState::Idle),
-            ]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+            ]))
+            .build();
 
         let root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&root, "lead").unwrap();
@@ -5038,90 +3890,24 @@ mod tests {
     #[test]
     fn maybe_intervene_architect_utilization_queues_for_underloaded_idle_architect() {
         let tmp = tempfile::tempdir().unwrap();
-        let architect = MemberInstance {
-            name: "architect".to_string(),
-            role_name: "architect".to_string(),
-            role_type: RoleType::Architect,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: None,
-            use_worktrees: false,
-        };
-        let lead = MemberInstance {
-            name: "lead".to_string(),
-            role_name: "lead".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let eng_1 = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("codex".to_string()),
-            prompt: None,
-            reports_to: Some("lead".to_string()),
-            use_worktrees: false,
-        };
-        let eng_2 = MemberInstance {
-            name: "eng-2".to_string(),
-            role_name: "eng".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("codex".to_string()),
-            prompt: None,
-            reports_to: Some("lead".to_string()),
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![architect, lead, eng_1, eng_2],
-                pane_map: HashMap::from([("architect".to_string(), "%999".to_string())]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+                engineer_member("eng-2", Some("lead"), false),
+            ])
+            .pane_map(HashMap::from([(
+                "architect".to_string(),
+                "%999".to_string(),
+            )]))
+            .states(HashMap::from([
                 ("architect".to_string(), MemberState::Idle),
                 ("lead".to_string(), MemberState::Idle),
                 ("eng-1".to_string(), MemberState::Idle),
                 ("eng-2".to_string(), MemberState::Idle),
-            ]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+            ]))
+            .build();
 
         let root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&root, "architect").unwrap();
@@ -5258,67 +4044,14 @@ mod tests {
     #[test]
     fn maybe_intervene_triage_backlog_does_not_refire_while_prior_intervention_remains_pending() {
         let tmp = tempfile::tempdir().unwrap();
-        let lead = MemberInstance {
-            name: "lead".to_string(),
-            role_name: "lead".to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        };
-        let engineer = MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "eng".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("codex".to_string()),
-            prompt: None,
-            reports_to: Some("lead".to_string()),
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![lead, engineer],
-                pane_map: HashMap::from([("lead".to_string(), "%999".to_string())]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([("lead".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::new(),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .pane_map(HashMap::from([("lead".to_string(), "%999".to_string())]))
+            .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
+            .build();
 
         let root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&root, "lead").unwrap();
@@ -5351,46 +4084,17 @@ mod tests {
     #[test]
     fn maybe_fire_nudges_keeps_member_idle_when_delivery_falls_back_to_inbox() {
         let tmp = tempfile::tempdir().unwrap();
-        let member = MemberInstance {
-            name: "scientist".to_string(),
-            role_name: "scientist".to_string(),
-            role_type: RoleType::Architect,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: None,
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![member],
-                pane_map: HashMap::from([("scientist".to_string(), "%999".to_string())]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([("scientist".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::from([(
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![architect_member("scientist")])
+            .pane_map(HashMap::from([(
+                "scientist".to_string(),
+                "%999".to_string(),
+            )]))
+            .states(HashMap::from([(
+                "scientist".to_string(),
+                MemberState::Idle,
+            )]))
+            .nudges(HashMap::from([(
                 "scientist".to_string(),
                 NudgeSchedule {
                     text: "Please make progress.".to_string(),
@@ -5399,19 +4103,8 @@ mod tests {
                     fired_this_idle: false,
                     paused: false,
                 },
-            )]),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+            )]))
+            .build();
 
         backdate_idle_grace(&mut daemon, "scientist");
         daemon.maybe_fire_nudges().unwrap();
@@ -5431,46 +4124,17 @@ mod tests {
     #[test]
     fn maybe_fire_nudges_skips_when_pending_inbox_exists() {
         let tmp = tempfile::tempdir().unwrap();
-        let member = MemberInstance {
-            name: "scientist".to_string(),
-            role_name: "scientist".to_string(),
-            role_type: RoleType::Architect,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: None,
-            use_worktrees: false,
-        };
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: "test".to_string(),
-                members: vec![member],
-                pane_map: HashMap::from([("scientist".to_string(), "%999".to_string())]),
-            },
-            watchers: HashMap::new(),
-            states: HashMap::from([("scientist".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            intervention_cooldowns: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::from([(
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![architect_member("scientist")])
+            .pane_map(HashMap::from([(
+                "scientist".to_string(),
+                "%999".to_string(),
+            )]))
+            .states(HashMap::from([(
+                "scientist".to_string(),
+                MemberState::Idle,
+            )]))
+            .nudges(HashMap::from([(
                 "scientist".to_string(),
                 NudgeSchedule {
                     text: "Please make progress.".to_string(),
@@ -5479,19 +4143,8 @@ mod tests {
                     fired_this_idle: false,
                     paused: false,
                 },
-            )]),
-            telegram_bot: None,
-            failure_tracker: FailureTracker::new(20),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            pipeline_starvation_fired: false,
-            retro_generated: false,
-            failed_deliveries: Vec::new(),
-            poll_interval: Duration::from_secs(5),
-        };
+            )]))
+            .build();
 
         let root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&root, "scientist").unwrap();
@@ -5508,6 +4161,26 @@ mod tests {
         let schedule = daemon.nudges.get("scientist").unwrap();
         assert!(!schedule.fired_this_idle);
         assert_eq!(daemon.states.get("scientist"), Some(&MemberState::Idle));
+    }
+
+    #[test]
+    fn automation_sender_prefers_direct_manager_and_config_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .build();
+        daemon.config.team_config.automation_sender = Some("human".to_string());
+
+        assert_eq!(daemon.automation_sender_for("eng-1"), "lead");
+        assert_eq!(daemon.automation_sender_for("lead"), "architect");
+        assert_eq!(daemon.automation_sender_for("architect"), "human");
+
+        daemon.config.team_config.automation_sender = None;
+        assert_eq!(daemon.automation_sender_for("architect"), "daemon");
     }
 
     #[test]
