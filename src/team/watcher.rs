@@ -20,6 +20,8 @@ pub enum WatcherState {
     Active,
     /// No agent running in pane (idle / waiting for assignment).
     Idle,
+    /// The tmux pane no longer exists or its process has exited.
+    PaneDead,
     /// Agent reported that its conversation/session is too large to continue.
     ContextExhausted,
 }
@@ -116,13 +118,13 @@ impl SessionWatcher {
     pub fn poll(&mut self) -> Result<WatcherState> {
         // Check if pane still exists
         if !tmux::pane_exists(&self.pane_id) {
-            self.state = WatcherState::Idle;
+            self.state = WatcherState::PaneDead;
             return Ok(self.state);
         }
 
         // Check if pane process died
         if tmux::pane_dead(&self.pane_id).unwrap_or(false) {
-            self.state = WatcherState::Idle;
+            self.state = WatcherState::PaneDead;
             return Ok(self.state);
         }
 
@@ -130,7 +132,13 @@ impl SessionWatcher {
         // This lets the watcher self-heal without requiring explicit activation
         // from the daemon whenever a nudge, standup, or external input arrives.
         if self.state == WatcherState::Idle {
-            let capture = tmux::capture_pane(&self.pane_id).unwrap_or_default();
+            let capture = match tmux::capture_pane(&self.pane_id) {
+                Ok(capture) => capture,
+                Err(_) => {
+                    self.state = WatcherState::PaneDead;
+                    return Ok(self.state);
+                }
+            };
             if detect_context_exhausted(&capture) {
                 self.last_capture = capture;
                 self.state = WatcherState::ContextExhausted;
@@ -153,7 +161,13 @@ impl SessionWatcher {
         }
 
         // Capture current pane content
-        let capture = tmux::capture_pane(&self.pane_id).unwrap_or_default();
+        let capture = match tmux::capture_pane(&self.pane_id) {
+            Ok(capture) => capture,
+            Err(_) => {
+                self.state = WatcherState::PaneDead;
+                return Ok(self.state);
+            }
+        };
         if detect_context_exhausted(&capture) {
             self.last_capture = capture;
             self.state = WatcherState::ContextExhausted;
@@ -1354,6 +1368,42 @@ mod tests {
         assert_eq!(watcher.poll().unwrap(), WatcherState::Active);
 
         crate::tmux::kill_session(session).unwrap();
+    }
+
+    #[test]
+    fn missing_pane_poll_reports_pane_dead() {
+        let mut watcher = SessionWatcher::new("%999999", "eng-1-1", 300, None);
+        assert_eq!(watcher.poll().unwrap(), WatcherState::PaneDead);
+    }
+
+    #[test]
+    #[serial]
+    fn pane_dead_poll_reports_pane_dead() {
+        let session = format!("batty-test-watcher-pane-dead-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
+
+        crate::tmux::create_session(&session, "bash", &[], "/tmp").unwrap();
+        crate::tmux::create_window(&session, "keeper", "sleep", &["30".to_string()], "/tmp")
+            .unwrap();
+        let pane_id = crate::tmux::pane_id(&session).unwrap();
+        std::process::Command::new("tmux")
+            .args(["set-option", "-p", "-t", &pane_id, "remain-on-exit", "on"])
+            .output()
+            .unwrap();
+
+        crate::tmux::send_keys(&pane_id, "exit", true).unwrap();
+        for _ in 0..5 {
+            if crate::tmux::pane_dead(&pane_id).unwrap_or(false) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert!(crate::tmux::pane_dead(&pane_id).unwrap());
+
+        let mut watcher = SessionWatcher::new(&pane_id, "eng-1-1", 300, None);
+        assert_eq!(watcher.poll().unwrap(), WatcherState::PaneDead);
+
+        crate::tmux::kill_session(&session).unwrap();
     }
 
     #[test]

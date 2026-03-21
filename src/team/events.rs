@@ -203,6 +203,20 @@ impl TeamEvent {
         }
     }
 
+    pub fn pane_death(role: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            ..Self::base("pane_death")
+        }
+    }
+
+    pub fn pane_respawned(role: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            ..Self::base("pane_respawned")
+        }
+    }
+
     pub fn message_routed(from: &str, to: &str) -> Self {
         Self {
             from: Some(from.into()),
@@ -383,6 +397,8 @@ mod tests {
                 TeamEvent::pattern_detected("merge_conflict_recurrence", 5),
             ),
             ("member_crashed", TeamEvent::member_crashed("eng-1", true)),
+            ("pane_death", TeamEvent::pane_death("eng-1")),
+            ("pane_respawned", TeamEvent::pane_respawned("eng-1")),
             ("message_routed", TeamEvent::message_routed("a", "b")),
             ("agent_spawned", TeamEvent::agent_spawned("eng-1")),
             (
@@ -478,6 +494,24 @@ mod tests {
         assert_eq!(parsed["event"].as_str().unwrap(), "cwd_corrected");
         assert_eq!(parsed["role"].as_str().unwrap(), "eng-1-1");
         assert_eq!(parsed["reason"].as_str().unwrap(), "/tmp/worktree");
+    }
+
+    #[test]
+    fn pane_death_serializes_role() {
+        let event = TeamEvent::pane_death("eng-1-1");
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"].as_str().unwrap(), "pane_death");
+        assert_eq!(parsed["role"].as_str().unwrap(), "eng-1-1");
+    }
+
+    #[test]
+    fn pane_respawned_serializes_role() {
+        let event = TeamEvent::pane_respawned("eng-1-1");
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"].as_str().unwrap(), "pane_respawned");
+        assert_eq!(parsed["role"].as_str().unwrap(), "eng-1-1");
     }
 
     #[test]
