@@ -3103,6 +3103,9 @@ Recover throughput now:\n\
             return Ok(());
         }
         let global_interval = self.config.team_config.standup.interval_secs;
+        if global_interval == 0 {
+            return Ok(());
+        }
 
         // Build list of recipients with their per-role intervals.
         // Default: managers and architects get standups, others don't unless configured.
@@ -6124,6 +6127,79 @@ mod tests {
         assert!(restarted_nudge.idle_since.unwrap().elapsed() < Duration::from_secs(1));
         assert!(!daemon.paused_standups.contains("manager"));
         assert!(daemon.last_standup["manager"].elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn maybe_generate_standup_skips_when_global_interval_is_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let role = RoleDef {
+            name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            instances: 1,
+            prompt: None,
+            talks_to: vec![],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: Some(true),
+            standup_interval_secs: Some(600),
+            owns: Vec::new(),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig {
+                        interval_secs: 0,
+                        output_lines: 30,
+                    },
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    orchestrator_pane: false,
+                    layout: None,
+                    roles: vec![role],
+                },
+                session: "test".to_string(),
+                members: vec![member],
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            idle_started_at: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        daemon.maybe_generate_standup().unwrap();
+
+        assert!(daemon.last_standup.is_empty());
     }
 
     #[test]
