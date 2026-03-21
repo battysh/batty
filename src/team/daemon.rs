@@ -1343,11 +1343,12 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
                 .filter(|t| t.claimed_by.is_none())
                 .count();
             let truly_idle = self.truly_idle_engineer_count(&all_tasks);
-            if truly_idle == 0 || unclaimed_todo >= truly_idle {
+            if truly_idle == 0 || unclaimed_todo > truly_idle {
                 self.pipeline_starvation_fired = false;
                 self.pipeline_starvation_last_fired = None;
+            } else {
+                return Ok(());
             }
-            return Ok(());
         }
 
         // Hard cooldown: never fire more than once per 5 minutes
