@@ -143,6 +143,26 @@ The daemon tracks recurring failure signatures across the event stream: repeated
 
 Successful team configurations (topology, prompt templates, workflow policies) can be exported as reusable templates via `batty export-template`. Templates capture the team.yaml, prompt files, and workflow policy settings. `batty init --template <name>` bootstraps a new project from a saved template. This enables cross-project learning without building a recommendation engine — the human curates which configurations are worth reusing.
 
+## Hardened Runtime
+
+The runtime relies on shell-outs to git and kanban-md, tmux paste-buffer injection for message delivery, and worktree lifecycle management. Each of these has observed failure modes that cause silent task stalls during multi-hour runs.
+
+### Command Infrastructure
+
+All external tool invocations (git, kanban-md) flow through typed command layers that capture stderr, classify errors as transient or permanent, and return structured results. Transient failures (lock contention, temporary I/O errors) retry with backoff. Permanent failures (bad ref, permission denied) surface immediately with diagnostic context. This replaces the current pattern of scattered `Command::new()` calls with ad-hoc error handling.
+
+### Delivery Confirmation
+
+Message delivery via tmux paste-buffer is fire-and-forget today. The hardened runtime adds post-injection verification: after pasting, sample the target pane to confirm the message appeared. Failed deliveries are flagged to the daemon for retry. This closes the gap where messages are "delivered" in the inbox but never actually reach the agent.
+
+### Agent Lifecycle Management
+
+Agents can exhaust their context window, crash, or silently stall. The daemon detects these states through output monitoring: an agent marked as "working" that stops producing output or produces degraded output (repeated errors, empty responses) is flagged as potentially exhausted. Recovery involves restarting the agent with the original task prompt plus a summary of progress (branch state, last commit, test status). Stuck tasks — in-progress beyond a configurable threshold with no commits — are escalated to the manager.
+
+### Board-Git Consistency
+
+Board state and git state can diverge: tasks marked done with unmerged branches, in-progress tasks with no active agent, blocked tasks whose dependencies are already resolved. The `batty doctor` command validates cross-referencing board metadata against actual branch/worktree state and reports inconsistencies. The daemon automatically unblocks tasks whose `blocked_on` dependencies have reached done state.
+
 ## Key Design Decisions
 
 **Why tmux?** Output capture (pipe-pane), input injection (send-keys/paste-buffer), status bar, panes, session persistence — all for free. No custom terminal code.
