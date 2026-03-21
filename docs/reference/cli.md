@@ -14,26 +14,29 @@ Hierarchical agent team system for software development
 Usage: batty [OPTIONS] <COMMAND>
 
 Commands:
-  init         Scaffold .batty/team_config/ with default team.yaml and prompt templates
-  start        Start the team daemon and tmux session
-  stop         Stop the team daemon and kill the tmux session
-  attach       Attach to the running team tmux session
-  status       Show all team members and their states
-  send         Send a message to an agent role (human → agent injection)
-  assign       Assign a task to an engineer (used by manager agent)
-  validate     Validate team config without launching
-  config       Show resolved team configuration
-  board        Show the kanban board
-  inbox        List inbox messages for a team member
-  read         Read a specific message from a member's inbox
-  ack          Acknowledge (mark delivered) a message in a member's inbox
-  merge        Merge an engineer's worktree branch into main
-  completions  Generate shell completions
-  pause        Pause nudges and standups
-  resume       Resume nudges and standups
-  telegram     Set up Telegram bot for human communication
-  load         Estimate team load and show recent load history
-  help         Print this message or the help of the given subcommand(s)
+  init             Scaffold .batty/team_config/ with default team.yaml and prompt templates
+  export-template  Export the current team config as a reusable template
+  retro            Generate a run retrospective
+  start            Start the team daemon and tmux session
+  stop             Stop the team daemon and kill the tmux session
+  attach           Attach to the running team tmux session
+  status           Show all team members and their states
+  send             Send a message to an agent role (human → agent injection)
+  assign           Assign a task to an engineer (used by manager agent)
+  validate         Validate team config without launching
+  config           Show resolved team configuration
+  board            Show the kanban board
+  inbox            List inbox messages for a team member, or purge delivered inbox messages
+  read             Read a specific message from a member's inbox
+  ack              Acknowledge (mark delivered) a message in a member's inbox
+  merge            Merge an engineer's worktree branch into main
+  task             Manage workflow task state and metadata
+  completions      Generate shell completions
+  pause            Pause nudges and standups
+  resume           Resume nudges and standups
+  telegram         Set up Telegram bot for human communication
+  load             Estimate team load and show recent load history
+  help             Print this message or the help of the given subcommand(s)
 
 Options:
   -v, --verbose...
@@ -60,7 +63,7 @@ Arguments:
           Member name
 
   <ID>
-          Message ID (from `batty inbox` output)
+          Message REF, ID, or ID prefix from `batty inbox` output
 
 Options:
   -v, --verbose...
@@ -194,20 +197,84 @@ Options:
           Print help
 ```
 
-## `batty inbox`
+## `batty export-template`
 
-List inbox messages for a team member
+Export the current team config as a reusable template
 
 ```text
-List inbox messages for a team member
+Export the current team config as a reusable template
 
-Usage: batty inbox [OPTIONS] <MEMBER>
+Usage: batty export-template [OPTIONS] <NAME>
 
 Arguments:
-  <MEMBER>
+  <NAME>
+          Template name
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty inbox`
+
+List inbox messages for a team member, or purge delivered inbox messages
+
+```text
+List inbox messages for a team member, or purge delivered inbox messages
+
+Usage: batty inbox [OPTIONS] [MEMBER]
+       batty inbox <COMMAND>
+
+Commands:
+  purge  Purge delivered messages from inbox cur/ directories
+  help   Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [MEMBER]
           Member name (e.g., "architect", "manager-1", "eng-1-1")
 
 Options:
+  -n, --limit <LIMIT>
+          Maximum number of recent messages to show
+          
+          [default: 20]
+
+      --all
+          Show all messages
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty inbox purge`
+
+Purge delivered messages from inbox cur/ directories
+
+```text
+Purge delivered messages from inbox cur/ directories
+
+Usage: batty inbox purge [OPTIONS] [ROLE]
+
+Arguments:
+  [ROLE]
+          Role/member name to purge
+
+Options:
+      --all-roles
+          Purge delivered messages for every inbox
+
+      --before <BEFORE>
+          Purge delivered messages older than this unix timestamp
+
+      --all
+          Purge all delivered messages
+
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 
@@ -237,8 +304,9 @@ Options:
           - research: PI + 3 sub-leads + 6 researchers — research lab style (10 panes)
           - software: Human + tech lead + 2 eng managers + 8 developers — full product team (11 panes)
           - batty:    Batty self-development: human + architect + manager + 4 Rust engineers (6 panes)
-          
-          [default: simple]
+
+      --from <FROM>
+          Copy team config from $HOME/.batty/templates/<name>/
 
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
@@ -316,7 +384,7 @@ Arguments:
           Member name
 
   <ID>
-          Message ID (or prefix) from `batty inbox` output
+          Message REF, ID, or ID prefix from `batty inbox` output
 
 Options:
   -v, --verbose...
@@ -336,6 +404,26 @@ Resume nudges and standups
 Usage: batty resume [OPTIONS]
 
 Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty retro`
+
+Generate a run retrospective
+
+```text
+Generate a run retrospective
+
+Usage: batty retro [OPTIONS]
+
+Options:
+      --events <EVENTS>
+          Path to events.jsonl (default: .batty/team_config/events.jsonl)
+
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 
@@ -417,6 +505,142 @@ Stop the team daemon and kill the tmux session
 Usage: batty stop [OPTIONS]
 
 Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty task`
+
+Manage workflow task state and metadata
+
+```text
+Manage workflow task state and metadata
+
+Usage: batty task [OPTIONS] <COMMAND>
+
+Commands:
+  transition  Transition a task to a new workflow state
+  assign      Assign execution and/or review ownership
+  review      Record a review disposition for a task
+  update      Update workflow metadata fields
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty task assign`
+
+Assign execution and/or review ownership
+
+```text
+Assign execution and/or review ownership
+
+Usage: batty task assign [OPTIONS] <TASK_ID>
+
+Arguments:
+  <TASK_ID>
+          Task id
+
+Options:
+      --execution-owner <EXECUTION_OWNER>
+          Execution owner
+
+      --review-owner <REVIEW_OWNER>
+          Review owner
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty task review`
+
+Record a review disposition for a task
+
+```text
+Record a review disposition for a task
+
+Usage: batty task review [OPTIONS] --disposition <DISPOSITION> <TASK_ID>
+
+Arguments:
+  <TASK_ID>
+          Task id
+
+Options:
+      --disposition <DISPOSITION>
+          Review disposition
+          
+          [possible values: approved, changes_requested, rejected]
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty task transition`
+
+Transition a task to a new workflow state
+
+```text
+Transition a task to a new workflow state
+
+Usage: batty task transition [OPTIONS] <TASK_ID> <TARGET_STATE>
+
+Arguments:
+  <TASK_ID>
+          Task id
+
+  <TARGET_STATE>
+          Target state
+          
+          [possible values: backlog, todo, in-progress, review, blocked, done, archived]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty task update`
+
+Update workflow metadata fields
+
+```text
+Update workflow metadata fields
+
+Usage: batty task update [OPTIONS] <TASK_ID>
+
+Arguments:
+  <TASK_ID>
+          Task id
+
+Options:
+      --branch <BRANCH>
+          Worktree branch
+
+      --commit <COMMIT>
+          Commit sha
+
+      --blocked-on <BLOCKED_ON>
+          Blocking reason
+
+      --clear-blocked
+          Clear blocking fields
+
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 

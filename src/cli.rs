@@ -91,10 +91,13 @@ pub enum Command {
     /// Show the kanban board
     Board,
 
-    /// List inbox messages for a team member
+    /// List inbox messages for a team member, or purge delivered inbox messages
+    #[command(args_conflicts_with_subcommands = true)]
     Inbox {
+        #[command(subcommand)]
+        command: Option<InboxCommand>,
         /// Member name (e.g., "architect", "manager-1", "eng-1-1")
-        member: String,
+        member: Option<String>,
         /// Maximum number of recent messages to show
         #[arg(
             short = 'n',
@@ -164,6 +167,25 @@ pub enum Command {
         /// Resume agent sessions from a previous run
         #[arg(long)]
         resume: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum InboxCommand {
+    /// Purge delivered messages from inbox cur/ directories
+    Purge {
+        /// Role/member name to purge
+        #[arg(required_unless_present = "all_roles")]
+        role: Option<String>,
+        /// Purge delivered messages for every inbox
+        #[arg(long, default_value_t = false)]
+        all_roles: bool,
+        /// Purge delivered messages older than this unix timestamp
+        #[arg(long, conflicts_with = "all")]
+        before: Option<u64>,
+        /// Purge all delivered messages
+        #[arg(long, default_value_t = false, conflicts_with = "before")]
+        all: bool,
     },
 }
 
@@ -449,8 +471,14 @@ mod tests {
     fn inbox_subcommand_parses_defaults() {
         let cli = Cli::parse_from(["batty", "inbox", "architect"]);
         match cli.command {
-            Command::Inbox { member, limit, all } => {
-                assert_eq!(member, "architect");
+            Command::Inbox {
+                command,
+                member,
+                limit,
+                all,
+            } => {
+                assert!(command.is_none());
+                assert_eq!(member.as_deref(), Some("architect"));
                 assert_eq!(limit, 20);
                 assert!(!all);
             }
@@ -462,8 +490,14 @@ mod tests {
     fn inbox_subcommand_parses_limit_flag() {
         let cli = Cli::parse_from(["batty", "inbox", "architect", "-n", "50"]);
         match cli.command {
-            Command::Inbox { member, limit, all } => {
-                assert_eq!(member, "architect");
+            Command::Inbox {
+                command,
+                member,
+                limit,
+                all,
+            } => {
+                assert!(command.is_none());
+                assert_eq!(member.as_deref(), Some("architect"));
                 assert_eq!(limit, 50);
                 assert!(!all);
             }
@@ -475,12 +509,68 @@ mod tests {
     fn inbox_subcommand_parses_all_flag() {
         let cli = Cli::parse_from(["batty", "inbox", "architect", "--all"]);
         match cli.command {
-            Command::Inbox { member, limit, all } => {
-                assert_eq!(member, "architect");
+            Command::Inbox {
+                command,
+                member,
+                limit,
+                all,
+            } => {
+                assert!(command.is_none());
+                assert_eq!(member.as_deref(), Some("architect"));
                 assert_eq!(limit, 20);
                 assert!(all);
             }
             other => panic!("expected inbox command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inbox_purge_subcommand_parses_role_and_before() {
+        let cli = Cli::parse_from(["batty", "inbox", "purge", "architect", "--before", "123"]);
+        match cli.command {
+            Command::Inbox {
+                command:
+                    Some(InboxCommand::Purge {
+                        role,
+                        all_roles,
+                        before,
+                        all,
+                    }),
+                member,
+                ..
+            } => {
+                assert!(member.is_none());
+                assert_eq!(role.as_deref(), Some("architect"));
+                assert!(!all_roles);
+                assert_eq!(before, Some(123));
+                assert!(!all);
+            }
+            other => panic!("expected inbox purge command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inbox_purge_subcommand_parses_all_roles_and_all() {
+        let cli = Cli::parse_from(["batty", "inbox", "purge", "--all-roles", "--all"]);
+        match cli.command {
+            Command::Inbox {
+                command:
+                    Some(InboxCommand::Purge {
+                        role,
+                        all_roles,
+                        before,
+                        all,
+                    }),
+                member,
+                ..
+            } => {
+                assert!(member.is_none());
+                assert!(role.is_none());
+                assert!(all_roles);
+                assert_eq!(before, None);
+                assert!(all);
+            }
+            other => panic!("expected inbox purge command, got {other:?}"),
         }
     }
 
