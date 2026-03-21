@@ -124,6 +124,8 @@ fn main() -> Result<()> {
         Command::ExportTemplate { name } => {
             let count = team::export_template(&root, &name)?;
             println!("Exported template '{name}' ({count} files)");
+        }
+
         Command::Retro { events } => {
             let events_path = events
                 .unwrap_or_else(|| root.join(".batty").join("team_config").join("events.jsonl"));

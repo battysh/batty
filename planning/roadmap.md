@@ -130,14 +130,49 @@ Wire up smart interventions, observability, and align prompts.
 
 ---
 
-## Future: Intelligence Layer
+## Intelligence Layer (Done)
 
-Make the team smarter over time.
+Make the team self-aware and self-improving. Build on the event stream, workflow metrics, and standup infrastructure to close the feedback loop.
 
-- **Standup summaries** — periodic team status digests sent to architect and user
-- **Retrospectives** — post-project analysis of what worked and what didn't
-- **Prompt evolution** — templates improve based on observed failure patterns
-- **Cross-project learning** — reusable team configurations for different project types
+### Wave 1: Periodic Standups (T-101, T-102, T-103)
+
+Turn the existing standup module from a one-shot report into a daemon-driven periodic system with board-aware content.
+
+- **Configurable standup interval** — `standup_interval_secs` in team.yaml; daemon triggers standup generation on the configured cadence (default: 300s). Zero disables. (`T-101`)
+- **Board-aware standup content** — standups include assigned task IDs, blocked items, review queue age, and idle-with-runnable warnings alongside agent status (`T-102`)
+- **Standup delivery to user** — standups for the user role are delivered via Telegram (if configured) or written to `.batty/standups/` as timestamped markdown files (`T-103`)
+
+**Exit:** Standups fire automatically at the configured interval. Each standup shows agent status plus board context. User receives standups via Telegram or file.
+
+### Wave 2: Run Retrospectives (T-104, T-105, T-106)
+
+Automated post-run analysis from the event log and board state.
+
+- **Event log analyzer** — parse events.jsonl to compute per-task cycle time, failure/retry counts, escalation frequency, merge conflict rate, idle-time percentage (`T-104`)
+- **Retrospective generator** — produce a structured markdown retrospective identifying top bottlenecks, longest-running tasks, most-failed tasks, and review queue stalls. Written to `.batty/retrospectives/` (`T-105`)
+- **Retrospective trigger** — `batty retro` CLI command generates a retrospective on demand. Daemon auto-generates one when all board tasks reach done/archived (`T-106`)
+
+**Exit:** `batty retro` produces useful post-run analysis. Auto-retro fires when a run completes. Retrospectives are human-readable markdown.
+
+### Wave 3: Failure Pattern Detection (T-107, T-108)
+
+Surface recurring problems before they compound.
+
+- **Failure signature tracker** — daemon maintains a rolling window of failure events (test failures, escalations, merge conflicts) and detects repeated patterns (same engineer, same file, same error class) (`T-107`)
+- **Pattern notification** — when a pattern exceeds a configurable threshold, surface a structured observation to the manager or architect via the existing message bus. Not automated remediation — automated noticing (`T-108`)
+
+**Exit:** Repeated failures are detected and surfaced as messages. Configurable thresholds prevent noise.
+
+### Wave 4: Team Templates (T-109, T-110)
+
+Reusable team configurations for cross-project learning.
+
+- **Template export** — `batty export-template <name>` saves the current team.yaml, prompt files, and workflow policies as a named template to `~/.batty/templates/` (`T-109`)
+- **Template init** — `batty init --from <name>` bootstraps a project from a saved template instead of defaults (`T-110`)
+
+**Exit:** Users can save and reuse successful team configurations across projects.
+
+**Result:** 10 tasks shipped across 4 waves, 594 tests (up from 556). Periodic standups, run retrospectives, failure pattern detection, and team templates all operational.
 
 ---
 

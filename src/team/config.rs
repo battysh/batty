@@ -22,6 +22,8 @@ pub struct TeamConfig {
     #[serde(default = "default_orchestrator_pane")]
     pub orchestrator_pane: bool,
     #[serde(default)]
+    pub orchestrator_position: OrchestratorPosition,
+    #[serde(default)]
     pub layout: Option<LayoutConfig>,
     #[serde(default)]
     pub workflow_policy: WorkflowPolicy,
@@ -64,6 +66,14 @@ pub enum WorkflowMode {
     Legacy,
     Hybrid,
     WorkflowFirst,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrchestratorPosition {
+    #[default]
+    Bottom,
+    Left,
 }
 
 impl WorkflowMode {
