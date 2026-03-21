@@ -1,9 +1,10 @@
-//! Standup status gathering and injection into manager panes.
+//! Standup status gathering and delivery helpers.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::hierarchy::MemberInstance;
@@ -126,6 +127,23 @@ pub fn inject_standup(pane_id: &str, standup: &str) -> Result<()> {
     std::thread::sleep(std::time::Duration::from_millis(500));
     tmux::send_keys(pane_id, "", true)?;
     Ok(())
+}
+
+/// Write standup text to a timestamped Markdown file under `.batty/standups/`.
+pub fn write_standup_file(project_root: &Path, standup: &str) -> Result<PathBuf> {
+    let standups_dir = project_root.join(".batty").join("standups");
+    std::fs::create_dir_all(&standups_dir)
+        .with_context(|| format!("failed to create {}", standups_dir.display()))?;
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before UNIX_EPOCH")?
+        .as_millis();
+    let path = standups_dir.join(format!("{timestamp}.md"));
+
+    std::fs::write(&path, standup)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
 }
 
 /// Simple member state enum used by standup reporting.
@@ -363,6 +381,7 @@ mod tests {
     }
 
     #[test]
+<<<<<<< HEAD
     fn board_aware_standup_appends_task_ids_and_workflow_signals() {
         let tmp = tempfile::tempdir().unwrap();
         let board_dir = tmp.path().join(".batty").join("team_config").join("board");
@@ -434,5 +453,18 @@ mod tests {
         assert!(!report.contains("assigned tasks:"));
         assert!(!report.contains("Workflow signals:"));
         assert!(!report.contains("warning: idle while runnable work exists on the board"));
+    }
+
+    #[test]
+    fn write_standup_file_creates_timestamped_markdown_in_batty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = "=== STANDUP for user ===\n[architect] status: working\n";
+        let expected_dir = tmp.path().join(".batty").join("standups");
+
+        let path = write_standup_file(tmp.path(), report).unwrap();
+
+        assert_eq!(path.parent(), Some(expected_dir.as_path()));
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("md"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), report);
     }
 }

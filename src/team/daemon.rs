@@ -3162,12 +3162,63 @@ Recover throughput now:\n\
                 Some(&board_dir),
             );
 
-            if let Some(pane_id) = self.config.pane_map.get(&recipient.name) {
-                if let Err(e) = standup::inject_standup(pane_id, &report) {
-                    warn!(member = %recipient.name, error = %e, "failed to inject standup");
-                } else {
-                    self.emit_event(TeamEvent::standup_generated(&recipient.name));
-                    any_generated = true;
+            match recipient.role_type {
+                RoleType::User => {
+                    if let Some(bot) = &self.telegram_bot {
+                        let chat_id = self
+                            .config
+                            .team_config
+                            .roles
+                            .iter()
+                            .find(|role| {
+                                role.role_type == RoleType::User && role.name == recipient.role_name
+                            })
+                            .and_then(|role| role.channel_config.as_ref())
+                            .map(|config| config.target.clone());
+
+                        match chat_id {
+                            Some(chat_id) => {
+                                if let Err(e) = bot.send_message(&chat_id, &report) {
+                                    warn!(
+                                        member = %recipient.name,
+                                        target = %chat_id,
+                                        error = %e,
+                                        "failed to send standup via telegram"
+                                    );
+                                } else {
+                                    self.emit_event(TeamEvent::standup_generated(&recipient.name));
+                                    any_generated = true;
+                                }
+                            }
+                            None => {
+                                warn!(
+                                    member = %recipient.name,
+                                    "telegram standup delivery skipped: missing target"
+                                );
+                            }
+                        }
+                    } else {
+                        match standup::write_standup_file(&self.config.project_root, &report) {
+                            Ok(path) => {
+                                info!(member = %recipient.name, path = %path.display(), "standup written to file");
+                                self.emit_event(TeamEvent::standup_generated(&recipient.name));
+                                any_generated = true;
+                            }
+                            Err(e) => {
+                                warn!(member = %recipient.name, error = %e, "failed to write standup file");
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(pane_id) = self.config.pane_map.get(&recipient.name) {
+                        if let Err(e) = standup::inject_standup(pane_id, &report) {
+                            warn!(member = %recipient.name, error = %e, "failed to inject standup");
+                        } else {
+                            self.emit_event(TeamEvent::standup_generated(&recipient.name));
+                            any_generated = true;
+                        }
+                    }
                 }
             }
 
@@ -3176,7 +3227,7 @@ Recover throughput now:\n\
         }
 
         if any_generated {
-            info!("standups generated and injected");
+            info!("standups generated and delivered");
         }
         Ok(())
     }
@@ -6202,6 +6253,119 @@ mod tests {
         daemon.maybe_generate_standup().unwrap();
 
         assert!(daemon.last_standup.is_empty());
+    }
+
+    #[test]
+    fn maybe_generate_standup_writes_user_report_to_file_without_telegram_bot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user = MemberInstance {
+            name: "user".to_string(),
+            role_name: "user".to_string(),
+            role_type: RoleType::User,
+            agent: None,
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let architect = MemberInstance {
+            name: "architect".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("user".to_string()),
+            use_worktrees: false,
+        };
+        let user_role = RoleDef {
+            name: "user".to_string(),
+            role_type: RoleType::User,
+            agent: None,
+            instances: 1,
+            prompt: None,
+            talks_to: vec!["architect".to_string()],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: Some(true),
+            standup_interval_secs: Some(1),
+            owns: Vec::new(),
+            use_worktrees: false,
+        };
+        let architect_role = RoleDef {
+            name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            instances: 1,
+            prompt: None,
+            talks_to: vec![],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: Some(false),
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig {
+                        interval_secs: 1,
+                        output_lines: 30,
+                    },
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    orchestrator_pane: false,
+                    layout: None,
+                    roles: vec![user_role, architect_role],
+                },
+                session: "test".to_string(),
+                members: vec![user.clone(), architect],
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([("architect".to_string(), MemberState::Working)]),
+            idle_started_at: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::from([(
+                user.name.clone(),
+                Instant::now() - Duration::from_secs(5),
+            )]),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            poll_interval: Duration::from_secs(5),
+        };
+
+        daemon.maybe_generate_standup().unwrap();
+
+        let standups_dir = tmp.path().join(".batty").join("standups");
+        let entries = std::fs::read_dir(&standups_dir)
+            .unwrap()
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+
+        let report = std::fs::read_to_string(entries[0].path()).unwrap();
+        assert!(report.contains("=== STANDUP for user ==="));
+        assert!(report.contains("[architect] status: working"));
+
+        let events = std::fs::read_to_string(tmp.path().join("events.jsonl")).unwrap();
+        assert!(events.contains("\"event\":\"standup_generated\""));
+        assert!(events.contains("\"recipient\":\"user\""));
     }
 
     #[test]
