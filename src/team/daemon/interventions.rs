@@ -573,8 +573,11 @@ impl TeamDaemon {
                 continue;
             }
 
-            let triage_state =
-                super::super::status::delivered_direct_report_triage_state(&inbox_root, &name, reports)?;
+            let triage_state = super::super::status::delivered_direct_report_triage_state(
+                &inbox_root,
+                &name,
+                reports,
+            )?;
             if triage_state.count > 0 {
                 continue;
             }
@@ -1367,33 +1370,6 @@ Recover throughput now:\n\
             ));
         }
         message
-    }
-}
-
-pub(super) fn format_nudge_status(schedule: Option<&NudgeSchedule>) -> String {
-    let Some(schedule) = schedule else {
-        return String::new();
-    };
-
-    if schedule.fired_this_idle {
-        return " #[fg=magenta]nudge sent#[default]".to_string();
-    }
-    if schedule.paused {
-        return " #[fg=244]nudge paused#[default]".to_string();
-    }
-
-    let Some(idle_since) = schedule.idle_since else {
-        return String::new();
-    };
-
-    let elapsed = idle_since.elapsed();
-    if elapsed < schedule.interval {
-        let remaining = schedule.interval - elapsed;
-        let mins = remaining.as_secs() / 60;
-        let secs = remaining.as_secs() % 60;
-        format!(" #[fg=magenta]nudge {mins}:{secs:02}#[default]")
-    } else {
-        " #[fg=magenta]nudge now#[default]".to_string()
     }
 }
 
