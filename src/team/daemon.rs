@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -67,6 +67,9 @@ struct NudgeSchedule {
 const DELIVERY_VERIFICATION_CAPTURE_LINES: u32 = 50;
 const FAILED_DELIVERY_RETRY_DELAY: Duration = Duration::from_secs(30);
 const FAILED_DELIVERY_MAX_ATTEMPTS: u32 = 3;
+
+const HOT_RELOAD_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+const HOT_RELOAD_MIN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The running team daemon.
 pub struct TeamDaemon {
@@ -200,6 +203,87 @@ enum MessageDelivery {
     SkippedUnknownRecipient,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BinaryFingerprint {
+    path: PathBuf,
+    modified: SystemTime,
+    len: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl BinaryFingerprint {
+    fn capture(path: &Path) -> Result<Self> {
+        let metadata =
+            fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
+        let modified = metadata
+            .modified()
+            .with_context(|| format!("failed to read mtime for {}", path.display()))?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            modified,
+            len: metadata.len(),
+            #[cfg(unix)]
+            inode: std::os::unix::fs::MetadataExt::ino(&metadata),
+        })
+    }
+
+    fn changed_from(&self, previous: &Self) -> bool {
+        self.modified != previous.modified || self.len != previous.len || {
+            #[cfg(unix)]
+            {
+                self.inode != previous.inode
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HotReloadMonitor {
+    binary: BinaryFingerprint,
+    last_checked: Instant,
+    last_reload_attempt: Option<Instant>,
+}
+
+impl HotReloadMonitor {
+    fn new(binary: BinaryFingerprint) -> Self {
+        Self {
+            binary,
+            last_checked: Instant::now(),
+            last_reload_attempt: None,
+        }
+    }
+
+    fn for_current_exe() -> Result<Self> {
+        let path = std::env::current_exe().context("failed to resolve current executable")?;
+        Ok(Self::new(BinaryFingerprint::capture(&path)?))
+    }
+
+    fn should_check(&self) -> bool {
+        self.last_checked.elapsed() >= HOT_RELOAD_CHECK_INTERVAL
+    }
+
+    fn changed_binary(&mut self) -> Result<Option<BinaryFingerprint>> {
+        self.last_checked = Instant::now();
+        let current = BinaryFingerprint::capture(&self.binary.path)?;
+        Ok(current.changed_from(&self.binary).then_some(current))
+    }
+
+    fn can_attempt_reload(&self) -> bool {
+        self.last_reload_attempt
+            .map(|instant| instant.elapsed() >= HOT_RELOAD_MIN_INTERVAL)
+            .unwrap_or(true)
+    }
+
+    fn mark_reload_attempt(&mut self) {
+        self.last_reload_attempt = Some(Instant::now());
+    }
+}
+
 impl TeamDaemon {
     /// Create a new daemon from resolved config and layout.
     pub fn new(config: DaemonConfig) -> Result<Self> {
@@ -321,6 +405,7 @@ impl TeamDaemon {
     /// (`claude --resume <session-id>` / `codex resume --last`) instead of fresh starts.
     pub fn run(&mut self, resume: bool) -> Result<()> {
         self.emit_event(TeamEvent::daemon_started());
+        self.acknowledge_hot_reload_marker();
         info!(session = %self.config.session, resume, "daemon started");
         self.record_orchestrator_action(format!(
             "runtime: orchestrator started (mode={}, resume={resume})",
@@ -346,6 +431,13 @@ impl TeamDaemon {
         let started_at = Instant::now();
         let heartbeat_interval = Duration::from_secs(300); // 5 minutes
         let mut last_heartbeat = Instant::now();
+        let mut hot_reload = match HotReloadMonitor::for_current_exe() {
+            Ok(monitor) => Some(monitor),
+            Err(error) => {
+                warn!(error = %error, "failed to initialize daemon hot-reload monitor");
+                None
+            }
+        };
 
         // Main polling loop
         let shutdown_reason;
@@ -411,6 +503,9 @@ impl TeamDaemon {
             self.run_loop_step("maybe_notify_failure_patterns", |daemon| {
                 daemon.maybe_notify_failure_patterns()
             });
+            self.run_loop_step("maybe_reload_binary", |daemon| {
+                daemon.maybe_hot_reload_binary(hot_reload.as_mut())
+            });
             self.update_pane_status_labels();
 
             // Periodic heartbeat
@@ -458,6 +553,66 @@ impl TeamDaemon {
         if let Err(error) = self.event_sink.emit(event) {
             warn!(error = %error, "failed to write daemon event; continuing");
         }
+    }
+
+    fn acknowledge_hot_reload_marker(&mut self) {
+        if !consume_hot_reload_marker(&self.config.project_root) {
+            return;
+        }
+
+        self.emit_event(TeamEvent::daemon_reloaded());
+        self.record_orchestrator_action("runtime: daemon hot-reloaded");
+        info!("daemon restarted via hot reload");
+    }
+
+    fn maybe_hot_reload_binary(&mut self, monitor: Option<&mut HotReloadMonitor>) -> Result<()> {
+        let Some(monitor) = monitor else {
+            return Ok(());
+        };
+        if !monitor.should_check() {
+            return Ok(());
+        }
+
+        let Some(updated_binary) = monitor.changed_binary()? else {
+            return Ok(());
+        };
+
+        if !monitor.can_attempt_reload() {
+            warn!(
+                path = %updated_binary.path.display(),
+                "binary changed again but reload attempt is rate-limited"
+            );
+            return Ok(());
+        }
+
+        if !binary_is_reloadable(&updated_binary.path) {
+            warn!(
+                path = %updated_binary.path.display(),
+                "binary changed but is not safe to hot-reload yet"
+            );
+            return Ok(());
+        }
+
+        monitor.mark_reload_attempt();
+        self.persist_runtime_state(false)?;
+        self.emit_event(TeamEvent::daemon_reloading());
+        self.record_orchestrator_action(format!(
+            "runtime: daemon reloading after binary change ({})",
+            updated_binary.path.display()
+        ));
+        write_hot_reload_marker(&self.config.project_root)?;
+
+        if let Err(error) = exec_reloaded_daemon(&updated_binary.path, &self.config.project_root) {
+            let _ = clear_hot_reload_marker(&self.config.project_root);
+            warn!(
+                path = %updated_binary.path.display(),
+                error = %error,
+                "failed to exec updated daemon binary; continuing on existing process"
+            );
+            self.record_orchestrator_action(format!("runtime: daemon reload failed ({error})"));
+        }
+
+        Ok(())
     }
 
     fn maybe_notify_failure_patterns(&mut self) -> Result<()> {
@@ -4330,6 +4485,100 @@ fn append_orchestrator_log_line(path: &Path, message: &str) -> Result<()> {
     writeln!(file, "[{}] {}", now_unix(), message)?;
     file.flush()?;
     Ok(())
+}
+
+fn hot_reload_marker_path(project_root: &Path) -> PathBuf {
+    project_root.join(".batty").join("reload")
+}
+
+fn write_hot_reload_marker(project_root: &Path) -> Result<()> {
+    let path = hot_reload_marker_path(project_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(&path, now_unix().to_string())
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn clear_hot_reload_marker(project_root: &Path) -> Result<()> {
+    let path = hot_reload_marker_path(project_root);
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
+    Ok(())
+}
+
+fn consume_hot_reload_marker(project_root: &Path) -> bool {
+    let path = hot_reload_marker_path(project_root);
+    if !path.exists() {
+        return false;
+    }
+    clear_hot_reload_marker(project_root).is_ok()
+}
+
+fn hot_reload_daemon_args(project_root: &Path) -> Vec<String> {
+    let root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    vec![
+        "-v".to_string(),
+        "daemon".to_string(),
+        "--project-root".to_string(),
+        root,
+        "--resume".to_string(),
+    ]
+}
+
+fn binary_is_reloadable(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return false;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(status) = std::process::Command::new("codesign")
+            .args(["--verify", path.to_string_lossy().as_ref()])
+            .status()
+        else {
+            return false;
+        };
+        if !status.success() {
+            return false;
+        }
+    }
+
+    true
+}
+
+#[cfg(unix)]
+fn exec_reloaded_daemon(executable: &Path, project_root: &Path) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let error = std::process::Command::new(executable)
+        .args(hot_reload_daemon_args(project_root))
+        .exec();
+    Err(anyhow::Error::new(error).context(format!("failed to exec {}", executable.display())))
+}
+
+#[cfg(not(unix))]
+fn exec_reloaded_daemon(_executable: &Path, _project_root: &Path) -> Result<()> {
+    bail!("daemon hot reload via exec is only supported on unix")
 }
 
 fn format_standup_status(
@@ -10170,6 +10419,92 @@ mod tests {
         let content =
             fs::read_to_string(tmp.path().join(".batty").join("orchestrator.log")).unwrap();
         assert!(content.contains("dispatch: active"));
+    }
+
+    #[test]
+    fn hot_reload_marker_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = hot_reload_marker_path(tmp.path());
+
+        write_hot_reload_marker(tmp.path()).unwrap();
+        assert!(marker.exists());
+        assert!(consume_hot_reload_marker(tmp.path()));
+        assert!(!marker.exists());
+        assert!(!consume_hot_reload_marker(tmp.path()));
+    }
+
+    #[test]
+    fn hot_reload_resume_args_include_resume_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let args = hot_reload_daemon_args(tmp.path());
+        let canonical_root = tmp.path().canonicalize().unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "-v".to_string(),
+                "daemon".to_string(),
+                "--project-root".to_string(),
+                canonical_root.to_string_lossy().to_string(),
+                "--resume".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn hot_reload_fingerprint_detects_binary_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let binary = tmp.path().join("batty");
+        fs::write(&binary, "old-binary").unwrap();
+        let before = BinaryFingerprint::capture(&binary).unwrap();
+
+        std::thread::sleep(Duration::from_millis(1100));
+        fs::write(&binary, "new-binary-build").unwrap();
+        let after = BinaryFingerprint::capture(&binary).unwrap();
+
+        assert!(after.changed_from(&before));
+    }
+
+    #[test]
+    fn hot_reload_acknowledgement_emits_event_and_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_hot_reload_marker(tmp.path()).unwrap();
+
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode: WorkflowMode::Hybrid,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                roles: Vec::new(),
+            },
+            session: "test".to_string(),
+            members: Vec::new(),
+            pane_map: HashMap::new(),
+        })
+        .unwrap();
+
+        daemon.acknowledge_hot_reload_marker();
+
+        let events = super::super::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| event.event == "daemon_reloaded"));
+
+        let content =
+            fs::read_to_string(tmp.path().join(".batty").join("orchestrator.log")).unwrap();
+        assert!(content.contains("daemon hot-reloaded"));
+        assert!(!hot_reload_marker_path(tmp.path()).exists());
     }
 
     #[test]
