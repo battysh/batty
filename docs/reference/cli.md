@@ -16,6 +16,7 @@ Usage: batty [OPTIONS] <COMMAND>
 Commands:
   init             Scaffold .batty/team_config/ with default team.yaml and prompt templates
   export-template  Export the current team config as a reusable template
+  export-run       Export run state for debugging
   retro            Generate a run retrospective
   start            Start the team daemon and tmux session
   stop             Stop the team daemon and kill the tmux session
@@ -36,6 +37,9 @@ Commands:
   resume           Resume nudges and standups
   telegram         Set up Telegram bot for human communication
   load             Estimate team load and show recent load history
+  queue            Show pending dispatch queue entries
+  cost             Estimate current run cost from agent session files
+  doctor           Dump diagnostic state from Batty state files
   help             Print this message or the help of the given subcommand(s)
 
 Options:
@@ -121,7 +125,49 @@ Show the kanban board
 ```text
 Show the kanban board
 
-Usage: batty board [OPTIONS]
+Usage: batty board [OPTIONS] [COMMAND]
+
+Commands:
+  list     List board tasks in a non-interactive table
+  summary  Show per-status task counts
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty board list`
+
+List board tasks in a non-interactive table
+
+```text
+List board tasks in a non-interactive table
+
+Usage: batty board list [OPTIONS]
+
+Options:
+      --status <STATUS>
+          Filter tasks by status
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty board summary`
+
+Show per-status task counts
+
+```text
+Show per-status task counts
+
+Usage: batty board summary [OPTIONS]
 
 Options:
   -v, --verbose...
@@ -174,6 +220,23 @@ Options:
           Print help
 ```
 
+## `batty cost`
+
+Estimate current run cost from agent session files
+
+```text
+Estimate current run cost from agent session files
+
+Usage: batty cost [OPTIONS]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
 ## `batty daemon`
 
 Internal: run the daemon loop (spawned by `batty start`)
@@ -190,6 +253,46 @@ Options:
       --resume
           Resume agent sessions from a previous run
 
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty doctor`
+
+Dump diagnostic state from Batty state files
+
+```text
+Dump diagnostic state from Batty state files
+
+Usage: batty doctor [OPTIONS]
+
+Options:
+      --fix
+          Remove orphan branches and worktrees after confirmation
+
+      --yes
+          Skip the cleanup confirmation prompt
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty export-run`
+
+Export run state for debugging
+
+```text
+Export run state for debugging
+
+Usage: batty export-run [OPTIONS]
+
+Options:
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 
@@ -361,6 +464,23 @@ Pause nudges and standups
 Pause nudges and standups
 
 Usage: batty pause [OPTIONS]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty queue`
+
+Show pending dispatch queue entries
+
+```text
+Show pending dispatch queue entries
+
+Usage: batty queue [OPTIONS]
 
 Options:
   -v, --verbose...

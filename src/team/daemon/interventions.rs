@@ -41,6 +41,16 @@ struct ReportDispatchSnapshot {
     active_task_ids: Vec<u32>,
 }
 
+struct BoardReplenishmentContext<'a> {
+    idle_engineers: &'a [String],
+    threshold: usize,
+    unblocked_todo_tasks: &'a [&'a crate::task::Task],
+    todo_count: usize,
+    in_progress_count: usize,
+    done_count: usize,
+    directive_context: Option<&'a str>,
+}
+
 impl TeamDaemon {
     fn prepend_planning_directive(
         &self,
@@ -1002,13 +1012,15 @@ impl TeamDaemon {
 
             let text = self.build_board_replenishment_message(
                 architect,
-                &idle_unassigned_engineers,
-                threshold,
-                &unblocked_todo_tasks,
-                todo_count,
-                in_progress_count,
-                done_count,
-                context.as_deref(),
+                BoardReplenishmentContext {
+                    idle_engineers: &idle_unassigned_engineers,
+                    threshold,
+                    unblocked_todo_tasks: &unblocked_todo_tasks,
+                    todo_count,
+                    in_progress_count,
+                    done_count,
+                    directive_context: context.as_deref(),
+                },
             );
             info!(
                 member = %architect.name,
@@ -1582,14 +1594,17 @@ Recover throughput now:\n\
     fn build_board_replenishment_message(
         &self,
         member: &MemberInstance,
-        idle_engineers: &[String],
-        threshold: usize,
-        unblocked_todo_tasks: &[&crate::task::Task],
-        todo_count: usize,
-        in_progress_count: usize,
-        done_count: usize,
-        context: Option<&str>,
+        context: BoardReplenishmentContext<'_>,
     ) -> String {
+        let BoardReplenishmentContext {
+            idle_engineers,
+            threshold,
+            unblocked_todo_tasks,
+            todo_count,
+            in_progress_count,
+            done_count,
+            directive_context,
+        } = context;
         let board_dir = self
             .config
             .project_root
@@ -1619,7 +1634,7 @@ Replenish the board now:\n\
             idle_engineers.len()
         );
 
-        if let Some(context) = context {
+        if let Some(context) = directive_context {
             message.push_str("\n\nReplenishment context:\n");
             message.push_str(context);
         }
@@ -1985,7 +2000,7 @@ mod tests {
 
         daemon.maybe_intervene_triage_backlog().unwrap();
 
-        assert!(daemon.triage_interventions.get("lead").is_none());
+        assert!(!daemon.triage_interventions.contains_key("lead"));
         assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
     }
 
@@ -1999,7 +2014,7 @@ mod tests {
         enter_idle_epoch(&mut daemon, "lead");
         daemon.maybe_intervene_triage_backlog().unwrap();
 
-        assert!(daemon.triage_interventions.get("lead").is_none());
+        assert!(!daemon.triage_interventions.contains_key("lead"));
         assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
     }
 
@@ -2246,7 +2261,7 @@ mod tests {
         daemon.maybe_intervene_owned_tasks().unwrap();
 
         assert!(harness.pending_inbox_messages("eng-1").unwrap().is_empty());
-        assert!(daemon.owned_task_interventions.get("eng-1").is_none());
+        assert!(!daemon.owned_task_interventions.contains_key("eng-1"));
     }
 
     #[test]
@@ -2813,7 +2828,7 @@ mod tests {
         let triage_pending = harness.pending_inbox_messages("lead-triage").unwrap();
         assert_eq!(triage_pending.len(), 1);
         assert_eq!(triage_pending[0].from, "architect");
-        assert!(daemon.triage_interventions.get("lead-triage").is_none());
+        assert!(!daemon.triage_interventions.contains_key("lead-triage"));
         assert_eq!(
             harness.pending_inbox_messages("eng-owned").unwrap().len(),
             1
@@ -2948,7 +2963,7 @@ mod tests {
 
     #[test]
     fn manager_dispatch_intervention_signature_sorts_all_components() {
-        let active = vec![
+        let active = [
             ReportDispatchSnapshot {
                 name: "eng-2".to_string(),
                 is_working: false,
@@ -2960,7 +2975,7 @@ mod tests {
                 active_task_ids: vec![3],
             },
         ];
-        let idle = vec![ReportDispatchSnapshot {
+        let idle = [ReportDispatchSnapshot {
             name: "eng-3".to_string(),
             is_working: false,
             active_task_ids: vec![],

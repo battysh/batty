@@ -1068,6 +1068,9 @@ mod tests {
     #[test]
     fn production_task_loop_has_no_unwrap_or_expect_calls() {
         let count = production_unwrap_expect_count(Path::new(file!()));
-        assert_eq!(count, 0, "production task_loop.rs should avoid unwrap/expect");
+        assert_eq!(
+            count, 0,
+            "production task_loop.rs should avoid unwrap/expect"
+        );
     }
 }

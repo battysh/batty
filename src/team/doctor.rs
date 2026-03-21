@@ -168,30 +168,43 @@ pub fn build_report(project_root: &Path) -> Result<String> {
         },
     ];
 
-    Ok(render_report(
+    Ok(render_report(DoctorReportData {
         project_root,
-        launch_state.as_ref(),
-        daemon_state.as_ref(),
-        &resume,
-        &worktrees,
-        &board_git_checks,
-        &board_dependency_graph,
-        &performance_checks,
-        &log_sizes,
-    ))
+        launch_state: launch_state.as_ref(),
+        daemon_state: daemon_state.as_ref(),
+        resume: &resume,
+        worktrees: &worktrees,
+        board_git_checks: &board_git_checks,
+        board_dependency_graph: &board_dependency_graph,
+        performance_checks: &performance_checks,
+        log_sizes: &log_sizes,
+    }))
 }
 
-fn render_report(
-    project_root: &Path,
-    launch_state: Option<&HashMap<String, LaunchIdentityRecord>>,
-    daemon_state: Option<&DoctorDaemonState>,
-    resume: &[ResumeEligibility],
-    worktrees: &[WorktreeStatus],
-    board_git_checks: &[CheckLine],
-    board_dependency_graph: &[String],
-    performance_checks: &[CheckLine],
-    log_sizes: &[LogSize],
-) -> String {
+struct DoctorReportData<'a> {
+    project_root: &'a Path,
+    launch_state: Option<&'a HashMap<String, LaunchIdentityRecord>>,
+    daemon_state: Option<&'a DoctorDaemonState>,
+    resume: &'a [ResumeEligibility],
+    worktrees: &'a [WorktreeStatus],
+    board_git_checks: &'a [CheckLine],
+    board_dependency_graph: &'a [String],
+    performance_checks: &'a [CheckLine],
+    log_sizes: &'a [LogSize],
+}
+
+fn render_report(report: DoctorReportData<'_>) -> String {
+    let DoctorReportData {
+        project_root,
+        launch_state,
+        daemon_state,
+        resume,
+        worktrees,
+        board_git_checks,
+        board_dependency_graph,
+        performance_checks,
+        log_sizes,
+    } = report;
     let mut out = String::new();
     out.push_str(&format!("Batty doctor for {}\n\n", project_root.display()));
 

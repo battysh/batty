@@ -461,17 +461,18 @@ impl TeamDaemon {
             });
             self.run_loop_step("maybe_fire_nudges", |daemon| daemon.maybe_fire_nudges());
             self.run_loop_step("maybe_generate_standup", |daemon| {
-                let generated = standup::maybe_generate_standup(
-                    &daemon.config.project_root,
-                    &daemon.config.team_config,
-                    &daemon.config.members,
-                    &daemon.watchers,
-                    &daemon.states,
-                    &daemon.config.pane_map,
-                    daemon.telegram_bot.as_ref(),
-                    &daemon.paused_standups,
-                    &mut daemon.last_standup,
-                )?;
+                let generated =
+                    standup::maybe_generate_standup(standup::StandupGenerationContext {
+                        project_root: &daemon.config.project_root,
+                        team_config: &daemon.config.team_config,
+                        members: &daemon.config.members,
+                        watchers: &daemon.watchers,
+                        states: &daemon.states,
+                        pane_map: &daemon.config.pane_map,
+                        telegram_bot: daemon.telegram_bot.as_ref(),
+                        paused_standups: &daemon.paused_standups,
+                        last_standup: &mut daemon.last_standup,
+                    })?;
                 for recipient in generated {
                     daemon.record_standup_generated(&recipient);
                 }
@@ -487,22 +488,22 @@ impl TeamDaemon {
             self.run_loop_step("maybe_reload_binary", |daemon| {
                 daemon.maybe_hot_reload_binary(hot_reload.as_mut())
             });
-            status::update_pane_status_labels(
-                &self.config.project_root,
-                &self.config.members,
-                &self.config.pane_map,
-                &self.states,
-                &self.nudges,
-                &self.last_standup,
-                &self.paused_standups,
-                |member_name| {
+            status::update_pane_status_labels(status::PaneStatusLabelUpdateContext {
+                project_root: &self.config.project_root,
+                members: &self.config.members,
+                pane_map: &self.config.pane_map,
+                states: &self.states,
+                nudges: &self.nudges,
+                last_standup: &self.last_standup,
+                paused_standups: &self.paused_standups,
+                standup_interval_for_member: |member_name| {
                     standup::standup_interval_for_member_name(
                         &self.config.team_config,
                         &self.config.members,
                         member_name,
                     )
                 },
-            );
+            });
 
             // Periodic heartbeat
             if last_heartbeat.elapsed() >= heartbeat_interval {
@@ -1262,9 +1263,8 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         self.idle_started_at = self
             .states
             .iter()
-            .filter_map(|(member, state)| {
-                matches!(state, MemberState::Idle).then(|| (member.clone(), Instant::now()))
-            })
+            .filter(|(_, state)| matches!(state, MemberState::Idle))
+            .map(|(member, _)| (member.clone(), Instant::now()))
             .collect();
         self.active_tasks = state.active_tasks;
         self.retry_counts = state.retry_counts;
@@ -4051,7 +4051,7 @@ exit 1
 
         daemon.maybe_intervene_triage_backlog().unwrap();
 
-        assert!(daemon.triage_interventions.get("lead").is_none());
+        assert!(!daemon.triage_interventions.contains_key("lead"));
         assert!(inbox::pending_messages(&root, "lead").unwrap().is_empty());
         assert_eq!(daemon.states.get("lead"), Some(&MemberState::Idle));
     }
@@ -4219,7 +4219,7 @@ exit 1
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].from, "architect");
         assert!(
-            daemon.owned_task_interventions.get("lead").is_none(),
+            !daemon.owned_task_interventions.contains_key("lead"),
             "pending inbox should block new interventions"
         );
     }
@@ -4241,7 +4241,7 @@ exit 1
         daemon.update_automation_timers_for_state("lead", MemberState::Idle);
         daemon.maybe_intervene_owned_tasks().unwrap();
 
-        assert!(daemon.owned_task_interventions.get("lead").is_none());
+        assert!(!daemon.owned_task_interventions.contains_key("lead"));
         assert!(inbox::pending_messages(&root, "lead").unwrap().is_empty());
     }
 
@@ -4941,12 +4941,7 @@ exit 1
         daemon.maybe_intervene_review_backlog().unwrap();
 
         assert!(inbox::pending_messages(&root, "lead").unwrap().is_empty());
-        assert!(
-            daemon
-                .owned_task_interventions
-                .get("review::lead")
-                .is_none()
-        );
+        assert!(!daemon.owned_task_interventions.contains_key("review::lead"));
     }
 
     #[test]

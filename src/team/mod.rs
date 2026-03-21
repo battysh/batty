@@ -1246,18 +1246,18 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
     };
 
     if json {
-        let report = status::build_team_status_json_report(
-            &team_config.name,
-            &session,
+        let report = status::build_team_status_json_report(status::TeamStatusJsonReportInput {
+            team: team_config.name.clone(),
+            session: session.clone(),
             session_running,
             paused,
-            workflow_metrics
+            workflow_metrics: workflow_metrics
                 .as_ref()
                 .map(|(_, metrics)| metrics.clone()),
             active_tasks,
             review_queue,
-            rows,
-        );
+            members: rows,
+        });
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!("Team: {}", team_config.name);

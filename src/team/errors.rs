@@ -170,34 +170,44 @@ mod tests {
 
     #[test]
     fn git_error_marks_only_transient_variants_retryable() {
-        assert!(GitError::Transient {
-            message: "lock".to_string(),
-            stderr: "lock".to_string(),
-        }
-        .is_transient());
-        assert!(!GitError::Permanent {
-            message: "fatal".to_string(),
-            stderr: "fatal".to_string(),
-        }
-        .is_transient());
-        assert!(!GitError::RebaseFailed {
-            branch: "topic".to_string(),
-            stderr: "conflict".to_string(),
-        }
-        .is_transient());
+        assert!(
+            GitError::Transient {
+                message: "lock".to_string(),
+                stderr: "lock".to_string(),
+            }
+            .is_transient()
+        );
+        assert!(
+            !GitError::Permanent {
+                message: "fatal".to_string(),
+                stderr: "fatal".to_string(),
+            }
+            .is_transient()
+        );
+        assert!(
+            !GitError::RebaseFailed {
+                branch: "topic".to_string(),
+                stderr: "conflict".to_string(),
+            }
+            .is_transient()
+        );
     }
 
     #[test]
     fn board_error_marks_only_transient_variants_retryable() {
-        assert!(BoardError::Transient {
-            message: "lock".to_string(),
-            stderr: "lock".to_string(),
-        }
-        .is_transient());
-        assert!(!BoardError::TaskNotFound {
-            id: "123".to_string()
-        }
-        .is_transient());
+        assert!(
+            BoardError::Transient {
+                message: "lock".to_string(),
+                stderr: "lock".to_string(),
+            }
+            .is_transient()
+        );
+        assert!(
+            !BoardError::TaskNotFound {
+                id: "123".to_string()
+            }
+            .is_transient()
+        );
     }
 
     #[test]
@@ -208,15 +218,19 @@ mod tests {
 
     #[test]
     fn delivery_error_marks_transient_channel_failures_retryable() {
-        assert!(DeliveryError::ChannelSend {
-            recipient: "human".to_string(),
-            detail: "429 too many requests".to_string(),
-        }
-        .is_transient());
-        assert!(!DeliveryError::ChannelSend {
-            recipient: "human".to_string(),
-            detail: "chat not found".to_string(),
-        }
-        .is_transient());
+        assert!(
+            DeliveryError::ChannelSend {
+                recipient: "human".to_string(),
+                detail: "429 too many requests".to_string(),
+            }
+            .is_transient()
+        );
+        assert!(
+            !DeliveryError::ChannelSend {
+                recipient: "human".to_string(),
+                detail: "chat not found".to_string(),
+            }
+            .is_transient()
+        );
     }
 }

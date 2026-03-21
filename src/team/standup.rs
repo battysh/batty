@@ -157,17 +157,30 @@ fn project_root_from_board_dir(board_dir: Option<&Path>) -> Option<&Path> {
     batty_dir.parent()
 }
 
-pub(crate) fn maybe_generate_standup(
-    project_root: &Path,
-    team_config: &TeamConfig,
-    members: &[MemberInstance],
-    watchers: &HashMap<String, SessionWatcher>,
-    states: &HashMap<String, MemberState>,
-    pane_map: &HashMap<String, String>,
-    telegram_bot: Option<&TelegramBot>,
-    paused_standups: &HashSet<String>,
-    last_standup: &mut HashMap<String, Instant>,
-) -> Result<Vec<String>> {
+pub(crate) struct StandupGenerationContext<'a> {
+    pub(crate) project_root: &'a Path,
+    pub(crate) team_config: &'a TeamConfig,
+    pub(crate) members: &'a [MemberInstance],
+    pub(crate) watchers: &'a HashMap<String, SessionWatcher>,
+    pub(crate) states: &'a HashMap<String, MemberState>,
+    pub(crate) pane_map: &'a HashMap<String, String>,
+    pub(crate) telegram_bot: Option<&'a TelegramBot>,
+    pub(crate) paused_standups: &'a HashSet<String>,
+    pub(crate) last_standup: &'a mut HashMap<String, Instant>,
+}
+
+pub(crate) fn maybe_generate_standup(context: StandupGenerationContext<'_>) -> Result<Vec<String>> {
+    let StandupGenerationContext {
+        project_root,
+        team_config,
+        members,
+        watchers,
+        states,
+        pane_map,
+        telegram_bot,
+        paused_standups,
+        last_standup,
+    } = context;
     if !team_config.automation.standups {
         return Ok(Vec::new());
     }
@@ -897,17 +910,17 @@ mod tests {
         let members = vec![member];
         let mut last_standup = HashMap::new();
 
-        let generated = maybe_generate_standup(
-            tmp.path(),
-            &team_config,
-            &members,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            None,
-            &HashSet::new(),
-            &mut last_standup,
-        )
+        let generated = maybe_generate_standup(StandupGenerationContext {
+            project_root: tmp.path(),
+            team_config: &team_config,
+            members: &members,
+            watchers: &HashMap::new(),
+            states: &HashMap::new(),
+            pane_map: &HashMap::new(),
+            telegram_bot: None,
+            paused_standups: &HashSet::new(),
+            last_standup: &mut last_standup,
+        })
         .unwrap();
 
         assert!(generated.is_empty());
@@ -988,17 +1001,17 @@ mod tests {
         let mut last_standup =
             HashMap::from([(user.name.clone(), Instant::now() - Duration::from_secs(5))]);
 
-        let generated = maybe_generate_standup(
-            tmp.path(),
-            &team_config,
-            &members,
-            &HashMap::new(),
-            &states,
-            &HashMap::new(),
-            None,
-            &HashSet::new(),
-            &mut last_standup,
-        )
+        let generated = maybe_generate_standup(StandupGenerationContext {
+            project_root: tmp.path(),
+            team_config: &team_config,
+            members: &members,
+            watchers: &HashMap::new(),
+            states: &states,
+            pane_map: &HashMap::new(),
+            telegram_bot: None,
+            paused_standups: &HashSet::new(),
+            last_standup: &mut last_standup,
+        })
         .unwrap();
 
         assert_eq!(generated, vec!["user".to_string()]);

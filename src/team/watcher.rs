@@ -1916,9 +1916,7 @@ mod tests {
         let session_file = tmp.path().join("session.jsonl");
         std::fs::write(
             &session_file,
-            concat!(
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_123\",\"output\":\"exec_command failed: SandboxDenied { message: \\\"operation not permitted\\\" }\"}}\n",
-            ),
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_123\",\"output\":\"exec_command failed: SandboxDenied { message: \\\"operation not permitted\\\" }\"}}\n",
         )
         .unwrap();
 

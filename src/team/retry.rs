@@ -154,7 +154,7 @@ mod tests {
 
     use crate::team::board_cmd::BoardError;
 
-    use super::{next_delay_ms, retry_sync, retry_sync_with_sleep, RetryConfig, Retryable};
+    use super::{RetryConfig, Retryable, next_delay_ms, retry_sync, retry_sync_with_sleep};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum TestError {

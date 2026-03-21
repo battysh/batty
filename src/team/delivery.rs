@@ -8,7 +8,7 @@ use super::daemon::TeamDaemon;
 use super::errors::DeliveryError;
 use super::inbox;
 use super::message;
-use super::retry::{retry_sync, RetryConfig};
+use super::retry::{RetryConfig, retry_sync};
 use crate::tmux;
 
 pub(super) const DELIVERY_VERIFICATION_CAPTURE_LINES: u32 = 50;
@@ -665,6 +665,7 @@ mod tests {
     use std::io;
     use std::sync::{Arc, Mutex};
 
+    use crate::team::AssignmentResultStatus;
     use crate::team::comms::Channel;
     use crate::team::config::OrchestratorPosition;
     use crate::team::config::{
@@ -676,7 +677,6 @@ mod tests {
     use crate::team::events::EventSink;
     use crate::team::failure_patterns::FailureTracker;
     use crate::team::hierarchy::MemberInstance;
-    use crate::team::AssignmentResultStatus;
 
     struct RecordingChannel {
         messages: Arc<Mutex<Vec<String>>>,
@@ -978,9 +978,11 @@ mod tests {
         );
 
         for _ in 0..TELEGRAM_DELIVERY_CIRCUIT_BREAKER_THRESHOLD {
-            assert!(daemon
-                .queue_daemon_message("human", "Still failing")
-                .is_err());
+            assert!(
+                daemon
+                    .queue_daemon_message("human", "Still failing")
+                    .is_err()
+            );
         }
 
         assert!(daemon.telegram_channel_paused("human"));
@@ -989,9 +991,11 @@ mod tests {
         assert!(pending[0].body.contains("Telegram delivery paused"));
 
         let before = *attempts.lock().unwrap();
-        assert!(daemon
-            .queue_daemon_message("human", "Breaker open")
-            .is_err());
+        assert!(
+            daemon
+                .queue_daemon_message("human", "Breaker open")
+                .is_err()
+        );
         assert_eq!(*attempts.lock().unwrap(), before);
     }
 
@@ -1185,9 +1189,11 @@ mod tests {
         assert!(engineer_pending.is_empty());
 
         let engineer_all = inbox::all_messages(&root, "eng-1").unwrap();
-        assert!(engineer_all
-            .iter()
-            .any(|(msg, delivered)| msg.id == id && *delivered));
+        assert!(
+            engineer_all
+                .iter()
+                .any(|(msg, delivered)| msg.id == id && *delivered)
+        );
 
         let manager_pending = inbox::pending_messages(&root, "manager").unwrap();
         assert_eq!(manager_pending.len(), 1);
@@ -1330,9 +1336,11 @@ mod tests {
             inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "manager").unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].from, "daemon");
-        assert!(messages[0]
-            .body
-            .contains("Live message delivery failed after 3 attempts."));
+        assert!(
+            messages[0]
+                .body
+                .contains("Live message delivery failed after 3 attempts.")
+        );
         assert!(messages[0].body.contains("Recipient: eng-1"));
     }
 }

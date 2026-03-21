@@ -775,20 +775,34 @@ pub(crate) fn build_team_status_health(
     }
 }
 
+pub(crate) struct TeamStatusJsonReportInput {
+    pub(crate) team: String,
+    pub(crate) session: String,
+    pub(crate) session_running: bool,
+    pub(crate) paused: bool,
+    pub(crate) workflow_metrics: Option<WorkflowMetrics>,
+    pub(crate) active_tasks: Vec<StatusTaskEntry>,
+    pub(crate) review_queue: Vec<StatusTaskEntry>,
+    pub(crate) members: Vec<TeamStatusRow>,
+}
+
 pub(crate) fn build_team_status_json_report(
-    team: &str,
-    session: &str,
-    session_running: bool,
-    paused: bool,
-    workflow_metrics: Option<WorkflowMetrics>,
-    active_tasks: Vec<StatusTaskEntry>,
-    review_queue: Vec<StatusTaskEntry>,
-    members: Vec<TeamStatusRow>,
+    input: TeamStatusJsonReportInput,
 ) -> TeamStatusJsonReport {
+    let TeamStatusJsonReportInput {
+        team,
+        session,
+        session_running,
+        paused,
+        workflow_metrics,
+        active_tasks,
+        review_queue,
+        members,
+    } = input;
     let health = build_team_status_health(&members, session_running, paused);
     TeamStatusJsonReport {
-        team: team.to_string(),
-        session: session.to_string(),
+        team,
+        session,
         running: session_running,
         paused,
         health,
@@ -978,16 +992,34 @@ pub(crate) fn workflow_metrics_enabled(config_path: &Path) -> bool {
     })
 }
 
-pub(crate) fn update_pane_status_labels(
-    project_root: &Path,
-    members: &[MemberInstance],
-    pane_map: &HashMap<String, String>,
-    states: &HashMap<String, MemberState>,
-    nudges: &HashMap<String, NudgeSchedule>,
-    last_standup: &HashMap<String, Instant>,
-    paused_standups: &HashSet<String>,
-    standup_interval_for_member: impl Fn(&str) -> Option<Duration>,
-) {
+pub(crate) struct PaneStatusLabelUpdateContext<'a, F>
+where
+    F: Fn(&str) -> Option<Duration>,
+{
+    pub(crate) project_root: &'a Path,
+    pub(crate) members: &'a [MemberInstance],
+    pub(crate) pane_map: &'a HashMap<String, String>,
+    pub(crate) states: &'a HashMap<String, MemberState>,
+    pub(crate) nudges: &'a HashMap<String, NudgeSchedule>,
+    pub(crate) last_standup: &'a HashMap<String, Instant>,
+    pub(crate) paused_standups: &'a HashSet<String>,
+    pub(crate) standup_interval_for_member: F,
+}
+
+pub(crate) fn update_pane_status_labels<F>(context: PaneStatusLabelUpdateContext<'_, F>)
+where
+    F: Fn(&str) -> Option<Duration>,
+{
+    let PaneStatusLabelUpdateContext {
+        project_root,
+        members,
+        pane_map,
+        states,
+        nudges,
+        last_standup,
+        paused_standups,
+        standup_interval_for_member,
+    } = context;
     let globally_paused = pause_marker_path(project_root).exists();
     let inbox_root = inbox::inboxes_root(project_root);
     let direct_reports = direct_reports_by_member(members);
@@ -1031,16 +1063,16 @@ pub(crate) fn update_pane_status_labels(
             .unwrap_or_default();
 
         let label = if globally_paused {
-            compose_pane_status_label(
+            compose_pane_status_label(PaneStatusLabelArgs {
                 state,
                 pending_inbox,
                 triage_backlog,
-                &member_owned_tasks.active,
-                &member_owned_tasks.review,
-                true,
-                "",
-                "",
-            )
+                active_task_ids: &member_owned_tasks.active,
+                review_task_ids: &member_owned_tasks.review,
+                globally_paused: true,
+                nudge_status: "",
+                standup_status: "",
+            })
         } else {
             let nudge_str = format_nudge_status(nudges.get(&member.name));
             let standup_str = standup_interval_for_member(&member.name)
@@ -1052,16 +1084,16 @@ pub(crate) fn update_pane_status_labels(
                     )
                 })
                 .unwrap_or_default();
-            compose_pane_status_label(
+            compose_pane_status_label(PaneStatusLabelArgs {
                 state,
                 pending_inbox,
                 triage_backlog,
-                &member_owned_tasks.active,
-                &member_owned_tasks.review,
-                false,
-                &nudge_str,
-                &standup_str,
-            )
+                active_task_ids: &member_owned_tasks.active,
+                review_task_ids: &member_owned_tasks.review,
+                globally_paused: false,
+                nudge_status: &nudge_str,
+                standup_status: &standup_str,
+            })
         };
 
         let _ = Command::new("tmux")
@@ -1122,16 +1154,28 @@ fn format_review_task_status(review_task_ids: &[u32]) -> String {
     }
 }
 
-pub(crate) fn compose_pane_status_label(
-    state: MemberState,
-    pending_inbox: usize,
-    triage_backlog: usize,
-    active_task_ids: &[u32],
-    review_task_ids: &[u32],
-    globally_paused: bool,
-    nudge_status: &str,
-    standup_status: &str,
-) -> String {
+pub(crate) struct PaneStatusLabelArgs<'a> {
+    pub(crate) state: MemberState,
+    pub(crate) pending_inbox: usize,
+    pub(crate) triage_backlog: usize,
+    pub(crate) active_task_ids: &'a [u32],
+    pub(crate) review_task_ids: &'a [u32],
+    pub(crate) globally_paused: bool,
+    pub(crate) nudge_status: &'a str,
+    pub(crate) standup_status: &'a str,
+}
+
+pub(crate) fn compose_pane_status_label(args: PaneStatusLabelArgs<'_>) -> String {
+    let PaneStatusLabelArgs {
+        state,
+        pending_inbox,
+        triage_backlog,
+        active_task_ids,
+        review_task_ids,
+        globally_paused,
+        nudge_status,
+        standup_status,
+    } = args;
     let state_str = match state {
         MemberState::Idle => "#[fg=yellow]idle#[default]",
         MemberState::Working => "#[fg=cyan]working#[default]",
@@ -1585,18 +1629,18 @@ mod tests {
 
     #[test]
     fn build_team_status_json_report_serializes_machine_readable_json() {
-        let report = build_team_status_json_report(
-            "test",
-            "batty-test",
-            true,
-            false,
-            Some(WorkflowMetrics {
+        let report = build_team_status_json_report(TeamStatusJsonReportInput {
+            team: "test".to_string(),
+            session: "batty-test".to_string(),
+            session_running: true,
+            paused: false,
+            workflow_metrics: Some(WorkflowMetrics {
                 runnable_count: 1,
                 ..WorkflowMetrics::default()
             }),
-            Vec::new(),
-            Vec::new(),
-            vec![TeamStatusRow {
+            active_tasks: Vec::new(),
+            review_queue: Vec::new(),
+            members: vec![TeamStatusRow {
                 name: "eng-1".to_string(),
                 role: "engineer".to_string(),
                 role_type: "Engineer".to_string(),
@@ -1612,7 +1656,7 @@ mod tests {
                 health: AgentHealthSummary::default(),
                 health_summary: "-".to_string(),
             }],
-        );
+        });
 
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["team"], "test");
@@ -1723,12 +1767,12 @@ mod tests {
 
     #[test]
     fn build_team_status_json_report_includes_health_and_queues() {
-        let report = build_team_status_json_report(
-            "test",
-            "batty-test",
-            true,
-            true,
-            Some(WorkflowMetrics {
+        let report = build_team_status_json_report(TeamStatusJsonReportInput {
+            team: "test".to_string(),
+            session: "batty-test".to_string(),
+            session_running: true,
+            paused: true,
+            workflow_metrics: Some(WorkflowMetrics {
                 runnable_count: 2,
                 blocked_count: 1,
                 in_review_count: 1,
@@ -1737,7 +1781,7 @@ mod tests {
                 oldest_review_age_secs: Some(60),
                 oldest_assignment_age_secs: Some(120),
             }),
-            vec![StatusTaskEntry {
+            active_tasks: vec![StatusTaskEntry {
                 id: 41,
                 title: "Active task".to_string(),
                 status: "in-progress".to_string(),
@@ -1750,7 +1794,7 @@ mod tests {
                 commit: None,
                 next_action: None,
             }],
-            vec![StatusTaskEntry {
+            review_queue: vec![StatusTaskEntry {
                 id: 42,
                 title: "Review task".to_string(),
                 status: "review".to_string(),
@@ -1763,7 +1807,7 @@ mod tests {
                 commit: None,
                 next_action: Some("review now".to_string()),
             }],
-            vec![
+            members: vec![
                 TeamStatusRow {
                     name: "eng-1".to_string(),
                     role: "engineer".to_string(),
@@ -1802,7 +1846,7 @@ mod tests {
                     health_summary: "-".to_string(),
                 },
             ],
-        );
+        });
 
         assert_eq!(report.team, "test");
         assert_eq!(report.active_tasks.len(), 1);
@@ -1842,16 +1886,16 @@ mod tests {
 
     #[test]
     fn compose_pane_status_label_shows_pending_inbox_count() {
-        let label = compose_pane_status_label(
-            MemberState::Idle,
-            3,
-            2,
-            &[191],
-            &[193, 194],
-            false,
-            " #[fg=magenta]nudge 0:30#[default]",
-            "",
-        );
+        let label = compose_pane_status_label(PaneStatusLabelArgs {
+            state: MemberState::Idle,
+            pending_inbox: 3,
+            triage_backlog: 2,
+            active_task_ids: &[191],
+            review_task_ids: &[193, 194],
+            globally_paused: false,
+            nudge_status: " #[fg=magenta]nudge 0:30#[default]",
+            standup_status: "",
+        });
         assert!(label.contains("idle"));
         assert!(label.contains("inbox 3"));
         assert!(label.contains("triage 2"));
@@ -1862,7 +1906,16 @@ mod tests {
 
     #[test]
     fn compose_pane_status_label_shows_zero_inbox_and_pause_state() {
-        let label = compose_pane_status_label(MemberState::Working, 0, 0, &[], &[], true, "", "");
+        let label = compose_pane_status_label(PaneStatusLabelArgs {
+            state: MemberState::Working,
+            pending_inbox: 0,
+            triage_backlog: 0,
+            active_task_ids: &[],
+            review_task_ids: &[],
+            globally_paused: true,
+            nudge_status: "",
+            standup_status: "",
+        });
         assert!(label.contains("working"));
         assert!(label.contains("inbox 0"));
         assert!(label.contains("PAUSED"));

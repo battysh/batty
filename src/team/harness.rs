@@ -22,6 +22,12 @@ pub struct TestHarness {
     availability: HashMap<String, MemberState>,
 }
 
+impl Default for TestHarness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TestHarness {
     pub fn new() -> Self {
         let project_root =
