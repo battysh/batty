@@ -403,6 +403,9 @@ pub fn read_events(path: &Path) -> Result<Vec<TeamEvent>> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
     use super::*;
 
     #[test]
@@ -764,5 +767,177 @@ mod tests {
         let current = fs::read_to_string(&path).unwrap();
         assert!(current.contains("task_assigned"));
         assert!(!current.contains("\"event\":\"first\""));
+    }
+
+    #[test]
+    fn event_round_trip_preserves_fields_for_agent_restarted() {
+        let original = TeamEvent::agent_restarted("eng-1", "42", "context_exhausted", 3);
+
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: TeamEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.event, "agent_restarted");
+        assert_eq!(parsed.role.as_deref(), Some("eng-1"));
+        assert_eq!(parsed.task.as_deref(), Some("42"));
+        assert_eq!(parsed.reason.as_deref(), Some("context_exhausted"));
+        assert_eq!(parsed.restart_count, Some(3));
+        assert_eq!(parsed.ts, original.ts);
+    }
+
+    #[test]
+    fn event_round_trip_preserves_fields_for_load_snapshot() {
+        let original = TeamEvent::load_snapshot(4, 8, true);
+
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: TeamEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.event, "load_snapshot");
+        assert_eq!(parsed.working_members, Some(4));
+        assert_eq!(parsed.total_members, Some(8));
+        assert_eq!(parsed.session_running, Some(true));
+        assert_eq!(parsed.load, Some(0.5));
+        assert_eq!(parsed.ts, original.ts);
+    }
+
+    #[test]
+    fn event_round_trip_preserves_fields_for_delivery_failed() {
+        let original = TeamEvent::delivery_failed("eng-2", "manager", "marker missing");
+
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: TeamEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.event, "delivery_failed");
+        assert_eq!(parsed.role.as_deref(), Some("eng-2"));
+        assert_eq!(parsed.from.as_deref(), Some("manager"));
+        assert_eq!(parsed.reason.as_deref(), Some("marker missing"));
+        assert_eq!(parsed.ts, original.ts);
+    }
+
+    #[test]
+    fn read_events_skips_blank_and_malformed_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("events.jsonl");
+        fs::write(
+            &path,
+            [
+                "",
+                "{\"event\":\"daemon_started\",\"ts\":1}",
+                "not-json",
+                "   ",
+                "{\"event\":\"daemon_stopped\",\"ts\":2}",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let events = read_events(&path).unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event, "daemon_started");
+        assert_eq!(events[1].event, "daemon_stopped");
+    }
+
+    #[test]
+    fn rotate_event_log_if_needed_returns_false_for_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("events.jsonl");
+
+        let rotated = rotate_event_log_if_needed(&path, 128, 0).unwrap();
+
+        assert!(!rotated);
+        assert!(!rotated_event_log_path(&path).exists());
+    }
+
+    #[test]
+    fn rotate_event_log_if_needed_returns_false_for_empty_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("events.jsonl");
+        fs::write(&path, "").unwrap();
+
+        let rotated = rotate_event_log_if_needed(&path, 1, 1).unwrap();
+
+        assert!(!rotated);
+        assert!(path.exists());
+        assert!(!rotated_event_log_path(&path).exists());
+    }
+
+    #[test]
+    fn rotate_event_log_if_needed_replaces_existing_rotated_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("events.jsonl");
+        let rotated_path = rotated_event_log_path(&path);
+        fs::write(&path, "current-events").unwrap();
+        fs::write(&rotated_path, "old-rotated-events").unwrap();
+
+        let rotated = rotate_event_log_if_needed(&path, 5, 0).unwrap();
+
+        assert!(rotated);
+        assert_eq!(fs::read_to_string(&rotated_path).unwrap(), "current-events");
+    }
+
+    #[test]
+    fn concurrent_event_sinks_append_without_losing_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = Arc::new(tmp.path().join("events.jsonl"));
+        let ready = Arc::new(std::sync::Barrier::new(5));
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut handles = Vec::new();
+
+        for idx in 0..4 {
+            let path = Arc::clone(&path);
+            let ready = Arc::clone(&ready);
+            let errors = Arc::clone(&errors);
+            handles.push(thread::spawn(move || {
+                ready.wait();
+                let result = (|| -> Result<()> {
+                    let mut sink = EventSink::new(&path)?;
+                    sink.emit(TeamEvent::task_assigned(
+                        &format!("eng-{idx}"),
+                        &format!("task-{idx}"),
+                    ))?;
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    errors.lock().unwrap().push(error.to_string());
+                }
+            }));
+        }
+
+        ready.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert!(errors.lock().unwrap().is_empty());
+        let events = read_events(&path).unwrap();
+        assert_eq!(events.len(), 4);
+        for idx in 0..4 {
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event.role.as_deref() == Some(&format!("eng-{idx}")))
+            );
+        }
+    }
+
+    #[test]
+    fn read_events_handles_large_log_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("events.jsonl");
+        let mut sink = EventSink::new(&path).unwrap();
+
+        for idx in 0..512 {
+            sink.emit(TeamEvent::task_assigned(
+                &format!("eng-{idx}"),
+                &"x".repeat(128),
+            ))
+            .unwrap();
+        }
+
+        let events = read_events(&path).unwrap();
+
+        assert_eq!(events.len(), 512);
+        assert_eq!(events.first().unwrap().event, "task_assigned");
+        assert_eq!(events.last().unwrap().event, "task_assigned");
     }
 }
