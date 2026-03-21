@@ -6,6 +6,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use super::DEFAULT_EVENT_LOG_MAX_BYTES;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct TeamConfig {
     pub name: String,
@@ -29,6 +31,8 @@ pub struct TeamConfig {
     pub workflow_policy: WorkflowPolicy,
     #[serde(default)]
     pub cost: CostConfig,
+    #[serde(default = "default_event_log_max_bytes")]
+    pub event_log_max_bytes: u64,
     pub roles: Vec<RoleDef>,
 }
 
@@ -326,6 +330,10 @@ fn default_intervention_cooldown_secs() -> u64 {
     120
 }
 
+fn default_event_log_max_bytes() -> u64 {
+    DEFAULT_EVENT_LOG_MAX_BYTES
+}
+
 impl TeamConfig {
     pub fn orchestrator_enabled(&self) -> bool {
         self.workflow_mode.enables_runtime_surface() && self.orchestrator_pane
@@ -486,6 +494,7 @@ roles:
         assert_eq!(config.roles[2].instances, 3);
         assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
         assert!(config.orchestrator_pane);
+        assert_eq!(config.event_log_max_bytes, DEFAULT_EVENT_LOG_MAX_BYTES);
     }
 
     #[test]
@@ -582,6 +591,7 @@ roles:
         assert_eq!(layout.zones.len(), 3);
         assert_eq!(layout.zones[0].width_pct, 15);
         assert_eq!(layout.zones[2].split.as_ref().unwrap().horizontal, 15);
+        assert_eq!(config.event_log_max_bytes, DEFAULT_EVENT_LOG_MAX_BYTES);
     }
 
     #[test]
@@ -608,6 +618,21 @@ roles:
         assert_eq!(config.roles[0].instances, 1);
         assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
         assert!(config.orchestrator_pane);
+        assert_eq!(config.event_log_max_bytes, DEFAULT_EVENT_LOG_MAX_BYTES);
+    }
+
+    #[test]
+    fn parse_event_log_max_bytes_override() {
+        let yaml = r#"
+name: test
+event_log_max_bytes: 2048
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.event_log_max_bytes, 2048);
     }
 
     #[test]

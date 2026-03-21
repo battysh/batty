@@ -221,7 +221,8 @@ impl TeamDaemon {
     pub fn new(config: DaemonConfig) -> Result<Self> {
         let team_config_dir = config.project_root.join(".batty").join("team_config");
         let events_path = team_config_dir.join("events.jsonl");
-        let event_sink = EventSink::new(&events_path)?;
+        let event_sink =
+            EventSink::new_with_max_bytes(&events_path, config.team_config.event_log_max_bytes)?;
 
         // Create watchers for each pane member
         let mut watchers = HashMap::new();
@@ -1851,6 +1852,7 @@ mod tests {
                 orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 roles,
             },
             session: "test".to_string(),
@@ -1958,6 +1960,7 @@ mod tests {
                 orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 roles: Vec::new(),
             },
             session: session.clone(),
@@ -2169,6 +2172,7 @@ mod tests {
                 orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 roles: Vec::new(),
             },
             session: session.clone(),
@@ -2284,6 +2288,7 @@ mod tests {
                 orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 roles: Vec::new(),
             },
             session: session.clone(),
@@ -2399,6 +2404,7 @@ mod tests {
                 orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 roles: Vec::new(),
             },
             session: session.clone(),
@@ -2531,6 +2537,7 @@ mod tests {
                 orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 roles: Vec::new(),
             },
             session: session.to_string(),
@@ -2677,6 +2684,7 @@ mod tests {
                 orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 roles: Vec::new(),
             },
             session: session.to_string(),
@@ -2776,6 +2784,7 @@ mod tests {
                 orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 roles: Vec::new(),
             },
             session: session.to_string(),
@@ -2897,6 +2906,7 @@ mod tests {
                 orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 roles: Vec::new(),
             },
             session: session.to_string(),
@@ -3012,6 +3022,7 @@ mod tests {
                 orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 roles: Vec::new(),
             },
             session: session.clone(),
@@ -3093,6 +3104,7 @@ mod tests {
                 orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 roles: Vec::new(),
             },
             session: session.clone(),
@@ -4595,6 +4607,7 @@ mod tests {
                 orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
                 cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 roles: Vec::new(),
             },
             session: "test".to_string(),
