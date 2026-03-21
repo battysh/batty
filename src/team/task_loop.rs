@@ -599,6 +599,15 @@ mod tests {
     use super::*;
     use crate::team::test_support::{git, git_ok, git_stdout};
 
+    fn production_unwrap_expect_count(path: &Path) -> usize {
+        let content = std::fs::read_to_string(path).unwrap();
+        let test_split = content.split("\n#[cfg(test)]").next().unwrap_or(&content);
+        test_split
+            .lines()
+            .filter(|line| line.contains(".unwrap(") || line.contains(".expect("))
+            .count()
+    }
+
     fn init_git_repo(tmp: &tempfile::TempDir) -> PathBuf {
         let repo = tmp.path();
         git_ok(repo, &["init", "-b", "main"]);
@@ -1049,5 +1058,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let title = read_task_title(tmp.path(), 99);
         assert_eq!(title, "Task #99");
+    }
+
+    #[test]
+    fn production_task_loop_has_no_unwrap_or_expect_calls() {
+        let count = production_unwrap_expect_count(Path::new(file!()));
+        assert_eq!(count, 0, "production task_loop.rs should avoid unwrap/expect");
     }
 }
