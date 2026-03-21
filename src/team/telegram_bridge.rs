@@ -461,7 +461,9 @@ mod tests {
             let pane = (0..20)
                 .find_map(|_| {
                     let pane = tmux::capture_pane(&pane_id).unwrap_or_default();
-                    if pane.contains("batty inbox lead") {
+                    if pane.contains("batty send architect")
+                        && pane.contains("next time you become idle")
+                    {
                         Some(pane)
                     } else {
                         std::thread::sleep(Duration::from_millis(100));
@@ -469,10 +471,7 @@ mod tests {
                     }
                 })
                 .unwrap_or_else(|| tmux::capture_pane(&pane_id).unwrap_or_default());
-            assert!(pane.contains("batty inbox lead"));
-            assert!(pane.contains("batty read lead <ref>"));
-            assert!(pane.contains("batty send eng-1"));
-            assert!(pane.contains("batty assign eng-1"));
+            assert!(pane.contains("Triage backlog detected"));
             assert!(pane.contains("batty send architect"));
             assert!(pane.contains("next time you become idle"));
         } else {
