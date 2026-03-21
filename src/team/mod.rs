@@ -20,6 +20,7 @@ pub mod metrics;
 pub mod nudge;
 pub mod policy;
 pub mod resolver;
+pub mod retrospective;
 pub mod review;
 pub mod standup;
 pub mod task_cmd;
