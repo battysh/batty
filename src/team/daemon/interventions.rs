@@ -1550,9 +1550,32 @@ mod tests {
             .with_pane("eng-1", "%999998")
     }
 
+    fn intervention_team_harness() -> TestHarness {
+        TestHarness::new()
+            .with_member(architect_member("architect"))
+            .with_member(manager_member("lead", Some("architect")))
+            .with_member(engineer_member("eng-1", Some("lead"), false))
+            .with_member(engineer_member("eng-2", Some("lead"), false))
+    }
+
     fn expire_owned_task_cooldown(daemon: &mut TeamDaemon, member: &str) {
         daemon.intervention_cooldowns.insert(
             member.to_string(),
+            Instant::now()
+                - Duration::from_secs(
+                    daemon
+                        .config
+                        .team_config
+                        .automation
+                        .intervention_cooldown_secs
+                        + 1,
+                ),
+        );
+    }
+
+    fn expire_intervention_key_cooldown(daemon: &mut TeamDaemon, key: &str) {
+        daemon.intervention_cooldowns.insert(
+            key.to_string(),
             Instant::now()
                 - Duration::from_secs(
                     daemon
@@ -1866,6 +1889,259 @@ mod tests {
 
         assert!(harness.pending_inbox_messages("eng-1").unwrap().is_empty());
         assert!(daemon.owned_task_interventions.get("eng-1").is_none());
+    }
+
+    #[test]
+    fn maybe_intervene_review_backlog_queues_for_idle_manager() {
+        let harness = intervention_team_harness()
+            .with_member_state("lead", MemberState::Idle)
+            .with_pane("lead", "%999997")
+            .with_board_task(191, "review-task", "review", Some("eng-1"));
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "lead");
+        daemon.maybe_intervene_review_backlog().unwrap();
+
+        let pending = harness.pending_inbox_messages("lead").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "architect");
+        assert!(pending[0].body.contains("Review backlog detected"));
+        assert!(pending[0].body.contains("#191 by eng-1"));
+        assert!(pending[0].body.contains("batty merge eng-1"));
+        assert!(daemon.owned_task_interventions.contains_key("review::lead"));
+    }
+
+    #[test]
+    fn maybe_intervene_review_backlog_dedupes_same_signature() {
+        let harness = intervention_team_harness()
+            .with_member_state("lead", MemberState::Idle)
+            .with_pane("lead", "%999997")
+            .with_board_task(191, "review-task", "review", Some("eng-1"));
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "lead");
+        daemon.maybe_intervene_review_backlog().unwrap();
+        mark_pending_delivered(&harness, "lead");
+
+        enter_idle_epoch(&mut daemon, "lead");
+        daemon.maybe_intervene_review_backlog().unwrap();
+
+        assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+        assert_eq!(
+            daemon
+                .owned_task_interventions
+                .get("review::lead")
+                .map(|state| state.signature.as_str()),
+            Some("191:review:eng-1")
+        );
+    }
+
+    #[test]
+    fn maybe_intervene_review_backlog_respects_cooldown_until_signature_refire() {
+        let harness = intervention_team_harness()
+            .with_member_state("lead", MemberState::Idle)
+            .with_pane("lead", "%999997")
+            .with_board_task(191, "review-task", "review", Some("eng-1"));
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "lead");
+        daemon.maybe_intervene_review_backlog().unwrap();
+        mark_pending_delivered(&harness, "lead");
+
+        std::fs::write(
+            harness.board_tasks_dir().join("192-review-task.md"),
+            "---\nid: 192\ntitle: review-task-2\nstatus: review\npriority: high\nclass: standard\nclaimed_by: eng-2\n---\n\nTask description.\n",
+        )
+        .unwrap();
+
+        enter_idle_epoch(&mut daemon, "lead");
+        daemon.maybe_intervene_review_backlog().unwrap();
+        assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+
+        expire_intervention_key_cooldown(&mut daemon, "review::lead");
+        daemon.maybe_intervene_review_backlog().unwrap();
+
+        let pending = harness.pending_inbox_messages("lead").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].body.contains("#191 by eng-1"));
+        assert!(pending[0].body.contains("#192 by eng-2"));
+    }
+
+    #[test]
+    fn maybe_intervene_manager_dispatch_gap_queues_for_idle_lead() {
+        let harness = intervention_team_harness()
+            .with_member_state("lead", MemberState::Idle)
+            .with_member_state("eng-1", MemberState::Idle)
+            .with_member_state("eng-2", MemberState::Idle)
+            .with_pane("lead", "%999997")
+            .with_board_task(191, "active-task", "in-progress", Some("eng-1"))
+            .with_board_task(192, "open-task", "todo", None);
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "lead");
+        daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+        let pending = harness.pending_inbox_messages("lead").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "architect");
+        assert!(pending[0].body.contains("Dispatch recovery needed"));
+        assert!(pending[0].body.contains("eng-1 on #191"));
+        assert!(pending[0].body.contains("eng-2"));
+        assert!(pending[0].body.contains("batty assign eng-2"));
+        assert!(
+            daemon
+                .owned_task_interventions
+                .contains_key("dispatch::lead")
+        );
+    }
+
+    #[test]
+    fn maybe_intervene_manager_dispatch_gap_dedupes_same_signature() {
+        let harness = intervention_team_harness()
+            .with_member_state("lead", MemberState::Idle)
+            .with_member_state("eng-1", MemberState::Idle)
+            .with_member_state("eng-2", MemberState::Idle)
+            .with_pane("lead", "%999997")
+            .with_board_task(191, "active-task", "in-progress", Some("eng-1"))
+            .with_board_task(192, "open-task", "todo", None);
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "lead");
+        daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+        mark_pending_delivered(&harness, "lead");
+
+        enter_idle_epoch(&mut daemon, "lead");
+        daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+        assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+    }
+
+    #[test]
+    fn maybe_intervene_manager_dispatch_gap_respects_cooldown_until_signature_refire() {
+        let harness = intervention_team_harness()
+            .with_member_state("lead", MemberState::Idle)
+            .with_member_state("eng-1", MemberState::Idle)
+            .with_member_state("eng-2", MemberState::Idle)
+            .with_pane("lead", "%999997")
+            .with_board_task(191, "active-task", "in-progress", Some("eng-1"))
+            .with_board_task(192, "open-task", "todo", None);
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "lead");
+        daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+        mark_pending_delivered(&harness, "lead");
+
+        std::fs::write(
+            harness.board_tasks_dir().join("193-open-task.md"),
+            "---\nid: 193\ntitle: open-task-2\nstatus: backlog\npriority: high\nclass: standard\n---\n\nTask description.\n",
+        )
+        .unwrap();
+
+        enter_idle_epoch(&mut daemon, "lead");
+        daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+        assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+
+        expire_intervention_key_cooldown(&mut daemon, "dispatch::lead");
+        daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+        let pending = harness.pending_inbox_messages("lead").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].body.contains("#193 (backlog) open-task-2"));
+    }
+
+    #[test]
+    fn maybe_intervene_architect_utilization_queues_for_underloaded_architect() {
+        let harness = intervention_team_harness()
+            .with_member_state("architect", MemberState::Idle)
+            .with_member_state("lead", MemberState::Idle)
+            .with_member_state("eng-1", MemberState::Idle)
+            .with_member_state("eng-2", MemberState::Idle)
+            .with_pane("architect", "%999996")
+            .with_board_task(191, "active-task", "in-progress", Some("eng-1"))
+            .with_board_task(192, "open-task", "backlog", None);
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "architect");
+        daemon.maybe_intervene_architect_utilization().unwrap();
+
+        let pending = harness.pending_inbox_messages("architect").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "daemon");
+        assert!(pending[0].body.contains("Utilization recovery needed"));
+        assert!(pending[0].body.contains("eng-1 on #191"));
+        assert!(pending[0].body.contains("eng-2"));
+        assert!(pending[0].body.contains("Task #192"));
+        assert!(
+            daemon
+                .owned_task_interventions
+                .contains_key("utilization::architect")
+        );
+    }
+
+    #[test]
+    fn maybe_intervene_architect_utilization_dedupes_same_signature() {
+        let harness = intervention_team_harness()
+            .with_member_state("architect", MemberState::Idle)
+            .with_member_state("lead", MemberState::Idle)
+            .with_member_state("eng-1", MemberState::Idle)
+            .with_member_state("eng-2", MemberState::Idle)
+            .with_pane("architect", "%999996")
+            .with_board_task(191, "active-task", "in-progress", Some("eng-1"))
+            .with_board_task(192, "open-task", "backlog", None);
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "architect");
+        daemon.maybe_intervene_architect_utilization().unwrap();
+        mark_pending_delivered(&harness, "architect");
+
+        enter_idle_epoch(&mut daemon, "architect");
+        daemon.maybe_intervene_architect_utilization().unwrap();
+
+        assert!(
+            harness
+                .pending_inbox_messages("architect")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn maybe_intervene_architect_utilization_respects_cooldown_until_signature_refire() {
+        let harness = intervention_team_harness()
+            .with_member_state("architect", MemberState::Idle)
+            .with_member_state("lead", MemberState::Idle)
+            .with_member_state("eng-1", MemberState::Idle)
+            .with_member_state("eng-2", MemberState::Idle)
+            .with_pane("architect", "%999996")
+            .with_board_task(191, "active-task", "in-progress", Some("eng-1"))
+            .with_board_task(192, "open-task", "backlog", None);
+        let mut daemon = harness.build_daemon().unwrap();
+
+        enter_idle_epoch(&mut daemon, "architect");
+        daemon.maybe_intervene_architect_utilization().unwrap();
+        mark_pending_delivered(&harness, "architect");
+
+        std::fs::write(
+            harness.board_tasks_dir().join("193-open-task.md"),
+            "---\nid: 193\ntitle: open-task-2\nstatus: todo\npriority: high\nclass: standard\n---\n\nTask description.\n",
+        )
+        .unwrap();
+
+        enter_idle_epoch(&mut daemon, "architect");
+        daemon.maybe_intervene_architect_utilization().unwrap();
+        assert!(
+            harness
+                .pending_inbox_messages("architect")
+                .unwrap()
+                .is_empty()
+        );
+
+        expire_intervention_key_cooldown(&mut daemon, "utilization::architect");
+        daemon.maybe_intervene_architect_utilization().unwrap();
+
+        let pending = harness.pending_inbox_messages("architect").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].body.contains("#193 (todo) open-task-2"));
     }
 
     #[test]
