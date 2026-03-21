@@ -1358,14 +1358,10 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         }
 
         // Suppress if manager is actively working (likely processing directives)
-        let manager_working = self
-            .config
-            .members
-            .iter()
-            .any(|m| {
-                m.role_type == RoleType::Manager
-                    && self.states.get(&m.name) == Some(&MemberState::Working)
-            });
+        let manager_working = self.config.members.iter().any(|m| {
+            m.role_type == RoleType::Manager
+                && self.states.get(&m.name) == Some(&MemberState::Working)
+        });
         if manager_working {
             return Ok(());
         }
@@ -2463,7 +2459,7 @@ exit 1
         assert!(worktree_dir.exists());
         assert_eq!(
             crate::team::test_support::git_stdout(&worktree_dir, &["branch", "--show-current"]),
-            format!("{member_name}/task-42")
+            format!("{member_name}/42")
         );
 
         let codex_cwd = worktree_dir
@@ -2775,9 +2771,8 @@ exit 1
         .unwrap();
 
         daemon.spawn_all_agents(false).unwrap();
-        std::thread::sleep(Duration::from_millis(700));
 
-        let log = (0..20)
+        let log = (0..100)
             .find_map(|_| {
                 let content = match std::fs::read_to_string(&fake_log) {
                     Ok(content) => content,
@@ -2801,7 +2796,17 @@ exit 1
             });
         assert!(log.contains("--append-system-prompt"));
 
-        let current = crate::tmux::pane_current_path(&pane_id).unwrap();
+        let current = (0..50)
+            .find_map(|_| match crate::tmux::pane_current_path(&pane_id) {
+                Ok(current) if !current.is_empty() => Some(current),
+                _ => {
+                    std::thread::sleep(Duration::from_millis(100));
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                panic!("tmux pane current path never became available for target '{pane_id}'")
+            });
         assert_eq!(
             normalized_assignment_dir(Path::new(&current)),
             normalized_assignment_dir(tmp.path())
@@ -2955,8 +2960,8 @@ exit 1
     #[test]
     #[serial]
     fn agent_restart_relaunches_context_exhausted_member_with_task_context() {
-        let session = "batty-test-agent-restart-context";
-        let _ = crate::tmux::kill_session(session);
+        let session = format!("batty-test-agent-restart-context-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
 
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
@@ -2967,16 +2972,16 @@ exit 1
         let worktree_path = tmp.path().join("worktree");
         std::fs::create_dir_all(&worktree_path).unwrap();
 
-        crate::tmux::create_session(session, "bash", &[], tmp.path().to_str().unwrap()).unwrap();
+        crate::tmux::create_session(&session, "bash", &[], tmp.path().to_str().unwrap()).unwrap();
         crate::tmux::create_window(
-            session,
+            &session,
             "keeper",
             "sleep",
             &["30".to_string()],
             tmp.path().to_str().unwrap(),
         )
         .unwrap();
-        let pane_id = crate::tmux::pane_id(session).unwrap();
+        let pane_id = crate::tmux::pane_id(&session).unwrap();
         Command::new("tmux")
             .args(["set-option", "-p", "-t", &pane_id, "remain-on-exit", "on"])
             .output()
@@ -3036,14 +3041,13 @@ exit 1
             "active-task",
             "in-progress",
             member_name,
-            "eng-1-2/task-191",
+            "eng-1-2/191",
             &worktree_path.display().to_string(),
         );
 
         daemon.handle_context_exhaustion(member_name).unwrap();
-        std::thread::sleep(Duration::from_millis(700));
 
-        let log = (0..20)
+        let log = (0..100)
             .find_map(|_| {
                 let content = match std::fs::read_to_string(&fake_log) {
                     Ok(content) => content,
@@ -3066,7 +3070,7 @@ exit 1
                 )
             });
         assert!(log.contains("Previous session exhausted context"));
-        assert!(log.contains("Branch: eng-1-2/task-191"));
+        assert!(log.contains("Branch: eng-1-2/191"));
         assert!(log.contains(&format!("Worktree: {}", worktree_path.display())));
 
         let events = crate::team::events::read_events(
@@ -3094,7 +3098,7 @@ exit 1
                 && event.to.as_deref() == Some(member_name)
         }));
 
-        crate::tmux::kill_session(session).unwrap();
+        crate::tmux::kill_session(&session).unwrap();
         let _ = std::fs::remove_dir_all(&fake_bin);
     }
 
@@ -3180,9 +3184,17 @@ exit 1
         write_owned_task_file(tmp.path(), 191, "active-task", "in-progress", member_name);
 
         daemon.handle_context_exhaustion(member_name).unwrap();
-        std::thread::sleep(Duration::from_millis(700));
-
-        let current = crate::tmux::pane_current_path(&pane_id).unwrap();
+        let current = (0..50)
+            .find_map(|_| match crate::tmux::pane_current_path(&pane_id) {
+                Ok(current) if !current.is_empty() => Some(current),
+                _ => {
+                    std::thread::sleep(Duration::from_millis(100));
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                panic!("tmux pane current path never became available for target '{pane_id}'")
+            });
         assert_eq!(
             normalized_assignment_dir(Path::new(&current)),
             normalized_assignment_dir(tmp.path())
@@ -5427,7 +5439,15 @@ exit 1
 
         // Create one unclaimed todo task and one in-review task claimed by eng-1
         write_open_task_file(tmp.path(), 101, "queued-task", "todo");
-        write_board_task_file(tmp.path(), 102, "review-task", "review", Some("eng-1"), &[], None);
+        write_board_task_file(
+            tmp.path(),
+            102,
+            "review-task",
+            "review",
+            Some("eng-1"),
+            &[],
+            None,
+        );
 
         daemon.maybe_detect_pipeline_starvation().unwrap();
 

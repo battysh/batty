@@ -686,7 +686,7 @@ pub(super) fn engineer_task_branch_name(
 ) -> String {
     let suffix = explicit_task_id
         .or_else(|| parse_assignment_task_id(task))
-        .map(|task_id| format!("task-{task_id}"))
+        .map(|task_id| task_id.to_string())
         .unwrap_or_else(|| {
             let slug = slugify_task_branch(task);
             let unique = Uuid::new_v4().simple().to_string();
@@ -760,7 +760,7 @@ mod tests {
     fn engineer_task_branch_name_uses_explicit_task_id() {
         assert_eq!(
             engineer_task_branch_name("eng-1-3", "freeform task body", Some(123)),
-            "eng-1-3/task-123"
+            "eng-1-3/123"
         );
     }
 
@@ -768,7 +768,7 @@ mod tests {
     fn engineer_task_branch_name_extracts_task_id_from_assignment_text() {
         assert_eq!(
             engineer_task_branch_name("eng-1-3", "Task #456: fix move generation", None),
-            "eng-1-3/task-456"
+            "eng-1-3/456"
         );
     }
 

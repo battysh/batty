@@ -705,7 +705,7 @@ mod tests {
             &repo,
             &worktree_dir,
             "eng-1",
-            "eng-1/task-42",
+            "eng-1/42",
             &team_config_dir,
         )
         .unwrap();
@@ -721,7 +721,7 @@ mod tests {
             engineer_base_branch_name("eng-1")
         );
 
-        let branch_check = git(&repo, &["rev-parse", "--verify", "eng-1/task-42"]);
+        let branch_check = git(&repo, &["rev-parse", "--verify", "eng-1/42"]);
         assert!(
             !branch_check.status.success(),
             "merged task branch should be deleted"
@@ -774,7 +774,7 @@ mod tests {
             &repo,
             &worktree_dir,
             "eng-keep",
-            "eng-keep/task-77",
+            "eng-keep/77",
             &team_config_dir,
         )
         .unwrap();
@@ -790,9 +790,44 @@ mod tests {
             engineer_base_branch_name("eng-keep")
         );
         assert!(
-            git(&repo, &["rev-parse", "--verify", "eng-keep/task-77"])
+            git(&repo, &["rev-parse", "--verify", "eng-keep/77"])
                 .status
                 .success()
+        );
+    }
+
+    #[test]
+    fn reset_worktree_deletes_merged_legacy_task_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-legacy");
+
+        setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            &engineer_base_branch_name("eng-legacy"),
+            &team_config_dir,
+        )
+        .unwrap();
+        git_ok(
+            &worktree_dir,
+            &["checkout", "-B", "eng-legacy/task-55", "main"],
+        );
+        std::fs::write(worktree_dir.join("legacy.txt"), "legacy branch work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "legacy.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "legacy task work"]);
+        git_ok(&repo, &["merge", "eng-legacy/task-55", "--no-edit"]);
+
+        reset_engineer_worktree(&repo, "eng-legacy").unwrap();
+
+        assert!(
+            !git(&repo, &["rev-parse", "--verify", "eng-legacy/task-55"])
+                .status
+                .success()
+        );
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            engineer_base_branch_name("eng-legacy")
         );
     }
 

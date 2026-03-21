@@ -761,14 +761,14 @@ mod tests {
             &repo,
             &worktree_dir,
             "eng-5",
-            "eng-5/task-123",
+            "eng-5/123",
             &team_config_dir,
         )
         .unwrap();
 
         assert_eq!(
             git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
-            "eng-5/task-123"
+            "eng-5/123"
         );
         assert_eq!(
             git_stdout(&repo, &["rev-parse", "main"]),
@@ -798,7 +798,7 @@ mod tests {
             &repo,
             &worktree_dir,
             "eng-6",
-            "eng-6/task-7",
+            "eng-6/7",
             &team_config_dir,
         )
         .unwrap();
@@ -827,7 +827,7 @@ mod tests {
             &repo,
             &worktree_dir,
             "eng-6b",
-            "eng-6b/task-17",
+            "eng-6b/17",
             &team_config_dir,
         )
         .unwrap();
@@ -836,7 +836,7 @@ mod tests {
         assert!(!legacy_check.status.success());
         assert_eq!(
             git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
-            "eng-6b/task-17"
+            "eng-6b/17"
         );
         assert_eq!(
             git_stdout(&repo, &["rev-parse", "--verify", "eng-main/eng-6b"]),
@@ -857,7 +857,7 @@ mod tests {
             &repo,
             &worktree_dir,
             "eng-7",
-            "eng-7/task-99",
+            "eng-7/99",
             &team_config_dir,
         )
         .unwrap();
@@ -866,7 +866,7 @@ mod tests {
         assert!(!legacy_check.status.success());
         assert_eq!(
             git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
-            "eng-7/task-99"
+            "eng-7/99"
         );
     }
 
@@ -887,7 +887,7 @@ mod tests {
             &repo,
             &worktree_dir,
             "eng-8",
-            "eng-8/task-100",
+            "eng-8/100",
             &team_config_dir,
         )
         .unwrap();
@@ -897,7 +897,7 @@ mod tests {
         assert!(!git_stdout(&repo, &["branch", "--list", "legacy/eng-8-*"]).is_empty());
         assert_eq!(
             git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
-            "eng-8/task-100"
+            "eng-8/100"
         );
     }
 
@@ -914,7 +914,7 @@ mod tests {
             &repo,
             &worktree_dir,
             "eng-9",
-            "eng-9/task-1",
+            "eng-9/1",
             &team_config_dir,
         )
         .unwrap_err();
