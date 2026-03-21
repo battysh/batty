@@ -39,18 +39,23 @@ use super::message;
 use super::standup::MemberState;
 use super::status;
 use super::task_cmd;
-use super::task_loop::{
-    engineer_base_branch_name, next_unclaimed_task, prepare_engineer_assignment_worktree,
-    setup_engineer_worktree,
-};
+#[cfg(test)]
+use super::task_loop::next_unclaimed_task;
+use super::task_loop::{engineer_base_branch_name, setup_engineer_worktree};
 use super::watcher::{SessionTrackerConfig, SessionWatcher, WatcherState};
 use super::{AssignmentDeliveryResult, AssignmentResultStatus, now_unix, store_assignment_result};
 use crate::agent;
 use crate::tmux;
 
+#[path = "dispatch.rs"]
+mod dispatch;
 #[path = "daemon/interventions.rs"]
 mod interventions;
 
+use self::dispatch::{
+    canonical_agent_name, new_member_session_id, normalized_assignment_dir, strip_nudge_section,
+    write_launch_script,
+};
 pub(crate) use self::interventions::NudgeSchedule;
 use self::interventions::OwnedTaskInterventionState;
 
@@ -143,12 +148,6 @@ struct LaunchIdentity {
     agent: String,
     prompt: String,
     session_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AssignmentLaunch {
-    branch: Option<String>,
-    work_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1558,145 +1557,6 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         message
     }
 
-    fn launch_task_assignment(
-        &mut self,
-        engineer: &str,
-        task: &str,
-        task_id: Option<u32>,
-        reset_context: bool,
-        emit_task_assigned: bool,
-    ) -> Result<AssignmentLaunch> {
-        info!(engineer, task, "assigning task");
-
-        let Some(pane_id) = self.config.pane_map.get(engineer).cloned() else {
-            bail!("no pane found for engineer '{engineer}'");
-        };
-
-        let member = self
-            .config
-            .members
-            .iter()
-            .find(|m| m.name == engineer)
-            .cloned();
-        let agent_name = member
-            .as_ref()
-            .and_then(|m| m.agent.as_deref())
-            .unwrap_or("claude");
-
-        let team_config_dir = self.config.project_root.join(".batty").join("team_config");
-        let use_worktrees = member.as_ref().map(|m| m.use_worktrees).unwrap_or(false);
-        let task_branch = use_worktrees.then(|| engineer_task_branch_name(engineer, task, task_id));
-        let work_dir = if let Some(task_branch) = task_branch.as_deref() {
-            let work_dir = self
-                .config
-                .project_root
-                .join(".batty")
-                .join("worktrees")
-                .join(engineer);
-            prepare_engineer_assignment_worktree(
-                &self.config.project_root,
-                &work_dir,
-                engineer,
-                task_branch,
-                &team_config_dir,
-            )?
-        } else {
-            self.config.project_root.clone()
-        };
-
-        if reset_context {
-            let adapter = agent::adapter_from_name(agent_name);
-            if let Some(adapter) = &adapter {
-                for (keys, enter) in adapter.reset_context_keys() {
-                    tmux::send_keys(&pane_id, &keys, enter)?;
-                    std::thread::sleep(Duration::from_millis(500));
-                }
-            }
-        }
-
-        self.ensure_assignment_pane_cwd(engineer, &pane_id, &work_dir)?;
-
-        let role_context = member
-            .as_ref()
-            .map(|m| strip_nudge_section(&self.load_prompt(m, &team_config_dir)));
-        let normalized_agent = canonical_agent_name(agent_name);
-        let session_id = new_member_session_id(&normalized_agent);
-
-        std::thread::sleep(Duration::from_secs(1));
-        let short_cmd = write_launch_script(
-            engineer,
-            agent_name,
-            task,
-            role_context.as_deref(),
-            &work_dir,
-            &self.config.project_root,
-            false,
-            false,
-            session_id.as_deref(),
-        )?;
-        if let Some(watcher) = self.watchers.get_mut(engineer) {
-            watcher.set_session_id(session_id.clone());
-        }
-        tmux::send_keys(&pane_id, &short_cmd, true)?;
-        if let Some(session_id) = session_id.as_deref() {
-            self.persist_member_session_id(engineer, session_id)?;
-        }
-
-        self.mark_member_working(engineer);
-
-        if emit_task_assigned {
-            self.emit_event(TeamEvent::task_assigned(engineer, task));
-        }
-
-        Ok(AssignmentLaunch {
-            branch: task_branch,
-            work_dir,
-        })
-    }
-
-    fn ensure_assignment_pane_cwd(
-        &mut self,
-        member_name: &str,
-        pane_id: &str,
-        expected_dir: &Path,
-    ) -> Result<()> {
-        let current_path = PathBuf::from(tmux::pane_current_path(pane_id)?);
-        let normalized_expected = normalized_assignment_dir(expected_dir);
-        if normalized_assignment_dir(&current_path) == normalized_expected {
-            return Ok(());
-        }
-
-        warn!(
-            member = %member_name,
-            pane = %pane_id,
-            current = %current_path.display(),
-            expected = %expected_dir.display(),
-            "correcting pane cwd before assignment"
-        );
-
-        let command = format!(
-            "cd '{}'",
-            shell_single_quote(expected_dir.to_string_lossy().as_ref())
-        );
-        tmux::send_keys(pane_id, &command, true)?;
-        std::thread::sleep(Duration::from_millis(200));
-
-        let corrected_path = PathBuf::from(tmux::pane_current_path(pane_id)?);
-        if normalized_assignment_dir(&corrected_path) != normalized_expected {
-            bail!(
-                "failed to correct pane cwd for '{member_name}': expected {}, got {}",
-                expected_dir.display(),
-                corrected_path.display()
-            );
-        }
-
-        self.emit_event(TeamEvent::cwd_corrected(
-            member_name,
-            &expected_dir.display().to_string(),
-        ));
-        Ok(())
-    }
-
     pub(super) fn increment_retry(&mut self, engineer: &str) -> u32 {
         let count = self.retry_counts.entry(engineer.to_string()).or_insert(0);
         *count += 1;
@@ -1706,54 +1566,6 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
     pub(super) fn clear_active_task(&mut self, engineer: &str) {
         self.active_tasks.remove(engineer);
         self.retry_counts.remove(engineer);
-    }
-
-    pub(super) fn run_kanban_md_nonfatal<'a, I>(
-        &mut self,
-        args: &[&str],
-        action: &str,
-        recipients: I,
-    ) -> bool
-    where
-        I: IntoIterator<Item = &'a str>,
-    {
-        match std::process::Command::new("kanban-md").args(args).output() {
-            Ok(output) if output.status.success() => true,
-            Ok(output) => {
-                let detail = describe_command_failure("kanban-md", args, &output);
-                self.report_nonfatal_kanban_failure(action, &detail, recipients);
-                false
-            }
-            Err(error) => {
-                let detail = format!("failed to execute `kanban-md {}`: {error}", args.join(" "));
-                self.report_nonfatal_kanban_failure(action, &detail, recipients);
-                false
-            }
-        }
-    }
-
-    fn report_nonfatal_kanban_failure<'a, I>(&mut self, action: &str, detail: &str, recipients: I)
-    where
-        I: IntoIterator<Item = &'a str>,
-    {
-        warn!(
-            action,
-            error = detail,
-            "kanban-md command failed; continuing"
-        );
-
-        let body = format!(
-            "Board automation failed while trying to {action}.\n{detail}\nDecide the next board action manually."
-        );
-        let mut notified = HashSet::new();
-        for recipient in recipients {
-            if !notified.insert(recipient.to_string()) {
-                continue;
-            }
-            if let Err(error) = self.queue_daemon_message(recipient, &body) {
-                warn!(to = recipient, error = %error, "failed to relay kanban-md failure");
-            }
-        }
     }
 
     fn queue_daemon_message(&mut self, recipient: &str, body: &str) -> Result<MessageDelivery> {
@@ -1811,100 +1623,6 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         inbox::deliver_to_inbox(&root, &msg)?;
         self.emit_event(TeamEvent::message_routed(from, recipient));
         Ok(MessageDelivery::InboxQueued)
-    }
-
-    fn notify_assignment_sender_success(
-        &mut self,
-        sender: &str,
-        engineer: &str,
-        msg_id: &str,
-        task: &str,
-        launch: &AssignmentLaunch,
-    ) {
-        let mut body = format!(
-            "Assignment delivered.\nEngineer: {engineer}\nMessage ID: {msg_id}\nTask: {}",
-            summarize_assignment(task)
-        );
-        if let Some(branch) = launch.branch.as_deref() {
-            body.push_str(&format!("\nBranch: {branch}"));
-        }
-        body.push_str(&format!("\nWorktree: {}", launch.work_dir.display()));
-
-        if let Err(error) = self.queue_daemon_message(sender, &body) {
-            warn!(to = sender, error = %error, "failed to notify assignment sender");
-        }
-    }
-
-    fn record_assignment_success(
-        &self,
-        engineer: &str,
-        msg_id: &str,
-        task: &str,
-        launch: &AssignmentLaunch,
-    ) {
-        let result = AssignmentDeliveryResult {
-            message_id: msg_id.to_string(),
-            status: AssignmentResultStatus::Delivered,
-            engineer: engineer.to_string(),
-            task_summary: summarize_assignment(task),
-            branch: launch.branch.clone(),
-            work_dir: Some(launch.work_dir.display().to_string()),
-            detail: "assignment launched".to_string(),
-            ts: now_unix(),
-        };
-        if let Err(error) = store_assignment_result(&self.config.project_root, &result) {
-            warn!(id = msg_id, error = %error, "failed to record assignment success");
-        }
-    }
-
-    fn notify_assignment_sender_failure(
-        &mut self,
-        sender: &str,
-        engineer: &str,
-        msg_id: &str,
-        task: &str,
-        error: &anyhow::Error,
-    ) {
-        let body = format!(
-            "Assignment failed.\nEngineer: {engineer}\nMessage ID: {msg_id}\nTask: {}\nReason: {error}",
-            summarize_assignment(task)
-        );
-
-        if let Err(notify_error) = self.queue_daemon_message(sender, &body) {
-            warn!(
-                to = sender,
-                error = %notify_error,
-                "failed to notify assignment sender of failure"
-            );
-        }
-    }
-
-    fn record_assignment_failure(
-        &self,
-        engineer: &str,
-        msg_id: &str,
-        task: &str,
-        error: &anyhow::Error,
-    ) {
-        let work_dir = self
-            .config
-            .project_root
-            .join(".batty")
-            .join("worktrees")
-            .join(engineer);
-        let result = AssignmentDeliveryResult {
-            message_id: msg_id.to_string(),
-            status: AssignmentResultStatus::Failed,
-            engineer: engineer.to_string(),
-            task_summary: summarize_assignment(task),
-            branch: None,
-            work_dir: Some(work_dir.display().to_string()),
-            detail: error.to_string(),
-            ts: now_unix(),
-        };
-        if let Err(store_error) = store_assignment_result(&self.config.project_root, &result) {
-            warn!(id = msg_id, error = %store_error, "failed to record assignment failure");
-        }
     }
 
     pub(super) fn notify_reports_to(&mut self, from_role: &str, msg: &str) -> Result<()> {
@@ -2109,105 +1827,6 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             }
         }
 
-        Ok(())
-    }
-
-    /// Assign a task to an engineer: reset context, inject new prompt.
-    fn assign_task(&mut self, engineer: &str, task: &str) -> Result<AssignmentLaunch> {
-        self.assign_task_with_task_id(engineer, task, None)
-    }
-
-    fn assign_task_with_task_id(
-        &mut self,
-        engineer: &str,
-        task: &str,
-        task_id: Option<u32>,
-    ) -> Result<AssignmentLaunch> {
-        self.launch_task_assignment(engineer, task, task_id, true, true)
-    }
-
-    fn idle_engineer_names(&self) -> Vec<String> {
-        self.config
-            .members
-            .iter()
-            .filter(|member| member.role_type == RoleType::Engineer)
-            .filter(|member| self.states.get(&member.name) == Some(&MemberState::Idle))
-            .map(|member| member.name.clone())
-            .collect()
-    }
-
-    fn auto_dispatch(&mut self) -> Result<()> {
-        let board_dir = self
-            .config
-            .project_root
-            .join(".batty")
-            .join("team_config")
-            .join("board");
-        let board_dir_str = board_dir.to_string_lossy().to_string();
-
-        for engineer_name in self.idle_engineer_names() {
-            let Some(task) = next_unclaimed_task(&board_dir)? else {
-                break;
-            };
-
-            let board_failure_recipients: Vec<String> = self
-                .config
-                .members
-                .iter()
-                .filter(|member| {
-                    matches!(member.role_type, RoleType::Architect | RoleType::Manager)
-                })
-                .map(|member| member.name.clone())
-                .collect();
-            if !self.run_kanban_md_nonfatal(
-                &[
-                    "pick",
-                    "--claim",
-                    &engineer_name,
-                    "--move",
-                    "in-progress",
-                    "--dir",
-                    &board_dir_str,
-                ],
-                &format!("pick the next task for {engineer_name}"),
-                board_failure_recipients.iter().map(String::as_str),
-            ) {
-                break;
-            }
-
-            let assignment_message =
-                format!("Task #{}: {}\n\n{}", task.id, task.title, task.description);
-            self.assign_task_with_task_id(&engineer_name, &assignment_message, Some(task.id))?;
-            self.active_tasks.insert(engineer_name.clone(), task.id);
-            self.retry_counts.remove(&engineer_name);
-            self.record_orchestrator_action(format!(
-                "dependency resolution: selected runnable task #{} ({}) and dispatched it to {}",
-                task.id, task.title, engineer_name
-            ));
-            info!(
-                engineer = %engineer_name,
-                task_id = task.id,
-                task_title = %task.title,
-                "auto-dispatched task"
-            );
-        }
-
-        Ok(())
-    }
-
-    fn maybe_auto_dispatch(&mut self) -> Result<()> {
-        if !self.config.team_config.board.auto_dispatch {
-            return Ok(());
-        }
-
-        if self.last_auto_dispatch.elapsed() < Duration::from_secs(10) {
-            return Ok(());
-        }
-
-        if let Err(e) = self.auto_dispatch() {
-            warn!(error = %e, "auto-dispatch failed");
-        }
-        self.last_auto_dispatch = Instant::now();
         Ok(())
     }
 
@@ -2909,26 +2528,6 @@ fn extract_nudge_section(prompt_path: &Path) -> Option<String> {
 ///
 /// The nudge content is daemon-only — injected periodically, not part of the
 /// initial prompt.
-fn strip_nudge_section(prompt: &str) -> String {
-    let mut lines = Vec::new();
-    let mut in_nudge = false;
-
-    for line in prompt.lines() {
-        if line.starts_with("## Nudge") {
-            in_nudge = true;
-            continue;
-        }
-        if in_nudge && line.starts_with("## ") {
-            in_nudge = false;
-        }
-        if !in_nudge {
-            lines.push(line);
-        }
-    }
-
-    lines.join("\n").trim_end().to_string()
-}
-
 fn format_stuck_duration(stuck_age_secs: u64) -> String {
     if stuck_age_secs >= 3600 {
         let hours = stuck_age_secs / 3600;
@@ -3044,134 +2643,6 @@ fn exec_reloaded_daemon(_executable: &Path, _project_root: &Path) -> Result<()> 
     bail!("daemon hot reload via exec is only supported on unix")
 }
 
-/// Write a launch script to a temp file and return the short command to execute it.
-///
-/// This avoids pasting huge prompt strings via tmux paste-buffer, which garbles
-/// long text. Instead we write a self-contained bash script and paste just
-/// `bash /tmp/batty-launch-<member>.sh`.
-/// Write a launch script to a temp file and return the short command to execute it.
-///
-/// `idle`: if true, the role prompt goes into `--append-system-prompt` and the
-/// agent launches with no initial user message (sits at the `>` prompt waiting
-/// for the daemon to inject work). If false, the prompt is sent as the first
-/// user message so the agent starts working immediately.
-#[allow(clippy::too_many_arguments)]
-fn write_launch_script(
-    member_name: &str,
-    agent_name: &str,
-    prompt: &str,
-    role_context: Option<&str>,
-    work_dir: &Path,
-    project_root: &Path,
-    idle: bool,
-    resume: bool,
-    session_id: Option<&str>,
-) -> Result<String> {
-    // Namespace temp paths by project to avoid collisions when multiple batty
-    // instances run concurrently (e.g. batty + mafia_solver both have "architect").
-    let project_slug = project_root
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "default".to_string());
-    let script_path =
-        std::env::temp_dir().join(format!("batty-launch-{project_slug}-{member_name}.sh"));
-    let escaped_prompt = prompt.replace('\'', "'\\''");
-    let launch_dir = match agent_name {
-        "codex" | "codex-cli" => prepare_codex_context(member_name, role_context, work_dir)?,
-        _ => work_dir.to_path_buf(),
-    };
-    let launch_dir_str = launch_dir.to_string_lossy();
-
-    let agent_cmd = match agent_name {
-        "codex" | "codex-cli" => {
-            if resume {
-                // Resume the most recent Codex session in this working directory
-                "exec codex resume --last --dangerously-bypass-approvals-and-sandbox".to_string()
-            } else {
-                let prefix = "exec codex --dangerously-bypass-approvals-and-sandbox";
-                if idle {
-                    prefix.to_string()
-                } else {
-                    format!("{prefix} '{escaped_prompt}'")
-                }
-            }
-        }
-        _ => {
-            if resume {
-                let session_id = session_id.context("missing Claude session ID for resume")?;
-                format!("exec claude --dangerously-skip-permissions --resume '{session_id}'")
-            } else if idle {
-                let session_flag = session_id
-                    .map(|id| format!(" --session-id '{id}'"))
-                    .unwrap_or_default();
-                format!(
-                    "exec claude --dangerously-skip-permissions{session_flag} --append-system-prompt '{escaped_prompt}'"
-                )
-            } else {
-                let session_flag = session_id
-                    .map(|id| format!(" --session-id '{id}'"))
-                    .unwrap_or_default();
-                format!(
-                    "exec claude --dangerously-skip-permissions{session_flag} '{escaped_prompt}'"
-                )
-            }
-        }
-    };
-
-    // Create wrapper scripts in a per-member bin directory prepended to PATH.
-    // This ensures agents use the correct binaries regardless of their environment.
-    let wrapper_dir = std::env::temp_dir().join(format!("batty-bin-{project_slug}-{member_name}"));
-    std::fs::create_dir_all(&wrapper_dir).ok();
-
-    #[cfg(unix)]
-    let set_executable = |path: &std::path::Path| {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).ok();
-    };
-    #[cfg(not(unix))]
-    let set_executable = |_path: &std::path::Path| {};
-
-    // kanban-md wrapper: auto-adds --dir pointing to the project board
-    let board_dir = project_root
-        .join(".batty")
-        .join("team_config")
-        .join("board");
-    let real_kanban = resolve_binary("kanban-md");
-    let kanban_wrapper = wrapper_dir.join("kanban-md");
-    std::fs::write(
-        &kanban_wrapper,
-        format!(
-            "#!/bin/bash\nexec '{}' \"$@\" --dir '{}'\n",
-            real_kanban,
-            board_dir.to_string_lossy()
-        ),
-    )
-    .ok();
-    set_executable(&kanban_wrapper);
-
-    // batty wrapper: resolve the installed binary from PATH.
-    // Do NOT use current_exe() — if the daemon was launched from a debug/test
-    // build (target/debug/deps/batty-*), agents would inherit that test binary,
-    // causing `batty send` to run cargo tests instead of the real command.
-    let real_batty = resolve_binary("batty");
-    let batty_wrapper = wrapper_dir.join("batty");
-    std::fs::write(
-        &batty_wrapper,
-        format!("#!/bin/bash\nexec '{}' \"$@\"\n", real_batty),
-    )
-    .ok();
-    set_executable(&batty_wrapper);
-
-    let script = format!(
-        "#!/bin/bash\nexport PATH='{}':\"$PATH\"\ncd '{launch_dir_str}'\n{agent_cmd}\n",
-        wrapper_dir.to_string_lossy()
-    );
-    std::fs::write(&script_path, &script)
-        .with_context(|| format!("failed to write launch script {}", script_path.display()))?;
-
-    Ok(format!("bash '{}'", script_path.to_string_lossy()))
-}
-
 fn prepare_codex_context(
     member_name: &str,
     role_context: Option<&str>,
@@ -3213,12 +2684,6 @@ fn initial_member_state(idle: bool, resume: bool) -> MemberState {
 
 fn should_activate_watcher_on_spawn(idle: bool, resume: bool) -> bool {
     !idle || resume
-}
-
-fn canonical_agent_name(agent_name: &str) -> String {
-    agent::adapter_from_name(agent_name)
-        .map(|adapter| adapter.name().to_string())
-        .unwrap_or_else(|| agent_name.to_string())
 }
 
 fn launch_state_path(project_root: &Path) -> PathBuf {
@@ -3281,94 +2746,6 @@ fn save_daemon_state(project_root: &Path, state: &PersistedDaemonState) -> Resul
         serde_json::to_string_pretty(state).context("failed to serialize daemon state")?;
     fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
-}
-
-fn new_member_session_id(agent_name: &str) -> Option<String> {
-    (agent_name == "claude-code").then(|| Uuid::new_v4().to_string())
-}
-
-fn normalized_assignment_dir(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-fn shell_single_quote(value: &str) -> String {
-    value.replace('\'', "'\"'\"'")
-}
-
-fn summarize_assignment(task: &str) -> String {
-    let summary = task
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("task")
-        .trim();
-    if summary.len() <= 120 {
-        summary.to_string()
-    } else {
-        format!("{}...", &summary[..117])
-    }
-}
-
-fn engineer_task_branch_name(engineer: &str, task: &str, explicit_task_id: Option<u32>) -> String {
-    let suffix = explicit_task_id
-        .or_else(|| parse_assignment_task_id(task))
-        .map(|task_id| format!("task-{task_id}"))
-        .unwrap_or_else(|| {
-            let slug = slugify_task_branch(task);
-            let unique = Uuid::new_v4().simple().to_string();
-            format!("task-{slug}-{}", &unique[..8])
-        });
-    format!("{engineer}/{suffix}")
-}
-
-fn parse_assignment_task_id(task: &str) -> Option<u32> {
-    let mut candidates = Vec::new();
-    if let Some(first_line) = task.lines().find(|line| !line.trim().is_empty()) {
-        candidates.push(first_line);
-    }
-    candidates.push(task.trim());
-    for candidate in candidates {
-        for marker in ["Task #", "task #", "#"] {
-            let Some(start) = candidate.find(marker) else {
-                continue;
-            };
-            let digits: String = candidate[start + marker.len()..]
-                .chars()
-                .take_while(|ch| ch.is_ascii_digit())
-                .collect();
-            if !digits.is_empty() {
-                return digits.parse().ok();
-            }
-        }
-    }
-    None
-}
-
-fn slugify_task_branch(task: &str) -> String {
-    let source = task
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("task");
-    let mut slug = String::new();
-    let mut last_was_dash = false;
-    for ch in source.chars() {
-        let lower = ch.to_ascii_lowercase();
-        if lower.is_ascii_alphanumeric() {
-            slug.push(lower);
-            last_was_dash = false;
-        } else if !last_was_dash && !slug.is_empty() {
-            slug.push('-');
-            last_was_dash = true;
-        }
-        if slug.len() >= 24 {
-            break;
-        }
-    }
-    let slug = slug.trim_matches('-').to_string();
-    if slug.is_empty() {
-        "task".to_string()
-    } else {
-        slug
-    }
 }
 
 fn default_claude_projects_root() -> PathBuf {
@@ -3990,94 +3367,6 @@ mod tests {
     }
 
     #[test]
-    fn engineer_task_branch_name_uses_explicit_task_id() {
-        assert_eq!(
-            engineer_task_branch_name("eng-1-3", "freeform task body", Some(123)),
-            "eng-1-3/task-123"
-        );
-    }
-
-    #[test]
-    fn engineer_task_branch_name_extracts_task_id_from_assignment_text() {
-        assert_eq!(
-            engineer_task_branch_name("eng-1-3", "Task #456: fix move generation", None),
-            "eng-1-3/task-456"
-        );
-    }
-
-    #[test]
-    fn engineer_task_branch_name_falls_back_to_slugged_branch() {
-        let branch = engineer_task_branch_name("eng-1-3", "Fix castling rights sync", None);
-        assert!(branch.starts_with("eng-1-3/task-fix-castling-rights-sy"));
-    }
-
-    #[test]
-    fn summarize_assignment_uses_first_non_empty_line() {
-        assert_eq!(
-            summarize_assignment("\n\nTask #9: fix move ordering\n\nDetails below"),
-            "Task #9: fix move ordering"
-        );
-    }
-
-    #[test]
-    fn launch_script_escapes_single_quotes() {
-        write_launch_script(
-            "eng-2",
-            "claude",
-            "fix the user's bug",
-            None,
-            Path::new("/tmp"),
-            Path::new("/tmp"),
-            false,
-            false,
-            Some("33333333-3333-4333-8333-333333333333"),
-        )
-        .unwrap();
-        let script_path = std::env::temp_dir().join("batty-launch-eng-2.sh");
-        let content = std::fs::read_to_string(&script_path).unwrap();
-        assert!(content.contains("user'\\''s"));
-    }
-
-    #[test]
-    fn launch_script_resume_claude_uses_explicit_session_id() {
-        write_launch_script(
-            "architect",
-            "claude",
-            "ignored",
-            None,
-            Path::new("/project"),
-            Path::new("/project"),
-            true,
-            true,
-            Some("44444444-4444-4444-8444-444444444444"),
-        )
-        .unwrap();
-        let script_path = std::env::temp_dir().join("batty-launch-project-architect.sh");
-        let content = std::fs::read_to_string(&script_path).unwrap();
-        assert!(content.contains(
-            "exec claude --dangerously-skip-permissions --resume '44444444-4444-4444-8444-444444444444'"
-        ));
-    }
-
-    #[test]
-    fn strip_nudge_removes_section() {
-        let prompt = "# Architect\n\n## Responsibilities\n\n- plan\n\n## Nudge\n\nDo a check-in.\n1. Review work\n2. Update roadmap\n\n## Communication\n\n- talk to manager\n";
-        let stripped = strip_nudge_section(prompt);
-        assert!(stripped.contains("# Architect"));
-        assert!(stripped.contains("## Responsibilities"));
-        assert!(stripped.contains("## Communication"));
-        assert!(!stripped.contains("## Nudge"));
-        assert!(!stripped.contains("Do a check-in"));
-    }
-
-    #[test]
-    fn strip_nudge_noop_when_absent() {
-        let prompt = "# Engineer\n\n## Workflow\n\n- code\n";
-        let stripped = strip_nudge_section(prompt);
-        assert_eq!(stripped, prompt.trim_end());
-    }
-
-    #[test]
     fn extract_nudge_from_file() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
@@ -4165,14 +3454,6 @@ mod tests {
         assert!(label.contains("working"));
         assert!(label.contains("inbox 0"));
         assert!(label.contains("PAUSED"));
-    }
-
-    #[test]
-    fn canonical_agent_name_normalizes_aliases() {
-        assert_eq!(canonical_agent_name("claude"), "claude-code");
-        assert_eq!(canonical_agent_name("claude-code"), "claude-code");
-        assert_eq!(canonical_agent_name("codex"), "codex-cli");
-        assert_eq!(canonical_agent_name("codex-cli"), "codex-cli");
     }
 
     #[test]
