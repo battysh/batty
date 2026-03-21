@@ -26,6 +26,33 @@ use super::task_loop::{
     delete_branch, engineer_base_branch_name, read_task_title, run_tests_in_worktree,
 };
 
+fn run_git_with_context(
+    repo_dir: &Path,
+    args: &[&str],
+    intent: &str,
+) -> Result<std::process::Output> {
+    let command = format!("git {}", args.join(" "));
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo_dir)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed while trying to {intent}: could not execute `{command}` in {}",
+                repo_dir.display()
+            )
+        })
+}
+
+fn describe_git_failure(repo_dir: &Path, args: &[&str], intent: &str, stderr: &str) -> String {
+    format!(
+        "failed while trying to {intent}: `git {}` in {} returned: {}",
+        args.join(" "),
+        repo_dir.display(),
+        stderr.trim()
+    )
+}
+
 pub(crate) struct MergeLock {
     path: PathBuf,
 }
@@ -314,32 +341,47 @@ pub(crate) fn merge_engineer_branch(
     let branch = current_worktree_branch(&worktree_dir)?;
     info!(engineer = engineer_name, branch = %branch, "merging worktree branch");
 
-    let rebase = std::process::Command::new("git")
-        .args(["rebase", "main"])
-        .current_dir(&worktree_dir)
-        .output()
-        .context("failed to rebase engineer branch onto main")?;
+    let rebase = run_git_with_context(
+        &worktree_dir,
+        &["rebase", "main"],
+        &format!(
+            "rebase engineer branch '{branch}' onto main before merging for '{engineer_name}'"
+        ),
+    )?;
 
     if !rebase.status.success() {
         let stderr = String::from_utf8_lossy(&rebase.stderr).trim().to_string();
-        let _ = std::process::Command::new("git")
-            .args(["rebase", "--abort"])
-            .current_dir(&worktree_dir)
-            .output();
+        let _ = run_git_with_context(
+            &worktree_dir,
+            &["rebase", "--abort"],
+            &format!("abort rebase for engineer branch '{branch}' after conflict"),
+        );
         warn!(engineer = engineer_name, branch = %branch, "rebase conflict during merge");
-        return Ok(MergeOutcome::RebaseConflict(stderr));
+        return Ok(MergeOutcome::RebaseConflict(describe_git_failure(
+            &worktree_dir,
+            &["rebase", "main"],
+            &format!(
+                "rebase engineer branch '{branch}' onto main before merging for '{engineer_name}'"
+            ),
+            &stderr,
+        )));
     }
 
-    let output = std::process::Command::new("git")
-        .args(["merge", &branch, "--no-edit"])
-        .current_dir(project_root)
-        .output()
-        .context("git merge failed")?;
+    let output = run_git_with_context(
+        project_root,
+        &["merge", &branch, "--no-edit"],
+        &format!("merge engineer branch '{branch}' from '{engineer_name}' into main"),
+    )?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         warn!(engineer = engineer_name, branch = %branch, "git merge failed");
-        return Ok(MergeOutcome::MergeFailure(stderr));
+        return Ok(MergeOutcome::MergeFailure(describe_git_failure(
+            project_root,
+            &["merge", &branch, "--no-edit"],
+            &format!("merge engineer branch '{branch}' from '{engineer_name}' into main"),
+            &stderr,
+        )));
     }
 
     println!("Merged branch '{branch}' from {engineer_name}");
@@ -441,15 +483,23 @@ fn record_merge_test_timing(
 }
 
 fn commits_ahead_of_main(worktree_dir: &Path) -> Result<u32> {
-    let output = std::process::Command::new("git")
-        .args(["rev-list", "--count", "main..HEAD"])
-        .current_dir(worktree_dir)
-        .output()
-        .context("failed to run git rev-list --count main..HEAD")?;
+    let output = run_git_with_context(
+        worktree_dir,
+        &["rev-list", "--count", "main..HEAD"],
+        "count commits ahead of main before accepting engineer completion",
+    )?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git rev-list --count main..HEAD failed: {stderr}");
+        bail!(
+            "{}",
+            describe_git_failure(
+                worktree_dir,
+                &["rev-list", "--count", "main..HEAD"],
+                "count commits ahead of main before accepting engineer completion",
+                &stderr,
+            )
+        );
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -515,6 +565,14 @@ mod tests {
             engineer_member(engineer, Some("manager"), true),
         ];
         make_test_daemon(repo, members)
+    }
+
+    #[test]
+    fn commits_ahead_of_main_error_includes_command_and_intent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let error = commits_ahead_of_main(tmp.path()).unwrap_err().to_string();
+        assert!(error.contains("count commits ahead of main before accepting engineer completion"));
+        assert!(error.contains("git rev-list --count main..HEAD"));
     }
 
     fn setup_rebase_conflict_repo(

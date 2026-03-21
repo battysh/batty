@@ -303,7 +303,12 @@ fn resolve_repo_root(project_root: &Path) -> Result<PathBuf> {
         .current_dir(project_root)
         .args(["rev-parse", "--show-toplevel"])
         .output()
-        .with_context(|| format!("failed to run git in {}", project_root.display()))?;
+        .with_context(|| {
+            format!(
+                "failed while trying to resolve the repository root: could not execute `git rev-parse --show-toplevel` in {}",
+                project_root.display()
+            )
+        })?;
     if !output.status.success() {
         bail!(
             "not a git repository: {}",
@@ -405,11 +410,23 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_os_string())
+        .collect::<Vec<_>>();
+    let command = {
+        let rendered = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("git {rendered}")
+    };
     Command::new("git")
         .current_dir(repo_root)
-        .args(args)
+        .args(&args)
         .output()
-        .with_context(|| format!("failed to run git in {}", repo_root.display()))
+        .with_context(|| format!("failed to execute `{command}` in {}", repo_root.display()))
 }
 
 fn branch_exists(repo_root: &Path, branch: &str) -> Result<bool> {

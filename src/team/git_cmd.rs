@@ -35,13 +35,26 @@ fn classify_error(stderr: &str) -> GitError {
     }
 }
 
+fn format_git_command(repo_dir: &Path, args: &[&str]) -> String {
+    let mut parts = vec![
+        "git".to_string(),
+        "-C".to_string(),
+        repo_dir.display().to_string(),
+    ];
+    parts.extend(args.iter().map(|arg| arg.to_string()));
+    parts.join(" ")
+}
+
 fn run_git_with_status(repo_dir: &Path, args: &[&str]) -> Result<std::process::Output, GitError> {
     Command::new("git")
         .arg("-C")
         .arg(repo_dir)
         .args(args)
         .output()
-        .map_err(GitError::from)
+        .map_err(|source| GitError::Exec {
+            command: format_git_command(repo_dir, args),
+            source,
+        })
 }
 
 pub fn run_git(repo_dir: &Path, args: &[&str]) -> Result<GitOutput, GitError> {
@@ -87,7 +100,7 @@ pub fn rebase(repo: &Path, onto: &str) -> Result<(), GitError> {
     run_git(repo, &["rebase", onto])
         .map(|_| ())
         .map_err(|error| match error {
-            GitError::Transient { .. } | GitError::Exec(_) => error,
+            GitError::Transient { .. } | GitError::Exec { .. } => error,
             GitError::Permanent { stderr, .. } => GitError::RebaseFailed {
                 branch: onto.to_string(),
                 stderr,
@@ -108,7 +121,7 @@ pub fn merge(repo: &Path, branch: &str) -> Result<(), GitError> {
     run_git(repo, &["merge", branch, "--no-edit"])
         .map(|_| ())
         .map_err(|error| match error {
-            GitError::Transient { .. } | GitError::Exec(_) => error,
+            GitError::Transient { .. } | GitError::Exec { .. } => error,
             GitError::Permanent { stderr, .. } => GitError::MergeFailed {
                 branch: branch.to_string(),
                 stderr,
@@ -133,7 +146,7 @@ pub fn rev_parse_branch(repo: &Path) -> Result<String, GitError> {
     run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])
         .map(|output| output.stdout.trim().to_string())
         .map_err(|error| match error {
-            GitError::Transient { .. } | GitError::Exec(_) => error,
+            GitError::Transient { .. } | GitError::Exec { .. } => error,
             GitError::Permanent { stderr, .. } => GitError::RevParseFailed {
                 spec: "--abbrev-ref HEAD".to_string(),
                 stderr,
@@ -283,10 +296,14 @@ mod tests {
             message: "bad ref".to_string(),
             stderr: "fatal: bad revision".to_string(),
         };
-        let exec = GitError::Exec(std::io::Error::other("missing git"));
+        let exec = GitError::Exec {
+            command: "git status --porcelain".to_string(),
+            source: std::io::Error::other("missing git"),
+        };
 
         assert!(transient.is_transient());
         assert!(!permanent.is_transient());
         assert!(!exec.is_transient());
+        assert!(exec.to_string().contains("git status --porcelain"));
     }
 }

@@ -213,7 +213,10 @@ impl TeamDaemon {
                 false
             }
             Err(error) => {
-                let detail = format!("failed to execute `kanban-md {}`: {error}", args.join(" "));
+                let detail = format!(
+                    "failed while trying to {action}: could not execute `kanban-md {}`: {error}",
+                    args.join(" ")
+                );
                 self.report_nonfatal_kanban_failure(action, &detail, recipients);
                 false
             }
@@ -530,7 +533,8 @@ impl TeamDaemon {
                 continue;
             };
 
-            let active_count = self.engineer_active_board_item_count(&board_dir, &entry.engineer)?;
+            let active_count =
+                self.engineer_active_board_item_count(&board_dir, &entry.engineer)?;
             if active_count > 0 {
                 entry.validation_failures += 1;
                 entry.last_failure = Some(format!(
@@ -866,7 +870,13 @@ mod tests {
     fn dispatch_guard_blocks_claimed_todo_assignment() {
         let tmp = tempfile::tempdir().unwrap();
         write_open_task_file(tmp.path(), 101, "queued-task", "todo");
-        crate::team::test_support::write_owned_task_file(tmp.path(), 91, "claimed-todo", "todo", "eng-1");
+        crate::team::test_support::write_owned_task_file(
+            tmp.path(),
+            91,
+            "claimed-todo",
+            "todo",
+            "eng-1",
+        );
         let members = vec![
             manager_member("manager", None),
             engineer_member("eng-1", Some("manager"), false),
@@ -902,7 +912,13 @@ mod tests {
     #[test]
     fn active_board_item_count_includes_todo_in_progress_and_review() {
         let tmp = tempfile::tempdir().unwrap();
-        crate::team::test_support::write_owned_task_file(tmp.path(), 11, "todo-task", "todo", "eng-1");
+        crate::team::test_support::write_owned_task_file(
+            tmp.path(),
+            11,
+            "todo-task",
+            "todo",
+            "eng-1",
+        );
         crate::team::test_support::write_owned_task_file(
             tmp.path(),
             12,
