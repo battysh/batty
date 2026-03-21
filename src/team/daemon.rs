@@ -499,7 +499,6 @@ impl TeamDaemon {
         ensure_tmux_session_ready(&self.config.session)?;
         self.ensure_member_panes_ready()?;
         ensure_kanban_available()?;
-        ensure_git_repo_clean(&self.config.project_root)?;
         if ensure_board_initialized(&self.config.project_root)? {
             let board_dir = board_dir(&self.config.project_root);
             info!(
@@ -1539,55 +1538,6 @@ fn ensure_board_initialized(project_root: &Path) -> Result<bool> {
         )
     })?;
     Ok(true)
-}
-
-fn ensure_git_repo_clean(project_root: &Path) -> Result<()> {
-    let repo_root = git_cmd::rev_parse_toplevel(project_root).map_err(|error| {
-        anyhow::anyhow!("daemon startup pre-flight failed: project root is not a git repo: {error}")
-    })?;
-    let status = git_cmd::status_porcelain(&repo_root).map_err(|error| {
-        anyhow::anyhow!("daemon startup pre-flight failed: unable to inspect git status: {error}")
-    })?;
-
-    let dirty_lines: Vec<_> = status
-        .lines()
-        .filter(|line| !is_runtime_git_status_entry(line))
-        .map(str::to_string)
-        .collect();
-    if dirty_lines.is_empty() {
-        return Ok(());
-    }
-
-    bail!(
-        "daemon startup pre-flight failed: git worktree is dirty:\n{}",
-        dirty_lines.join("\n")
-    );
-}
-
-fn is_runtime_git_status_entry(line: &str) -> bool {
-    let path = git_status_entry_path(line);
-    matches!(
-        path,
-        ".batty/"
-            | ".batty"
-            | ".batty/daemon.log"
-            | ".batty/daemon.pid"
-            | ".batty/daemon-state.json"
-            | ".batty/launch-state.json"
-            | ".batty/merge.lock"
-            | ".batty/resume"
-            | ".batty/team_config/events.jsonl"
-            | ".batty/test_timing.jsonl"
-    ) || path.starts_with(".batty/assignment_results/")
-        || path.starts_with(".batty/codex-context/")
-        || path.starts_with(".batty/inboxes/")
-        || path.starts_with(".batty/logs/")
-        || path.starts_with(".batty/worktrees/")
-}
-
-fn git_status_entry_path(line: &str) -> &str {
-    let path = line.get(3..).unwrap_or(line).trim();
-    path.rsplit(" -> ").next().unwrap_or(path).trim_matches('"')
 }
 
 fn hot_reload_marker_path(project_root: &Path) -> PathBuf {
@@ -3249,37 +3199,6 @@ exit 1
         assert!(ensure_board_initialized(&repo).unwrap());
         assert!(board_path.join("tasks").is_dir());
         assert!(!ensure_board_initialized(&repo).unwrap());
-    }
-
-    #[test]
-    fn startup_preflight_git_clean_check_ignores_runtime_artifacts_only() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "startup_git_clean");
-
-        std::fs::create_dir_all(repo.join(".batty").join("codex-context").join("eng-1-3")).unwrap();
-        std::fs::write(
-            repo.join(".batty")
-                .join("codex-context")
-                .join("eng-1-3")
-                .join("AGENTS.md"),
-            "generated context\n",
-        )
-        .unwrap();
-        std::fs::write(repo.join(".batty").join("launch-state.json"), "{}").unwrap();
-        std::fs::write(repo.join(".batty").join("daemon.pid"), "123").unwrap();
-
-        ensure_git_repo_clean(&repo).unwrap();
-
-        std::fs::write(
-            repo.join("src").join("lib.rs"),
-            "pub fn smoke() -> bool { false }\n",
-        )
-        .unwrap();
-
-        let error = ensure_git_repo_clean(&repo).unwrap_err();
-        let message = format!("{error:#}");
-        assert!(message.contains("git worktree is dirty"));
-        assert!(message.contains("src/lib.rs"));
     }
 
     #[test]
