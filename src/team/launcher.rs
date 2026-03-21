@@ -10,6 +10,7 @@ pub(super) struct LaunchIdentity {
 #[derive(Debug, Clone)]
 pub(super) struct MemberLaunchPlan {
     short_cmd: String,
+    pub(super) work_dir: PathBuf,
     pub(super) identity: LaunchIdentity,
     initial_state: MemberState,
     activate_watcher: bool,
@@ -115,6 +116,7 @@ impl TeamDaemon {
 
         Ok(MemberLaunchPlan {
             short_cmd,
+            work_dir,
             identity: LaunchIdentity {
                 agent: normalized_agent,
                 prompt: prompt_text,
@@ -135,6 +137,7 @@ impl TeamDaemon {
         if let Some(watcher) = self.watchers.get_mut(&member.name) {
             watcher.set_session_id(plan.identity.session_id.clone());
         }
+        self.ensure_member_pane_cwd(&member.name, pane_id, &plan.work_dir)?;
         tmux::send_keys(pane_id, &plan.short_cmd, true)?;
         self.states.insert(member.name.clone(), plan.initial_state);
         self.update_automation_timers_for_state(&member.name, plan.initial_state);
