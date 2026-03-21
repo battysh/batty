@@ -340,12 +340,12 @@ mod tests {
 
     #[test]
     fn telegram_recent_sends_respects_ttl() {
-        let cache = RecentTelegramSends::new(Duration::from_millis(5), 16);
+        let cache = RecentTelegramSends::new(Duration::from_millis(50), 16);
         let id = telegram_message_id("12345", "hello");
         assert!(!cache.contains_recent(id));
         cache.record(id);
         assert!(cache.contains_recent(id));
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(100));
         assert!(!cache.contains_recent(id));
     }
 
