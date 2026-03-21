@@ -121,6 +121,11 @@ fn main() -> Result<()> {
             println!("Then run: batty start");
         }
 
+        Command::ExportTemplate { name } => {
+            let count = team::export_template(&root, &name)?;
+            println!("Exported template '{name}' ({count} files)");
+        }
+
         Command::Start { attach } => {
             let session = team::start_team(&root, attach)?;
             if !attach {
