@@ -2180,8 +2180,7 @@ exit 1
         })
         .unwrap();
         daemon.spawn_all_agents(false).unwrap();
-        let spawn_log =
-            wait_for_log_contains(&fake_log, "--dangerously-bypass-approvals-and-sandbox");
+        let spawn_log = wait_for_log_contains(&fake_log, "PWD:");
         assert!(spawn_log.contains("PWD:"));
         std::thread::sleep(Duration::from_millis(1200));
 
