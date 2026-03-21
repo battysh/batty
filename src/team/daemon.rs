@@ -7132,7 +7132,7 @@ mod tests {
         inbox::init_inbox(&root, "lead").unwrap();
         inbox::init_inbox(&root, "eng-1").unwrap();
         let mut result = inbox::InboxMessage::new_send("eng-1", "lead", "Task complete.");
-        result.timestamp = 42;
+        result.timestamp = super::now_unix();
         let id = inbox::deliver_to_inbox(&root, &result).unwrap();
         inbox::mark_delivered(&root, "lead", &id).unwrap();
 
@@ -7227,7 +7227,7 @@ mod tests {
         inbox::init_inbox(&root, "lead").unwrap();
         inbox::init_inbox(&root, "eng-1").unwrap();
         let mut result = inbox::InboxMessage::new_send("eng-1", "lead", "Task complete.");
-        result.timestamp = 42;
+        result.timestamp = super::now_unix();
         let id = inbox::deliver_to_inbox(&root, &result).unwrap();
         inbox::mark_delivered(&root, "lead", &id).unwrap();
 
@@ -7318,7 +7318,7 @@ mod tests {
         inbox::init_inbox(&root, "lead").unwrap();
         inbox::init_inbox(&root, "eng-1").unwrap();
         let mut result = inbox::InboxMessage::new_send("eng-1", "lead", "Task complete.");
-        result.timestamp = 42;
+        result.timestamp = super::now_unix();
         let id = inbox::deliver_to_inbox(&root, &result).unwrap();
         inbox::mark_delivered(&root, "lead", &id).unwrap();
 
@@ -8564,7 +8564,7 @@ mod tests {
         inbox::init_inbox(&root, "lead").unwrap();
         inbox::init_inbox(&root, "eng-1").unwrap();
         let mut result = inbox::InboxMessage::new_send("eng-1", "lead", "Task complete.");
-        result.timestamp = 42;
+        result.timestamp = super::now_unix();
         let id = inbox::deliver_to_inbox(&root, &result).unwrap();
         inbox::mark_delivered(&root, "lead", &id).unwrap();
 
