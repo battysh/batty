@@ -8,11 +8,14 @@ use super::daemon::TeamDaemon;
 use super::errors::DeliveryError;
 use super::inbox;
 use super::message;
+use super::retry::{retry_sync, RetryConfig};
 use crate::tmux;
 
 pub(super) const DELIVERY_VERIFICATION_CAPTURE_LINES: u32 = 50;
 pub(super) const FAILED_DELIVERY_RETRY_DELAY: Duration = Duration::from_secs(30);
 pub(super) const FAILED_DELIVERY_MAX_ATTEMPTS: u32 = 3;
+const TELEGRAM_DELIVERY_CIRCUIT_BREAKER_THRESHOLD: u32 = 5;
+const TELEGRAM_DELIVERY_CIRCUIT_BREAKER_COOLDOWN: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone)]
 pub(super) struct FailedDelivery {
@@ -56,6 +59,128 @@ pub(super) enum MessageDelivery {
 }
 
 impl TeamDaemon {
+    fn telegram_failure_key(recipient: &str) -> String {
+        format!("telegram-delivery-failures::{recipient}")
+    }
+
+    fn telegram_circuit_breaker_key(recipient: &str) -> String {
+        format!("telegram-delivery-breaker::{recipient}")
+    }
+
+    fn telegram_retry_config() -> RetryConfig {
+        RetryConfig {
+            max_retries: 3,
+            base_delay_ms: 100,
+            max_delay_ms: 1_000,
+            jitter: false,
+        }
+    }
+
+    fn telegram_channel_paused(&self, recipient: &str) -> bool {
+        self.intervention_cooldowns
+            .get(&Self::telegram_circuit_breaker_key(recipient))
+            .is_some_and(|opened_at| {
+                opened_at.elapsed() < TELEGRAM_DELIVERY_CIRCUIT_BREAKER_COOLDOWN
+            })
+    }
+
+    fn clear_telegram_delivery_failures(&mut self, recipient: &str) {
+        self.retry_counts
+            .remove(&Self::telegram_failure_key(recipient));
+        self.intervention_cooldowns
+            .remove(&Self::telegram_circuit_breaker_key(recipient));
+    }
+
+    fn increment_telegram_delivery_failures(&mut self, recipient: &str) -> u32 {
+        let failures = self
+            .retry_counts
+            .entry(Self::telegram_failure_key(recipient))
+            .or_insert(0);
+        *failures += 1;
+        *failures
+    }
+
+    fn alert_telegram_delivery_paused(
+        &mut self,
+        recipient: &str,
+        from: &str,
+        detail: &str,
+    ) -> Result<()> {
+        let Some(manager) = self.failed_delivery_escalation_recipient(recipient) else {
+            warn!(
+                recipient,
+                from, detail, "telegram delivery paused without escalation target"
+            );
+            return Ok(());
+        };
+
+        let body = format!(
+            "Telegram delivery paused after repeated failures.\nRecipient: {recipient}\nFrom: {from}\nLast error: {detail}"
+        );
+        let root = inbox::inboxes_root(&self.config.project_root);
+        let msg = inbox::InboxMessage::new_send("daemon", &manager, &body);
+        inbox::deliver_to_inbox(&root, &msg)?;
+        self.record_message_routed("daemon", &manager);
+        Ok(())
+    }
+
+    fn deliver_channel_message(
+        &mut self,
+        from: &str,
+        recipient: &str,
+        body: &str,
+    ) -> Result<MessageDelivery> {
+        let channel_type = self
+            .channels
+            .get(recipient)
+            .map(|channel| channel.channel_type().to_string())
+            .unwrap_or_default();
+
+        if !channel_type.starts_with("telegram") {
+            self.channels
+                .get(recipient)
+                .expect("channel presence checked by caller")
+                .send(body)?;
+            self.record_message_routed(from, recipient);
+            return Ok(MessageDelivery::Channel);
+        }
+
+        if self.telegram_channel_paused(recipient) {
+            return Err(DeliveryError::ChannelSend {
+                recipient: recipient.to_string(),
+                detail: "telegram delivery circuit breaker is open".to_string(),
+            }
+            .into());
+        }
+
+        let send_result = {
+            let channel = self
+                .channels
+                .get(recipient)
+                .expect("channel presence checked by caller");
+            retry_sync(&Self::telegram_retry_config(), || channel.send(body))
+        };
+
+        match send_result {
+            Ok(()) => {
+                self.clear_telegram_delivery_failures(recipient);
+                self.record_message_routed(from, recipient);
+                Ok(MessageDelivery::Channel)
+            }
+            Err(error) => {
+                let failure_count = self.increment_telegram_delivery_failures(recipient);
+                if failure_count >= TELEGRAM_DELIVERY_CIRCUIT_BREAKER_THRESHOLD {
+                    self.intervention_cooldowns.insert(
+                        Self::telegram_circuit_breaker_key(recipient),
+                        Instant::now(),
+                    );
+                    self.alert_telegram_delivery_paused(recipient, from, &error.to_string())?;
+                }
+                Err(error.into())
+            }
+        }
+    }
+
     fn verify_message_content_in_pane(&self, pane_id: &str, message_marker: &str) -> bool {
         match tmux::capture_pane_recent(pane_id, DELIVERY_VERIFICATION_CAPTURE_LINES) {
             Ok(capture) => capture_contains_message_marker(&capture, message_marker),
@@ -292,9 +417,8 @@ impl TeamDaemon {
         body: &str,
     ) -> Result<MessageDelivery> {
         if let Some(channel) = self.channels.get(recipient) {
-            channel.send(body)?;
-            self.record_message_routed(from, recipient);
-            return Ok(MessageDelivery::Channel);
+            let _ = channel;
+            return self.deliver_channel_message(from, recipient, body);
         }
 
         let known_recipient = self.config.pane_map.contains_key(recipient)
@@ -366,9 +490,9 @@ impl TeamDaemon {
                     if is_user {
                         if let Some(channel) = self.channels.get(to.as_str()) {
                             let formatted = format!("[From {from}]\n{msg}");
-                            channel.send(&formatted)?;
+                            let _ = channel;
+                            self.deliver_channel_message(from, to, &formatted)?;
                         }
-                        self.record_message_routed(from, to);
                     } else {
                         let inbox_msg = inbox::InboxMessage::new_send(from, to, msg);
                         inbox::deliver_to_inbox(&root, &inbox_msg)?;
@@ -536,11 +660,11 @@ pub(super) fn capture_contains_message_marker(capture: &str, message_marker: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::collections::{HashMap, HashSet};
     use std::io;
     use std::sync::{Arc, Mutex};
 
-    use crate::team::AssignmentResultStatus;
     use crate::team::comms::Channel;
     use crate::team::config::OrchestratorPosition;
     use crate::team::config::{
@@ -552,6 +676,7 @@ mod tests {
     use crate::team::events::EventSink;
     use crate::team::failure_patterns::FailureTracker;
     use crate::team::hierarchy::MemberInstance;
+    use crate::team::AssignmentResultStatus;
 
     struct RecordingChannel {
         messages: Arc<Mutex<Vec<String>>>,
@@ -580,6 +705,22 @@ mod tests {
 
         fn channel_type(&self) -> &str {
             "test-failing"
+        }
+    }
+
+    struct SequencedTelegramChannel {
+        results: Arc<Mutex<VecDeque<std::result::Result<(), DeliveryError>>>>,
+        attempts: Arc<Mutex<u32>>,
+    }
+
+    impl Channel for SequencedTelegramChannel {
+        fn send(&self, _message: &str) -> std::result::Result<(), DeliveryError> {
+            *self.attempts.lock().unwrap() += 1;
+            self.results.lock().unwrap().pop_front().unwrap_or(Ok(()))
+        }
+
+        fn channel_type(&self) -> &str {
+            "telegram-test"
         }
     }
 
@@ -744,6 +885,114 @@ mod tests {
             sent.lock().unwrap().as_slice(),
             ["Event sink can fail without breaking delivery."]
         );
+    }
+
+    #[test]
+    fn telegram_delivery_retries_transient_channel_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = empty_legacy_daemon(&tmp);
+        let attempts = Arc::new(Mutex::new(0));
+        daemon.channels.insert(
+            "human".to_string(),
+            Box::new(SequencedTelegramChannel {
+                results: Arc::new(Mutex::new(VecDeque::from([
+                    Err(DeliveryError::ChannelSend {
+                        recipient: "human".to_string(),
+                        detail: "429 too many requests".to_string(),
+                    }),
+                    Err(DeliveryError::ChannelSend {
+                        recipient: "human".to_string(),
+                        detail: "timeout while sending".to_string(),
+                    }),
+                    Ok(()),
+                ]))),
+                attempts: Arc::clone(&attempts),
+            }),
+        );
+
+        daemon
+            .queue_daemon_message("human", "Assignment delivered.")
+            .unwrap();
+
+        assert_eq!(*attempts.lock().unwrap(), 3);
+        assert_eq!(
+            daemon
+                .retry_counts
+                .get(&TeamDaemon::telegram_failure_key("human")),
+            None
+        );
+    }
+
+    #[test]
+    fn telegram_delivery_circuit_breaker_alerts_manager_after_repeated_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: super::super::config::TeamConfig {
+                    name: "test".to_string(),
+                    workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
+                    layout: None,
+                    cost: Default::default(),
+                    event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![manager],
+                pane_map: HashMap::new(),
+            },
+            ..empty_legacy_daemon(&tmp)
+        };
+        let attempts = Arc::new(Mutex::new(0));
+        daemon.channels.insert(
+            "human".to_string(),
+            Box::new(SequencedTelegramChannel {
+                results: Arc::new(Mutex::new(VecDeque::from(
+                    (0..32)
+                        .map(|_| {
+                            Err(DeliveryError::ChannelSend {
+                                recipient: "human".to_string(),
+                                detail: "429 too many requests".to_string(),
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                ))),
+                attempts: Arc::clone(&attempts),
+            }),
+        );
+
+        for _ in 0..TELEGRAM_DELIVERY_CIRCUIT_BREAKER_THRESHOLD {
+            assert!(daemon
+                .queue_daemon_message("human", "Still failing")
+                .is_err());
+        }
+
+        assert!(daemon.telegram_channel_paused("human"));
+        let pending = inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "manager").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].body.contains("Telegram delivery paused"));
+
+        let before = *attempts.lock().unwrap();
+        assert!(daemon
+            .queue_daemon_message("human", "Breaker open")
+            .is_err());
+        assert_eq!(*attempts.lock().unwrap(), before);
     }
 
     #[test]
@@ -936,11 +1185,9 @@ mod tests {
         assert!(engineer_pending.is_empty());
 
         let engineer_all = inbox::all_messages(&root, "eng-1").unwrap();
-        assert!(
-            engineer_all
-                .iter()
-                .any(|(msg, delivered)| msg.id == id && *delivered)
-        );
+        assert!(engineer_all
+            .iter()
+            .any(|(msg, delivered)| msg.id == id && *delivered));
 
         let manager_pending = inbox::pending_messages(&root, "manager").unwrap();
         assert_eq!(manager_pending.len(), 1);
@@ -1083,11 +1330,9 @@ mod tests {
             inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "manager").unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].from, "daemon");
-        assert!(
-            messages[0]
-                .body
-                .contains("Live message delivery failed after 3 attempts.")
-        );
+        assert!(messages[0]
+            .body
+            .contains("Live message delivery failed after 3 attempts."));
         assert!(messages[0].body.contains("Recipient: eng-1"));
     }
 }

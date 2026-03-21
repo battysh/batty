@@ -116,55 +116,99 @@ pub enum DeliveryError {
     InboxQueue { recipient: String, detail: String },
 }
 
+impl DeliveryError {
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::UnsupportedChannel { .. } => false,
+            Self::ProviderExec { source, .. } => matches!(
+                source.kind(),
+                std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::NotConnected
+            ),
+            Self::ChannelSend { detail, .. } | Self::PaneInject { detail, .. } => {
+                detail_is_transient(detail)
+            }
+            Self::InboxQueue { .. } => false,
+        }
+    }
+}
+
+fn detail_is_transient(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    [
+        "429",
+        "too many requests",
+        "timeout",
+        "timed out",
+        "temporary",
+        "temporarily unavailable",
+        "connection reset",
+        "connection aborted",
+        "try again",
+        "retry after",
+        "network",
+    ]
+    .iter()
+    .any(|needle| detail.contains(needle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn git_error_marks_only_transient_variants_retryable() {
-        assert!(
-            GitError::Transient {
-                message: "lock".to_string(),
-                stderr: "lock".to_string(),
-            }
-            .is_transient()
-        );
-        assert!(
-            !GitError::Permanent {
-                message: "fatal".to_string(),
-                stderr: "fatal".to_string(),
-            }
-            .is_transient()
-        );
-        assert!(
-            !GitError::RebaseFailed {
-                branch: "topic".to_string(),
-                stderr: "conflict".to_string(),
-            }
-            .is_transient()
-        );
+        assert!(GitError::Transient {
+            message: "lock".to_string(),
+            stderr: "lock".to_string(),
+        }
+        .is_transient());
+        assert!(!GitError::Permanent {
+            message: "fatal".to_string(),
+            stderr: "fatal".to_string(),
+        }
+        .is_transient());
+        assert!(!GitError::RebaseFailed {
+            branch: "topic".to_string(),
+            stderr: "conflict".to_string(),
+        }
+        .is_transient());
     }
 
     #[test]
     fn board_error_marks_only_transient_variants_retryable() {
-        assert!(
-            BoardError::Transient {
-                message: "lock".to_string(),
-                stderr: "lock".to_string(),
-            }
-            .is_transient()
-        );
-        assert!(
-            !BoardError::TaskNotFound {
-                id: "123".to_string()
-            }
-            .is_transient()
-        );
+        assert!(BoardError::Transient {
+            message: "lock".to_string(),
+            stderr: "lock".to_string(),
+        }
+        .is_transient());
+        assert!(!BoardError::TaskNotFound {
+            id: "123".to_string()
+        }
+        .is_transient());
     }
 
     #[test]
     fn tmux_command_failed_formats_target_suffix() {
         let error = TmuxError::command_failed("send-keys", Some("%1"), "pane missing");
         assert!(error.to_string().contains("for '%1'"));
+    }
+
+    #[test]
+    fn delivery_error_marks_transient_channel_failures_retryable() {
+        assert!(DeliveryError::ChannelSend {
+            recipient: "human".to_string(),
+            detail: "429 too many requests".to_string(),
+        }
+        .is_transient());
+        assert!(!DeliveryError::ChannelSend {
+            recipient: "human".to_string(),
+            detail: "chat not found".to_string(),
+        }
+        .is_transient());
     }
 }

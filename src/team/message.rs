@@ -35,9 +35,7 @@ pub fn inject_message(pane_id: &str, from: &str, message: &str) -> Result<()> {
         "\n--- Message from {from} ---\n{message}\n--- end message ---\nTo reply, run: batty send {from} \"<your response>\"\n"
     );
 
-    // Use load-buffer + paste-buffer for text, then send Enter to submit
-    tmux::load_buffer(&formatted)?;
-    tmux::paste_buffer(pane_id)?;
+    paste_message_with_retry(pane_id, &formatted)?;
     // paste-buffer needs time to complete before we press Enter —
     // longer messages need more time for the terminal to process the paste
     let delay_ms = 500 + (formatted.len() as u64 / 100) * 50;
@@ -48,6 +46,18 @@ pub fn inject_message(pane_id: &str, from: &str, message: &str) -> Result<()> {
     std::thread::sleep(std::time::Duration::from_millis(300));
     tmux::send_keys(pane_id, "", true)?;
     Ok(())
+}
+
+fn paste_message_with_retry(pane_id: &str, formatted: &str) -> Result<()> {
+    tmux::load_buffer(formatted)?;
+    match tmux::paste_buffer(pane_id) {
+        Ok(()) => Ok(()),
+        Err(error) if error.to_string().contains("no buffer batty-inject") => {
+            tmux::load_buffer(formatted)?;
+            tmux::paste_buffer(pane_id)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Write a command to the queue file.
