@@ -1,12 +1,13 @@
 //! Team configuration parsed from `.batty/team_config/team.yaml`.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use super::DEFAULT_EVENT_LOG_MAX_BYTES;
+use super::TEAM_CONFIG_DIR;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TeamConfig {
@@ -269,6 +270,30 @@ pub struct ChannelConfig {
     pub allowed_user_ids: Vec<i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanningDirectiveFile {
+    ReplenishmentContext,
+    ReviewPolicy,
+    EscalationPolicy,
+}
+
+impl PlanningDirectiveFile {
+    pub fn file_name(self) -> &'static str {
+        match self {
+            Self::ReplenishmentContext => "replenishment_context.md",
+            Self::ReviewPolicy => "review_policy.md",
+            Self::EscalationPolicy => "escalation_policy.md",
+        }
+    }
+
+    pub fn path_for(self, project_root: &Path) -> PathBuf {
+        project_root
+            .join(".batty")
+            .join(TEAM_CONFIG_DIR)
+            .join(self.file_name())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RoleType {
@@ -458,6 +483,36 @@ impl TeamConfig {
     }
 }
 
+pub fn load_planning_directive(
+    project_root: &Path,
+    directive: PlanningDirectiveFile,
+    max_chars: usize,
+) -> Result<Option<String>> {
+    let path = directive.path_for(project_root);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            let trimmed = content.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+
+            let total_chars = trimmed.chars().count();
+            let truncated = trimmed.chars().take(max_chars).collect::<String>();
+            if total_chars > max_chars {
+                Ok(Some(format!(
+                    "{truncated}\n\n[truncated to {max_chars} chars from {}]",
+                    directive.file_name()
+                )))
+            } else {
+                Ok(Some(truncated))
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to read planning directive {}", path.display())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,6 +579,45 @@ roles:
         );
         assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
         assert!(config.orchestrator_pane);
+    }
+
+    #[test]
+    fn planning_directive_path_uses_team_config_directory() {
+        let root = Path::new("/tmp/project");
+
+        assert_eq!(
+            PlanningDirectiveFile::ReviewPolicy.path_for(root),
+            PathBuf::from("/tmp/project/.batty/team_config/review_policy.md")
+        );
+    }
+
+    #[test]
+    fn load_planning_directive_returns_none_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let loaded =
+            load_planning_directive(tmp.path(), PlanningDirectiveFile::ReviewPolicy, 120).unwrap();
+
+        assert_eq!(loaded, None);
+    }
+
+    #[test]
+    fn load_planning_directive_truncates_long_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join(".batty").join("team_config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("review_policy.md"),
+            "abcdefghijklmnopqrstuvwxyz",
+        )
+        .unwrap();
+
+        let loaded = load_planning_directive(tmp.path(), PlanningDirectiveFile::ReviewPolicy, 10)
+            .unwrap()
+            .unwrap();
+
+        assert!(loaded.starts_with("abcdefghij"));
+        assert!(loaded.contains("[truncated to 10 chars"));
     }
 
     #[test]

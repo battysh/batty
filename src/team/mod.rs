@@ -289,6 +289,29 @@ pub fn init_team(project_root: &Path, template: &str) -> Result<Vec<PathBuf>> {
         }
     }
 
+    let directive_files = [
+        (
+            "replenishment_context.md",
+            include_str!("templates/replenishment_context.md"),
+        ),
+        (
+            "review_policy.md",
+            include_str!("templates/review_policy.md"),
+        ),
+        (
+            "escalation_policy.md",
+            include_str!("templates/escalation_policy.md"),
+        ),
+    ];
+    for (name, content) in directive_files {
+        let path = config_dir.join(name);
+        if !path.exists() {
+            std::fs::write(&path, content)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+            created.push(path);
+        }
+    }
+
     // Initialize kanban-md board in the team config directory
     let board_dir = config_dir.join("board");
     if !board_dir.exists() {
@@ -1952,6 +1975,21 @@ mod tests {
         assert!(team_config_dir(tmp.path()).join("architect.md").exists());
         assert!(team_config_dir(tmp.path()).join("manager.md").exists());
         assert!(team_config_dir(tmp.path()).join("engineer.md").exists());
+        assert!(
+            team_config_dir(tmp.path())
+                .join("replenishment_context.md")
+                .exists()
+        );
+        assert!(
+            team_config_dir(tmp.path())
+                .join("review_policy.md")
+                .exists()
+        );
+        assert!(
+            team_config_dir(tmp.path())
+                .join("escalation_policy.md")
+                .exists()
+        );
         // kanban-md creates board/ directory; fallback creates kanban.md
         let config = team_config_dir(tmp.path());
         assert!(config.join("board").is_dir() || config.join("kanban.md").exists());
@@ -2130,6 +2168,11 @@ mod tests {
         assert!(
             team_config_dir(tmp.path())
                 .join("batty_engineer.md")
+                .exists()
+        );
+        assert!(
+            team_config_dir(tmp.path())
+                .join("review_policy.md")
                 .exists()
         );
     }

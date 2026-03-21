@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use super::config::{RoleType, TeamConfig};
+use super::config::{PlanningDirectiveFile, RoleType, TeamConfig, load_planning_directive};
 use super::hierarchy::MemberInstance;
 use super::metrics;
 use super::telegram::TelegramBot;
@@ -16,6 +16,8 @@ use super::watcher::SessionWatcher;
 use super::{pause_marker_path, team_config_dir};
 use crate::task;
 use crate::tmux;
+
+const REVIEW_POLICY_MAX_CHARS: usize = 2_000;
 
 /// Generate a standup report for a specific recipient, showing only their
 /// direct reports.
@@ -121,7 +123,38 @@ pub fn generate_board_aware_standup_for(
     }
 
     report.push_str("\n=== END STANDUP ===\n");
-    report
+    prepend_review_policy_context(board_dir, report)
+}
+
+fn prepend_review_policy_context(board_dir: Option<&Path>, report: String) -> String {
+    let Some(project_root) = project_root_from_board_dir(board_dir) else {
+        return report;
+    };
+    match load_planning_directive(
+        project_root,
+        PlanningDirectiveFile::ReviewPolicy,
+        REVIEW_POLICY_MAX_CHARS,
+    ) {
+        Ok(Some(policy)) => format!("Review policy context:\n{policy}\n\n{report}"),
+        Ok(None) => report,
+        Err(error) => {
+            warn!(error = %error, "failed to load review policy for standup");
+            report
+        }
+    }
+}
+
+fn project_root_from_board_dir(board_dir: Option<&Path>) -> Option<&Path> {
+    let board_dir = board_dir?;
+    let team_config = board_dir.parent()?;
+    if team_config.file_name()? != "team_config" {
+        return None;
+    }
+    let batty_dir = team_config.parent()?;
+    if batty_dir.file_name()? != ".batty" {
+        return None;
+    }
+    batty_dir.parent()
 }
 
 pub(crate) fn maybe_generate_standup(
@@ -675,6 +708,75 @@ mod tests {
         assert!(!report.contains("assigned tasks:"));
         assert!(!report.contains("Workflow signals:"));
         assert!(!report.contains("warning: idle while runnable work exists on the board"));
+    }
+
+    #[test]
+    fn board_aware_standup_prepends_review_policy_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let team_config_dir = tmp.path().join(".batty").join("team_config");
+        let board_dir = team_config_dir.join("board");
+        std::fs::create_dir_all(&board_dir).unwrap();
+        std::fs::write(
+            team_config_dir.join("review_policy.md"),
+            "Approve only after tests pass.",
+        )
+        .unwrap();
+
+        let members = vec![
+            make_member("manager", RoleType::Manager, None),
+            make_member("eng-1", RoleType::Engineer, Some("manager")),
+        ];
+        let states = HashMap::from([("eng-1".to_string(), MemberState::Idle)]);
+
+        let report = generate_board_aware_standup_for(
+            &members[0],
+            &members,
+            &HashMap::new(),
+            &states,
+            5,
+            Some(&board_dir),
+        );
+
+        assert!(report.starts_with("Review policy context:\nApprove only after tests pass."));
+        assert!(report.contains("=== STANDUP for manager ==="));
+    }
+
+    #[test]
+    fn board_aware_standup_reloads_updated_review_policy_contents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let team_config_dir = tmp.path().join(".batty").join("team_config");
+        let board_dir = team_config_dir.join("board");
+        std::fs::create_dir_all(&board_dir).unwrap();
+        let policy_path = team_config_dir.join("review_policy.md");
+        std::fs::write(&policy_path, "Initial policy").unwrap();
+
+        let members = vec![
+            make_member("manager", RoleType::Manager, None),
+            make_member("eng-1", RoleType::Engineer, Some("manager")),
+        ];
+        let states = HashMap::from([("eng-1".to_string(), MemberState::Idle)]);
+
+        let first = generate_board_aware_standup_for(
+            &members[0],
+            &members,
+            &HashMap::new(),
+            &states,
+            5,
+            Some(&board_dir),
+        );
+        std::fs::write(&policy_path, "Updated policy").unwrap();
+        let second = generate_board_aware_standup_for(
+            &members[0],
+            &members,
+            &HashMap::new(),
+            &states,
+            5,
+            Some(&board_dir),
+        );
+
+        assert!(first.contains("Initial policy"));
+        assert!(second.contains("Updated policy"));
+        assert!(!second.contains("Initial policy"));
     }
 
     #[test]
