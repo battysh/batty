@@ -80,6 +80,7 @@ pub struct TeamDaemon {
     last_standup: HashMap<String, Instant>,
     last_board_rotation: Instant,
     last_auto_dispatch: Instant,
+    retro_generated: bool,
     poll_interval: Duration,
 }
 
@@ -255,6 +256,7 @@ impl TeamDaemon {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         })
     }
@@ -343,6 +345,9 @@ impl TeamDaemon {
                 daemon.maybe_generate_standup()
             });
             self.run_loop_step("maybe_rotate_board", |daemon| daemon.maybe_rotate_board());
+            self.run_loop_step("maybe_generate_retrospective", |daemon| {
+                daemon.maybe_generate_retrospective()
+            });
             self.update_pane_status_labels();
 
             // Periodic heartbeat
@@ -3275,6 +3280,49 @@ Recover throughput now:\n\
         Ok(())
     }
 
+    fn maybe_generate_retrospective(&mut self) -> Result<()> {
+        if self.retro_generated {
+            return Ok(());
+        }
+
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let tasks_dir = board_dir.join("tasks");
+        if !tasks_dir.is_dir() {
+            return Ok(());
+        }
+
+        let tasks = crate::task::load_tasks_from_dir(&tasks_dir)?;
+        let active_tasks: Vec<&crate::task::Task> = tasks
+            .iter()
+            .filter(|task| task.status != "archived")
+            .collect();
+        if active_tasks.is_empty() || active_tasks.iter().any(|task| task.status != "done") {
+            return Ok(());
+        }
+
+        let events_path = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let Some(stats) = super::retrospective::analyze_event_log(&events_path)? else {
+            return Ok(());
+        };
+
+        let report_path =
+            super::retrospective::generate_retrospective(&self.config.project_root, &stats)?;
+        self.retro_generated = true;
+        self.emit_event(TeamEvent::retro_generated());
+        info!(path = %report_path.display(), "retrospective generated");
+        Ok(())
+    }
+
     /// Poll Telegram for inbound messages from the human user.
     /// Routes them as inbox messages from:human to the user role's talks_to targets.
     fn poll_telegram(&mut self) -> Result<()> {
@@ -4317,6 +4365,17 @@ mod tests {
         .unwrap();
     }
 
+    fn write_event_log(project_root: &Path, events: &[TeamEvent]) {
+        let events_path = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let mut sink = EventSink::new(&events_path).unwrap();
+        for event in events {
+            sink.emit(event.clone()).unwrap();
+        }
+    }
+
     fn backdate_idle_grace(daemon: &mut TeamDaemon, member_name: &str) {
         let grace = daemon.automation_idle_grace_duration() + Duration::from_secs(1);
         daemon
@@ -4908,6 +4967,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -4967,6 +5027,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -5076,6 +5137,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -5394,6 +5456,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -5443,6 +5506,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now() - Duration::from_secs(30),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -5489,6 +5553,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -5540,6 +5605,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -5589,6 +5655,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -5642,6 +5709,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -5697,6 +5765,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -5761,6 +5830,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -5854,6 +5924,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6072,6 +6143,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6161,6 +6233,7 @@ mod tests {
             )]),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6437,6 +6510,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6521,6 +6595,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6611,6 +6686,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6697,6 +6773,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6771,6 +6848,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6866,6 +6944,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -6937,6 +7016,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7000,6 +7080,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7068,6 +7149,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7131,6 +7213,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7160,6 +7243,150 @@ mod tests {
                 .get("lead")
                 .map(|state| state.idle_epoch),
             Some(2)
+        );
+    }
+
+    #[test]
+    fn auto_retro_fires_when_all_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        write_owned_task_file(tmp.path(), 45, "retro-task", "done", "eng-1");
+        write_event_log(
+            tmp.path(),
+            &[
+                TeamEvent::daemon_started(),
+                TeamEvent::task_assigned("eng-1", "45"),
+                TeamEvent::task_completed("eng-1"),
+                TeamEvent::daemon_stopped(),
+            ],
+        );
+
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: Vec::new(),
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            idle_started_at: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&events_path).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            retro_generated: false,
+            poll_interval: Duration::from_secs(5),
+        };
+
+        daemon.maybe_generate_retrospective().unwrap();
+
+        assert!(daemon.retro_generated);
+        let retro_dir = tmp.path().join(".batty").join("retrospectives");
+        let reports = std::fs::read_dir(&retro_dir).unwrap().count();
+        assert_eq!(reports, 1);
+
+        let events = super::super::events::read_events(&events_path).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event == "retro_generated")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn auto_retro_does_not_fire_twice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        write_owned_task_file(tmp.path(), 45, "retro-task", "done", "eng-1");
+        write_event_log(
+            tmp.path(),
+            &[
+                TeamEvent::daemon_started(),
+                TeamEvent::task_assigned("eng-1", "45"),
+                TeamEvent::task_completed("eng-1"),
+                TeamEvent::daemon_stopped(),
+            ],
+        );
+
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: Vec::new(),
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            idle_started_at: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            event_sink: EventSink::new(&events_path).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            retro_generated: false,
+            poll_interval: Duration::from_secs(5),
+        };
+
+        daemon.maybe_generate_retrospective().unwrap();
+        daemon.maybe_generate_retrospective().unwrap();
+
+        let retro_dir = tmp.path().join(".batty").join("retrospectives");
+        let reports = std::fs::read_dir(&retro_dir).unwrap().count();
+        assert_eq!(reports, 1);
+
+        let events = super::super::events::read_events(&events_path).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event == "retro_generated")
+                .count(),
+            1
         );
     }
 
@@ -7228,6 +7455,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7326,6 +7554,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7421,6 +7650,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7540,6 +7770,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7633,6 +7864,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7720,6 +7952,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7794,6 +8027,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 
@@ -7880,6 +8114,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
 

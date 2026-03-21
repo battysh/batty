@@ -124,6 +124,17 @@ fn main() -> Result<()> {
         Command::ExportTemplate { name } => {
             let count = team::export_template(&root, &name)?;
             println!("Exported template '{name}' ({count} files)");
+        Command::Retro { events } => {
+            let events_path = events
+                .unwrap_or_else(|| root.join(".batty").join("team_config").join("events.jsonl"));
+            let stats = team::retrospective::analyze_event_log(&events_path)?;
+            match stats {
+                Some(stats) => {
+                    let path = team::retrospective::generate_retrospective(&root, &stats)?;
+                    println!("Retrospective written to {}", path.display());
+                }
+                None => println!("No run data found in event log."),
+            }
         }
 
         Command::Start { attach } => {

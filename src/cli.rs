@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
@@ -31,6 +33,13 @@ pub enum Command {
     ExportTemplate {
         /// Template name
         name: String,
+    },
+
+    /// Generate a run retrospective
+    Retro {
+        /// Path to events.jsonl (default: .batty/team_config/events.jsonl)
+        #[arg(long)]
+        events: Option<PathBuf>,
     },
 
     /// Start the team daemon and tmux session
@@ -308,6 +317,22 @@ mod tests {
         match cli.command {
             Command::ExportTemplate { name } => assert_eq!(name, "myteam"),
             other => panic!("expected export-template command, got {other:?}"),
+    fn retro_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "retro"]);
+        match cli.command {
+            Command::Retro { events } => assert!(events.is_none()),
+            other => panic!("expected retro command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn retro_subcommand_parses_with_events_path() {
+        let cli = Cli::parse_from(["batty", "retro", "--events", "/tmp/events.jsonl"]);
+        match cli.command {
+            Command::Retro { events } => {
+                assert_eq!(events, Some(PathBuf::from("/tmp/events.jsonl")));
+            }
+            other => panic!("expected retro command, got {other:?}"),
         }
     }
 

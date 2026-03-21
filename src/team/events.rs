@@ -141,6 +141,10 @@ impl TeamEvent {
         }
     }
 
+    pub fn retro_generated() -> Self {
+        Self::base("retro_generated")
+    }
+
     pub fn member_crashed(role: &str, restart: bool) -> Self {
         Self {
             role: Some(role.into()),
@@ -302,6 +306,7 @@ mod tests {
             ("task_escalated", TeamEvent::task_escalated("eng-1", "task")),
             ("task_completed", TeamEvent::task_completed("eng-1")),
             ("standup_generated", TeamEvent::standup_generated("manager")),
+            ("retro_generated", TeamEvent::retro_generated()),
             ("member_crashed", TeamEvent::member_crashed("eng-1", true)),
             ("message_routed", TeamEvent::message_routed("a", "b")),
             ("agent_spawned", TeamEvent::agent_spawned("eng-1")),
