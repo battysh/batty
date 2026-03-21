@@ -257,7 +257,11 @@ pub(crate) fn refresh_engineer_worktree(
     let stderr = match rebase_result {
         Ok(_) => unreachable!("successful rebase returned early"),
         Err(git_cmd::GitError::Transient { stderr, .. })
-        | Err(git_cmd::GitError::Permanent { stderr, .. }) => stderr.trim().to_string(),
+        | Err(git_cmd::GitError::Permanent { stderr, .. })
+        | Err(git_cmd::GitError::RebaseFailed { stderr, .. })
+        | Err(git_cmd::GitError::MergeFailed { stderr, .. }) => stderr.trim().to_string(),
+        Err(git_cmd::GitError::RevParseFailed { stderr, .. }) => stderr.trim().to_string(),
+        Err(git_cmd::GitError::InvalidRevListCount { output, .. }) => output.trim().to_string(),
         Err(git_cmd::GitError::Exec(error)) => error.to_string(),
     };
     let _ = retry_git(|| git_cmd::rebase_abort(worktree_dir));

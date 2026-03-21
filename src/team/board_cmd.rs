@@ -4,21 +4,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-#[derive(Debug, thiserror::Error)]
-pub enum BoardError {
-    #[error("transient board error: {message}")]
-    Transient { message: String, stderr: String },
-    #[error("permanent board error: {message}")]
-    Permanent { message: String, stderr: String },
-    #[error("kanban-md not found or failed to execute: {0}")]
-    Exec(#[from] std::io::Error),
-}
-
-impl BoardError {
-    pub fn is_transient(&self) -> bool {
-        matches!(self, BoardError::Transient { .. })
-    }
-}
+pub use super::errors::BoardError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoardOutput {
@@ -62,8 +48,8 @@ pub fn edit_task(board_dir: &Path, task_id: &str, block_reason: &str) -> Result<
                 )
                 .map(|_| ())
             } else {
-                Err(BoardError::Permanent {
-                    message: format!("failed to determine claim owner for blocked task #{task_id}"),
+                Err(BoardError::ClaimOwnerUnknown {
+                    task_id: task_id.to_string(),
                     stderr,
                 })
             }
@@ -86,7 +72,20 @@ pub fn pick_task(
 }
 
 pub fn show_task(board_dir: &Path, task_id: &str) -> Result<String, BoardError> {
-    run_board(board_dir, &["show", task_id]).map(|output| output.stdout)
+    run_board(board_dir, &["show", task_id])
+        .map(|output| output.stdout)
+        .map_err(|error| match error {
+            BoardError::Permanent { stderr, .. }
+                if stderr
+                    .to_ascii_lowercase()
+                    .contains(&format!("task #{task_id} not found")) =>
+            {
+                BoardError::TaskNotFound {
+                    id: task_id.to_string(),
+                }
+            }
+            other => other,
+        })
 }
 
 pub fn list_tasks(board_dir: &Path, status: Option<&str>) -> Result<String, BoardError> {

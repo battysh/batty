@@ -2,14 +2,13 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
-
 use crate::team::comms::Channel;
 use crate::team::config::{
     AutomationConfig, BoardConfig, OrchestratorPosition, RoleDef, StandupConfig, TeamConfig,
     WorkflowMode, WorkflowPolicy,
 };
 use crate::team::daemon::{DaemonConfig, TeamDaemon};
+use crate::team::errors::DeliveryError;
 use crate::team::events::{EventSink, TeamEvent};
 use crate::team::hierarchy::MemberInstance;
 
@@ -18,7 +17,7 @@ pub(crate) struct RecordingChannel {
 }
 
 impl Channel for RecordingChannel {
-    fn send(&self, message: &str) -> Result<()> {
+    fn send(&self, message: &str) -> std::result::Result<(), DeliveryError> {
         self.messages.lock().unwrap().push(message.to_string());
         Ok(())
     }

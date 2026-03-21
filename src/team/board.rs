@@ -7,6 +7,8 @@ use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 use tracing::info;
 
+use super::errors::BoardError;
+
 /// Workflow metadata stored in task frontmatter.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct WorkflowMetadata {
@@ -202,7 +204,10 @@ fn split_done_section(content: &str) -> (&str, Vec<&str>, &str) {
 fn split_task_frontmatter(content: &str) -> Result<(&str, &str)> {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
-        anyhow::bail!("task file missing YAML frontmatter (no opening ---)");
+        return Err(BoardError::InvalidFrontmatter {
+            detail: "no opening ---".to_string(),
+        }
+        .into());
     }
 
     let after_open = &trimmed[3..];

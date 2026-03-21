@@ -5,6 +5,7 @@ use tracing::{debug, info, warn};
 
 use super::config::RoleType;
 use super::daemon::TeamDaemon;
+use super::errors::DeliveryError;
 use super::inbox;
 use super::message;
 use crate::tmux;
@@ -318,16 +319,25 @@ impl TeamDaemon {
                     warn!(
                         from,
                         to = recipient,
+                        pane_id,
                         error = %error,
                         "live message delivery failed; queueing to inbox"
                     );
+                    let _typed_error = DeliveryError::PaneInject {
+                        recipient: recipient.to_string(),
+                        pane_id: pane_id.clone(),
+                        detail: error.to_string(),
+                    };
                 }
             }
         }
 
         let root = inbox::inboxes_root(&self.config.project_root);
         let msg = inbox::InboxMessage::new_send(from, recipient, body);
-        inbox::deliver_to_inbox(&root, &msg)?;
+        inbox::deliver_to_inbox(&root, &msg).map_err(|error| DeliveryError::InboxQueue {
+            recipient: recipient.to_string(),
+            detail: error.to_string(),
+        })?;
         self.record_message_routed(from, recipient);
         Ok(MessageDelivery::InboxQueued)
     }
@@ -526,7 +536,6 @@ pub(super) fn capture_contains_message_marker(capture: &str, message_marker: &st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::bail;
     use std::collections::{HashMap, HashSet};
     use std::io;
     use std::sync::{Arc, Mutex};
@@ -539,6 +548,7 @@ mod tests {
         WorkflowPolicy,
     };
     use crate::team::daemon::{DaemonConfig, TeamDaemon};
+    use crate::team::errors::DeliveryError;
     use crate::team::events::EventSink;
     use crate::team::failure_patterns::FailureTracker;
     use crate::team::hierarchy::MemberInstance;
@@ -548,7 +558,7 @@ mod tests {
     }
 
     impl Channel for RecordingChannel {
-        fn send(&self, message: &str) -> Result<()> {
+        fn send(&self, message: &str) -> std::result::Result<(), DeliveryError> {
             self.messages.lock().unwrap().push(message.to_string());
             Ok(())
         }
@@ -561,8 +571,11 @@ mod tests {
     struct FailingChannel;
 
     impl Channel for FailingChannel {
-        fn send(&self, _message: &str) -> Result<()> {
-            bail!("synthetic channel failure")
+        fn send(&self, _message: &str) -> std::result::Result<(), DeliveryError> {
+            Err(DeliveryError::ChannelSend {
+                recipient: "test-recipient".to_string(),
+                detail: "synthetic channel failure".to_string(),
+            })
         }
 
         fn channel_type(&self) -> &str {

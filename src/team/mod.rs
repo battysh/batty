@@ -15,6 +15,7 @@ pub mod cost;
 pub mod daemon;
 pub mod delivery;
 pub mod doctor;
+pub mod errors;
 pub mod events;
 pub mod failure_patterns;
 pub mod git_cmd;

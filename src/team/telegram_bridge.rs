@@ -159,6 +159,7 @@ mod tests {
         AutomationConfig, BoardConfig, ChannelConfig, OrchestratorPosition, RoleDef, StandupConfig,
         WorkflowMode, WorkflowPolicy,
     };
+    use crate::team::errors::DeliveryError;
     use crate::team::events::EventSink;
     use crate::team::failure_patterns::FailureTracker;
     use crate::team::hierarchy::MemberInstance;
@@ -169,7 +170,7 @@ mod tests {
     }
 
     impl Channel for RecordingChannel {
-        fn send(&self, message: &str) -> Result<()> {
+        fn send(&self, message: &str) -> std::result::Result<(), DeliveryError> {
             self.messages.lock().unwrap().push(message.to_string());
             Ok(())
         }
