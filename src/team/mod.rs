@@ -6,6 +6,7 @@
 
 pub mod artifact;
 pub mod board;
+pub mod board_cmd;
 pub mod capability;
 pub mod comms;
 pub mod completion;
