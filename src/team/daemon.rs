@@ -146,6 +146,7 @@ struct MemberLaunchPlan {
     identity: LaunchIdentity,
     initial_state: MemberState,
     activate_watcher: bool,
+    resume_summary: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -550,6 +551,19 @@ impl TeamDaemon {
                 .and_then(|identity| identity.session_id.as_deref())
                 .is_some_and(|existing| duplicate_claude_session_ids.contains(existing)),
         );
+        let resume_summary = format_resume_decision_summary(
+            &member.name,
+            &normalized_agent,
+            previous_identity,
+            resume,
+            &prompt_text,
+            claude_session_available,
+            previous_identity
+                .and_then(|identity| identity.session_id.as_deref())
+                .is_some_and(|existing| duplicate_claude_session_ids.contains(existing)),
+            member_resume,
+            session_id.as_deref(),
+        );
 
         let short_cmd = write_launch_script(
             &member.name,
@@ -581,6 +595,7 @@ impl TeamDaemon {
             },
             initial_state: initial_member_state(idle, member_resume),
             activate_watcher: should_activate_watcher_on_spawn(idle, member_resume),
+            resume_summary,
         })
     }
 
@@ -672,6 +687,7 @@ impl TeamDaemon {
         let previous_launch_state = load_launch_state(&self.config.project_root);
         let duplicate_claude_session_ids = duplicate_claude_session_ids(&previous_launch_state);
         let mut next_launch_state = HashMap::new();
+        let mut resume_summaries = Vec::new();
 
         // Ensure inboxes exist for all members
         let inboxes = inbox::inboxes_root(&self.config.project_root);
@@ -698,6 +714,7 @@ impl TeamDaemon {
                 &duplicate_claude_session_ids,
             ) {
                 Ok(plan) => {
+                    resume_summaries.push(plan.resume_summary.clone());
                     if let Err(error) = self.apply_member_launch(member, &pane_id, &plan) {
                         warn!(member = %member.name, error = %error, "failed to launch member");
                         continue;
@@ -712,6 +729,10 @@ impl TeamDaemon {
                     );
                 }
             }
+        }
+
+        if !resume_summaries.is_empty() {
+            self.record_orchestrator_action(format!("resume: {}", resume_summaries.join(", ")));
         }
 
         if let Err(error) = save_launch_state(&self.config.project_root, &next_launch_state) {
@@ -4258,6 +4279,54 @@ fn should_resume_member(
     false
 }
 
+fn format_resume_decision_summary(
+    member_name: &str,
+    current_agent: &str,
+    previous_identity: Option<&LaunchIdentity>,
+    resume_requested: bool,
+    current_prompt: &str,
+    claude_session_available: bool,
+    duplicate_session_id: bool,
+    member_resume: bool,
+    session_id: Option<&str>,
+) -> String {
+    let decision = if member_resume { "yes" } else { "no" };
+    let reason = if !resume_requested {
+        "resume disabled".to_string()
+    } else if let Some(previous) = previous_identity {
+        if previous.agent != current_agent {
+            "agent changed".to_string()
+        } else if previous.prompt != current_prompt {
+            "prompt changed".to_string()
+        } else if duplicate_session_id {
+            "session duplicated".to_string()
+        } else if previous.session_id.is_some() && !claude_session_available {
+            "session missing".to_string()
+        } else if member_resume {
+            session_id
+                .map(short_session_summary)
+                .unwrap_or_else(|| "identity matched".to_string())
+        } else if previous.session_id.is_none() {
+            "session unavailable".to_string()
+        } else {
+            "starting fresh".to_string()
+        }
+    } else {
+        "no prior launch identity".to_string()
+    };
+
+    format!("{member_name}={decision} ({reason})")
+}
+
+fn short_session_summary(session_id: &str) -> String {
+    let short = session_id.chars().take(8).collect::<String>();
+    if session_id.chars().count() > 8 {
+        format!("session {short}...")
+    } else {
+        format!("session {short}")
+    }
+}
+
 fn member_session_tracker_config(
     project_root: &Path,
     member: &MemberInstance,
@@ -4880,6 +4949,54 @@ mod tests {
             "claude-code",
             "same prompt",
         ));
+    }
+
+    #[test]
+    fn resume_reason_includes_session_info() {
+        let previous = LaunchIdentity {
+            agent: "claude-code".to_string(),
+            prompt: "same prompt".to_string(),
+            session_id: Some("e303fefd1234".to_string()),
+        };
+
+        let summary = format_resume_decision_summary(
+            "architect",
+            "claude-code",
+            Some(&previous),
+            true,
+            "same prompt",
+            true,
+            false,
+            true,
+            Some("e303fefd1234"),
+        );
+
+        assert!(summary.contains("architect=yes"));
+        assert!(summary.contains("session e303fefd"));
+    }
+
+    #[test]
+    fn fresh_start_logged_differently() {
+        let previous = LaunchIdentity {
+            agent: "claude-code".to_string(),
+            prompt: "old prompt".to_string(),
+            session_id: Some("e303fefd1234".to_string()),
+        };
+
+        let summary = format_resume_decision_summary(
+            "architect",
+            "claude-code",
+            Some(&previous),
+            true,
+            "new prompt",
+            true,
+            false,
+            false,
+            Some("new-session"),
+        );
+
+        assert!(summary.contains("architect=no"));
+        assert!(summary.contains("prompt changed"));
     }
 
     #[test]
@@ -8460,6 +8577,46 @@ mod tests {
         let content =
             fs::read_to_string(tmp.path().join(".batty").join("orchestrator.log")).unwrap();
         assert!(content.contains("dispatch: active"));
+    }
+
+    #[test]
+    fn resume_decision_logged_to_orchestrator() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member = MemberInstance {
+            name: "architect".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode: WorkflowMode::Hybrid,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                roles: Vec::new(),
+            },
+            session: "test".to_string(),
+            members: vec![member],
+            pane_map: HashMap::from([("architect".to_string(), "%999".to_string())]),
+        })
+        .unwrap();
+
+        daemon.spawn_all_agents(false).unwrap();
+
+        let content =
+            fs::read_to_string(tmp.path().join(".batty").join("orchestrator.log")).unwrap();
+        assert!(content.contains("resume: architect=no (resume disabled)"));
     }
 
     /// Helper: build a minimal DaemonConfig with the given roles.
