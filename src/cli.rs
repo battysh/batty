@@ -35,6 +35,9 @@ pub enum Command {
         name: String,
     },
 
+    /// Export run state for debugging
+    ExportRun,
+
     /// Generate a run retrospective
     Retro {
         /// Path to events.jsonl (default: .batty/team_config/events.jsonl)
@@ -352,6 +355,15 @@ mod tests {
         match cli.command {
             Command::ExportTemplate { name } => assert_eq!(name, "myteam"),
             other => panic!("expected export-template command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn export_run_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "export-run"]);
+        match cli.command {
+            Command::ExportRun => {}
+            other => panic!("expected export-run command, got {other:?}"),
         }
     }
 
