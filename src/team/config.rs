@@ -36,6 +36,8 @@ pub struct WorkflowPolicy {
     pub wip_limit_per_engineer: Option<u32>,
     #[serde(default)]
     pub wip_limit_per_reviewer: Option<u32>,
+    #[serde(default = "default_pipeline_starvation_threshold")]
+    pub pipeline_starvation_threshold: Option<usize>,
     #[serde(default = "default_escalation_threshold_secs")]
     pub escalation_threshold_secs: u64,
     #[serde(default = "default_review_timeout_secs")]
@@ -51,6 +53,7 @@ impl Default for WorkflowPolicy {
         Self {
             wip_limit_per_engineer: None,
             wip_limit_per_reviewer: None,
+            pipeline_starvation_threshold: default_pipeline_starvation_threshold(),
             escalation_threshold_secs: default_escalation_threshold_secs(),
             review_timeout_secs: default_review_timeout_secs(),
             auto_archive_done_after_secs: None,
@@ -253,6 +256,10 @@ fn default_board_auto_dispatch() -> bool {
 
 fn default_standup_interval() -> u64 {
     300
+}
+
+fn default_pipeline_starvation_threshold() -> Option<usize> {
+    Some(1)
 }
 
 fn default_output_lines() -> u32 {

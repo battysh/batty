@@ -30,6 +30,7 @@ mod tests {
         let policy = WorkflowPolicy::default();
         assert_eq!(policy.wip_limit_per_engineer, None);
         assert_eq!(policy.wip_limit_per_reviewer, None);
+        assert_eq!(policy.pipeline_starvation_threshold, Some(1));
         assert_eq!(policy.escalation_threshold_secs, 3600);
         assert_eq!(policy.review_timeout_secs, 7200);
         assert_eq!(policy.auto_archive_done_after_secs, None);

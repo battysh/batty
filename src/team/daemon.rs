@@ -85,6 +85,7 @@ pub struct TeamDaemon {
     last_standup: HashMap<String, Instant>,
     last_board_rotation: Instant,
     last_auto_dispatch: Instant,
+    pipeline_starvation_fired: bool,
     retro_generated: bool,
     poll_interval: Duration,
 }
@@ -138,6 +139,7 @@ struct PersistedDaemonState {
     paused_standups: HashSet<String>,
     last_standup_elapsed_secs: HashMap<String, u64>,
     nudge_state: HashMap<String, PersistedNudgeState>,
+    pipeline_starvation_fired: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +266,7 @@ impl TeamDaemon {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         })
@@ -345,6 +348,9 @@ impl TeamDaemon {
             });
             self.run_loop_step("maybe_intervene_architect_utilization", |daemon| {
                 daemon.maybe_intervene_architect_utilization()
+            });
+            self.run_loop_step("maybe_detect_pipeline_starvation", |daemon| {
+                daemon.maybe_detect_pipeline_starvation()
             });
             self.run_loop_step("poll_telegram", |daemon| daemon.poll_telegram());
             self.run_loop_step("deliver_user_inbox", |daemon| daemon.deliver_user_inbox());
@@ -2031,6 +2037,7 @@ impl TeamDaemon {
             schedule.fired_this_idle = persisted.fired_this_idle;
             schedule.paused = persisted.paused;
         }
+        self.pipeline_starvation_fired = state.pipeline_starvation_fired;
     }
 
     fn persist_runtime_state(&self, clean_shutdown: bool) -> Result<()> {
@@ -2060,6 +2067,7 @@ impl TeamDaemon {
                     )
                 })
                 .collect(),
+            pipeline_starvation_fired: self.pipeline_starvation_fired,
         };
         save_daemon_state(&self.config.project_root, &state)
     }
@@ -2727,6 +2735,67 @@ impl TeamDaemon {
             }
         }
 
+        Ok(())
+    }
+
+    fn maybe_detect_pipeline_starvation(&mut self) -> Result<()> {
+        let Some(threshold) = self
+            .config
+            .team_config
+            .workflow_policy
+            .pipeline_starvation_threshold
+        else {
+            self.pipeline_starvation_fired = false;
+            return Ok(());
+        };
+
+        let idle_engineers = self.idle_engineer_names();
+        let idle_count = idle_engineers.len();
+        if idle_count == 0 {
+            self.pipeline_starvation_fired = false;
+            return Ok(());
+        }
+
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let todo_count = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?
+            .into_iter()
+            .filter(|task| matches!(task.status.as_str(), "todo" | "backlog"))
+            .count();
+
+        let deficit = idle_count.saturating_sub(todo_count);
+        if todo_count >= idle_count || deficit < threshold {
+            self.pipeline_starvation_fired = false;
+            return Ok(());
+        }
+        if self.pipeline_starvation_fired {
+            return Ok(());
+        }
+
+        let inbox_root = inbox::inboxes_root(&self.config.project_root);
+        let architects: Vec<String> = self
+            .config
+            .members
+            .iter()
+            .filter(|member| member.role_type == RoleType::Architect)
+            .map(|member| member.name.clone())
+            .collect();
+        if architects.is_empty() {
+            return Ok(());
+        }
+
+        let message =
+            format!("Pipeline running dry: {idle_count} idle engineers, {todo_count} todo tasks.");
+        for architect in &architects {
+            let visible_sender = self.automation_sender_for(architect);
+            let inbox_msg = inbox::InboxMessage::new_send(&visible_sender, architect, &message);
+            inbox::deliver_to_inbox(&inbox_root, &inbox_msg)?;
+        }
+        self.pipeline_starvation_fired = true;
         Ok(())
     }
 
@@ -4506,6 +4575,101 @@ mod tests {
         .unwrap();
     }
 
+    fn write_open_task_file(project_root: &Path, id: u32, title: &str, status: &str) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join(format!("{id:03}-{title}.md")),
+            format!(
+                "---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: high\nclass: standard\n---\n\nTask description.\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn starvation_test_daemon(tmp: &tempfile::TempDir, threshold: Option<usize>) -> TeamDaemon {
+        let architect = MemberInstance {
+            name: "architect".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let eng_1 = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let eng_2 = MemberInstance {
+            name: "eng-2".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+
+        TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: TeamConfig {
+                    name: "test".to_string(),
+                    workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy {
+                        pipeline_starvation_threshold: threshold,
+                        ..WorkflowPolicy::default()
+                    },
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
+                    layout: None,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![architect, eng_1, eng_2],
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::from([
+                ("eng-1".to_string(), MemberState::Idle),
+                ("eng-2".to_string(), MemberState::Idle),
+            ]),
+            idle_started_at: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            failure_window: FailureWindow::new(20),
+            last_pattern_notifications: HashMap::new(),
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
+            retro_generated: false,
+            poll_interval: Duration::from_secs(5),
+        }
+    }
+
     fn write_event_log(project_root: &Path, events: &[TeamEvent]) {
         let events_path = project_root
             .join(".batty")
@@ -4880,6 +5044,7 @@ mod tests {
                     paused: false,
                 },
             )]),
+            pipeline_starvation_fired: true,
         };
 
         save_daemon_state(tmp.path(), &state).unwrap();
@@ -5159,6 +5324,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -5222,6 +5388,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -5411,6 +5578,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -5735,6 +5903,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -5788,6 +5957,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now() - Duration::from_secs(30),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -5838,6 +6008,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -5893,6 +6064,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -5946,6 +6118,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -6003,6 +6176,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -6062,6 +6236,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -6130,6 +6305,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -6227,6 +6403,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -6455,6 +6632,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -6548,6 +6726,7 @@ mod tests {
             )]),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -6638,6 +6817,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -6742,6 +6922,7 @@ mod tests {
             )]),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -6842,6 +7023,7 @@ mod tests {
                 last_standup: HashMap::new(),
                 last_board_rotation: Instant::now(),
                 last_auto_dispatch: Instant::now(),
+                pipeline_starvation_fired: false,
                 retro_generated: false,
                 poll_interval: Duration::from_secs(5),
             };
@@ -6941,6 +7123,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -7035,6 +7218,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -7125,6 +7309,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -7203,6 +7388,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -7302,6 +7488,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -7377,6 +7564,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -7444,6 +7632,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -7516,6 +7705,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -7582,6 +7772,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -7670,6 +7861,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             failure_window: FailureWindow::new(20),
             last_pattern_notifications: HashMap::new(),
@@ -7748,6 +7940,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             failure_window: FailureWindow::new(20),
             last_pattern_notifications: HashMap::new(),
@@ -7839,6 +8032,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -7941,6 +8135,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -8040,6 +8235,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -8163,6 +8359,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -8199,6 +8396,104 @@ mod tests {
                 .owned_task_interventions
                 .contains_key("utilization::architect")
         );
+    }
+
+    #[test]
+    fn test_starvation_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = starvation_test_daemon(&tmp, Some(1));
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "architect").unwrap();
+        write_open_task_file(tmp.path(), 101, "queued-task", "todo");
+
+        daemon.maybe_detect_pipeline_starvation().unwrap();
+
+        let pending = inbox::pending_messages(&root, "architect").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "daemon");
+        assert_eq!(
+            pending[0].body,
+            "Pipeline running dry: 2 idle engineers, 1 todo tasks."
+        );
+        assert!(daemon.pipeline_starvation_fired);
+    }
+
+    #[test]
+    fn test_debounce() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = starvation_test_daemon(&tmp, Some(1));
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "architect").unwrap();
+        write_open_task_file(tmp.path(), 101, "queued-task", "todo");
+
+        daemon.maybe_detect_pipeline_starvation().unwrap();
+        daemon.maybe_detect_pipeline_starvation().unwrap();
+
+        let pending = inbox::pending_messages(&root, "architect").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(daemon.pipeline_starvation_fired);
+    }
+
+    #[test]
+    fn test_threshold_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = starvation_test_daemon(&tmp, Some(2));
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "architect").unwrap();
+        write_open_task_file(tmp.path(), 101, "queued-task", "todo");
+
+        daemon.maybe_detect_pipeline_starvation().unwrap();
+        assert!(
+            inbox::pending_messages(&root, "architect")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!daemon.pipeline_starvation_fired);
+
+        let disabled_tmp = tempfile::tempdir().unwrap();
+        let mut disabled_daemon = starvation_test_daemon(&disabled_tmp, None);
+        let disabled_root = inbox::inboxes_root(disabled_tmp.path());
+        inbox::init_inbox(&disabled_root, "architect").unwrap();
+        write_open_task_file(disabled_tmp.path(), 101, "queued-task", "todo");
+
+        disabled_daemon.maybe_detect_pipeline_starvation().unwrap();
+        assert!(
+            inbox::pending_messages(&disabled_root, "architect")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!disabled_daemon.pipeline_starvation_fired);
+    }
+
+    #[test]
+    fn test_reset_when_work_added() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = starvation_test_daemon(&tmp, Some(1));
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "architect").unwrap();
+        write_open_task_file(tmp.path(), 101, "queued-task", "todo");
+
+        daemon.maybe_detect_pipeline_starvation().unwrap();
+        assert!(daemon.pipeline_starvation_fired);
+
+        write_open_task_file(tmp.path(), 102, "queued-task-2", "backlog");
+        daemon.maybe_detect_pipeline_starvation().unwrap();
+        assert!(!daemon.pipeline_starvation_fired);
+
+        std::fs::remove_file(
+            tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("102-queued-task-2.md"),
+        )
+        .unwrap();
+        daemon.maybe_detect_pipeline_starvation().unwrap();
+
+        let pending = inbox::pending_messages(&root, "architect").unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(daemon.pipeline_starvation_fired);
     }
 
     #[test]
@@ -8260,6 +8555,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -8351,6 +8647,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -8429,6 +8726,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
@@ -8519,6 +8817,7 @@ mod tests {
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
             retro_generated: false,
             poll_interval: Duration::from_secs(5),
         };
