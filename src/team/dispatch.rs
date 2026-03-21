@@ -1,3 +1,4 @@
+use super::super::events::TeamEvent;
 use super::super::task_loop::{next_unclaimed_task, prepare_engineer_assignment_worktree};
 use super::launcher::{
     canonical_agent_name, new_member_session_id, strip_nudge_section, write_launch_script,

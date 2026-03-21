@@ -19,6 +19,7 @@ use crate::tmux;
 
 /// Generate a standup report for a specific recipient, showing only their
 /// direct reports.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn generate_standup_for(
     recipient: &MemberInstance,
     members: &[MemberInstance],

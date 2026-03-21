@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 use crate::team::comms::Channel;
 use crate::team::config::{
@@ -25,18 +25,6 @@ impl Channel for RecordingChannel {
 
     fn channel_type(&self) -> &str {
         "test"
-    }
-}
-
-pub(crate) struct FailingChannel;
-
-impl Channel for FailingChannel {
-    fn send(&self, _message: &str) -> Result<()> {
-        bail!("synthetic channel failure")
-    }
-
-    fn channel_type(&self) -> &str {
-        "test-failing"
     }
 }
 

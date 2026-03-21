@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), allow(dead_code))]
+
 //! Review and merge transitions for Batty-managed workflow metadata.
 
 use serde::{Deserialize, Serialize};

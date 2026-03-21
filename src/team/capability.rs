@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), allow(dead_code))]
+
 //! Workflow capability resolution for topology-independent team behavior.
 //!
 //! The rules in this module intentionally resolve responsibilities from

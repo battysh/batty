@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), allow(dead_code))]
+
 use super::config::{RoleType, WorkflowPolicy};
 
 pub fn check_wip_limit(policy: &WorkflowPolicy, role_type: RoleType, active_count: u32) -> bool {
