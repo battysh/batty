@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use super::events::{TeamEvent, read_events};
+use crate::task;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunStats {
@@ -193,6 +194,39 @@ pub fn analyze_events(events: &[TeamEvent]) -> Option<RunStats> {
 pub fn analyze_event_log(path: &Path) -> Result<Option<RunStats>> {
     let events = read_events(path)?;
     Ok(analyze_events(&events))
+}
+
+pub fn should_generate_retro(
+    project_root: &Path,
+    retro_generated: bool,
+) -> Result<Option<RunStats>> {
+    if retro_generated {
+        return Ok(None);
+    }
+
+    let board_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board");
+    let tasks_dir = board_dir.join("tasks");
+    if !tasks_dir.is_dir() {
+        return Ok(None);
+    }
+
+    let tasks = task::load_tasks_from_dir(&tasks_dir)?;
+    let active_tasks: Vec<&task::Task> = tasks
+        .iter()
+        .filter(|task| task.status != "archived")
+        .collect();
+    if active_tasks.is_empty() || active_tasks.iter().any(|task| task.status != "done") {
+        return Ok(None);
+    }
+
+    let events_path = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("events.jsonl");
+    analyze_event_log(&events_path)
 }
 
 pub fn generate_retrospective(project_root: &Path, stats: &RunStats) -> Result<PathBuf> {
@@ -585,5 +619,97 @@ mod tests {
 
         assert!(content.contains("Several retries were needed"));
         assert!(content.contains("smaller tasks"));
+    }
+
+    fn write_owned_task_file(
+        project_root: &Path,
+        task_id: u32,
+        title: &str,
+        status: &str,
+        claimed_by: &str,
+    ) {
+        let board_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let tasks_dir = board_dir.join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        let slug = title.replace(' ', "-");
+        let task_path = tasks_dir.join(format!("{task_id:03}-{slug}.md"));
+        let content = format!(
+            r#"---
+id: {task_id}
+title: "{title}"
+status: {status}
+claimed_by: {claimed_by}
+---
+
+Task body.
+"#
+        );
+        fs::write(task_path, content).unwrap();
+    }
+
+    fn write_event_log(project_root: &Path, events: &[TeamEvent]) {
+        let events_path = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        fs::create_dir_all(events_path.parent().unwrap()).unwrap();
+        let body = events
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(events_path, format!("{body}\n")).unwrap();
+    }
+
+    #[test]
+    fn should_generate_retro_when_all_active_tasks_are_done() {
+        let tmp = tempdir().unwrap();
+        write_owned_task_file(tmp.path(), 45, "retro-task", "done", "eng-1");
+        write_event_log(
+            tmp.path(),
+            &[
+                at(TeamEvent::daemon_started(), 100),
+                at(TeamEvent::task_assigned("eng-1", "45"), 110),
+                at(TeamEvent::task_completed("eng-1"), 150),
+                at(TeamEvent::daemon_stopped(), 160),
+            ],
+        );
+
+        let stats = should_generate_retro(tmp.path(), false).unwrap().unwrap();
+        assert_eq!(stats.run_start, 100);
+        assert_eq!(stats.run_end, 160);
+        assert_eq!(stats.task_stats.len(), 1);
+        assert_eq!(stats.task_stats[0].task_id, "45");
+    }
+
+    #[test]
+    fn should_not_generate_retro_when_task_is_not_done() {
+        let tmp = tempdir().unwrap();
+        write_owned_task_file(tmp.path(), 45, "retro-task", "in-progress", "eng-1");
+        write_event_log(tmp.path(), &[at(TeamEvent::daemon_started(), 100)]);
+
+        let stats = should_generate_retro(tmp.path(), false).unwrap();
+        assert_eq!(stats, None);
+    }
+
+    #[test]
+    fn should_not_generate_retro_twice() {
+        let tmp = tempdir().unwrap();
+        write_owned_task_file(tmp.path(), 45, "retro-task", "done", "eng-1");
+        write_event_log(
+            tmp.path(),
+            &[
+                at(TeamEvent::daemon_started(), 100),
+                at(TeamEvent::task_assigned("eng-1", "45"), 110),
+                at(TeamEvent::task_completed("eng-1"), 150),
+                at(TeamEvent::daemon_stopped(), 160),
+            ],
+        );
+
+        let stats = should_generate_retro(tmp.path(), true).unwrap();
+        assert_eq!(stats, None);
     }
 }

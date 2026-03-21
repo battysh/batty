@@ -1334,37 +1334,11 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
     }
 
     fn maybe_generate_retrospective(&mut self) -> Result<()> {
-        if self.retro_generated {
-            return Ok(());
-        }
-
-        let board_dir = self
-            .config
-            .project_root
-            .join(".batty")
-            .join("team_config")
-            .join("board");
-        let tasks_dir = board_dir.join("tasks");
-        if !tasks_dir.is_dir() {
-            return Ok(());
-        }
-
-        let tasks = crate::task::load_tasks_from_dir(&tasks_dir)?;
-        let active_tasks: Vec<&crate::task::Task> = tasks
-            .iter()
-            .filter(|task| task.status != "archived")
-            .collect();
-        if active_tasks.is_empty() || active_tasks.iter().any(|task| task.status != "done") {
-            return Ok(());
-        }
-
-        let events_path = self
-            .config
-            .project_root
-            .join(".batty")
-            .join("team_config")
-            .join("events.jsonl");
-        let Some(stats) = super::retrospective::analyze_event_log(&events_path)? else {
+        let Some(stats) = super::retrospective::should_generate_retro(
+            &self.config.project_root,
+            self.retro_generated,
+        )?
+        else {
             return Ok(());
         };
 
