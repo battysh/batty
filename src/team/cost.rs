@@ -848,18 +848,15 @@ mod tests {
         fs::write(
             codex_day.join("rollout.jsonl"),
             format!(
-                "{}\n{}\n{}\n",
-                format!(
-                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"codex-session\",\"cwd\":\"{}\"}}}}",
-                    project_root
-                        .join(".batty")
-                        .join("worktrees")
-                        .join("engineer")
-                        .join(".batty")
-                        .join("codex-context")
-                        .join("engineer")
-                        .display()
-                ),
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"codex-session\",\"cwd\":\"{}\"}}}}\n{}\n{}\n",
+                project_root
+                    .join(".batty")
+                    .join("worktrees")
+                    .join("engineer")
+                    .join(".batty")
+                    .join("codex-context")
+                    .join("engineer")
+                    .display(),
                 r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
                 r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":250,"output_tokens":100,"reasoning_output_tokens":10}}}}"#,
             ),

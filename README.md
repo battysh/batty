@@ -126,6 +126,7 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 - Maildir inbox routing with explicit `talks_to` communication rules
 - Stable per-engineer worktrees with fresh task branches on each assignment
 - Kanban-driven task loop with auto-dispatch, retry tracking, and test gating
+- Orchestrator automation for triage, review, owned-task recovery, dispatch-gap recovery, utilization recovery, standups, nudges, and retrospectives
 - YAML config, Markdown boards, JSON/JSONL logs: everything stays file-based
 
 ## CLI Quick Reference
@@ -138,10 +139,12 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 | `batty send <role> <message>` | Send a message to a role |
 | `batty assign <engineer> <task>` | Queue work for an engineer and report delivery result |
 | `batty inbox <member>` / `read` / `ack` | Inspect and manage inbox messages |
-| `batty board` | Open the kanban board |
+| `batty board` / `board list` / `board summary` | Open the kanban board or inspect it without a TTY |
 | `batty status [--json]` | Show current team state |
 | `batty merge <engineer>` | Merge an engineer worktree branch |
-| `batty validate` / `config` | Validate and inspect team config |
+| `batty retro` / `load` / `cost` / `doctor` | Inspect run history, team load, session cost, and diagnostic state |
+| `batty pause` / `resume` / `queue` | Control automation and inspect queued dispatch work |
+| `batty validate` / `config` / `export-run` | Validate config and export runtime state |
 | `batty telegram` | Configure Telegram for human communication |
 | `batty completions <shell>` | Generate shell completions |
 

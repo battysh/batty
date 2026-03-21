@@ -194,7 +194,11 @@ Use these while the team runs:
 batty attach
 batty inbox architect
 batty board
+batty board summary
+batty doctor
 ```
+
+`batty board summary` is the quickest non-interactive snapshot of backlog vs. in-progress vs. review work, while `batty doctor` dumps the launch state, board health, worktree status, and daemon-derived checks when the team looks stuck.
 
 If a member has queued messages, `batty inbox architect` looks like:
 

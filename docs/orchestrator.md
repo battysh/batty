@@ -58,6 +58,26 @@ This is controlled primarily by:
 - `workflow_policy.wip_limit_per_engineer`
 - `workflow_policy.capability_overrides`
 
+## Intervention Matrix
+
+The orchestrator's recovery prompts are state-driven, not timer spam. Each intervention family computes a signature from the current board/runtime state, tracks the member's current idle epoch, and suppresses repeat prompts unless either the state meaningfully changes or the cooldown expires.
+
+| Intervention | Trigger | State / dedupe behavior | Main config knobs |
+| --- | --- | --- | --- |
+| Triage backlog | Manager is idle and has delivered direct-report result packets waiting in inbox | Signature is based on the delivered backlog set; repeats are suppressed within the same idle epoch until backlog changes | `automation.triage_interventions`, `automation.intervention_idle_grace_secs`, `automation_sender` |
+| Review backlog | Review owner is idle while board tasks remain in `review` for them | Signature includes review task refs; repeat prompts are blocked unless the review queue changes or cooldown clears | `automation.review_interventions`, `automation.intervention_idle_grace_secs`, `workflow_policy.review_timeout_secs` |
+| Owned-task recovery | Member is idle while still owning active board work | Signature follows owned active/review work; same-signature prompts are suppressed and may escalate when the condition persists | `automation.owned_task_interventions`, `automation.intervention_idle_grace_secs`, `workflow_policy.escalation_threshold_secs` |
+| Manager dispatch-gap | Manager is idle while direct reports are idle and runnable work still exists | Signature includes idle reports plus runnable backlog; repeats wait for a changed dispatch picture or cooldown reset | `automation.manager_dispatch_interventions`, `automation.intervention_idle_grace_secs`, `board.auto_dispatch`, `workflow_policy.wip_limit_per_engineer` |
+| Architect utilization | Architect is idle while the team is underloaded or blocked on replenishment/lead action | Signature follows the underload snapshot; repeated prompts are deduped per idle epoch | `automation.architect_utilization_interventions`, `automation.intervention_idle_grace_secs` |
+| Board replenishment | Idle engineers exist but runnable todo work is below threshold | Signature tracks idle capacity and runnable queue counts so the architect is only re-prompted when the replenishment picture changes | `board.rotation_threshold`, `automation.architect_utilization_interventions`, `automation.intervention_idle_grace_secs` |
+
+Operationally, all of these share the same guard rails:
+
+- they only fire for members the daemon currently sees as idle
+- pending inbox work and higher-priority recovery conditions suppress lower-priority prompts
+- `batty pause` disables nudge/standup automation and stops further intervention firing until resumed
+- orchestrator actions are recorded to `.batty/orchestrator.log` and the ANSI pane log for operator review
+
 ## Triage System
 
 Triage is how Batty prevents upward-report backlog from silently accumulating.
@@ -95,6 +115,57 @@ This is controlled by:
 - `automation.review_interventions`
 - `workflow_policy.wip_limit_per_reviewer`
 - `workflow_policy.review_timeout_secs`
+
+## Owned-Task Interventions
+
+Owned-task recovery handles the case where a member has gone idle even though the board still says they own active work. The daemon treats this as a workflow inconsistency or a blocked lane, then nudges the owner to normalize the board state, unblock the task, or escalate.
+
+Behavior:
+
+- only active ownership states qualify; `done` and archived work are ignored
+- prompts are deduped by idle epoch plus the owned-task signature
+- if the same stuck condition persists long enough, the daemon escalates instead of silently repeating the same nudge
+
+This is controlled by:
+
+- `automation.owned_task_interventions`
+- `automation.intervention_idle_grace_secs`
+- `workflow_policy.escalation_threshold_secs`
+
+## Manager Dispatch-Gap Interventions
+
+Dispatch-gap recovery is aimed at leads who have idle capacity below them but have not yet pushed new work into those lanes. The orchestrator inspects direct reports, runnable board work, and current ownership so it can distinguish "nothing to do" from "lead needs to dispatch now."
+
+Behavior:
+
+- only idle managers are considered
+- reports with pending inbox work or active board ownership are not treated as free capacity
+- the intervention message includes concrete next commands for inspecting todo/in-progress lanes and dispatching specific work
+
+This is controlled by:
+
+- `automation.manager_dispatch_interventions`
+- `automation.intervention_idle_grace_secs`
+- `board.auto_dispatch`
+- `workflow_policy.wip_limit_per_engineer`
+
+## Architect Utilization And Board Replenishment
+
+Architect utilization recovery is the top-level backpressure mechanism. It fires when the team is underloaded and the architect is idle, prompting either dispatch recovery or board replenishment rather than letting the run stall.
+
+Board replenishment is the architect-specific branch of that logic: when idle engineers exist but the runnable todo queue is too small, the orchestrator asks the architect to add or normalize executable tasks.
+
+Behavior:
+
+- utilization and replenishment signatures are deduped so the architect is not re-prompted every loop tick
+- replenishment prompts include current board counts and idle-engineer context
+- upward reporting guidance is included when the architect has a parent role
+
+This is controlled by:
+
+- `automation.architect_utilization_interventions`
+- `automation.intervention_idle_grace_secs`
+- `board.rotation_threshold`
 
 ## Standup System
 

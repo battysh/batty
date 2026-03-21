@@ -96,15 +96,15 @@ fn task_id_from_assignment_line(line: &str) -> Option<String> {
     }
 }
 
-fn cycle_time_metrics(
-    task_stats: &[TaskStats],
-) -> (
+type CycleTimeMetrics = (
     Option<u64>,
     Option<String>,
     Option<u64>,
     Option<String>,
     Option<u64>,
-) {
+);
+
+fn cycle_time_metrics(task_stats: &[TaskStats]) -> CycleTimeMetrics {
     let completed: Vec<(&TaskStats, u64)> = task_stats
         .iter()
         .filter_map(|task| task.cycle_time_secs.map(|cycle| (task, cycle)))
@@ -118,12 +118,12 @@ fn cycle_time_metrics(
     let (fastest_task, fastest_cycle_time_secs) = completed
         .iter()
         .min_by_key(|(_, cycle)| *cycle)
-        .map(|(task, cycle)| ((*task).task_id.clone(), *cycle))
+        .map(|(task, cycle)| (task.task_id.clone(), *cycle))
         .expect("completed is not empty");
     let (longest_task, longest_cycle_time_secs) = completed
         .iter()
         .max_by_key(|(_, cycle)| *cycle)
-        .map(|(task, cycle)| ((*task).task_id.clone(), *cycle))
+        .map(|(task, cycle)| (task.task_id.clone(), *cycle))
         .expect("completed is not empty");
 
     (
