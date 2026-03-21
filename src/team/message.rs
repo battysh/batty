@@ -311,10 +311,11 @@ mod tests {
             let log_path = tmp.path().join("message-empty.log");
 
             crate::tmux::create_session(session, "cat", &[], "/tmp").unwrap();
-            crate::tmux::setup_pipe_pane(session, &log_path).unwrap();
+            let pane_id = crate::tmux::pane_id(session).unwrap();
+            crate::tmux::setup_pipe_pane(&pane_id, &log_path).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(200));
 
-            inject_message(session, "manager", "").unwrap();
+            inject_message(&pane_id, "manager", "").unwrap();
             let content = (0..30)
                 .find_map(|_| {
                     let content = std::fs::read_to_string(&log_path).unwrap_or_default();
