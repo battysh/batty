@@ -349,8 +349,8 @@ mod tests {
     #[test]
     #[serial]
     fn test_inject_message_long_special_message_preserves_content() {
-        let session = "batty-test-message-special";
-        let _ = crate::tmux::kill_session(session);
+        let session = format!("batty-test-message-special-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
 
         let tmp = tempfile::tempdir().unwrap();
         let log_path = tmp.path().join("message-special.log");
@@ -360,11 +360,11 @@ mod tests {
             repeated
         );
 
-        crate::tmux::create_session(session, "cat", &[], "/tmp").unwrap();
-        crate::tmux::setup_pipe_pane(session, &log_path).unwrap();
+        crate::tmux::create_session(&session, "cat", &[], "/tmp").unwrap();
+        crate::tmux::setup_pipe_pane(&session, &log_path).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));
 
-        inject_message(session, "architect", &long_message).unwrap();
+        inject_message(&session, "architect", &long_message).unwrap();
         let content = (0..30)
             .find_map(|_| {
                 let content = std::fs::read_to_string(&log_path).unwrap_or_default();
@@ -385,7 +385,7 @@ mod tests {
         assert!(content.contains("line-2"));
         assert!(content.contains("batty send architect"));
 
-        crate::tmux::kill_session(session).unwrap();
+        crate::tmux::kill_session(&session).unwrap();
     }
 
     #[test]

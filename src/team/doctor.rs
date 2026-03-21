@@ -940,7 +940,7 @@ fn active_task_targets(project_root: &Path, tasks: &[&crate::task::Task]) -> Act
             .map(str::trim)
             .filter(|name| is_engineer_name(name))
         {
-            branches.insert(format!("{claimed_by}/task-{}", task.id));
+            branches.insert(format!("{claimed_by}/{}", task.id));
         }
 
         if let Some(worktree_path) = task
@@ -1207,7 +1207,10 @@ fn resolve_task_worktree(project_root: &Path, worktree_path: &str) -> PathBuf {
 }
 
 fn is_task_branch(branch: &str) -> bool {
-    branch.starts_with("eng-") && branch.contains("/task-")
+    branch.starts_with("eng-")
+        && branch
+            .split_once('/')
+            .is_some_and(|(_, suffix)| suffix.starts_with("task-") || suffix.parse::<u32>().is_ok())
 }
 
 fn is_engineer_name(name: &str) -> bool {
@@ -1734,7 +1737,7 @@ roles:
             tmp.path(),
             69,
             "in-progress",
-            Some("eng-1-3/task-69"),
+            Some("eng-1-3/69"),
             Some(".batty/worktrees/eng-1-3"),
         );
 
@@ -1745,7 +1748,7 @@ roles:
                 "worktree",
                 "add",
                 "-b",
-                "eng-1-3/task-69",
+                "eng-1-3/69",
                 worktree_path.to_string_lossy().as_ref(),
                 "main",
             ],
@@ -2047,7 +2050,7 @@ roles:
         init_git_repo(tmp.path());
         write_claimed_task(tmp.path(), 72, "in-progress", "eng-1");
 
-        git_ok(tmp.path(), &["branch", "eng-1/task-72"]);
+        git_ok(tmp.path(), &["branch", "eng-1/72"]);
         fs::create_dir_all(tmp.path().join(".batty").join("worktrees").join("eng-1")).unwrap();
 
         let orphan_worktree = tmp.path().join(".batty").join("worktrees").join("eng-9");
@@ -2074,7 +2077,7 @@ roles:
         init_git_repo(tmp.path());
         write_claimed_task(tmp.path(), 72, "review", "eng-1");
 
-        git_ok(tmp.path(), &["branch", "eng-1/task-72"]);
+        git_ok(tmp.path(), &["branch", "eng-1/72"]);
         fs::create_dir_all(tmp.path().join(".batty").join("worktrees").join("eng-1")).unwrap();
 
         let orphan_worktree = tmp.path().join(".batty").join("worktrees").join("eng-9");
@@ -2103,7 +2106,7 @@ roles:
         assert!(!orphan_worktree.exists());
         assert_eq!(
             list_task_branches(tmp.path()).unwrap(),
-            vec!["eng-1/task-72".to_string()]
+            vec!["eng-1/72".to_string()]
         );
     }
 
@@ -2224,6 +2227,7 @@ roles:
 
     #[test]
     fn branch_and_engineer_name_helpers_match_expected_patterns() {
+        assert!(is_task_branch("eng-1/12"));
         assert!(is_task_branch("eng-1/task-12"));
         assert!(!is_task_branch("main"));
         assert!(!is_task_branch("eng-1/feature"));
@@ -2264,7 +2268,7 @@ roles:
 
         let targets = active_task_targets(tmp.path(), &[&task]);
 
-        assert!(targets.branches.contains("eng-2/task-88"));
+        assert!(targets.branches.contains("eng-2/88"));
         assert!(
             targets
                 .worktrees
@@ -2310,7 +2314,7 @@ roles:
         write_named_team_config(tmp.path(), &team_name);
         write_claimed_task(tmp.path(), 72, "review", "eng-1");
 
-        git_ok(tmp.path(), &["branch", "eng-1/task-72"]);
+        git_ok(tmp.path(), &["branch", "eng-1/72"]);
         fs::create_dir_all(tmp.path().join(".batty").join("worktrees").join("eng-1")).unwrap();
 
         let orphan_worktree = tmp.path().join(".batty").join("worktrees").join("eng-9");
