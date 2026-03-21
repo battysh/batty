@@ -5415,30 +5415,27 @@ exit 1
         daemon.maybe_detect_pipeline_starvation().unwrap();
         assert!(daemon.pipeline_starvation_fired);
 
+        // Adding a second task gives 2 unclaimed tasks for 2 idle engineers — starvation resolved
         write_open_task_file(tmp.path(), 102, "queued-task-2", "backlog");
-        daemon.maybe_detect_pipeline_starvation().unwrap();
-        assert!(daemon.pipeline_starvation_fired);
-
-        write_open_task_file(tmp.path(), 103, "queued-task-3", "backlog");
-        daemon.pipeline_starvation_last_fired = Some(Instant::now() - Duration::from_secs(301));
         daemon.maybe_detect_pipeline_starvation().unwrap();
         assert!(!daemon.pipeline_starvation_fired);
 
+        // Remove task 102 — back to 1 task for 2 engineers, starvation re-fires after cooldown
         std::fs::remove_file(
             tmp.path()
                 .join(".batty")
                 .join("team_config")
                 .join("board")
                 .join("tasks")
-                .join("103-queued-task-3.md"),
+                .join("102-queued-task-2.md"),
         )
         .unwrap();
         daemon.pipeline_starvation_last_fired = Some(Instant::now() - Duration::from_secs(301));
         daemon.maybe_detect_pipeline_starvation().unwrap();
 
         let pending = inbox::pending_messages(&root, "architect").unwrap();
-        assert_eq!(pending.len(), 1);
-        assert!(!daemon.pipeline_starvation_fired);
+        assert_eq!(pending.len(), 2);
+        assert!(daemon.pipeline_starvation_fired);
     }
 
     #[test]
