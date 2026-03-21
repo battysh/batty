@@ -4763,6 +4763,287 @@ exit 1
     }
 
     #[test]
+    fn zero_engineers_topology_skips_executor_interventions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("lead", Some("architect")),
+            ])
+            .pane_map(HashMap::from([
+                ("architect".to_string(), "%998".to_string()),
+                ("lead".to_string(), "%999".to_string()),
+            ]))
+            .states(HashMap::from([
+                ("architect".to_string(), MemberState::Idle),
+                ("lead".to_string(), MemberState::Idle),
+            ]))
+            .build();
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "architect").unwrap();
+        inbox::init_inbox(&root, "lead").unwrap();
+        write_open_task_file(tmp.path(), 191, "queued-task", "todo");
+
+        backdate_idle_grace(&mut daemon, "architect");
+        backdate_idle_grace(&mut daemon, "lead");
+        daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+        daemon.maybe_intervene_architect_utilization().unwrap();
+
+        assert!(
+            inbox::pending_messages(&root, "architect")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(inbox::pending_messages(&root, "lead").unwrap().is_empty());
+        assert!(
+            !daemon
+                .owned_task_interventions
+                .contains_key("dispatch::lead")
+        );
+        assert!(
+            !daemon
+                .owned_task_interventions
+                .contains_key("utilization::architect")
+        );
+    }
+
+    #[test]
+    fn single_role_topology_nudges_idle_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![architect_member("solo")])
+            .pane_map(HashMap::from([("solo".to_string(), "%999".to_string())]))
+            .states(HashMap::from([("solo".to_string(), MemberState::Idle)]))
+            .nudges(HashMap::from([(
+                "solo".to_string(),
+                NudgeSchedule {
+                    text: "Solo mode should keep moving.".to_string(),
+                    interval: Duration::from_secs(1),
+                    idle_since: Some(Instant::now() - Duration::from_secs(5)),
+                    fired_this_idle: false,
+                    paused: false,
+                },
+            )]))
+            .build();
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "solo").unwrap();
+
+        backdate_idle_grace(&mut daemon, "solo");
+        daemon.maybe_fire_nudges().unwrap();
+
+        let pending = inbox::pending_messages(&root, "solo").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "daemon");
+        assert!(pending[0].body.contains("Solo mode should keep moving."));
+        assert_eq!(daemon.states.get("solo"), Some(&MemberState::Idle));
+        assert!(
+            daemon
+                .nudges
+                .get("solo")
+                .is_some_and(|schedule| schedule.fired_this_idle)
+        );
+    }
+
+    #[test]
+    fn all_members_working_suppresses_interventions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+                engineer_member("eng-2", Some("lead"), false),
+            ])
+            .pane_map(HashMap::from([
+                ("architect".to_string(), "%997".to_string()),
+                ("lead".to_string(), "%998".to_string()),
+                ("eng-1".to_string(), "%999".to_string()),
+                ("eng-2".to_string(), "%996".to_string()),
+            ]))
+            .states(HashMap::from([
+                ("architect".to_string(), MemberState::Working),
+                ("lead".to_string(), MemberState::Working),
+                ("eng-1".to_string(), MemberState::Working),
+                ("eng-2".to_string(), MemberState::Working),
+            ]))
+            .build();
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "architect").unwrap();
+        inbox::init_inbox(&root, "lead").unwrap();
+        inbox::init_inbox(&root, "eng-1").unwrap();
+        inbox::init_inbox(&root, "eng-2").unwrap();
+
+        let mut triage_message = inbox::InboxMessage::new_send("eng-1", "lead", "Task complete.");
+        triage_message.timestamp = super::now_unix();
+        let triage_id = inbox::deliver_to_inbox(&root, &triage_message).unwrap();
+        inbox::mark_delivered(&root, "lead", &triage_id).unwrap();
+
+        write_owned_task_file(tmp.path(), 191, "owned-task", "in-progress", "eng-1");
+        write_owned_task_file(tmp.path(), 192, "review-task", "review", "eng-2");
+        write_open_task_file(tmp.path(), 193, "open-task", "todo");
+
+        daemon.maybe_intervene_triage_backlog().unwrap();
+        daemon.maybe_intervene_owned_tasks().unwrap();
+        daemon.maybe_intervene_review_backlog().unwrap();
+        daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+        daemon.maybe_intervene_architect_utilization().unwrap();
+
+        assert!(
+            inbox::pending_messages(&root, "architect")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(inbox::pending_messages(&root, "lead").unwrap().is_empty());
+        assert!(inbox::pending_messages(&root, "eng-1").unwrap().is_empty());
+        assert!(inbox::pending_messages(&root, "eng-2").unwrap().is_empty());
+        assert!(daemon.triage_interventions.is_empty());
+        assert!(daemon.owned_task_interventions.is_empty());
+    }
+
+    #[test]
+    fn manager_dispatch_gap_skips_when_pending_inbox_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+                engineer_member("eng-2", Some("lead"), false),
+            ])
+            .pane_map(HashMap::from([("lead".to_string(), "%999".to_string())]))
+            .states(HashMap::from([
+                ("lead".to_string(), MemberState::Idle),
+                ("eng-1".to_string(), MemberState::Idle),
+                ("eng-2".to_string(), MemberState::Idle),
+            ]))
+            .build();
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        inbox::init_inbox(&root, "eng-1").unwrap();
+        inbox::init_inbox(&root, "eng-2").unwrap();
+        let message = inbox::InboxMessage::new_send("architect", "lead", "Handle this first.");
+        inbox::deliver_to_inbox(&root, &message).unwrap();
+
+        write_owned_task_file(tmp.path(), 191, "active-task", "in-progress", "eng-1");
+        write_open_task_file(tmp.path(), 192, "open-task", "todo");
+
+        backdate_idle_grace(&mut daemon, "lead");
+        daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+        let pending = inbox::pending_messages(&root, "lead").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "architect");
+        assert!(
+            !daemon
+                .owned_task_interventions
+                .contains_key("dispatch::lead")
+        );
+    }
+
+    #[test]
+    fn owned_task_intervention_refires_at_exact_cooldown_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![manager_member("lead", Some("architect"))])
+            .pane_map(HashMap::from([("lead".to_string(), "%999".to_string())]))
+            .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
+            .build();
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "lead").unwrap();
+        write_owned_task_file(tmp.path(), 191, "owned-task", "in-progress", "lead");
+
+        let cooldown = Duration::from_secs(
+            daemon
+                .config
+                .team_config
+                .automation
+                .intervention_cooldown_secs,
+        );
+
+        backdate_idle_grace(&mut daemon, "lead");
+        daemon.intervention_cooldowns.insert(
+            "lead".to_string(),
+            Instant::now() - (cooldown - Duration::from_secs(1)),
+        );
+        daemon.maybe_intervene_owned_tasks().unwrap();
+        assert!(inbox::pending_messages(&root, "lead").unwrap().is_empty());
+
+        daemon
+            .intervention_cooldowns
+            .insert("lead".to_string(), Instant::now() - cooldown);
+        daemon.maybe_intervene_owned_tasks().unwrap();
+
+        let pending = inbox::pending_messages(&root, "lead").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(
+            pending[0]
+                .body
+                .contains("Owned active task backlog detected")
+        );
+        assert!(daemon.owned_task_interventions.contains_key("lead"));
+    }
+
+    #[test]
+    fn empty_board_skips_interventions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .pane_map(HashMap::from([
+                ("architect".to_string(), "%997".to_string()),
+                ("lead".to_string(), "%998".to_string()),
+                ("eng-1".to_string(), "%999".to_string()),
+            ]))
+            .states(HashMap::from([
+                ("architect".to_string(), MemberState::Idle),
+                ("lead".to_string(), MemberState::Idle),
+                ("eng-1".to_string(), MemberState::Idle),
+            ]))
+            .build();
+
+        std::fs::create_dir_all(
+            tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks"),
+        )
+        .unwrap();
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, "architect").unwrap();
+        inbox::init_inbox(&root, "lead").unwrap();
+        inbox::init_inbox(&root, "eng-1").unwrap();
+
+        backdate_idle_grace(&mut daemon, "architect");
+        backdate_idle_grace(&mut daemon, "lead");
+        backdate_idle_grace(&mut daemon, "eng-1");
+
+        daemon.maybe_intervene_triage_backlog().unwrap();
+        daemon.maybe_intervene_owned_tasks().unwrap();
+        daemon.maybe_intervene_review_backlog().unwrap();
+        daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+        daemon.maybe_intervene_architect_utilization().unwrap();
+
+        assert!(
+            inbox::pending_messages(&root, "architect")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(inbox::pending_messages(&root, "lead").unwrap().is_empty());
+        assert!(inbox::pending_messages(&root, "eng-1").unwrap().is_empty());
+        assert!(daemon.triage_interventions.is_empty());
+        assert!(daemon.owned_task_interventions.is_empty());
+    }
+
+    #[test]
     fn test_starvation_detected() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = starvation_test_daemon(&tmp, Some(1));
