@@ -431,12 +431,13 @@ impl TeamDaemon {
         Ok(())
     }
 
-    fn engineer_board_wip_count(&self, board_dir: &Path, engineer: &str) -> Result<u32> {
+    fn engineer_active_board_item_count(&self, board_dir: &Path, engineer: &str) -> Result<u32> {
         let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
         Ok(tasks
             .into_iter()
             .filter(|task| {
-                (task.status == "in-progress" && task.claimed_by.as_deref() == Some(engineer))
+                (matches!(task.status.as_str(), "todo" | "in-progress")
+                    && task.claimed_by.as_deref() == Some(engineer))
                     || (task.status == "review" && task.review_owner.as_deref() == Some(engineer))
             })
             .count() as u32)
@@ -529,7 +530,27 @@ impl TeamDaemon {
                 continue;
             };
 
-            let active_count = self.engineer_board_wip_count(&board_dir, &entry.engineer)?;
+            let active_count = self.engineer_active_board_item_count(&board_dir, &entry.engineer)?;
+            if active_count > 0 {
+                entry.validation_failures += 1;
+                entry.last_failure = Some(format!(
+                    "Dispatch guard blocked assignment for '{}' with {} active board item(s)",
+                    entry.engineer, active_count
+                ));
+                if entry.validation_failures >= DISPATCH_QUEUE_FAILURE_LIMIT {
+                    self.escalate_dispatch_queue_entry(
+                        &entry,
+                        entry
+                            .last_failure
+                            .as_deref()
+                            .unwrap_or("dispatch guard blocked assignment"),
+                    )?;
+                } else {
+                    retained.push(entry);
+                }
+                continue;
+            }
+
             if !check_wip_limit(
                 &self.config.team_config.workflow_policy,
                 RoleType::Engineer,
@@ -837,7 +858,78 @@ mod tests {
                 .last_failure
                 .as_deref()
                 .unwrap_or_default()
-                .contains("WIP gate")
+                .contains("Dispatch guard")
+        );
+    }
+
+    #[test]
+    fn dispatch_guard_blocks_claimed_todo_assignment() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 101, "queued-task", "todo");
+        crate::team::test_support::write_owned_task_file(tmp.path(), 91, "claimed-todo", "todo", "eng-1");
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), false),
+        ];
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(members)
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 0,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon.idle_started_at.insert(
+            "eng-1".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+
+        daemon.maybe_auto_dispatch().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].validation_failures, 1);
+        assert!(
+            daemon.dispatch_queue[0]
+                .last_failure
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Dispatch guard blocked assignment")
+        );
+    }
+
+    #[test]
+    fn active_board_item_count_includes_todo_in_progress_and_review() {
+        let tmp = tempfile::tempdir().unwrap();
+        crate::team::test_support::write_owned_task_file(tmp.path(), 11, "todo-task", "todo", "eng-1");
+        crate::team::test_support::write_owned_task_file(
+            tmp.path(),
+            12,
+            "working-task",
+            "in-progress",
+            "eng-1",
+        );
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("013-review-task.md"),
+            "---\nid: 13\ntitle: review-task\nstatus: review\npriority: critical\nclaimed_by: manager\nreview_owner: eng-1\nclass: standard\n---\n\nTask description.\n",
+        )
+        .unwrap();
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+
+        assert_eq!(
+            daemon
+                .engineer_active_board_item_count(&board_dir, "eng-1")
+                .unwrap(),
+            3
         );
     }
 
