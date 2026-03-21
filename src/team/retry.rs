@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracing::warn;
 
+use super::board_cmd::BoardError;
 use super::git_cmd::GitError;
 
 /// Classifies whether an error is safe to retry.
@@ -14,6 +15,12 @@ pub trait Retryable {
 }
 
 impl Retryable for GitError {
+    fn is_transient(&self) -> bool {
+        self.is_transient()
+    }
+}
+
+impl Retryable for BoardError {
     fn is_transient(&self) -> bool {
         self.is_transient()
     }
@@ -65,8 +72,6 @@ impl RetryConfig {
     }
 }
 
-/// TODO: implement `Retryable` for typed `BoardError` once that module lands in
-/// this branch.
 pub fn retry_sync<T, E, F>(config: &RetryConfig, operation: F) -> Result<T, E>
 where
     E: Retryable + Debug,
@@ -137,6 +142,8 @@ fn jitter_delay_ms(delay_ms: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    use crate::team::board_cmd::BoardError;
 
     use super::{RetryConfig, Retryable, next_delay_ms, retry_sync, retry_sync_with_sleep};
 
@@ -282,5 +289,20 @@ mod tests {
         assert_eq!(conservative.base_delay_ms, 200);
         assert_eq!(conservative.max_delay_ms, 10_000);
         assert!(conservative.jitter);
+    }
+
+    #[test]
+    fn board_error_uses_typed_transient_classification() {
+        let transient = BoardError::Transient {
+            message: "lock held".to_string(),
+            stderr: "try again".to_string(),
+        };
+        let permanent = BoardError::Permanent {
+            message: "bad input".to_string(),
+            stderr: "usage".to_string(),
+        };
+
+        assert!(transient.is_transient());
+        assert!(!permanent.is_transient());
     }
 }
