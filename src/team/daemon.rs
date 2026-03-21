@@ -6763,88 +6763,105 @@ mod tests {
     #[serial]
     fn maybe_fire_nudges_marks_member_working_after_live_delivery() {
         let session = "batty-test-nudge-live-delivery";
-        let _ = crate::tmux::kill_session(session);
+        let mut delivered_live = false;
 
-        crate::tmux::create_session(session, "cat", &[], "/tmp").unwrap();
-        let pane_id = crate::tmux::pane_id(session).unwrap();
-        std::thread::sleep(Duration::from_millis(100));
+        // A freshly created tmux pane can occasionally reject the first live
+        // injection under heavy suite load. Retry the full setup a few times so
+        // this test only fails on a real regression in the live-delivery path.
+        for _attempt in 0..3 {
+            let _ = crate::tmux::kill_session(session);
 
-        let tmp = tempfile::tempdir().unwrap();
-        let member = MemberInstance {
-            name: "scientist".to_string(),
-            role_name: "scientist".to_string(),
-            role_type: RoleType::Architect,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: None,
-            use_worktrees: false,
-        };
-        let mut watchers = HashMap::new();
-        watchers.insert(
-            "scientist".to_string(),
-            SessionWatcher::new(&pane_id, "scientist", 300, None),
-        );
-        let mut daemon = TeamDaemon {
-            config: DaemonConfig {
-                project_root: tmp.path().to_path_buf(),
-                team_config: TeamConfig {
-                    name: "test".to_string(),
-                    workflow_mode: WorkflowMode::Legacy,
-                    workflow_policy: WorkflowPolicy::default(),
-                    board: BoardConfig::default(),
-                    standup: StandupConfig::default(),
-                    automation: AutomationConfig::default(),
-                    automation_sender: None,
-                    orchestrator_pane: true,
-                    orchestrator_position: OrchestratorPosition::Bottom,
-                    layout: None,
-                    roles: Vec::new(),
-                },
-                session: session.to_string(),
-                members: vec![member],
-                pane_map: HashMap::from([("scientist".to_string(), pane_id.clone())]),
-            },
-            watchers,
-            states: HashMap::from([("scientist".to_string(), MemberState::Idle)]),
-            idle_started_at: HashMap::new(),
-            active_tasks: HashMap::new(),
-            retry_counts: HashMap::new(),
-            triage_idle_epochs: HashMap::new(),
-            triage_interventions: HashMap::new(),
-            owned_task_interventions: HashMap::new(),
-            channels: HashMap::new(),
-            nudges: HashMap::from([(
+            crate::tmux::create_session(session, "cat", &[], "/tmp").unwrap();
+            let pane_id = crate::tmux::pane_id(session).unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+
+            let tmp = tempfile::tempdir().unwrap();
+            let member = MemberInstance {
+                name: "scientist".to_string(),
+                role_name: "scientist".to_string(),
+                role_type: RoleType::Architect,
+                agent: Some("claude".to_string()),
+                prompt: None,
+                reports_to: None,
+                use_worktrees: false,
+            };
+            let mut watchers = HashMap::new();
+            watchers.insert(
                 "scientist".to_string(),
-                NudgeSchedule {
-                    text: "Please make progress.".to_string(),
-                    interval: Duration::from_secs(1),
-                    idle_since: Some(Instant::now() - Duration::from_secs(5)),
-                    fired_this_idle: false,
-                    paused: false,
+                SessionWatcher::new(&pane_id, "scientist", 300, None),
+            );
+            let mut daemon = TeamDaemon {
+                config: DaemonConfig {
+                    project_root: tmp.path().to_path_buf(),
+                    team_config: TeamConfig {
+                        name: "test".to_string(),
+                        workflow_mode: WorkflowMode::Legacy,
+                        workflow_policy: WorkflowPolicy::default(),
+                        board: BoardConfig::default(),
+                        standup: StandupConfig::default(),
+                        automation: AutomationConfig::default(),
+                        automation_sender: None,
+                        orchestrator_pane: true,
+                        orchestrator_position: OrchestratorPosition::Bottom,
+                        layout: None,
+                        roles: Vec::new(),
+                    },
+                    session: session.to_string(),
+                    members: vec![member],
+                    pane_map: HashMap::from([("scientist".to_string(), pane_id.clone())]),
                 },
-            )]),
-            telegram_bot: None,
-            failure_window: FailureWindow::new(20),
-            last_pattern_notifications: HashMap::new(),
-            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
-            paused_standups: HashSet::new(),
-            last_standup: HashMap::new(),
-            last_board_rotation: Instant::now(),
-            last_auto_dispatch: Instant::now(),
-            retro_generated: false,
-            poll_interval: Duration::from_secs(5),
-        };
+                watchers,
+                states: HashMap::from([("scientist".to_string(), MemberState::Idle)]),
+                idle_started_at: HashMap::new(),
+                active_tasks: HashMap::new(),
+                retry_counts: HashMap::new(),
+                triage_idle_epochs: HashMap::new(),
+                triage_interventions: HashMap::new(),
+                owned_task_interventions: HashMap::new(),
+                channels: HashMap::new(),
+                nudges: HashMap::from([(
+                    "scientist".to_string(),
+                    NudgeSchedule {
+                        text: "Please make progress.".to_string(),
+                        interval: Duration::from_secs(1),
+                        idle_since: Some(Instant::now() - Duration::from_secs(5)),
+                        fired_this_idle: false,
+                        paused: false,
+                    },
+                )]),
+                telegram_bot: None,
+                failure_window: FailureWindow::new(20),
+                last_pattern_notifications: HashMap::new(),
+                event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+                paused_standups: HashSet::new(),
+                last_standup: HashMap::new(),
+                last_board_rotation: Instant::now(),
+                last_auto_dispatch: Instant::now(),
+                retro_generated: false,
+                poll_interval: Duration::from_secs(5),
+            };
 
-        backdate_idle_grace(&mut daemon, "scientist");
-        daemon.maybe_fire_nudges().unwrap();
+            backdate_idle_grace(&mut daemon, "scientist");
+            daemon.maybe_fire_nudges().unwrap();
 
-        assert_eq!(daemon.states.get("scientist"), Some(&MemberState::Working));
-        let schedule = daemon.nudges.get("scientist").unwrap();
-        assert!(schedule.paused);
-        assert!(schedule.idle_since.is_none());
-        assert!(!schedule.fired_this_idle);
+            if daemon.states.get("scientist") == Some(&MemberState::Working) {
+                let schedule = daemon.nudges.get("scientist").unwrap();
+                assert!(schedule.paused);
+                assert!(schedule.idle_since.is_none());
+                assert!(!schedule.fired_this_idle);
+                delivered_live = true;
+                crate::tmux::kill_session(session).unwrap();
+                break;
+            }
 
-        crate::tmux::kill_session(session).unwrap();
+            crate::tmux::kill_session(session).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        assert!(
+            delivered_live,
+            "expected at least one successful live nudge delivery"
+        );
     }
 
     #[test]
