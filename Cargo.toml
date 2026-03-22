@@ -52,6 +52,9 @@ ureq = { version = "2", features = ["json"] }
 cron = "0.13"
 chrono = { version = "0.4", features = ["serde"] }
 
+# Telemetry storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 # Pattern matching
 regex = "1"
 sha2 = "0.10"
