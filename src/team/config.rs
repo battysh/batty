@@ -85,6 +85,8 @@ pub struct WorkflowPolicy {
     pub auto_archive_done_after_secs: Option<u64>,
     #[serde(default)]
     pub capability_overrides: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub auto_merge: AutoMergePolicy,
 }
 
 impl Default for WorkflowPolicy {
@@ -97,6 +99,63 @@ impl Default for WorkflowPolicy {
             review_timeout_secs: default_review_timeout_secs(),
             auto_archive_done_after_secs: None,
             capability_overrides: HashMap::new(),
+            auto_merge: AutoMergePolicy::default(),
+        }
+    }
+}
+
+fn default_sensitive_paths() -> Vec<String> {
+    vec![
+        "Cargo.toml".to_string(),
+        "team.yaml".to_string(),
+        ".env".to_string(),
+    ]
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AutoMergePolicy {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_max_diff_lines")]
+    pub max_diff_lines: usize,
+    #[serde(default = "default_max_files_changed")]
+    pub max_files_changed: usize,
+    #[serde(default = "default_max_modules_touched")]
+    pub max_modules_touched: usize,
+    #[serde(default = "default_sensitive_paths")]
+    pub sensitive_paths: Vec<String>,
+    #[serde(default = "default_confidence_threshold")]
+    pub confidence_threshold: f64,
+    #[serde(default = "default_require_tests_pass")]
+    pub require_tests_pass: bool,
+}
+
+fn default_max_diff_lines() -> usize {
+    200
+}
+fn default_max_files_changed() -> usize {
+    5
+}
+fn default_max_modules_touched() -> usize {
+    2
+}
+fn default_confidence_threshold() -> f64 {
+    0.8
+}
+fn default_require_tests_pass() -> bool {
+    true
+}
+
+impl Default for AutoMergePolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_diff_lines: default_max_diff_lines(),
+            max_files_changed: default_max_files_changed(),
+            max_modules_touched: default_max_modules_touched(),
+            sensitive_paths: default_sensitive_paths(),
+            confidence_threshold: default_confidence_threshold(),
+            require_tests_pass: default_require_tests_pass(),
         }
     }
 }
