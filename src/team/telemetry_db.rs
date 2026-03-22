@@ -158,12 +158,12 @@ fn update_metrics_for_event(conn: &Connection, event: &TeamEvent) -> Result<()> 
                 )?;
             }
         }
-        "member_crashed" | "pane_death" => {
+        "member_crashed" | "pane_death" | "delivery_failed" => {
             if let Some(role) = &event.role {
                 upsert_agent_counter(conn, role, "failures")?;
             }
         }
-        "pane_respawned" | "agent_restarted" => {
+        "pane_respawned" | "agent_restarted" | "context_exhausted" => {
             if let Some(role) = &event.role {
                 upsert_agent_counter(conn, role, "restarts")?;
             }
@@ -530,6 +530,64 @@ mod tests {
 
         let agents = query_agent_metrics(&conn).unwrap();
         assert_eq!(agents[0].restarts, 1);
+    }
+
+    #[test]
+    fn delivery_failed_increments_failures() {
+        let conn = open_in_memory().unwrap();
+        let event = TeamEvent::delivery_failed("eng-1", "manager", "pane not ready");
+        insert_event(&conn, &event).unwrap();
+
+        let agents = query_agent_metrics(&conn).unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].role, "eng-1");
+        assert_eq!(agents[0].failures, 1);
+    }
+
+    #[test]
+    fn context_exhausted_increments_restarts() {
+        let conn = open_in_memory().unwrap();
+        let event = TeamEvent::context_exhausted("eng-1", Some(42), Some(500_000));
+        insert_event(&conn, &event).unwrap();
+
+        let agents = query_agent_metrics(&conn).unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].role, "eng-1");
+        assert_eq!(agents[0].restarts, 1);
+    }
+
+    #[test]
+    fn all_failure_event_types_accumulate() {
+        let conn = open_in_memory().unwrap();
+        insert_event(&conn, &TeamEvent::pane_death("eng-1")).unwrap();
+        insert_event(&conn, &TeamEvent::member_crashed("eng-1", true)).unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::delivery_failed("eng-1", "manager", "timeout"),
+        )
+        .unwrap();
+
+        let agents = query_agent_metrics(&conn).unwrap();
+        assert_eq!(agents[0].failures, 3);
+    }
+
+    #[test]
+    fn all_restart_event_types_accumulate() {
+        let conn = open_in_memory().unwrap();
+        insert_event(&conn, &TeamEvent::pane_respawned("eng-1")).unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::agent_restarted("eng-1", "42", "stall", 1),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::context_exhausted("eng-1", Some(42), None),
+        )
+        .unwrap();
+
+        let agents = query_agent_metrics(&conn).unwrap();
+        assert_eq!(agents[0].restarts, 3);
     }
 
     #[test]
