@@ -23,6 +23,9 @@ pub struct Task {
     pub commit: Option<String>,
     pub artifacts: Vec<String>,
     pub next_action: Option<String>,
+    pub scheduled_for: Option<String>,
+    pub cron_schedule: Option<String>,
+    pub cron_last_run: Option<String>,
     pub description: String,
     pub batty_config: Option<TaskBattyConfig>,
     pub source_path: PathBuf,
@@ -69,6 +72,12 @@ struct Frontmatter {
     artifacts: Vec<String>,
     #[serde(default)]
     next_action: Option<String>,
+    #[serde(default)]
+    scheduled_for: Option<String>,
+    #[serde(default)]
+    cron_schedule: Option<String>,
+    #[serde(default)]
+    cron_last_run: Option<String>,
 }
 
 fn default_status() -> String {
@@ -111,6 +120,9 @@ impl Task {
             commit: fm.commit,
             artifacts: fm.artifacts,
             next_action: fm.next_action,
+            scheduled_for: fm.scheduled_for,
+            cron_schedule: fm.cron_schedule,
+            cron_last_run: fm.cron_last_run,
             description,
             batty_config,
             source_path: PathBuf::new(),
@@ -446,6 +458,78 @@ Workflow description.
             task.next_action.as_deref(),
             Some("Hand off to manager for review")
         );
+    }
+
+    #[test]
+    fn parse_task_with_all_schedule_fields() {
+        let content = r#"---
+id: 200
+title: scheduled task
+status: backlog
+priority: medium
+scheduled_for: "2026-04-01T09:00:00Z"
+cron_schedule: "0 9 * * 1"
+cron_last_run: "2026-03-21T09:00:00Z"
+---
+
+A task with all schedule fields.
+"#;
+        let task = Task::parse(content).unwrap();
+        assert_eq!(task.id, 200);
+        assert_eq!(task.scheduled_for.as_deref(), Some("2026-04-01T09:00:00Z"));
+        assert_eq!(task.cron_schedule.as_deref(), Some("0 9 * * 1"));
+        assert_eq!(task.cron_last_run.as_deref(), Some("2026-03-21T09:00:00Z"));
+    }
+
+    #[test]
+    fn parse_task_with_no_schedule_fields() {
+        let content = r#"---
+id: 201
+title: no schedule
+status: todo
+---
+
+No schedule fields at all.
+"#;
+        let task = Task::parse(content).unwrap();
+        assert_eq!(task.id, 201);
+        assert!(task.scheduled_for.is_none());
+        assert!(task.cron_schedule.is_none());
+        assert!(task.cron_last_run.is_none());
+    }
+
+    #[test]
+    fn parse_task_with_only_scheduled_for() {
+        let content = r#"---
+id: 202
+title: future task
+status: backlog
+scheduled_for: "2026-06-15T12:00:00Z"
+---
+
+Only scheduled_for set.
+"#;
+        let task = Task::parse(content).unwrap();
+        assert_eq!(task.scheduled_for.as_deref(), Some("2026-06-15T12:00:00Z"));
+        assert!(task.cron_schedule.is_none());
+        assert!(task.cron_last_run.is_none());
+    }
+
+    #[test]
+    fn parse_task_with_only_cron_schedule() {
+        let content = r#"---
+id: 203
+title: recurring task
+status: backlog
+cron_schedule: "30 8 * * *"
+---
+
+Only cron_schedule set.
+"#;
+        let task = Task::parse(content).unwrap();
+        assert!(task.scheduled_for.is_none());
+        assert_eq!(task.cron_schedule.as_deref(), Some("30 8 * * *"));
+        assert!(task.cron_last_run.is_none());
     }
 
     #[test]
