@@ -458,21 +458,12 @@ pub(crate) fn is_worktree_safe_to_mutate(worktree_dir: &Path) -> Result<bool> {
 }
 
 fn auto_clean_worktree(worktree_dir: &Path) -> Result<()> {
-    // Try stash first — preserves work for manual recovery.
-    if let Ok(stash) =
-        retry_git(|| git_cmd::run_git(worktree_dir, &["stash", "--include-untracked"]))
-    {
-        let stdout = stash.stdout;
-        if !stdout.contains("No local changes to save") {
-            warn!(
-                worktree = %worktree_dir.display(),
-                "auto-stashed uncommitted changes in engineer worktree"
-            );
-            return Ok(());
-        }
+    // Try commit first — preserves work in git history (no stash accumulation).
+    if auto_commit_before_reset(worktree_dir) {
+        return Ok(());
     }
 
-    // Stash was a no-op or failed — force clean.
+    // Commit failed — fall back to force clean.
     warn!(
         worktree = %worktree_dir.display(),
         "force-cleaning engineer worktree"
@@ -487,6 +478,59 @@ fn auto_clean_worktree(worktree_dir: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Auto-commit uncommitted changes before a worktree reset to avoid stash
+/// accumulation. Returns `true` if changes were successfully committed or
+/// there was nothing to commit.
+pub(crate) fn auto_commit_before_reset(worktree_dir: &Path) -> bool {
+    // Stage all changes (including untracked, excluding .batty/).
+    if retry_git(|| {
+        git_cmd::run_git(
+            worktree_dir,
+            &["add", "-A", "--", ".", ":!.batty/"],
+        )
+    })
+    .is_err()
+    {
+        warn!(
+            worktree = %worktree_dir.display(),
+            "auto-commit: git add failed"
+        );
+        return false;
+    }
+
+    // Check if there's anything staged after add.
+    let has_staged = retry_git(|| git_cmd::run_git(worktree_dir, &["diff", "--cached", "--quiet"]))
+        .is_err(); // exit code 1 means there ARE staged diffs
+    if !has_staged {
+        // Nothing staged — nothing to commit, clean enough.
+        return true;
+    }
+
+    // Build a descriptive commit message.
+    let branch = retry_git(|| git_cmd::rev_parse_branch(worktree_dir))
+        .unwrap_or_default();
+    let msg = format!("wip: auto-save before worktree reset [{}]", branch);
+
+    match retry_git(|| git_cmd::run_git(worktree_dir, &["commit", "-m", &msg])) {
+        Ok(_) => {
+            info!(
+                worktree = %worktree_dir.display(),
+                branch = %branch,
+                "auto-committed uncommitted changes before worktree reset"
+            );
+            true
+        }
+        Err(e) => {
+            warn!(
+                worktree = %worktree_dir.display(),
+                error = %e,
+                "auto-commit failed"
+            );
+            false
+        }
+    }
 }
 
 pub(crate) fn current_worktree_branch(worktree_dir: &Path) -> Result<String> {
