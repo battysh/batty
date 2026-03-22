@@ -38,6 +38,7 @@ mod tests {
         assert_eq!(policy.wip_limit_per_reviewer, None);
         assert_eq!(policy.pipeline_starvation_threshold, Some(1));
         assert_eq!(policy.escalation_threshold_secs, 3600);
+        assert_eq!(policy.review_nudge_threshold_secs, 1800);
         assert_eq!(policy.review_timeout_secs, 7200);
         assert_eq!(policy.auto_archive_done_after_secs, None);
         assert!(policy.capability_overrides.is_empty());
@@ -71,5 +72,17 @@ mod tests {
         assert!(should_escalate(&policy, 120));
         assert!(!is_review_stale(&policy, 299));
         assert!(is_review_stale(&policy, 300));
+    }
+
+    #[test]
+    fn review_nudge_threshold_check_is_inclusive() {
+        let policy = WorkflowPolicy {
+            review_nudge_threshold_secs: 1800,
+            ..WorkflowPolicy::default()
+        };
+
+        assert!(!is_review_nudge_due(&policy, 1799));
+        assert!(is_review_nudge_due(&policy, 1800));
+        assert!(is_review_nudge_due(&policy, 1801));
     }
 }
