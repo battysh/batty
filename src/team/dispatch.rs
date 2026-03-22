@@ -447,6 +447,13 @@ impl TeamDaemon {
 
     fn enqueue_dispatch_candidates(&mut self) -> Result<()> {
         let board_dir = self.board_dir();
+        let dedup_window =
+            Duration::from_secs(self.config.team_config.board.dispatch_dedup_window_secs);
+
+        // Expire stale dedup entries.
+        self.recent_dispatches
+            .retain(|_, dispatched_at| dispatched_at.elapsed() < dedup_window);
+
         let mut queued_task_ids: HashSet<u32> = self
             .dispatch_queue
             .iter()
@@ -467,6 +474,18 @@ impl TeamDaemon {
             let Some(task) = self.next_dispatch_task(&board_dir, &queued_task_ids)? else {
                 break;
             };
+
+            // Skip if this (task_id, engineer) pair was dispatched within the dedup window.
+            let dedup_key = (task.id, engineer_name.clone());
+            if self.recent_dispatches.contains_key(&dedup_key) {
+                debug!(
+                    task_id = task.id,
+                    engineer = %engineer_name,
+                    "skipping dispatch — within dedup window"
+                );
+                continue;
+            }
+
             queued_task_ids.insert(task.id);
             self.dispatch_queue.push(DispatchQueueEntry {
                 engineer: engineer_name,
@@ -660,6 +679,8 @@ impl TeamDaemon {
                     transition_task(&board_dir, task.id, "in-progress")?;
                     self.active_tasks.insert(entry.engineer.clone(), task.id);
                     self.retry_counts.remove(&entry.engineer);
+                    self.recent_dispatches
+                        .insert((task.id, entry.engineer.clone()), Instant::now());
                     self.record_orchestrator_action(format!(
                         "dispatch queue: selected runnable task #{} ({}) and dispatched it to {}",
                         task.id, task.title, entry.engineer
@@ -1505,5 +1526,160 @@ mod tests {
             "task without scheduled_for should be dispatched"
         );
         assert_eq!(daemon.dispatch_queue[0].task_id, 503);
+    }
+
+    #[test]
+    fn dedup_window_prevents_duplicate_enqueue() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 101, "queued-task", "todo");
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), false),
+        ];
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(members)
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 0,
+                dispatch_dedup_window_secs: 60,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon.idle_started_at.insert(
+            "eng-1".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+
+        // Simulate a recent dispatch for this (task_id, engineer) pair.
+        daemon
+            .recent_dispatches
+            .insert((101, "eng-1".to_string()), Instant::now());
+
+        daemon.maybe_auto_dispatch().unwrap();
+
+        assert!(
+            daemon.dispatch_queue.is_empty(),
+            "task should be skipped due to dedup window"
+        );
+    }
+
+    #[test]
+    fn dedup_window_allows_different_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 101, "first-task", "todo");
+        write_open_task_file(tmp.path(), 102, "second-task", "todo");
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), false),
+        ];
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(members)
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 0,
+                dispatch_dedup_window_secs: 60,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon.idle_started_at.insert(
+            "eng-1".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+
+        // Recent dispatch for task 102, but not 101.
+        daemon
+            .recent_dispatches
+            .insert((102, "eng-1".to_string()), Instant::now());
+
+        daemon.maybe_auto_dispatch().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(
+            daemon.dispatch_queue[0].task_id, 101,
+            "a different task should still be dispatched"
+        );
+    }
+
+    #[test]
+    fn dedup_window_expires_and_allows_reassignment() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 101, "queued-task", "todo");
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), false),
+        ];
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(members)
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 0,
+                dispatch_dedup_window_secs: 60,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon.idle_started_at.insert(
+            "eng-1".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+
+        // Simulate a dispatch that happened 120 seconds ago — outside the 60s window.
+        daemon.recent_dispatches.insert(
+            (101, "eng-1".to_string()),
+            Instant::now() - Duration::from_secs(120),
+        );
+
+        daemon.maybe_auto_dispatch().unwrap();
+
+        assert_eq!(
+            daemon.dispatch_queue.len(),
+            1,
+            "expired dedup entry should allow reassignment"
+        );
+        assert_eq!(daemon.dispatch_queue[0].task_id, 101);
+    }
+
+    #[test]
+    fn dedup_window_zero_disables_dedup() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 101, "queued-task", "todo");
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), false),
+        ];
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(members)
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 0,
+                dispatch_dedup_window_secs: 0,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon.idle_started_at.insert(
+            "eng-1".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+
+        // With window=0, even a "just now" entry should be expired immediately.
+        daemon
+            .recent_dispatches
+            .insert((101, "eng-1".to_string()), Instant::now());
+
+        daemon.maybe_auto_dispatch().unwrap();
+
+        assert_eq!(
+            daemon.dispatch_queue.len(),
+            1,
+            "dedup_window_secs=0 should effectively disable dedup"
+        );
+        assert_eq!(daemon.dispatch_queue[0].task_id, 101);
     }
 }
