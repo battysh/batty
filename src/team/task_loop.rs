@@ -1518,4 +1518,119 @@ mod tests {
             "blocking reason should mention 'scheduled for'"
         );
     }
+
+    // --- is_worktree_safe_to_mutate tests ---
+
+    #[test]
+    fn safe_to_mutate_nonexistent_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        assert!(is_worktree_safe_to_mutate(&missing).unwrap());
+    }
+
+    #[test]
+    fn safe_to_mutate_clean_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let wt_dir = repo.join(".batty").join("worktrees").join("eng-safe");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &wt_dir,
+            "eng-safe",
+            "eng-safe/99",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        // No uncommitted changes — safe to mutate.
+        assert!(is_worktree_safe_to_mutate(&wt_dir).unwrap());
+    }
+
+    #[test]
+    fn unsafe_to_mutate_dirty_task_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let wt_dir = repo.join(".batty").join("worktrees").join("eng-dirty");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &wt_dir,
+            "eng-dirty",
+            "eng-dirty/42",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        // Create uncommitted changes.
+        std::fs::write(wt_dir.join("wip.txt"), "work in progress\n").unwrap();
+        git_ok(&wt_dir, &["add", "wip.txt"]);
+
+        // Dirty task branch — NOT safe.
+        assert!(!is_worktree_safe_to_mutate(&wt_dir).unwrap());
+    }
+
+    #[test]
+    fn safe_to_mutate_dirty_base_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let wt_dir = repo.join(".batty").join("worktrees").join("eng-base");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        let base = engineer_base_branch_name("eng-base");
+        setup_engineer_worktree(&repo, &wt_dir, &base, &team_config_dir).unwrap();
+
+        std::fs::write(wt_dir.join("junk.txt"), "junk\n").unwrap();
+        git_ok(&wt_dir, &["add", "junk.txt"]);
+
+        // Dirty but on eng-main/* — safe to mutate.
+        assert!(is_worktree_safe_to_mutate(&wt_dir).unwrap());
+    }
+
+    #[test]
+    fn unsafe_to_mutate_dirty_untracked_files_on_task_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let wt_dir = repo.join(".batty").join("worktrees").join("eng-ut");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &wt_dir,
+            "eng-ut",
+            "eng-ut/55",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        // Untracked file (not in .batty/) counts as user changes.
+        std::fs::write(wt_dir.join("new_file.rs"), "fn main() {}\n").unwrap();
+
+        assert!(!is_worktree_safe_to_mutate(&wt_dir).unwrap());
+    }
+
+    #[test]
+    fn safe_to_mutate_only_batty_untracked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let wt_dir = repo.join(".batty").join("worktrees").join("eng-bt");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &wt_dir,
+            "eng-bt",
+            "eng-bt/33",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        // Only .batty/ untracked files — not user changes, safe.
+        std::fs::create_dir_all(wt_dir.join(".batty").join("temp")).unwrap();
+        std::fs::write(wt_dir.join(".batty").join("temp").join("log.txt"), "log\n").unwrap();
+
+        assert!(is_worktree_safe_to_mutate(&wt_dir).unwrap());
+    }
 }

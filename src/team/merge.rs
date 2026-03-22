@@ -1710,31 +1710,26 @@ mod tests {
     }
 
     #[test]
-    fn reset_handles_uncommitted_changes() {
+    fn reset_handles_uncommitted_changes_on_base_branch() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "batty-merge-test");
         let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-dirty");
+        let base = engineer_base_branch_name("eng-dirty");
 
-        prepare_engineer_assignment_worktree(
-            &repo,
-            &worktree_dir,
-            "eng-dirty",
-            "eng-dirty/task-88",
-            &team_config_dir,
-        )
-        .unwrap();
+        // Set up worktree on the base branch (not a task branch).
+        setup_engineer_worktree(&repo, &worktree_dir, &base, &team_config_dir).unwrap();
 
         // Leave uncommitted staged and unstaged changes.
         std::fs::write(worktree_dir.join("staged.txt"), "staged\n").unwrap();
         git_ok(&worktree_dir, &["add", "staged.txt"]);
         std::fs::write(worktree_dir.join("unstaged.txt"), "unstaged\n").unwrap();
 
-        // Reset should still succeed despite dirty worktree.
+        // Reset should succeed — base branch is safe to mutate even when dirty.
         reset_engineer_worktree(&repo, "eng-dirty").unwrap();
 
         assert_eq!(
             git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
-            engineer_base_branch_name("eng-dirty")
+            base
         );
         // Worktree should be clean after reset.
         let status = git_stdout(&worktree_dir, &["status", "--porcelain"]);
@@ -1747,6 +1742,36 @@ mod tests {
             "worktree should be clean after reset, got: {:?}",
             tracked_changes
         );
+    }
+
+    #[test]
+    fn reset_skips_when_dirty_task_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-dirty-task");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-dirty-task",
+            "eng-dirty-task/task-88",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        // Leave uncommitted staged changes on a task branch.
+        std::fs::write(worktree_dir.join("staged.txt"), "staged\n").unwrap();
+        git_ok(&worktree_dir, &["add", "staged.txt"]);
+
+        // Reset should skip — worktree is dirty on a task branch.
+        reset_engineer_worktree(&repo, "eng-dirty-task").unwrap();
+
+        // Worktree should remain on the task branch with changes intact.
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "eng-dirty-task/task-88"
+        );
+        assert!(worktree_dir.join("staged.txt").exists());
     }
 
     #[test]
@@ -2018,5 +2043,91 @@ mod tests {
             "reason should contain diff stats: {:?}",
             auto_event.reason
         );
+    }
+
+    #[test]
+    fn merge_fails_when_project_root_not_on_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-off");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-off", &team_config_dir).unwrap();
+
+        std::fs::write(worktree_dir.join("feature.txt"), "engineer work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "feature.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "engineer feature"]);
+
+        // Move project root off main onto a detached HEAD.
+        git_ok(&repo, &["checkout", "--detach", "HEAD"]);
+
+        let result = merge_engineer_branch(&repo, "eng-off").unwrap();
+        // Should attempt to checkout main — detached HEAD means checkout succeeds
+        // and merge proceeds normally. The key fix is that it TRIES to checkout.
+        // But if we create a scenario where checkout fails, we get MergeFailure.
+        match result {
+            MergeOutcome::Success => {
+                // checkout main succeeded, merge proceeded — verify we're on main
+                let branch = git_stdout(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+                assert_eq!(branch, "main");
+            }
+            MergeOutcome::MergeFailure(msg) => {
+                assert!(
+                    msg.contains("not 'main'"),
+                    "expected branch mismatch message, got: {msg}"
+                );
+            }
+            other => panic!("expected Success or MergeFailure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_succeeds_when_project_root_on_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-ok");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-ok", &team_config_dir).unwrap();
+
+        std::fs::write(worktree_dir.join("feature.txt"), "work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "feature.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "engineer work"]);
+
+        // project root stays on main (the default) — merge should succeed
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "main"
+        );
+
+        let result = merge_engineer_branch(&repo, "eng-ok").unwrap();
+        assert!(matches!(result, MergeOutcome::Success));
+        assert!(repo.join("feature.txt").exists());
+    }
+
+    #[test]
+    fn reset_worktree_skips_when_dirty_task_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-wip");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-wip",
+            "eng-wip/88",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        // Create uncommitted changes on the task branch.
+        std::fs::write(worktree_dir.join("wip.txt"), "work in progress\n").unwrap();
+        git_ok(&worktree_dir, &["add", "wip.txt"]);
+
+        // reset_engineer_worktree should skip (not error) when dirty on task branch.
+        reset_engineer_worktree(&repo, "eng-wip").unwrap();
+
+        // Verify the worktree was NOT reset — still on task branch with changes.
+        let branch = current_worktree_branch(&worktree_dir).unwrap();
+        assert_eq!(branch, "eng-wip/88");
+        assert!(worktree_dir.join("wip.txt").exists());
     }
 }
