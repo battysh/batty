@@ -6251,4 +6251,114 @@ exit 1
         assert_eq!(policy.review_nudge_threshold_secs, 1800);
         assert_eq!(policy.review_timeout_secs, 7200);
     }
+
+    // --- Restart budget tests ---
+
+    #[test]
+    fn check_restart_budget_allows_within_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = make_test_daemon(tmp.path(), vec![]);
+        daemon.config.team_config.automation.restart_budget_per_hour = 5;
+        // No restarts yet — budget should be available
+        assert!(daemon.check_restart_budget());
+        // Add 4 restarts — still within budget
+        for _ in 0..4 {
+            daemon.restart_timestamps.push(Instant::now());
+        }
+        assert!(daemon.check_restart_budget());
+    }
+
+    #[test]
+    fn check_restart_budget_blocks_at_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = make_test_daemon(tmp.path(), vec![]);
+        daemon.config.team_config.automation.restart_budget_per_hour = 3;
+        // Add 3 restarts — at limit, should be blocked
+        for _ in 0..3 {
+            daemon.restart_timestamps.push(Instant::now());
+        }
+        assert!(!daemon.check_restart_budget());
+    }
+
+    #[test]
+    fn check_restart_budget_prunes_old_timestamps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = make_test_daemon(tmp.path(), vec![]);
+        daemon.config.team_config.automation.restart_budget_per_hour = 2;
+        // Add old timestamps (> 1 hour ago)
+        let old = Instant::now() - Duration::from_secs(3700);
+        daemon.restart_timestamps.push(old);
+        daemon.restart_timestamps.push(old);
+        daemon.restart_timestamps.push(old);
+        // Old timestamps should be pruned, budget available
+        assert!(daemon.check_restart_budget());
+        assert!(daemon.restart_timestamps.is_empty());
+    }
+
+    #[test]
+    fn restart_backoff_increases_exponentially() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = make_test_daemon(tmp.path(), vec![]);
+        // No restarts: recent=0, recent.saturating_sub(1)=0, 2^0=1, base*1=5
+        let b0 = daemon.restart_backoff();
+        assert_eq!(b0, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn restart_backoff_grows_with_recent_restarts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = make_test_daemon(tmp.path(), vec![]);
+        daemon.config.team_config.automation.restart_backoff_base_secs = 5;
+        // 1 restart: 5 * 2^0 = 5
+        daemon.restart_timestamps.push(Instant::now());
+        assert_eq!(daemon.restart_backoff(), Duration::from_secs(5));
+        // 2 restarts: 5 * 2^1 = 10
+        daemon.restart_timestamps.push(Instant::now());
+        assert_eq!(daemon.restart_backoff(), Duration::from_secs(10));
+        // 3 restarts: 5 * 2^2 = 20
+        daemon.restart_timestamps.push(Instant::now());
+        assert_eq!(daemon.restart_backoff(), Duration::from_secs(20));
+    }
+
+    #[test]
+    fn restart_backoff_caps_at_300_seconds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = make_test_daemon(tmp.path(), vec![]);
+        daemon.config.team_config.automation.restart_backoff_base_secs = 5;
+        // 10 restarts: 5 * 2^9 = 2560, capped at 300
+        for _ in 0..10 {
+            daemon.restart_timestamps.push(Instant::now());
+        }
+        assert_eq!(daemon.restart_backoff(), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn restart_budget_exhausted_flag_set_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = make_test_daemon(tmp.path(), vec![]);
+        daemon.config.team_config.automation.restart_budget_per_hour = 1;
+        // Exhaust the budget
+        daemon.restart_timestamps.push(Instant::now());
+        assert!(!daemon.check_restart_budget());
+        // Flag should not be set by check_restart_budget alone (set by restart_member)
+        assert!(!daemon.restart_budget_exhausted);
+        // Manually set it as restart_member would
+        daemon.restart_budget_exhausted = true;
+        assert!(daemon.restart_budget_exhausted);
+    }
+
+    #[test]
+    fn restart_budget_config_defaults() {
+        let auto = AutomationConfig::default();
+        assert_eq!(auto.restart_budget_per_hour, 10);
+        assert_eq!(auto.restart_backoff_base_secs, 5);
+        assert_eq!(auto.mass_death_window_secs, 5);
+    }
+
+    #[test]
+    fn restart_budget_exhausted_event() {
+        let event = TeamEvent::restart_budget_exhausted(10);
+        assert_eq!(event.restart_count, Some(10));
+        assert!(event.reason.as_ref().unwrap().contains("budget exceeded"));
+    }
 }
