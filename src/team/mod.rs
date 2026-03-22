@@ -1128,6 +1128,92 @@ pub fn resume_team(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Path to the nudge-disabled marker for a given intervention.
+pub fn nudge_disabled_marker_path(project_root: &Path, intervention: &str) -> PathBuf {
+    project_root
+        .join(".batty")
+        .join(format!("nudge_{intervention}_disabled"))
+}
+
+/// Create a nudge-disabled marker file, disabling the intervention at runtime.
+pub fn disable_nudge(project_root: &Path, intervention: &str) -> Result<()> {
+    let marker = nudge_disabled_marker_path(project_root, intervention);
+    if marker.exists() {
+        bail!("Intervention '{intervention}' is already disabled.");
+    }
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&marker, "").context("failed to write nudge disabled marker")?;
+    info!(intervention, "disabled intervention");
+    Ok(())
+}
+
+/// Remove a nudge-disabled marker file, re-enabling the intervention.
+pub fn enable_nudge(project_root: &Path, intervention: &str) -> Result<()> {
+    let marker = nudge_disabled_marker_path(project_root, intervention);
+    if !marker.exists() {
+        bail!("Intervention '{intervention}' is not disabled.");
+    }
+    std::fs::remove_file(&marker).context("failed to remove nudge disabled marker")?;
+    info!(intervention, "enabled intervention");
+    Ok(())
+}
+
+/// Print a table showing config, runtime, and effective state for each intervention.
+pub fn nudge_status(project_root: &Path) -> Result<()> {
+    use crate::cli::NudgeIntervention;
+
+    let config_path = team_config_path(project_root);
+    let automation = if config_path.exists() {
+        let team_config = config::TeamConfig::load(&config_path)?;
+        Some(team_config.automation)
+    } else {
+        None
+    };
+
+    println!(
+        "{:<16} {:<10} {:<10} {:<10}",
+        "INTERVENTION", "CONFIG", "RUNTIME", "EFFECTIVE"
+    );
+
+    for intervention in NudgeIntervention::ALL {
+        let name = intervention.marker_name();
+        let config_enabled = automation
+            .as_ref()
+            .map(|a| match intervention {
+                NudgeIntervention::Replenish => true, // no dedicated config flag
+                NudgeIntervention::Triage => a.triage_interventions,
+                NudgeIntervention::Review => a.review_interventions,
+                NudgeIntervention::Dispatch => a.manager_dispatch_interventions,
+                NudgeIntervention::Utilization => a.architect_utilization_interventions,
+                NudgeIntervention::OwnedTask => a.owned_task_interventions,
+            })
+            .unwrap_or(true);
+
+        let runtime_disabled = nudge_disabled_marker_path(project_root, name).exists();
+        let runtime_str = if runtime_disabled {
+            "disabled"
+        } else {
+            "enabled"
+        };
+        let config_str = if config_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        let effective = config_enabled && !runtime_disabled;
+        let effective_str = if effective { "enabled" } else { "DISABLED" };
+
+        println!(
+            "{:<16} {:<10} {:<10} {:<10}",
+            name, config_str, runtime_str, effective_str
+        );
+    }
+
+    Ok(())
+}
+
 /// Stop a running team session and clean up any orphaned `batty-` sessions.
 pub fn stop_team(project_root: &Path) -> Result<()> {
     // Write resume marker before tearing down — agents have sessions to continue
@@ -2348,6 +2434,57 @@ mod tests {
         let error = export_run(&project_root).unwrap_err();
 
         assert!(error.to_string().contains("team config missing"));
+    }
+
+    #[test]
+    fn nudge_disable_creates_marker_and_enable_removes_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+
+        let marker = nudge_disabled_marker_path(tmp.path(), "triage");
+        assert!(!marker.exists());
+
+        disable_nudge(tmp.path(), "triage").unwrap();
+        assert!(marker.exists());
+
+        // Double-disable should fail
+        assert!(disable_nudge(tmp.path(), "triage").is_err());
+
+        enable_nudge(tmp.path(), "triage").unwrap();
+        assert!(!marker.exists());
+
+        // Double-enable should fail
+        assert!(enable_nudge(tmp.path(), "triage").is_err());
+    }
+
+    #[test]
+    fn nudge_marker_path_uses_intervention_name() {
+        let root = std::path::Path::new("/tmp/test-project");
+        assert_eq!(
+            nudge_disabled_marker_path(root, "replenish"),
+            root.join(".batty").join("nudge_replenish_disabled")
+        );
+        assert_eq!(
+            nudge_disabled_marker_path(root, "owned-task"),
+            root.join(".batty").join("nudge_owned-task_disabled")
+        );
+    }
+
+    #[test]
+    fn nudge_multiple_interventions_independent() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+
+        disable_nudge(tmp.path(), "triage").unwrap();
+        disable_nudge(tmp.path(), "review").unwrap();
+
+        assert!(nudge_disabled_marker_path(tmp.path(), "triage").exists());
+        assert!(nudge_disabled_marker_path(tmp.path(), "review").exists());
+        assert!(!nudge_disabled_marker_path(tmp.path(), "dispatch").exists());
+
+        enable_nudge(tmp.path(), "triage").unwrap();
+        assert!(!nudge_disabled_marker_path(tmp.path(), "triage").exists());
+        assert!(nudge_disabled_marker_path(tmp.path(), "review").exists());
     }
 
     #[test]

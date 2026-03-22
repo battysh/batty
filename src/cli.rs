@@ -152,6 +152,12 @@ pub enum Command {
         shell: CompletionShell,
     },
 
+    /// Per-intervention runtime toggles
+    Nudge {
+        #[command(subcommand)]
+        command: NudgeCommand,
+    },
+
     /// Pause nudges and standups
     Pause,
 
@@ -338,6 +344,59 @@ pub enum ReviewDispositionArg {
 pub enum AutoMergeAction {
     Enable,
     Disable,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum NudgeCommand {
+    /// Disable an intervention at runtime
+    Disable {
+        /// Intervention name
+        #[arg(value_enum)]
+        name: NudgeIntervention,
+    },
+    /// Re-enable a disabled intervention
+    Enable {
+        /// Intervention name
+        #[arg(value_enum)]
+        name: NudgeIntervention,
+    },
+    /// Show status of all interventions
+    Status,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum NudgeIntervention {
+    Replenish,
+    Triage,
+    Review,
+    Dispatch,
+    Utilization,
+    #[value(name = "owned-task")]
+    OwnedTask,
+}
+
+impl NudgeIntervention {
+    /// Return the marker file suffix for this intervention.
+    pub fn marker_name(self) -> &'static str {
+        match self {
+            Self::Replenish => "replenish",
+            Self::Triage => "triage",
+            Self::Review => "review",
+            Self::Dispatch => "dispatch",
+            Self::Utilization => "utilization",
+            Self::OwnedTask => "owned-task",
+        }
+    }
+
+    /// All known interventions.
+    pub const ALL: [NudgeIntervention; 6] = [
+        Self::Replenish,
+        Self::Triage,
+        Self::Review,
+        Self::Dispatch,
+        Self::Utilization,
+        Self::OwnedTask,
+    ];
 }
 
 #[cfg(test)]
@@ -888,5 +947,65 @@ mod tests {
             }
             other => panic!("expected task update command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn nudge_disable_parses() {
+        let cli = Cli::parse_from(["batty", "nudge", "disable", "triage"]);
+        match cli.command {
+            Command::Nudge {
+                command: NudgeCommand::Disable { name },
+            } => assert_eq!(name, NudgeIntervention::Triage),
+            other => panic!("expected nudge disable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nudge_enable_parses() {
+        let cli = Cli::parse_from(["batty", "nudge", "enable", "replenish"]);
+        match cli.command {
+            Command::Nudge {
+                command: NudgeCommand::Enable { name },
+            } => assert_eq!(name, NudgeIntervention::Replenish),
+            other => panic!("expected nudge enable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nudge_status_parses() {
+        let cli = Cli::parse_from(["batty", "nudge", "status"]);
+        match cli.command {
+            Command::Nudge {
+                command: NudgeCommand::Status,
+            } => {}
+            other => panic!("expected nudge status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nudge_disable_owned_task_parses() {
+        let cli = Cli::parse_from(["batty", "nudge", "disable", "owned-task"]);
+        match cli.command {
+            Command::Nudge {
+                command: NudgeCommand::Disable { name },
+            } => assert_eq!(name, NudgeIntervention::OwnedTask),
+            other => panic!("expected nudge disable owned-task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nudge_rejects_unknown_intervention() {
+        let result = Cli::try_parse_from(["batty", "nudge", "disable", "unknown"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn nudge_intervention_marker_names() {
+        assert_eq!(NudgeIntervention::Replenish.marker_name(), "replenish");
+        assert_eq!(NudgeIntervention::Triage.marker_name(), "triage");
+        assert_eq!(NudgeIntervention::Review.marker_name(), "review");
+        assert_eq!(NudgeIntervention::Dispatch.marker_name(), "dispatch");
+        assert_eq!(NudgeIntervention::Utilization.marker_name(), "utilization");
+        assert_eq!(NudgeIntervention::OwnedTask.marker_name(), "owned-task");
     }
 }
