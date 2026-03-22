@@ -420,12 +420,7 @@ impl TeamDaemon {
             .filter(|task| task.claimed_by.is_none())
             .filter(|task| task.blocked.is_none())
             .filter(|task| task.blocked_on.is_none())
-            .filter(|task| {
-                task.scheduled_for.as_ref().map_or(true, |scheduled| {
-                    chrono::DateTime::parse_from_rfc3339(scheduled)
-                        .map_or(true, |ts| ts <= chrono::Utc::now())
-                })
-            })
+            .filter(|task| !task.is_schedule_blocked())
             .filter(|task| !queued_task_ids.contains(&task.id))
             .filter(|task| {
                 task.depends_on.iter().all(|dep_id| {
@@ -503,10 +498,7 @@ impl TeamDaemon {
                 && task.claimed_by.is_none()
                 && task.blocked.is_none()
                 && task.blocked_on.is_none()
-                && task.scheduled_for.as_ref().map_or(true, |scheduled| {
-                    chrono::DateTime::parse_from_rfc3339(scheduled)
-                        .map_or(true, |ts| ts <= chrono::Utc::now())
-                })
+                && !task.is_schedule_blocked()
                 && task.depends_on.iter().all(|dep_id| {
                     task_status_by_id
                         .get(dep_id)
