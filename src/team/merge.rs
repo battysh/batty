@@ -411,16 +411,44 @@ pub(crate) fn reset_engineer_worktree(project_root: &Path, engineer_name: &str) 
 
     let previous_branch = current_worktree_branch(&worktree_dir)?;
     let base_branch = engineer_base_branch_name(engineer_name);
+
+    // Force-clean uncommitted changes before switching branches.
+    // Without this, `checkout -B` fails when the worktree is dirty.
+    force_clean_worktree(&worktree_dir, engineer_name);
+
     if let Err(error) = checkout_worktree_branch_from_main(&worktree_dir, &base_branch) {
         warn!(
             engineer = engineer_name,
+            current_branch = %previous_branch,
+            expected_branch = %base_branch,
             error = %error,
             "failed to reset worktree after merge"
         );
         return Ok(());
     }
 
+    // Verify HEAD landed on the base branch.
+    match current_worktree_branch(&worktree_dir) {
+        Ok(actual) if actual == base_branch => {}
+        Ok(actual) => {
+            warn!(
+                engineer = engineer_name,
+                current_branch = %actual,
+                expected_branch = %base_branch,
+                "worktree reset did not land on expected branch"
+            );
+        }
+        Err(error) => {
+            warn!(
+                engineer = engineer_name,
+                error = %error,
+                "could not verify worktree branch after reset"
+            );
+        }
+    }
+
     if previous_branch != base_branch
+        && previous_branch != "HEAD"
         && (previous_branch == engineer_name
             || previous_branch.starts_with(&format!("{engineer_name}/")))
         && branch_is_merged_into(project_root, &previous_branch, "main")?
@@ -441,6 +469,33 @@ pub(crate) fn reset_engineer_worktree(project_root: &Path, engineer_name: &str) 
         "reset worktree to main after merge"
     );
     Ok(())
+}
+
+/// Discard uncommitted changes in a worktree so `checkout -B` can succeed.
+/// Best-effort: failures are logged but do not block the reset attempt.
+fn force_clean_worktree(worktree_dir: &Path, engineer_name: &str) {
+    if let Err(error) = run_git_with_context(
+        worktree_dir,
+        &["reset", "--hard"],
+        "discard staged/unstaged changes before worktree reset",
+    ) {
+        warn!(
+            engineer = engineer_name,
+            error = %error,
+            "git reset --hard failed during worktree cleanup"
+        );
+    }
+    if let Err(error) = run_git_with_context(
+        worktree_dir,
+        &["clean", "-fd", "--exclude=.batty/"],
+        "remove untracked files before worktree reset",
+    ) {
+        warn!(
+            engineer = engineer_name,
+            error = %error,
+            "git clean failed during worktree cleanup"
+        );
+    }
 }
 
 fn record_merge_test_timing(
@@ -1495,5 +1550,113 @@ mod tests {
         let timings = read_test_timing_log(&timing_log).unwrap();
         assert_eq!(timings.len(), 6);
         assert!(timings.last().unwrap().regression_detected);
+    }
+
+    #[test]
+    fn reset_clears_task_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-reset");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-reset",
+            "eng-reset/task-99",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        std::fs::write(worktree_dir.join("done.txt"), "work done\n").unwrap();
+        git_ok(&worktree_dir, &["add", "done.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "task work"]);
+
+        // Merge the task branch into main so it's considered merged.
+        git_ok(&repo, &["merge", "eng-reset/task-99", "--no-edit"]);
+
+        reset_engineer_worktree(&repo, "eng-reset").unwrap();
+
+        // Verify on base branch.
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            engineer_base_branch_name("eng-reset")
+        );
+        // Verify task branch is deleted.
+        assert!(
+            !git(&repo, &["rev-parse", "--verify", "eng-reset/task-99"])
+                .status
+                .success(),
+            "merged task branch should have been deleted"
+        );
+    }
+
+    #[test]
+    fn reset_handles_uncommitted_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-dirty");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-dirty",
+            "eng-dirty/task-88",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        // Leave uncommitted staged and unstaged changes.
+        std::fs::write(worktree_dir.join("staged.txt"), "staged\n").unwrap();
+        git_ok(&worktree_dir, &["add", "staged.txt"]);
+        std::fs::write(worktree_dir.join("unstaged.txt"), "unstaged\n").unwrap();
+
+        // Reset should still succeed despite dirty worktree.
+        reset_engineer_worktree(&repo, "eng-dirty").unwrap();
+
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            engineer_base_branch_name("eng-dirty")
+        );
+        // Worktree should be clean after reset.
+        let status = git_stdout(&worktree_dir, &["status", "--porcelain"]);
+        let tracked_changes: Vec<&str> = status
+            .lines()
+            .filter(|line| !line.starts_with("?? .batty/"))
+            .collect();
+        assert!(
+            tracked_changes.is_empty(),
+            "worktree should be clean after reset, got: {:?}",
+            tracked_changes
+        );
+    }
+
+    #[test]
+    fn reset_handles_detached_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-detach");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-detach", &team_config_dir).unwrap();
+
+        // Create a commit and detach HEAD.
+        std::fs::write(worktree_dir.join("file.txt"), "content\n").unwrap();
+        git_ok(&worktree_dir, &["add", "file.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "a commit"]);
+        let commit_sha = git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
+        git_ok(&worktree_dir, &["checkout", &commit_sha]);
+
+        // Verify we are in detached HEAD state.
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "HEAD"
+        );
+
+        // Reset should still check out the base branch.
+        reset_engineer_worktree(&repo, "eng-detach").unwrap();
+
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            engineer_base_branch_name("eng-detach")
+        );
     }
 }
