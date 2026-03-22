@@ -226,6 +226,8 @@ pub enum TelemetryCommand {
     Agents,
     /// Show per-task lifecycle metrics
     Tasks,
+    /// Show review pipeline metrics (auto-merge rate, rework, latency)
+    Reviews,
     /// Show recent events from the telemetry database
     Events {
         /// Maximum number of events to show
