@@ -520,4 +520,164 @@ mod tests {
             assert_eq!(picked, None);
         });
     }
+
+    // --- extract_task_id edge cases ---
+
+    #[test]
+    fn extract_task_id_returns_none_when_prefix_not_found() {
+        assert_eq!(extract_task_id("no match here", "Created task #"), None);
+    }
+
+    #[test]
+    fn extract_task_id_returns_none_when_no_digits_after_prefix() {
+        assert_eq!(extract_task_id("Created task #abc", "Created task #"), None);
+    }
+
+    #[test]
+    fn extract_task_id_stops_at_non_digit() {
+        assert_eq!(
+            extract_task_id("Created task #42 is done", "Created task #"),
+            Some("42".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_task_id_from_empty_string() {
+        assert_eq!(extract_task_id("", "Created task #"), None);
+    }
+
+    #[test]
+    fn extract_task_id_with_picked_prefix() {
+        assert_eq!(
+            extract_task_id(
+                "Picked and moved task #7 to in-progress",
+                "Picked and moved task #"
+            ),
+            Some("7".to_string())
+        );
+    }
+
+    // --- is_transient_stderr edge cases ---
+
+    #[test]
+    fn io_error_is_transient() {
+        assert!(is_transient_stderr("i/o error during write"));
+    }
+
+    #[test]
+    fn try_again_is_transient() {
+        assert!(is_transient_stderr("operation failed, try again later"));
+    }
+
+    #[test]
+    fn no_such_file_is_transient() {
+        assert!(is_transient_stderr("no such file or directory: /tmp/board"));
+    }
+
+    #[test]
+    fn unknown_command_is_not_transient() {
+        assert!(!is_transient_stderr(
+            "unknown command \"invalid\" for \"kanban-md\""
+        ));
+    }
+
+    // --- is_empty_pick ---
+
+    #[test]
+    fn empty_pick_detected() {
+        assert!(is_empty_pick("No unblocked, unclaimed tasks found in todo"));
+    }
+
+    #[test]
+    fn non_empty_pick_error_not_detected() {
+        assert!(!is_empty_pick("task #5 is already claimed"));
+    }
+
+    // --- claim_required_for_edit ---
+
+    #[test]
+    fn claim_required_detected_in_stderr() {
+        assert!(claim_required_for_edit("task #5 is claimed by eng-1-2"));
+    }
+
+    #[test]
+    fn claim_not_required_for_unrelated_error() {
+        assert!(!claim_required_for_edit("unknown field \"foo\""));
+    }
+
+    // --- extract_claimed_by edge cases ---
+
+    #[test]
+    fn extract_claimed_by_empty_input() {
+        assert_eq!(extract_claimed_by(""), None);
+    }
+
+    #[test]
+    fn extract_claimed_by_no_claimed_line() {
+        assert_eq!(extract_claimed_by("Status: todo\nPriority: high"), None);
+    }
+
+    #[test]
+    fn extract_claimed_by_empty_claim_value() {
+        assert_eq!(extract_claimed_by("Claimed by:  "), None);
+    }
+
+    #[test]
+    fn extract_claimed_by_without_timestamp() {
+        assert_eq!(
+            extract_claimed_by("Claimed by:  manager-1"),
+            Some("manager-1".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_claimed_by_dash_dash_is_none() {
+        assert_eq!(extract_claimed_by("Claimed by: --"), None);
+    }
+
+    // --- contains_word ---
+
+    #[test]
+    fn contains_word_matches_isolated_word() {
+        assert!(contains_word("the lock is active", "lock"));
+    }
+
+    #[test]
+    fn contains_word_rejects_substring() {
+        assert!(!contains_word("unlock the door", "lock"));
+    }
+
+    #[test]
+    fn contains_word_empty_text() {
+        assert!(!contains_word("", "lock"));
+    }
+
+    // --- format_board_command ---
+
+    #[test]
+    fn format_board_command_includes_all_args() {
+        let result =
+            format_board_command("kanban-md", Path::new("/tmp/board"), &["move", "5", "done"]);
+        assert_eq!(result, "kanban-md move 5 done --dir /tmp/board");
+    }
+
+    #[test]
+    fn format_board_command_no_args() {
+        let result = format_board_command("kanban-md", Path::new("/board"), &[]);
+        assert_eq!(result, "kanban-md --dir /board");
+    }
+
+    // --- classify_failure edge cases ---
+
+    #[test]
+    fn classify_failure_lock_in_stderr() {
+        let error = classify_failure("failed".to_string(), "file lock held".to_string());
+        assert!(matches!(error, BoardError::Transient { .. }));
+    }
+
+    #[test]
+    fn classify_failure_empty_stderr_is_permanent() {
+        let error = classify_failure("failed".to_string(), "".to_string());
+        assert!(matches!(error, BoardError::Permanent { .. }));
+    }
 }

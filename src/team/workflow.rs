@@ -224,4 +224,148 @@ mod tests {
         let decoded: WorkflowMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, meta);
     }
+
+    // --- self-transition ---
+
+    #[test]
+    fn self_transition_is_allowed() {
+        assert!(can_transition(TaskState::Backlog, TaskState::Backlog).is_ok());
+        assert!(can_transition(TaskState::InProgress, TaskState::InProgress).is_ok());
+        assert!(can_transition(TaskState::Done, TaskState::Done).is_ok());
+    }
+
+    // --- archived is terminal ---
+
+    #[test]
+    fn archived_cannot_transition_to_any_state() {
+        let targets = [
+            TaskState::Backlog,
+            TaskState::Todo,
+            TaskState::InProgress,
+            TaskState::Review,
+            TaskState::Blocked,
+            TaskState::Done,
+        ];
+        for target in targets {
+            assert!(
+                can_transition(TaskState::Archived, target).is_err(),
+                "archived -> {target:?} should be illegal"
+            );
+        }
+    }
+
+    // --- transition error message ---
+
+    #[test]
+    fn transition_error_message_contains_states() {
+        let err = can_transition(TaskState::Backlog, TaskState::Done).unwrap_err();
+        assert!(err.contains("Backlog"));
+        assert!(err.contains("Done"));
+    }
+
+    // --- is_runnable edge cases ---
+
+    #[test]
+    fn is_runnable_with_no_deps_at_todo() {
+        let meta = WorkflowMeta {
+            state: TaskState::Todo,
+            ..WorkflowMeta::default()
+        };
+        assert!(meta.is_runnable(&HashSet::new()));
+    }
+
+    #[test]
+    fn is_runnable_at_backlog_is_false() {
+        let meta = WorkflowMeta::default(); // Backlog
+        assert!(!meta.is_runnable(&HashSet::new()));
+    }
+
+    #[test]
+    fn is_runnable_at_done_is_false() {
+        let meta = WorkflowMeta {
+            state: TaskState::Done,
+            ..WorkflowMeta::default()
+        };
+        assert!(!meta.is_runnable(&HashSet::new()));
+    }
+
+    // --- multi-step transitions ---
+
+    #[test]
+    fn full_lifecycle_transition_chain() {
+        let mut meta = WorkflowMeta::default(); // Backlog
+        meta.transition(TaskState::Todo).unwrap();
+        meta.transition(TaskState::InProgress).unwrap();
+        meta.transition(TaskState::Review).unwrap();
+        meta.transition(TaskState::Done).unwrap();
+        meta.transition(TaskState::Archived).unwrap();
+        assert_eq!(meta.state, TaskState::Archived);
+    }
+
+    #[test]
+    fn blocked_to_todo_to_in_progress_chain() {
+        let mut meta = WorkflowMeta {
+            state: TaskState::Todo,
+            ..WorkflowMeta::default()
+        };
+        meta.transition(TaskState::Blocked).unwrap();
+        meta.transition(TaskState::Todo).unwrap();
+        meta.transition(TaskState::InProgress).unwrap();
+        assert_eq!(meta.state, TaskState::InProgress);
+    }
+
+    #[test]
+    fn review_rework_cycle() {
+        let mut meta = WorkflowMeta {
+            state: TaskState::InProgress,
+            ..WorkflowMeta::default()
+        };
+        meta.transition(TaskState::Review).unwrap();
+        meta.transition(TaskState::InProgress).unwrap(); // rework
+        meta.transition(TaskState::Review).unwrap();
+        meta.transition(TaskState::Done).unwrap();
+        assert_eq!(meta.state, TaskState::Done);
+    }
+
+    // --- TaskState serde ---
+
+    #[test]
+    fn task_state_default_is_backlog() {
+        let state: TaskState = Default::default();
+        assert_eq!(state, TaskState::Backlog);
+    }
+
+    #[test]
+    fn task_state_serde_round_trip() {
+        let states = [
+            TaskState::Backlog,
+            TaskState::Todo,
+            TaskState::InProgress,
+            TaskState::Review,
+            TaskState::Blocked,
+            TaskState::Done,
+            TaskState::Archived,
+        ];
+        for state in states {
+            let json = serde_json::to_string(&state).unwrap();
+            let decoded: TaskState = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, state);
+        }
+    }
+
+    // --- ReviewDisposition serde ---
+
+    #[test]
+    fn review_disposition_serde_round_trip() {
+        let dispositions = [
+            ReviewDisposition::Approved,
+            ReviewDisposition::ChangesRequested,
+            ReviewDisposition::Rejected,
+        ];
+        for disp in dispositions {
+            let json = serde_json::to_string(&disp).unwrap();
+            let decoded: ReviewDisposition = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, disp);
+        }
+    }
 }
