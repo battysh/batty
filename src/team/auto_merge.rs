@@ -141,8 +141,8 @@ pub fn analyze_diff(repo: &Path, base: &str, branch: &str) -> Result<DiffSummary
         .count();
 
     // Detect migration and config file changes
-    let has_migrations = changed_paths.iter().any(is_migration_file);
-    let has_config_changes = changed_paths.iter().any(is_config_file);
+    let has_migrations = changed_paths.iter().any(|p| is_migration_file(p));
+    let has_config_changes = changed_paths.iter().any(|p| is_config_file(p));
 
     // Check if branch can merge cleanly into base
     let has_conflicts = check_has_conflicts(repo, base, branch);
@@ -679,19 +679,19 @@ mod tests {
 
     #[test]
     fn migration_file_detection() {
-        assert!(is_migration_file(&"db/migrate/001_add_users.sql".into()));
-        assert!(is_migration_file(&"src/migrations/v2.rs".into()));
-        assert!(is_migration_file(&"schema.sql".into()));
-        assert!(!is_migration_file(&"src/team/mod.rs".into()));
+        assert!(is_migration_file("db/migrate/001_add_users.sql"));
+        assert!(is_migration_file("src/migrations/v2.rs"));
+        assert!(is_migration_file("schema.sql"));
+        assert!(!is_migration_file("src/team/mod.rs"));
     }
 
     #[test]
     fn config_file_detection() {
-        assert!(is_config_file(&"team.yaml".into()));
-        assert!(is_config_file(&"Cargo.toml".into()));
-        assert!(is_config_file(&"package.json".into()));
-        assert!(is_config_file(&".env".into()));
-        assert!(!is_config_file(&"src/team/config.rs".into()));
+        assert!(is_config_file("team.yaml"));
+        assert!(is_config_file("Cargo.toml"));
+        assert!(is_config_file("package.json"));
+        assert!(is_config_file(".env"));
+        assert!(!is_config_file("src/team/config.rs"));
     }
 
     #[test]
