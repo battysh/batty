@@ -9,6 +9,7 @@ pub mod auto_merge;
 pub mod board;
 pub mod board_cmd;
 pub mod capability;
+pub mod checkpoint;
 pub mod comms;
 pub mod completion;
 pub mod config;
