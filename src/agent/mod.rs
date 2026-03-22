@@ -321,9 +321,8 @@ mod tests {
 
     #[test]
     fn health_check_for_nonexistent_binary_returns_unreachable() {
-        let adapter = claude::ClaudeCodeAdapter::new(Some(
-            "/nonexistent/path/to/claude-9999".to_string(),
-        ));
+        let adapter =
+            claude::ClaudeCodeAdapter::new(Some("/nonexistent/path/to/claude-9999".to_string()));
         assert_eq!(adapter.health_check(), BackendHealth::Unreachable);
     }
 

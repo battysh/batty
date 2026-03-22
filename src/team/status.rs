@@ -400,10 +400,7 @@ pub(crate) fn agent_health_by_member(
                         // Parse the latest backend health from the transition reason.
                         // Format is "prev→new", e.g. "healthy→unreachable".
                         if let Some(reason) = event.reason.as_deref() {
-                            let new_state = reason
-                                .split('→')
-                                .last()
-                                .unwrap_or("healthy");
+                            let new_state = reason.split('→').last().unwrap_or("healthy");
                             let health_val = match new_state {
                                 "degraded" => crate::agent::BackendHealth::Degraded,
                                 "unreachable" => crate::agent::BackendHealth::Unreachable,
@@ -2152,5 +2149,78 @@ mod tests {
         assert_eq!(eng_1.delivery_failure_count, 1);
         assert!(eng_1.task_elapsed_secs.unwrap() >= 600);
         assert_eq!(health.get("eng-2").unwrap(), &AgentHealthSummary::default());
+    }
+
+    #[test]
+    fn format_agent_health_summary_includes_backend_health() {
+        let summary = format_agent_health_summary(&AgentHealthSummary {
+            backend_health: crate::agent::BackendHealth::Unreachable,
+            ..AgentHealthSummary::default()
+        });
+        assert_eq!(summary, "B:unreachable");
+
+        let summary = format_agent_health_summary(&AgentHealthSummary {
+            backend_health: crate::agent::BackendHealth::Degraded,
+            restart_count: 1,
+            ..AgentHealthSummary::default()
+        });
+        assert_eq!(summary, "B:degraded r1");
+    }
+
+    #[test]
+    fn agent_health_by_member_reads_health_changed_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events_path = team_events_path(tmp.path());
+        let mut sink = EventSink::new(&events_path).unwrap();
+        sink.emit(TeamEvent::health_changed("eng-1", "healthy→unreachable"))
+            .unwrap();
+
+        let health = agent_health_by_member(tmp.path(), &[engineer("eng-1")]);
+        assert_eq!(
+            health.get("eng-1").unwrap().backend_health,
+            crate::agent::BackendHealth::Unreachable,
+        );
+    }
+
+    #[test]
+    fn agent_health_by_member_uses_latest_health_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events_path = team_events_path(tmp.path());
+        let mut sink = EventSink::new(&events_path).unwrap();
+        sink.emit(TeamEvent::health_changed("eng-1", "healthy→unreachable"))
+            .unwrap();
+        sink.emit(TeamEvent::health_changed("eng-1", "unreachable→healthy"))
+            .unwrap();
+
+        let health = agent_health_by_member(tmp.path(), &[engineer("eng-1")]);
+        assert_eq!(
+            health.get("eng-1").unwrap().backend_health,
+            crate::agent::BackendHealth::Healthy,
+        );
+    }
+
+    #[test]
+    fn build_team_status_health_counts_unhealthy_backend() {
+        let rows = vec![TeamStatusRow {
+            name: "eng-bad".to_string(),
+            role: "engineer".to_string(),
+            role_type: "Engineer".to_string(),
+            agent: Some("claude".to_string()),
+            reports_to: Some("manager".to_string()),
+            state: "working".to_string(),
+            pending_inbox: 0,
+            triage_backlog: 0,
+            active_owned_tasks: Vec::new(),
+            review_owned_tasks: Vec::new(),
+            signal: None,
+            runtime_label: Some("working".to_string()),
+            health: AgentHealthSummary {
+                backend_health: crate::agent::BackendHealth::Unreachable,
+                ..AgentHealthSummary::default()
+            },
+            health_summary: "B:unreachable".to_string(),
+        }];
+        let health = build_team_status_health(&rows, true, false);
+        assert_eq!(health.unhealthy_members, vec!["eng-bad".to_string()]);
     }
 }
