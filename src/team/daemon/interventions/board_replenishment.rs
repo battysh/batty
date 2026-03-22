@@ -1,0 +1,306 @@
+//! Board replenishment intervention: nudges idle architects when the
+//! unblocked todo queue falls below the configured threshold and idle
+//! engineers have no assigned work.
+
+use std::path::Path;
+use std::time::Instant;
+
+use anyhow::Result;
+use tracing::{info, warn};
+
+use super::super::*;
+use super::{OwnedTaskInterventionState, task_needs_owned_intervention};
+
+struct BoardReplenishmentContext<'a> {
+    idle_engineers: &'a [String],
+    threshold: usize,
+    unblocked_todo_tasks: &'a [&'a crate::task::Task],
+    todo_count: usize,
+    in_progress_count: usize,
+    done_count: usize,
+    directive_context: Option<&'a str>,
+}
+
+impl TeamDaemon {
+    pub(in super::super) fn maybe_intervene_board_replenishment(&mut self) -> Result<()> {
+        if super::super::super::pause_marker_path(&self.config.project_root).exists() {
+            return Ok(());
+        }
+        if super::super::super::nudge_disabled_marker_path(
+            &self.config.project_root,
+            "replenish",
+        )
+        .exists()
+        {
+            return Ok(());
+        }
+
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let inbox_root = inbox::inboxes_root(&self.config.project_root);
+        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
+        let task_status_by_id: std::collections::HashMap<u32, String> = tasks
+            .iter()
+            .map(|task| (task.id, task.status.clone()))
+            .collect();
+        let architect_members: Vec<MemberInstance> = self
+            .config
+            .members
+            .iter()
+            .filter(|member| member.role_type == RoleType::Architect)
+            .cloned()
+            .collect();
+        if architect_members.is_empty() {
+            return Ok(());
+        }
+
+        let engineer_names: Vec<String> = self
+            .config
+            .members
+            .iter()
+            .filter(|member| member.role_type == RoleType::Engineer)
+            .map(|member| member.name.clone())
+            .collect();
+        if engineer_names.is_empty() {
+            return Ok(());
+        }
+
+        let idle_unassigned_engineers: Vec<String> = engineer_names
+            .iter()
+            .filter(|name| self.is_member_idle(name))
+            .filter(|name| {
+                !tasks.iter().any(|task| {
+                    task.claimed_by.as_deref() == Some(name.as_str())
+                        && task_needs_owned_intervention(task.status.as_str())
+                })
+            })
+            .cloned()
+            .collect();
+        if idle_unassigned_engineers.is_empty() {
+            return Ok(());
+        }
+
+        let unblocked_todo_tasks: Vec<&crate::task::Task> = tasks
+            .iter()
+            .filter(|task| task.status == "todo")
+            .filter(|task| task.claimed_by.is_none())
+            .filter(|task| task.blocked.is_none())
+            .filter(|task| task.blocked_on.is_none())
+            .filter(|task| {
+                task.depends_on.iter().all(|dep_id| {
+                    task_status_by_id
+                        .get(dep_id)
+                        .is_none_or(|status| status == "done")
+                })
+            })
+            .collect();
+
+        let threshold = self
+            .config
+            .team_config
+            .automation
+            .replenishment_threshold
+            .unwrap_or(engineer_names.len());
+        if unblocked_todo_tasks.len() >= threshold {
+            return Ok(());
+        }
+
+        let todo_count = tasks.iter().filter(|task| task.status == "todo").count();
+        let in_progress_count = tasks
+            .iter()
+            .filter(|task| matches!(task.status.as_str(), "in-progress" | "in_progress"))
+            .count();
+        let done_count = tasks
+            .iter()
+            .filter(|task| matches!(task.status.as_str(), "done" | "archived"))
+            .count();
+        let context = replenishment_context(&self.config.project_root);
+
+        for architect in &architect_members {
+            if !self.is_member_idle(&architect.name) {
+                continue;
+            }
+            if !self.ready_for_idle_automation(&inbox_root, &architect.name) {
+                continue;
+            }
+
+            let replenishment_key = board_replenishment_intervention_key(&architect.name);
+            let signature = board_replenishment_intervention_signature(
+                &idle_unassigned_engineers,
+                &unblocked_todo_tasks,
+                todo_count,
+                in_progress_count,
+                done_count,
+            );
+            if self
+                .owned_task_interventions
+                .get(&replenishment_key)
+                .is_some_and(|state| state.signature == signature)
+            {
+                continue;
+            }
+            if self.intervention_on_cooldown(&replenishment_key) {
+                continue;
+            }
+
+            let text = self.build_board_replenishment_message(
+                architect,
+                BoardReplenishmentContext {
+                    idle_engineers: &idle_unassigned_engineers,
+                    threshold,
+                    unblocked_todo_tasks: &unblocked_todo_tasks,
+                    todo_count,
+                    in_progress_count,
+                    done_count,
+                    directive_context: context.as_deref(),
+                },
+            );
+            info!(
+                member = %architect.name,
+                idle_engineers = idle_unassigned_engineers.len(),
+                unblocked_todo = unblocked_todo_tasks.len(),
+                threshold,
+                "firing board replenishment intervention"
+            );
+            let delivered_live = match self.queue_daemon_message(&architect.name, &text) {
+                Ok(MessageDelivery::LivePane) => true,
+                Ok(_) => false,
+                Err(error) => {
+                    warn!(member = %architect.name, error = %error, "failed to deliver board replenishment intervention");
+                    continue;
+                }
+            };
+            self.record_orchestrator_action(format!(
+                "recovery: board replenishment intervention for {} (idle engineers: {}, unblocked todo: {}, threshold: {}, todo/in-progress/done: {}/{}/{})",
+                architect.name,
+                idle_unassigned_engineers.len(),
+                unblocked_todo_tasks.len(),
+                threshold,
+                todo_count,
+                in_progress_count,
+                done_count
+            ));
+            let idle_epoch = self
+                .triage_idle_epochs
+                .get(&architect.name)
+                .copied()
+                .unwrap_or(0);
+            self.owned_task_interventions.insert(
+                replenishment_key.clone(),
+                OwnedTaskInterventionState {
+                    idle_epoch,
+                    signature,
+                    detected_at: Instant::now(),
+                    escalation_sent: false,
+                },
+            );
+            self.intervention_cooldowns
+                .insert(replenishment_key, Instant::now());
+            if delivered_live {
+                self.mark_member_working(&architect.name);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn build_board_replenishment_message(
+        &self,
+        member: &MemberInstance,
+        context: BoardReplenishmentContext<'_>,
+    ) -> String {
+        let BoardReplenishmentContext {
+            idle_engineers,
+            threshold,
+            unblocked_todo_tasks,
+            todo_count,
+            in_progress_count,
+            done_count,
+            directive_context,
+        } = context;
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let board_dir_str = board_dir.display();
+        let idle_engineer_summary = idle_engineers.join(", ");
+        let todo_summary = if unblocked_todo_tasks.is_empty() {
+            "none".to_string()
+        } else {
+            unblocked_todo_tasks
+                .iter()
+                .take(4)
+                .map(|task| format!("#{} {}", task.id, task.title))
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+
+        let mut message = format!(
+            "Board replenishment needed: unblocked todo queue is below threshold. Current counts: todo={todo_count}, in-progress={in_progress_count}, done={done_count}. Idle engineers without work: {} ({idle_engineer_summary}). Runnable todo threshold: {threshold}. Current runnable todo tasks: {todo_summary}.\n\
+            Replenish the board now:\n\
+            1. `batty status`\n\
+            2. `kanban-md list --dir {board_dir_str} --status todo`\n\
+            3. `kanban-md list --dir {board_dir_str} --status in-progress`\n\
+            4. `kanban-md list --dir {board_dir_str} --status done`",
+            idle_engineers.len()
+        );
+
+        if let Some(context) = directive_context {
+            message.push_str("\n\nReplenishment context:\n");
+            message.push_str(context);
+        }
+
+        if let Some(parent) = &member.reports_to {
+            message.push_str(&format!(
+                "\n\n5. After you add or normalize work, report upward with `batty send {parent} \"board replenished: <what was added or why the board cannot be replenished yet>\"`."
+            ));
+        }
+
+        message.push_str(
+            "\nDo not leave idle engineers without executable work. Create the next concrete tasks or explain the exact blocker now.",
+        );
+        message
+    }
+}
+
+pub(super) fn board_replenishment_intervention_key(member_name: &str) -> String {
+    format!("replenishment::{member_name}")
+}
+
+pub(super) fn board_replenishment_intervention_signature(
+    idle_engineers: &[String],
+    unblocked_todo_tasks: &[&crate::task::Task],
+    todo_count: usize,
+    in_progress_count: usize,
+    done_count: usize,
+) -> String {
+    let mut parts = vec![
+        format!("counts:{todo_count}:{in_progress_count}:{done_count}"),
+        format!("idle:{}", idle_engineers.len()),
+    ];
+    for engineer in idle_engineers {
+        parts.push(format!("idle-free:{engineer}"));
+    }
+    for task in unblocked_todo_tasks {
+        parts.push(format!("todo:{}:{}", task.id, task.title));
+    }
+    parts.sort();
+    parts.join("|")
+}
+
+fn replenishment_context(project_root: &Path) -> Option<String> {
+    let path = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("replenishment_context.md");
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|content| content.trim().to_string())
+        .filter(|content| !content.is_empty())
+}
