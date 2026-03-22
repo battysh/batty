@@ -90,6 +90,10 @@ impl AgentAdapter for CodexCliAdapter {
     fn supports_resume(&self) -> bool {
         true
     }
+
+    fn health_check(&self) -> super::BackendHealth {
+        super::check_binary_available(&self.program)
+    }
 }
 
 #[cfg(test)]

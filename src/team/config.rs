@@ -93,6 +93,8 @@ pub struct WorkflowPolicy {
     pub stall_threshold_secs: u64,
     #[serde(default = "default_max_stall_restarts")]
     pub max_stall_restarts: u32,
+    #[serde(default = "default_health_check_interval_secs")]
+    pub health_check_interval_secs: u64,
     #[serde(default)]
     pub auto_merge: AutoMergePolicy,
 }
@@ -122,6 +124,7 @@ impl Default for WorkflowPolicy {
             capability_overrides: HashMap::new(),
             stall_threshold_secs: default_stall_threshold_secs(),
             max_stall_restarts: default_max_stall_restarts(),
+            health_check_interval_secs: default_health_check_interval_secs(),
             auto_merge: AutoMergePolicy::default(),
         }
     }
@@ -461,6 +464,10 @@ fn default_stall_threshold_secs() -> u64 {
 
 fn default_max_stall_restarts() -> u32 {
     2
+}
+
+fn default_health_check_interval_secs() -> u64 {
+    60
 }
 
 fn default_enabled() -> bool {
