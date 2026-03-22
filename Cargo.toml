@@ -36,7 +36,7 @@ clap_complete = "4"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
+toml = "1"
 serde_yaml = "0.9"
 
 # Unique IDs
@@ -49,11 +49,11 @@ maildir = "0.6"
 ureq = { version = "2", features = ["json"] }
 
 # Scheduling
-cron = "0.13"
+cron = "0.15"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Telemetry storage
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 
 # Pattern matching
 regex = "1"
