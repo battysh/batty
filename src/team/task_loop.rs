@@ -458,21 +458,12 @@ pub(crate) fn is_worktree_safe_to_mutate(worktree_dir: &Path) -> Result<bool> {
 }
 
 fn auto_clean_worktree(worktree_dir: &Path) -> Result<()> {
-    // Try stash first — preserves work for manual recovery.
-    if let Ok(stash) =
-        retry_git(|| git_cmd::run_git(worktree_dir, &["stash", "--include-untracked"]))
-    {
-        let stdout = stash.stdout;
-        if !stdout.contains("No local changes to save") {
-            warn!(
-                worktree = %worktree_dir.display(),
-                "auto-stashed uncommitted changes in engineer worktree"
-            );
-            return Ok(());
-        }
+    // Try commit first — preserves work in git history (no stash accumulation).
+    if auto_commit_before_reset(worktree_dir) {
+        return Ok(());
     }
 
-    // Stash was a no-op or failed — force clean.
+    // Commit failed — fall back to force clean.
     warn!(
         worktree = %worktree_dir.display(),
         "force-cleaning engineer worktree"
@@ -487,6 +478,52 @@ fn auto_clean_worktree(worktree_dir: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Auto-commit uncommitted changes before a worktree reset to avoid stash
+/// accumulation. Returns `true` if changes were successfully committed or
+/// there was nothing to commit.
+pub(crate) fn auto_commit_before_reset(worktree_dir: &Path) -> bool {
+    // Check for user changes first (excludes .batty/ untracked files).
+    let has_changes = match worktree_has_user_changes(worktree_dir) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    if !has_changes {
+        return true;
+    }
+
+    // Stage all changes including untracked files.
+    if retry_git(|| git_cmd::run_git(worktree_dir, &["add", "-A"])).is_err() {
+        warn!(
+            worktree = %worktree_dir.display(),
+            "auto-commit: git add failed"
+        );
+        return false;
+    }
+
+    // Build a descriptive commit message.
+    let branch = retry_git(|| git_cmd::rev_parse_branch(worktree_dir)).unwrap_or_default();
+    let msg = format!("wip: auto-save before worktree reset [{}]", branch);
+
+    match retry_git(|| git_cmd::run_git(worktree_dir, &["commit", "-m", &msg])) {
+        Ok(_) => {
+            info!(
+                worktree = %worktree_dir.display(),
+                branch = %branch,
+                "auto-committed uncommitted changes before worktree reset"
+            );
+            true
+        }
+        Err(e) => {
+            warn!(
+                worktree = %worktree_dir.display(),
+                error = %e,
+                "auto-commit failed"
+            );
+            false
+        }
+    }
 }
 
 pub(crate) fn current_worktree_branch(worktree_dir: &Path) -> Result<String> {
@@ -947,7 +984,7 @@ mod tests {
         .unwrap();
         std::fs::write(worktree_dir.join("scratch.txt"), "uncommitted\n").unwrap();
 
-        // Should succeed — auto-clean stashes the dirty file.
+        // Should succeed — auto-clean commits the dirty file.
         prepare_engineer_assignment_worktree(
             &repo,
             &worktree_dir,
@@ -960,11 +997,11 @@ mod tests {
         // Worktree should be clean now.
         assert!(!worktree_has_user_changes(&worktree_dir).unwrap());
 
-        // Stash should contain the saved work.
+        // No stash should be created (commit-before-reset discipline).
         let stash_list = git_stdout(&worktree_dir, &["stash", "list"]);
         assert!(
-            !stash_list.is_empty(),
-            "stash should contain auto-saved work"
+            stash_list.trim().is_empty(),
+            "no stash should be created, changes should be auto-committed"
         );
     }
 
@@ -1632,5 +1669,141 @@ mod tests {
         std::fs::write(wt_dir.join(".batty").join("temp").join("log.txt"), "log\n").unwrap();
 
         assert!(is_worktree_safe_to_mutate(&wt_dir).unwrap());
+    }
+
+    // --- auto_commit_before_reset tests ---
+
+    #[test]
+    fn auto_commit_saves_uncommitted_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let wt_dir = repo.join(".batty").join("worktrees").join("eng-ac");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &wt_dir,
+            "eng-ac",
+            "eng-ac/77",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        // Create uncommitted changes.
+        std::fs::write(wt_dir.join("work.rs"), "fn hello() {}\n").unwrap();
+        git_ok(&wt_dir, &["add", "work.rs"]);
+
+        assert!(auto_commit_before_reset(&wt_dir));
+
+        // Worktree should now be clean.
+        let status = git_stdout(&wt_dir, &["status", "--porcelain"]);
+        assert!(
+            status.trim().is_empty(),
+            "worktree should be clean after auto-commit"
+        );
+
+        // Verify the commit message contains the wip marker.
+        let log = git_stdout(&wt_dir, &["log", "--oneline", "-1"]);
+        assert!(
+            log.contains("wip: auto-save"),
+            "commit should have wip marker, got: {log}"
+        );
+    }
+
+    #[test]
+    fn auto_commit_noop_on_clean_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let wt_dir = repo.join(".batty").join("worktrees").join("eng-cl");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &wt_dir,
+            "eng-cl",
+            "eng-cl/88",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        let before = git_stdout(&wt_dir, &["rev-parse", "HEAD"]);
+
+        // No changes — should succeed without creating a commit.
+        assert!(auto_commit_before_reset(&wt_dir));
+
+        let after = git_stdout(&wt_dir, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            before, after,
+            "no new commit should be created for clean worktree"
+        );
+    }
+
+    #[test]
+    fn auto_commit_saves_untracked_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let wt_dir = repo.join(".batty").join("worktrees").join("eng-ut2");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &wt_dir,
+            "eng-ut2",
+            "eng-ut2/99",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        // Create untracked file (not staged).
+        std::fs::write(wt_dir.join("new_file.txt"), "new content\n").unwrap();
+
+        assert!(auto_commit_before_reset(&wt_dir));
+
+        // Worktree should be clean.
+        let status = git_stdout(&wt_dir, &["status", "--porcelain"]);
+        assert!(
+            status.trim().is_empty(),
+            "worktree should be clean after auto-commit"
+        );
+    }
+
+    #[test]
+    fn auto_clean_worktree_uses_commit_not_stash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let wt_dir = repo.join(".batty").join("worktrees").join("eng-ns");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &wt_dir,
+            "eng-ns",
+            "eng-ns/66",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        // Create uncommitted changes.
+        std::fs::write(wt_dir.join("work.txt"), "some work\n").unwrap();
+
+        auto_clean_worktree(&wt_dir).unwrap();
+
+        // Should be clean.
+        let status = git_stdout(&wt_dir, &["status", "--porcelain"]);
+        assert!(status.trim().is_empty(), "worktree should be clean");
+
+        // No stashes should have been created.
+        let stash = git_stdout(&wt_dir, &["stash", "list"]);
+        assert!(
+            stash.trim().is_empty(),
+            "no stash should be created, got: {stash}"
+        );
+
+        // A wip commit should exist.
+        let log = git_stdout(&wt_dir, &["log", "--oneline", "-1"]);
+        assert!(
+            log.contains("wip: auto-save"),
+            "should have wip commit, got: {log}"
+        );
     }
 }
