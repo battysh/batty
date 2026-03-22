@@ -106,8 +106,16 @@ pub fn insert_event(conn: &Connection, event: &TeamEvent) -> Result<()> {
     )
     .context("failed to insert telemetry event")?;
 
-    // Update derived metrics based on event type.
+    // Update derived metrics based on event type (may create session row).
     update_metrics_for_event(conn, event)?;
+
+    // Fix #3: Increment total_events on every insert (after update_metrics
+    // so that daemon_started can create the session row first).
+    conn.execute(
+        "UPDATE session_summary SET total_events = total_events + 1
+         WHERE rowid = (SELECT rowid FROM session_summary ORDER BY started_at DESC LIMIT 1)",
+        [],
+    )?;
 
     Ok(())
 }
@@ -125,6 +133,12 @@ fn update_metrics_for_event(conn: &Connection, event: &TeamEvent) -> Result<()> 
                     params![task, event.ts as i64],
                 )?;
             }
+            // Fix #1: Increment tasks_completed on latest session.
+            conn.execute(
+                "UPDATE session_summary SET tasks_completed = tasks_completed + 1
+                 WHERE rowid = (SELECT rowid FROM session_summary ORDER BY started_at DESC LIMIT 1)",
+                [],
+            )?;
         }
         "task_assigned" => {
             if let Some(task) = &event.task {
@@ -162,6 +176,12 @@ fn update_metrics_for_event(conn: &Connection, event: &TeamEvent) -> Result<()> 
                     params![task, event.ts as i64],
                 )?;
             }
+            // Fix #2: Increment total_merges on latest session.
+            conn.execute(
+                "UPDATE session_summary SET total_merges = total_merges + 1
+                 WHERE rowid = (SELECT rowid FROM session_summary ORDER BY started_at DESC LIMIT 1)",
+                [],
+            )?;
         }
         "merge_confidence_scored" => {
             if let Some(task) = &event.task {
@@ -181,6 +201,15 @@ fn update_metrics_for_event(conn: &Connection, event: &TeamEvent) -> Result<()> 
                 params![session_id, event.ts as i64],
             )?;
         }
+        // Fix #4: Set ended_at on latest session when daemon stops.
+        // Both daemon_stopped() and daemon_stopped_with_reason() use "daemon_stopped" as event name.
+        "daemon_stopped" => {
+            conn.execute(
+                "UPDATE session_summary SET ended_at = ?1
+                 WHERE rowid = (SELECT rowid FROM session_summary ORDER BY started_at DESC LIMIT 1)",
+                params![event.ts as i64],
+            )?;
+        }
         _ => {}
     }
     Ok(())
@@ -193,6 +222,35 @@ fn upsert_agent_counter(conn: &Connection, role: &str, column: &str) -> Result<(
          ON CONFLICT(role) DO UPDATE SET {column} = {column} + 1"
     );
     conn.execute(&sql, params![role])?;
+    Ok(())
+}
+
+/// Record an agent's poll state (idle or working) and accumulate cycle time.
+///
+/// Fix #5: Upserts idle_polls or working_polls for the given role.
+/// Fix #6: Increments total_cycle_secs by `poll_interval_secs` when working.
+pub fn record_agent_poll_state(
+    conn: &Connection,
+    role: &str,
+    is_working: bool,
+    poll_interval_secs: u64,
+) -> Result<()> {
+    if is_working {
+        conn.execute(
+            "INSERT INTO agent_metrics (role, working_polls, total_cycle_secs)
+             VALUES (?1, 1, ?2)
+             ON CONFLICT(role) DO UPDATE SET
+                working_polls = working_polls + 1,
+                total_cycle_secs = total_cycle_secs + ?2",
+            params![role, poll_interval_secs as i64],
+        )?;
+    } else {
+        conn.execute(
+            "INSERT INTO agent_metrics (role, idle_polls) VALUES (?1, 1)
+             ON CONFLICT(role) DO UPDATE SET idle_polls = idle_polls + 1",
+            params![role],
+        )?;
+    }
     Ok(())
 }
 
@@ -583,5 +641,187 @@ mod tests {
         // avg = (100 + 300) / 2 = 200
         let avg = row.avg_review_latency_secs.unwrap();
         assert!((avg - 200.0).abs() < 0.01);
+    }
+
+    // --- Fix #1: tasks_completed incremented on task_completed ---
+
+    #[test]
+    fn tasks_completed_increments_on_task_completed() {
+        let conn = open_in_memory().unwrap();
+        insert_event(&conn, &TeamEvent::daemon_started()).unwrap();
+
+        insert_event(&conn, &TeamEvent::task_completed("eng-1", Some("1"))).unwrap();
+        insert_event(&conn, &TeamEvent::task_completed("eng-2", Some("2"))).unwrap();
+
+        let summaries = query_session_summaries(&conn).unwrap();
+        assert_eq!(summaries[0].tasks_completed, 2);
+    }
+
+    // --- Fix #2: total_merges incremented on merge events ---
+
+    #[test]
+    fn total_merges_increments_on_auto_and_manual_merge() {
+        let conn = open_in_memory().unwrap();
+        insert_event(&conn, &TeamEvent::daemon_started()).unwrap();
+
+        insert_event(
+            &conn,
+            &TeamEvent::task_auto_merged("eng-1", "1", 0.9, 2, 30),
+        )
+        .unwrap();
+        insert_event(&conn, &TeamEvent::task_manual_merged("2")).unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::task_auto_merged("eng-1", "3", 0.8, 1, 10),
+        )
+        .unwrap();
+
+        let summaries = query_session_summaries(&conn).unwrap();
+        assert_eq!(summaries[0].total_merges, 3);
+    }
+
+    // --- Fix #3: total_events incremented on every insert ---
+
+    #[test]
+    fn total_events_increments_on_every_insert() {
+        let conn = open_in_memory().unwrap();
+        // daemon_started is the first event, creating the session and then incrementing.
+        insert_event(&conn, &TeamEvent::daemon_started()).unwrap();
+        insert_event(&conn, &TeamEvent::task_assigned("eng-1", "1")).unwrap();
+        insert_event(&conn, &TeamEvent::task_completed("eng-1", Some("1"))).unwrap();
+
+        let summaries = query_session_summaries(&conn).unwrap();
+        // 3 events inserted after session was created (daemon_started creates the row
+        // then total_events is incremented for it too).
+        assert_eq!(summaries[0].total_events, 3);
+    }
+
+    // --- Fix #4: ended_at set on daemon_stopped ---
+
+    #[test]
+    fn ended_at_set_on_daemon_stopped() {
+        let conn = open_in_memory().unwrap();
+        insert_event(&conn, &TeamEvent::daemon_started()).unwrap();
+
+        let summaries = query_session_summaries(&conn).unwrap();
+        assert!(summaries[0].ended_at.is_none());
+
+        let mut stop = TeamEvent::daemon_stopped_with_reason("shutdown", 3600);
+        stop.ts = 9999;
+        insert_event(&conn, &stop).unwrap();
+
+        let summaries = query_session_summaries(&conn).unwrap();
+        assert_eq!(summaries[0].ended_at, Some(9999));
+    }
+
+    #[test]
+    fn ended_at_set_on_plain_daemon_stopped() {
+        let conn = open_in_memory().unwrap();
+        insert_event(&conn, &TeamEvent::daemon_started()).unwrap();
+
+        let mut stop = TeamEvent::daemon_stopped();
+        stop.ts = 5000;
+        insert_event(&conn, &stop).unwrap();
+
+        let summaries = query_session_summaries(&conn).unwrap();
+        assert_eq!(summaries[0].ended_at, Some(5000));
+    }
+
+    // --- Fix #5: idle_polls / working_polls updated ---
+
+    #[test]
+    fn record_agent_poll_state_tracks_idle_polls() {
+        let conn = open_in_memory().unwrap();
+        record_agent_poll_state(&conn, "eng-1", false, 5).unwrap();
+        record_agent_poll_state(&conn, "eng-1", false, 5).unwrap();
+        record_agent_poll_state(&conn, "eng-1", false, 5).unwrap();
+
+        let agents = query_agent_metrics(&conn).unwrap();
+        assert_eq!(agents[0].idle_polls, 3);
+        assert_eq!(agents[0].working_polls, 0);
+        assert_eq!(agents[0].total_cycle_secs, 0);
+    }
+
+    #[test]
+    fn record_agent_poll_state_tracks_working_polls() {
+        let conn = open_in_memory().unwrap();
+        record_agent_poll_state(&conn, "eng-1", true, 5).unwrap();
+        record_agent_poll_state(&conn, "eng-1", true, 5).unwrap();
+
+        let agents = query_agent_metrics(&conn).unwrap();
+        assert_eq!(agents[0].working_polls, 2);
+        assert_eq!(agents[0].idle_polls, 0);
+    }
+
+    // --- Fix #6: total_cycle_secs incremented for working agents ---
+
+    #[test]
+    fn record_agent_poll_state_accumulates_cycle_secs_for_working() {
+        let conn = open_in_memory().unwrap();
+        record_agent_poll_state(&conn, "eng-1", true, 5).unwrap();
+        record_agent_poll_state(&conn, "eng-1", true, 5).unwrap();
+        record_agent_poll_state(&conn, "eng-1", true, 5).unwrap();
+
+        let agents = query_agent_metrics(&conn).unwrap();
+        assert_eq!(agents[0].total_cycle_secs, 15); // 3 * 5
+    }
+
+    #[test]
+    fn record_agent_poll_state_idle_does_not_accumulate_cycle_secs() {
+        let conn = open_in_memory().unwrap();
+        record_agent_poll_state(&conn, "eng-1", false, 5).unwrap();
+        record_agent_poll_state(&conn, "eng-1", false, 5).unwrap();
+
+        let agents = query_agent_metrics(&conn).unwrap();
+        assert_eq!(agents[0].total_cycle_secs, 0);
+    }
+
+    #[test]
+    fn record_agent_poll_state_mixed_idle_and_working() {
+        let conn = open_in_memory().unwrap();
+        record_agent_poll_state(&conn, "eng-1", true, 5).unwrap();
+        record_agent_poll_state(&conn, "eng-1", false, 5).unwrap();
+        record_agent_poll_state(&conn, "eng-1", true, 5).unwrap();
+        record_agent_poll_state(&conn, "eng-1", false, 5).unwrap();
+
+        let agents = query_agent_metrics(&conn).unwrap();
+        assert_eq!(agents[0].working_polls, 2);
+        assert_eq!(agents[0].idle_polls, 2);
+        assert_eq!(agents[0].total_cycle_secs, 10); // 2 * 5
+    }
+
+    #[test]
+    fn record_agent_poll_state_multiple_agents() {
+        let conn = open_in_memory().unwrap();
+        record_agent_poll_state(&conn, "eng-1", true, 5).unwrap();
+        record_agent_poll_state(&conn, "eng-2", false, 5).unwrap();
+        record_agent_poll_state(&conn, "eng-1", true, 5).unwrap();
+        record_agent_poll_state(&conn, "eng-2", true, 5).unwrap();
+
+        let agents = query_agent_metrics(&conn).unwrap();
+        let eng1 = agents.iter().find(|a| a.role == "eng-1").unwrap();
+        let eng2 = agents.iter().find(|a| a.role == "eng-2").unwrap();
+        assert_eq!(eng1.working_polls, 2);
+        assert_eq!(eng1.total_cycle_secs, 10);
+        assert_eq!(eng2.idle_polls, 1);
+        assert_eq!(eng2.working_polls, 1);
+        assert_eq!(eng2.total_cycle_secs, 5);
+    }
+
+    // --- Edge cases: session counters without a session ---
+
+    #[test]
+    fn session_counters_noop_without_session() {
+        // If no daemon_started event has been emitted, no session row exists.
+        // The UPDATE statements should just affect 0 rows — no error.
+        let conn = open_in_memory().unwrap();
+        insert_event(&conn, &TeamEvent::task_completed("eng-1", Some("1"))).unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::task_auto_merged("eng-1", "1", 0.9, 2, 30),
+        )
+        .unwrap();
+        let summaries = query_session_summaries(&conn).unwrap();
+        assert!(summaries.is_empty());
     }
 }
