@@ -84,11 +84,24 @@ pub struct WorkflowPolicy {
     #[serde(default = "default_review_timeout_secs")]
     pub review_timeout_secs: u64,
     #[serde(default)]
+    pub review_timeout_overrides: HashMap<String, ReviewTimeoutOverride>,
+    #[serde(default)]
     pub auto_archive_done_after_secs: Option<u64>,
     #[serde(default)]
     pub capability_overrides: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub auto_merge: AutoMergePolicy,
+}
+
+/// Per-priority override for review timeout thresholds.
+/// When a task's priority matches a key in `review_timeout_overrides`,
+/// these values replace the global defaults.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReviewTimeoutOverride {
+    /// Nudge threshold override (seconds). Falls back to global if absent.
+    pub review_nudge_threshold_secs: Option<u64>,
+    /// Escalation threshold override (seconds). Falls back to global if absent.
+    pub review_timeout_secs: Option<u64>,
 }
 
 impl Default for WorkflowPolicy {
@@ -100,6 +113,7 @@ impl Default for WorkflowPolicy {
             escalation_threshold_secs: default_escalation_threshold_secs(),
             review_nudge_threshold_secs: default_review_nudge_threshold_secs(),
             review_timeout_secs: default_review_timeout_secs(),
+            review_timeout_overrides: HashMap::new(),
             auto_archive_done_after_secs: None,
             capability_overrides: HashMap::new(),
             auto_merge: AutoMergePolicy::default(),
