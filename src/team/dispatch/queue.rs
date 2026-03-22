@@ -295,7 +295,6 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
 
-    use crate::team::config::BoardConfig;
     use crate::team::standup::MemberState;
     use crate::team::test_support::{
         TestDaemonBuilder, engineer_member, manager_member, write_open_task_file,

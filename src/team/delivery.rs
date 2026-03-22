@@ -2377,12 +2377,14 @@ mod tests {
 
     #[test]
     fn delivery_verification_constants_are_sane() {
-        assert!(
-            DELIVERY_VERIFICATION_CAPTURE_LINES_RECENTLY_READY
-                > DELIVERY_VERIFICATION_CAPTURE_LINES
-        );
-        assert!(DELIVERY_VERIFICATION_CAPTURE_LINES > 0);
-        assert!(FAILED_DELIVERY_MAX_ATTEMPTS >= 2);
+        const {
+            assert!(
+                DELIVERY_VERIFICATION_CAPTURE_LINES_RECENTLY_READY
+                    > DELIVERY_VERIFICATION_CAPTURE_LINES
+            );
+            assert!(DELIVERY_VERIFICATION_CAPTURE_LINES > 0);
+            assert!(FAILED_DELIVERY_MAX_ATTEMPTS >= 2);
+        }
         assert!(FAILED_DELIVERY_RETRY_DELAY >= Duration::from_secs(1));
     }
 
