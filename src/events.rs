@@ -10,7 +10,6 @@ use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -372,23 +371,6 @@ impl PipeWatcher {
         Ok(event_count)
     }
 
-    /// Get a reference to the event buffer.
-    #[allow(dead_code)]
-    pub fn buffer(&self) -> &EventBuffer {
-        &self.buffer
-    }
-
-    /// Get the time of last activity (useful for silence detection).
-    /// Returns None if no file modification detected.
-    #[allow(dead_code)]
-    pub fn last_activity(&self) -> Option<Instant> {
-        if self.position > 0 {
-            Some(Instant::now())
-        } else {
-            None
-        }
-    }
-
     /// Resume-safe checkpoint offset.
     ///
     /// This rewinds by the currently buffered partial line bytes so a resumed
@@ -397,29 +379,6 @@ impl PipeWatcher {
         self.position
             .saturating_sub(self.line_buffer.len().try_into().unwrap_or(0))
     }
-}
-
-/// Run the pipe watcher in a polling loop until the stop flag is set.
-///
-/// This is meant to be spawned in a thread. It polls the log file at the
-/// given interval and pushes events into the shared buffer.
-#[allow(dead_code)]
-pub fn run_watcher_loop(
-    path: &Path,
-    buffer: EventBuffer,
-    poll_interval: std::time::Duration,
-    stop: Arc<std::sync::atomic::AtomicBool>,
-) -> Result<()> {
-    let mut watcher = PipeWatcher::new(path, buffer);
-
-    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-        watcher.poll()?;
-        std::thread::sleep(poll_interval);
-    }
-
-    // Final poll to catch any remaining content
-    watcher.poll()?;
-    Ok(())
 }
 
 #[cfg(test)]
