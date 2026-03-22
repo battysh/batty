@@ -301,3 +301,88 @@ fn replenishment_context(project_root: &Path) -> Option<String> {
         .map(|content| content.trim().to_string())
         .filter(|content| !content.is_empty())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replenishment_key_uses_prefix() {
+        assert_eq!(
+            board_replenishment_intervention_key("architect"),
+            "replenishment::architect"
+        );
+        assert_eq!(
+            board_replenishment_intervention_key("arch-2"),
+            "replenishment::arch-2"
+        );
+    }
+
+    #[test]
+    fn replenishment_signature_sorts_deterministically() {
+        let sig1 = board_replenishment_intervention_signature(
+            &["eng-2".to_string(), "eng-1".to_string()],
+            &[],
+            3,
+            1,
+            5,
+        );
+        let sig2 = board_replenishment_intervention_signature(
+            &["eng-1".to_string(), "eng-2".to_string()],
+            &[],
+            3,
+            1,
+            5,
+        );
+        assert_eq!(sig1, sig2);
+    }
+
+    #[test]
+    fn replenishment_signature_changes_with_different_counts() {
+        let sig1 = board_replenishment_intervention_signature(&[], &[], 3, 1, 5);
+        let sig2 = board_replenishment_intervention_signature(&[], &[], 4, 1, 5);
+        assert_ne!(sig1, sig2);
+    }
+
+    #[test]
+    fn replenishment_signature_includes_idle_engineers() {
+        let sig = board_replenishment_intervention_signature(&["eng-1".to_string()], &[], 0, 0, 0);
+        assert!(sig.contains("idle-free:eng-1"));
+        assert!(sig.contains("idle:1"));
+    }
+
+    #[test]
+    fn replenishment_context_returns_none_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(replenishment_context(tmp.path()), None);
+    }
+
+    #[test]
+    fn replenishment_context_returns_none_when_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("replenishment_context.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "   \n  \n").unwrap();
+        assert_eq!(replenishment_context(tmp.path()), None);
+    }
+
+    #[test]
+    fn replenishment_context_returns_trimmed_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("replenishment_context.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "  Focus on launch tasks.  \n").unwrap();
+        assert_eq!(
+            replenishment_context(tmp.path()),
+            Some("Focus on launch tasks.".to_string())
+        );
+    }
+}

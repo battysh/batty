@@ -332,3 +332,59 @@ pub(super) fn owned_task_intervention_signature(tasks: &[&crate::task::Task]) ->
     parts.sort();
     parts.join("|")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_task(id: u32, status: &str) -> crate::task::Task {
+        crate::task::Task {
+            id,
+            title: format!("task-{id}"),
+            status: status.to_string(),
+            priority: "high".to_string(),
+            claimed_by: None,
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description: String::new(),
+            batty_config: None,
+            source_path: std::path::PathBuf::from(format!("task-{id}.md")),
+        }
+    }
+
+    #[test]
+    fn signature_single_task() {
+        let task = make_task(42, "in-progress");
+        assert_eq!(
+            owned_task_intervention_signature(&[&task]),
+            "42:in-progress"
+        );
+    }
+
+    #[test]
+    fn signature_sorts_by_id() {
+        let t1 = make_task(20, "todo");
+        let t2 = make_task(10, "in-progress");
+        assert_eq!(
+            owned_task_intervention_signature(&[&t1, &t2]),
+            "10:in-progress|20:todo"
+        );
+    }
+
+    #[test]
+    fn signature_empty() {
+        assert_eq!(owned_task_intervention_signature(&[]), "");
+    }
+}
