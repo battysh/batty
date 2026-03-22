@@ -772,6 +772,7 @@ mod tests {
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn poll_watchers_emits_context_exhausted_event() {
         let session = format!("batty-test-context-exhausted-{}", std::process::id());
         let _ = crate::tmux::kill_session(&session);

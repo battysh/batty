@@ -314,6 +314,7 @@ mod tests {
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn test_inject_message_empty_message_writes_message_wrapper_to_pane() {
         let session = "batty-test-message-empty";
         let mut delivered = false;
@@ -363,6 +364,7 @@ mod tests {
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn test_inject_message_long_special_message_preserves_content() {
         let session = format!("batty-test-message-special-{}", std::process::id());
         let _ = crate::tmux::kill_session(&session);

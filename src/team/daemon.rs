@@ -1675,6 +1675,7 @@ mod tests {
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn daemon_lifecycle_happy_path_exercises_decomposed_modules() {
         let session = format!("batty-test-daemon-lifecycle-{}", std::process::id());
         let _ = crate::tmux::kill_session(&session);
@@ -1807,6 +1808,7 @@ mod tests {
     }
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn maybe_fire_nudges_marks_member_working_after_live_delivery() {
         let session = "batty-test-nudge-live-delivery";
         let mut delivered_live = false;
@@ -1872,6 +1874,7 @@ mod tests {
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn maybe_intervene_triage_backlog_marks_member_working_after_live_delivery() {
         let session = format!("batty-test-triage-live-delivery-{}", std::process::id());
         let _ = crate::tmux::kill_session(&session);

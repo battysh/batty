@@ -44,6 +44,15 @@ planning/          # Architecture, roadmap, philosophy docs
 - **Test what matters.** Focus on tmux supervision, message routing, board state, and prompt handling.
 - **Extensive unit tests.** Every module gets `#[cfg(test)]` coverage for happy paths, edge cases, and failures. Run `cargo test` before committing. If a task adds code, it adds tests.
 
+## Test Categories
+
+Tests are split into **unit** and **integration**:
+
+- **Unit tests** (`cargo test`): ~1,574 tests that run without tmux. Safe for CI without a tmux server.
+- **Integration tests** (`cargo test --features integration`): 56 tmux-dependent tests gated behind the `integration` Cargo feature. These require a running tmux server.
+
+Integration tests use `#[cfg_attr(not(feature = "integration"), ignore)]`. Without the feature flag, they are automatically skipped.
+
 ## Key Dependencies
 
 ```toml
