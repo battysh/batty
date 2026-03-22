@@ -23,6 +23,12 @@ pub struct RunStats {
     pub idle_time_pct: f64,
     pub escalation_count: u32,
     pub message_count: u32,
+    // Review pipeline metrics
+    pub auto_merge_count: u32,
+    pub manual_merge_count: u32,
+    pub rework_count: u32,
+    pub review_nudge_count: u32,
+    pub review_escalation_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +170,11 @@ pub fn analyze_events(events: &[TeamEvent]) -> Option<RunStats> {
     let mut idle_samples = Vec::new();
     let mut escalation_count = 0u32;
     let mut message_count = 0u32;
+    let mut auto_merge_count = 0u32;
+    let mut manual_merge_count = 0u32;
+    let mut rework_count = 0u32;
+    let mut review_nudge_count = 0u32;
+    let mut review_escalation_count = 0u32;
 
     for event in run_events {
         match event.event.as_str() {
@@ -213,6 +224,21 @@ pub fn analyze_events(events: &[TeamEvent]) -> Option<RunStats> {
             }
             "message_routed" => {
                 message_count += 1;
+            }
+            "task_auto_merged" => {
+                auto_merge_count += 1;
+            }
+            "task_manual_merged" => {
+                manual_merge_count += 1;
+            }
+            "task_reworked" => {
+                rework_count += 1;
+            }
+            "review_nudge_sent" => {
+                review_nudge_count += 1;
+            }
+            "review_escalated" => {
+                review_escalation_count += 1;
             }
             "load_snapshot" => {
                 let Some(working_members) = event.working_members else {
@@ -266,6 +292,11 @@ pub fn analyze_events(events: &[TeamEvent]) -> Option<RunStats> {
         idle_time_pct,
         escalation_count,
         message_count,
+        auto_merge_count,
+        manual_merge_count,
+        rework_count,
+        review_nudge_count,
+        review_escalation_count,
     })
 }
 
@@ -398,6 +429,7 @@ fn render_retrospective(stats: &RunStats) -> String {
     let task_cycle_rows = render_task_cycle_rows(&stats.task_stats);
     let bottlenecks = render_bottlenecks(&stats.task_stats);
     let recommendations = render_recommendations(stats);
+    let review_section = render_review_performance(stats);
 
     format!(
         "# Batty Retrospective\n\n\
@@ -415,6 +447,7 @@ fn render_retrospective(stats: &RunStats) -> String {
 | --- | --- | --- | --- | --- | --- |\n\
 {}\
 \n\
+{}\
 ## Bottlenecks\n\n\
 {}\
 \n\
@@ -429,8 +462,52 @@ fn render_retrospective(stats: &RunStats) -> String {
         stats.escalation_count,
         stats.idle_time_pct * 100.0,
         task_cycle_rows,
+        review_section,
         bottlenecks,
         recommendations
+    )
+}
+
+fn render_review_performance(stats: &RunStats) -> String {
+    let total_merges = stats.auto_merge_count + stats.manual_merge_count;
+    if total_merges == 0 && stats.rework_count == 0 && stats.review_nudge_count == 0 {
+        return String::new();
+    }
+
+    let auto_rate = if total_merges > 0 {
+        format!(
+            "{:.0}%",
+            stats.auto_merge_count as f64 / total_merges as f64 * 100.0
+        )
+    } else {
+        "-".to_string()
+    };
+    let total_reviewed = total_merges + stats.rework_count;
+    let rework_rate = if total_reviewed > 0 {
+        format!(
+            "{:.0}%",
+            stats.rework_count as f64 / total_reviewed as f64 * 100.0
+        )
+    } else {
+        "-".to_string()
+    };
+
+    format!(
+        "## Review Performance\n\n\
+- Auto-merged: {}\n\
+- Manually merged: {}\n\
+- Auto-merge rate: {}\n\
+- Rework: {}\n\
+- Rework rate: {}\n\
+- Review nudges: {}\n\
+- Review escalations: {}\n\n",
+        stats.auto_merge_count,
+        stats.manual_merge_count,
+        auto_rate,
+        stats.rework_count,
+        rework_rate,
+        stats.review_nudge_count,
+        stats.review_escalation_count,
     )
 }
 
@@ -723,6 +800,11 @@ mod tests {
             idle_time_pct: 0.25,
             escalation_count: 1,
             message_count: 6,
+            auto_merge_count: 0,
+            manual_merge_count: 0,
+            rework_count: 0,
+            review_nudge_count: 0,
+            review_escalation_count: 0,
         };
 
         let path = generate_retrospective(tmp.path(), &stats).unwrap();
@@ -762,6 +844,11 @@ mod tests {
             idle_time_pct: 0.0,
             escalation_count: 0,
             message_count: 0,
+            auto_merge_count: 0,
+            manual_merge_count: 0,
+            rework_count: 0,
+            review_nudge_count: 0,
+            review_escalation_count: 0,
         };
 
         let path = generate_retrospective(tmp.path(), &stats).unwrap();
@@ -791,6 +878,11 @@ mod tests {
             idle_time_pct: 0.75,
             escalation_count: 0,
             message_count: 1,
+            auto_merge_count: 0,
+            manual_merge_count: 0,
+            rework_count: 0,
+            review_nudge_count: 0,
+            review_escalation_count: 0,
         };
 
         let path = generate_retrospective(tmp.path(), &stats).unwrap();
@@ -816,6 +908,11 @@ mod tests {
             idle_time_pct: 0.1,
             escalation_count: 0,
             message_count: 2,
+            auto_merge_count: 0,
+            manual_merge_count: 0,
+            rework_count: 0,
+            review_nudge_count: 0,
+            review_escalation_count: 0,
         };
 
         let path = generate_retrospective(tmp.path(), &stats).unwrap();
