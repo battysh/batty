@@ -2,6 +2,63 @@
 
 All notable changes to Batty are documented here.
 
+## 0.3.1 — 2026-03-22
+
+Dogfooding-driven fixes, review automation, error resilience, and documentation
+refresh. 19 tasks across 4 phases, shipped in a single session.
+
+### Review Automation
+
+- **Auto-merge policy engine** — configurable confidence scoring evaluates diffs
+  by size, module count, sensitive file presence, and unsafe blocks. Low-risk
+  completions merge without manual review when policy is enabled.
+- **Auto-merge daemon integration** — wired into the completion path with
+  per-task override support (`batty task auto-merge <id> enable|disable`).
+- **Review timeout escalation** — tasks in review beyond a configurable threshold
+  trigger nudges to the reviewer, then escalate to architect. Dedup prevents spam.
+- **Structured review feedback** — `batty review <id> <disposition> --feedback`
+  stores exact rework instructions in task frontmatter and delivers to engineer.
+- **Review observability** — queue depth, average latency, auto-merge rate,
+  rework rate, nudge/escalation counts surfaced in `batty status`, standups, and
+  retrospectives.
+
+### Dogfooding Fixes
+
+- **Active-task reconciliation** — daemon clears stale `active_tasks` entries for
+  done/archived/missing tasks, preventing engineers from appearing stuck.
+- **Completion rejection recovery** — no-commits rejection now clears the
+  assignment and marks engineer idle instead of leaving them in limbo.
+- **Pane cwd correction** — retry loop with symlink-safe normalization fixes
+  resume-time cwd failures on macOS.
+- **Non-git-repo support** — `is_git_repo` detection gates all git operations;
+  non-code projects no longer emit spurious warnings.
+- **Skip worktree when disabled** — `use_worktrees: false` is respected at every
+  call site, eliminating 42+ warnings per session in non-code projects.
+- **External message sources** — `external_senders` config allows non-role
+  senders (e.g. email-router, slack-bridge) to message any role.
+- **Test session cleanup** — RAII `TestSession` guard ensures tmux cleanup on
+  panic; `batty doctor --fix` kills orphaned `batty-test-*` sessions.
+- **Trivial retrospective suppression** — short runs with zero completions skip
+  retro generation (configurable `retro_min_duration_secs`).
+- **Post-merge worktree reset** — force-clean uncommitted changes and verify HEAD
+  after reset; handles dirty worktrees and detached HEAD.
+
+### Error Resilience
+
+- **Poll loop isolation** — subsystems categorized as critical (delivery,
+  dispatch) or recoverable (standup, telegram, retro). Recoverable failures log
+  and skip; 3+ consecutive failures escalate. Panic-safe `catch_unwind` wraps
+  telegram, standup, and retrospective subsystems.
+- **Unwrap/expect sentinel tests** — production code in mod.rs, events.rs,
+  watcher.rs, inbox.rs, and merge.rs verified free of unwrap/expect calls.
+
+### Documentation & Hygiene
+
+- **Intervention system docs** — comprehensive documentation of all intervention
+  types with triggers, state machines, cooldown behavior, and config tables.
+- **Docs refresh** — README, getting-started, CLI reference, and config reference
+  updated for all post-v0.3.0 features.
+
 ## 0.2.0 — 2026-03-18
 
 This release expands Batty's runtime controls and makes long-running team
