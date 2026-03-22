@@ -190,14 +190,12 @@ mod tests {
         write_task(&board_dir, 1, "t1", "done", None, None, &[]);
 
         // task_completed marks review entry, task_auto/manual_merged marks exit
-        let mut e1 = TeamEvent::task_completed("eng-1");
-        e1.task = Some("10".to_string());
+        let mut e1 = TeamEvent::task_completed("eng-1", Some("10"));
         e1.ts = 1000;
         let mut e2 = TeamEvent::task_auto_merged("eng-1", "10", 0.9, 2, 30);
         e2.ts = 1100; // 100s latency
 
-        let mut e3 = TeamEvent::task_completed("eng-2");
-        e3.task = Some("20".to_string());
+        let mut e3 = TeamEvent::task_completed("eng-2", Some("20"));
         e3.ts = 2000;
         let mut e4 = TeamEvent::task_manual_merged("20");
         e4.ts = 2300; // 300s latency
