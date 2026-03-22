@@ -1354,4 +1354,156 @@ mod tests {
             "idle engineer should have task branch created by worktree prep; branches: {branches}"
         );
     }
+
+    // -- End-to-end scheduled tasks tests (task #203) --
+
+    #[test]
+    fn e2e_past_scheduled_for_is_dispatchable() {
+        use crate::team::resolver::{ResolutionStatus, resolve_board};
+
+        let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        let tmp = tempfile::tempdir().unwrap();
+        write_scheduled_task_file(tmp.path(), 501, "past-sched", "todo", &past);
+
+        // Step 1: resolve_board sees it as Runnable
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        let members_list = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), false),
+        ];
+        let resolutions = resolve_board(&board_dir, &members_list).unwrap();
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(
+            resolutions[0].status,
+            ResolutionStatus::Runnable,
+            "past scheduled_for task should be Runnable"
+        );
+
+        // Step 2: next_dispatch_task (via maybe_auto_dispatch) returns the task
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(members_list)
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 0,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon.idle_started_at.insert(
+            "eng-1".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+
+        daemon.maybe_auto_dispatch().unwrap();
+        assert_eq!(
+            daemon.dispatch_queue.len(),
+            1,
+            "past-scheduled task should be dispatched"
+        );
+        assert_eq!(daemon.dispatch_queue[0].task_id, 501);
+    }
+
+    #[test]
+    fn e2e_future_scheduled_for_is_blocked() {
+        use crate::team::resolver::{ResolutionStatus, resolve_board};
+
+        let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let tmp = tempfile::tempdir().unwrap();
+        write_scheduled_task_file(tmp.path(), 502, "future-sched", "todo", &future);
+
+        // Step 1: resolve_board sees it as Blocked with 'scheduled for' reason
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        let members_list = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), false),
+        ];
+        let resolutions = resolve_board(&board_dir, &members_list).unwrap();
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(
+            resolutions[0].status,
+            ResolutionStatus::Blocked,
+            "future scheduled_for task should be Blocked"
+        );
+        assert!(
+            resolutions[0]
+                .blocking_reason
+                .as_ref()
+                .unwrap()
+                .contains("scheduled for"),
+            "blocking reason should mention 'scheduled for'"
+        );
+
+        // Step 2: next_dispatch_task (via maybe_auto_dispatch) does NOT return the task
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(members_list)
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 0,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon.idle_started_at.insert(
+            "eng-1".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+
+        daemon.maybe_auto_dispatch().unwrap();
+        assert!(
+            daemon.dispatch_queue.is_empty(),
+            "future-scheduled task should NOT be dispatched"
+        );
+    }
+
+    #[test]
+    fn e2e_no_scheduled_for_always_runnable() {
+        use crate::team::resolver::{ResolutionStatus, resolve_board};
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 503, "no-schedule", "todo");
+
+        // Step 1: resolve_board sees it as Runnable
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        let members_list = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), false),
+        ];
+        let resolutions = resolve_board(&board_dir, &members_list).unwrap();
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(
+            resolutions[0].status,
+            ResolutionStatus::Runnable,
+            "task without scheduled_for should be Runnable"
+        );
+        assert!(
+            resolutions[0].blocking_reason.is_none(),
+            "no blocking reason expected"
+        );
+
+        // Step 2: next_dispatch_task (via maybe_auto_dispatch) returns the task
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(members_list)
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 0,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon.idle_started_at.insert(
+            "eng-1".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+
+        daemon.maybe_auto_dispatch().unwrap();
+        assert_eq!(
+            daemon.dispatch_queue.len(),
+            1,
+            "task without scheduled_for should be dispatched"
+        );
+        assert_eq!(daemon.dispatch_queue[0].task_id, 503);
+    }
 }
