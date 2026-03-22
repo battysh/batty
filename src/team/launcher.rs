@@ -1,4 +1,5 @@
 use super::*;
+use tracing::debug;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct LaunchIdentity {
@@ -19,34 +20,38 @@ pub(super) struct MemberLaunchPlan {
 
 impl TeamDaemon {
     pub(super) fn member_work_dir(&self, member: &MemberInstance) -> PathBuf {
-        let team_config_dir = self.config.project_root.join(".batty").join("team_config");
+        if !member.use_worktrees {
+            debug!(
+                member = %member.name,
+                "Skipping worktree setup for {}: use_worktrees=false",
+                member.name
+            );
+            return self.config.project_root.clone();
+        }
 
-        if member.use_worktrees {
-            let wt_dir = self
-                .config
-                .project_root
-                .join(".batty")
-                .join("worktrees")
-                .join(&member.name);
-            let branch_name = engineer_base_branch_name(&member.name);
-            match setup_engineer_worktree(
-                &self.config.project_root,
-                &wt_dir,
-                &branch_name,
-                &team_config_dir,
-            ) {
-                Ok(path) => path,
-                Err(error) => {
-                    warn!(
-                        member = %member.name,
-                        error = %error,
-                        "worktree setup failed, using project root"
-                    );
-                    self.config.project_root.clone()
-                }
+        let team_config_dir = self.config.project_root.join(".batty").join("team_config");
+        let wt_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("worktrees")
+            .join(&member.name);
+        let branch_name = engineer_base_branch_name(&member.name);
+        match setup_engineer_worktree(
+            &self.config.project_root,
+            &wt_dir,
+            &branch_name,
+            &team_config_dir,
+        ) {
+            Ok(path) => path,
+            Err(error) => {
+                warn!(
+                    member = %member.name,
+                    error = %error,
+                    "worktree setup failed, using project root"
+                );
+                self.config.project_root.clone()
             }
-        } else {
-            self.config.project_root.clone()
         }
     }
 
@@ -1363,5 +1368,61 @@ mod tests {
         let tracker = member_session_tracker_config(tmp.path(), &member);
 
         assert!(tracker.is_none());
+    }
+
+    #[test]
+    fn skip_worktree_when_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = crate::team::test_support::init_git_repo(&tmp, "batty-skip-wt");
+
+        let member = MemberInstance {
+            name: "eng-1-1".to_string(),
+            role_name: "engineer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+        };
+
+        let daemon = crate::team::test_support::TestDaemonBuilder::new(&repo)
+            .members(vec![member.clone()])
+            .build();
+
+        let work_dir = daemon.member_work_dir(&member);
+
+        // When use_worktrees is false, member_work_dir returns the project root
+        assert_eq!(work_dir, repo);
+
+        // No worktree directory should have been created
+        let worktree_path = repo.join(".batty").join("worktrees").join("eng-1-1");
+        assert!(!worktree_path.exists());
+    }
+
+    #[test]
+    fn worktree_setup_when_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = crate::team::test_support::init_git_repo(&tmp, "batty-setup-wt");
+
+        let member = MemberInstance {
+            name: "eng-1-1".to_string(),
+            role_name: "engineer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: true,
+        };
+
+        let daemon = crate::team::test_support::TestDaemonBuilder::new(&repo)
+            .members(vec![member.clone()])
+            .build();
+
+        let work_dir = daemon.member_work_dir(&member);
+
+        // When use_worktrees is true, a worktree should be created
+        let worktree_path = repo.join(".batty").join("worktrees").join("eng-1-1");
+        assert!(worktree_path.exists());
+        assert_eq!(work_dir, worktree_path);
     }
 }
