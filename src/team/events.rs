@@ -266,6 +266,17 @@ impl TeamEvent {
         }
     }
 
+    /// Record a backend health state change for an agent.
+    ///
+    /// `reason` encodes the transition, e.g. "healthy→unreachable".
+    pub fn health_changed(role: &str, reason: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            reason: Some(reason.into()),
+            ..Self::base("health_changed")
+        }
+    }
+
     pub fn message_routed(from: &str, to: &str) -> Self {
         Self {
             from: Some(from.into()),
@@ -1216,5 +1227,21 @@ mod tests {
         assert!(json.contains("\"stall_detected\""));
         assert!(json.contains("\"eng-1-1\""));
         assert!(json.contains("\"42\""));
+    }
+
+    #[test]
+    fn health_changed_event_fields() {
+        let event = TeamEvent::health_changed("eng-1-1", "healthy→unreachable");
+        assert_eq!(event.event, "health_changed");
+        assert_eq!(event.role.as_deref(), Some("eng-1-1"));
+        assert_eq!(event.reason.as_deref(), Some("healthy→unreachable"));
+    }
+
+    #[test]
+    fn health_changed_event_serializes_to_jsonl() {
+        let event = TeamEvent::health_changed("eng-1-2", "unreachable→healthy");
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"health_changed\""));
+        assert!(json.contains("\"eng-1-2\""));
     }
 }
