@@ -45,7 +45,6 @@ impl TeamDaemon {
         Ok(())
     }
 
-
     pub(super) fn maybe_escalate_stale_reviews(&mut self) -> Result<()> {
         let board_dir = self.board_dir();
         let tasks_dir = board_dir.join("tasks");
@@ -82,7 +81,8 @@ impl TeamDaemon {
             let age = now.saturating_sub(first_seen);
 
             // Resolve per-priority thresholds (falls back to global defaults)
-            let nudge_threshold = super::super::policy::effective_nudge_threshold(&policy, &task.priority);
+            let nudge_threshold =
+                super::super::policy::effective_nudge_threshold(&policy, &task.priority);
             let timeout_threshold =
                 super::super::policy::effective_escalation_threshold(&policy, &task.priority);
 
@@ -235,7 +235,6 @@ impl TeamDaemon {
         Ok(())
     }
 
-
     pub(super) fn manager_for_member_name(&self, member_name: &str) -> Option<&str> {
         self.config
             .members
@@ -244,7 +243,10 @@ impl TeamDaemon {
             .and_then(|member| member.reports_to.as_deref())
     }
 
-    pub(super) fn auto_unblock_notification_recipient(&self, task: &crate::task::Task) -> Option<String> {
+    pub(super) fn auto_unblock_notification_recipient(
+        &self,
+        task: &crate::task::Task,
+    ) -> Option<String> {
         task.claimed_by
             .as_deref()
             .filter(|owner| {
@@ -377,7 +379,10 @@ impl TeamDaemon {
             .count()
     }
 
-    pub(super) fn member_worktree_context(&self, member_name: &str) -> Option<MemberWorktreeContext> {
+    pub(super) fn member_worktree_context(
+        &self,
+        member_name: &str,
+    ) -> Option<MemberWorktreeContext> {
         if !self.member_uses_worktrees(member_name) {
             return None;
         }
@@ -451,11 +456,7 @@ impl TeamDaemon {
                 continue;
             }
 
-            let merged = match branch_is_merged_into(
-                &self.config.project_root,
-                &branch,
-                "main",
-            ) {
+            let merged = match branch_is_merged_into(&self.config.project_root, &branch, "main") {
                 Ok(m) => m,
                 Err(_) => continue,
             };
@@ -583,7 +584,6 @@ mod tests {
         TestDaemonBuilder, write_board_task_file, write_owned_task_file,
     };
 
-
     #[test]
     fn maybe_auto_unblock_moves_blocked_task_to_todo_and_notifies_owner() {
         let tmp = tempfile::tempdir().unwrap();
@@ -650,7 +650,7 @@ mod tests {
         );
         assert!(pending[0].body.contains("[11, 12]"));
 
-        let events = super::super::events::read_events(&events_path).unwrap();
+        let events = crate::team::events::read_events(&events_path).unwrap();
         assert!(events.iter().any(|event| {
             event.event == "task_unblocked"
                 && event.role.as_deref() == Some("eng-1")
@@ -696,7 +696,7 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert!(pending[0].body.contains("Task #22 (blocked-task)"));
 
-        let events = super::super::events::read_events(&events_path).unwrap();
+        let events = crate::team::events::read_events(&events_path).unwrap();
         assert!(events.iter().any(|event| {
             event.event == "task_unblocked"
                 && event.role.as_deref() == Some("manager")
@@ -769,14 +769,13 @@ mod tests {
         let pending = inbox::pending_messages(&inbox_root, "manager").unwrap();
         assert!(pending.is_empty());
 
-        let events = super::super::events::read_events(&events_path).unwrap();
+        let events = crate::team::events::read_events(&events_path).unwrap();
         assert!(
             !events
                 .iter()
                 .any(|event| matches!(event.task.as_deref(), Some("33" | "34")))
         );
     }
-
 
     #[test]
     fn auto_retro_fires_when_all_done() {
@@ -809,7 +808,7 @@ mod tests {
         let reports = std::fs::read_dir(&retro_dir).unwrap().count();
         assert_eq!(reports, 1);
 
-        let events = super::super::events::read_events(&events_path).unwrap();
+        let events = crate::team::events::read_events(&events_path).unwrap();
         assert_eq!(
             events
                 .iter()
@@ -850,7 +849,7 @@ mod tests {
         let reports = std::fs::read_dir(&retro_dir).unwrap().count();
         assert_eq!(reports, 1);
 
-        let events = super::super::events::read_events(&events_path).unwrap();
+        let events = crate::team::events::read_events(&events_path).unwrap();
         assert_eq!(
             events
                 .iter()
