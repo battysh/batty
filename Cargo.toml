@@ -48,6 +48,10 @@ maildir = "0.6"
 # HTTP client (blocking) — Telegram Bot API
 ureq = { version = "2", features = ["json"] }
 
+# Scheduling
+cron = "0.13"
+chrono = { version = "0.4", features = ["serde"] }
+
 # Pattern matching
 regex = "1"
 sha2 = "0.10"
