@@ -586,6 +586,80 @@ pub fn sync_phase_board_to_worktree(
     Ok(())
 }
 
+/// Check if all commits on `branch` since diverging from `base` are already
+/// present on `base` (e.g., via cherry-pick).
+///
+/// Uses `git cherry <base> <branch>` — lines starting with `-` are already on
+/// base. If ALL lines start with `-` (or output is empty), the branch is fully
+/// merged.
+pub fn branch_fully_merged(repo_root: &Path, branch: &str, base: &str) -> Result<bool> {
+    let output = run_git(repo_root, ["cherry", base, branch])?;
+    if !output.status.success() {
+        bail!(
+            "git cherry failed for '{}' against '{}': {}",
+            branch,
+            base,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Lines starting with '+' are commits NOT on base.
+        if trimmed.starts_with('+') {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Get the current branch name for a repository/worktree path.
+pub fn git_current_branch(path: &Path) -> Result<String> {
+    let output = run_git(path, ["branch", "--show-current"])?;
+    if !output.status.success() {
+        bail!(
+            "failed to determine current branch in {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        bail!(
+            "detached HEAD in {}; cannot determine branch",
+            path.display()
+        );
+    }
+    Ok(branch)
+}
+
+/// Reset a worktree to point at its base branch. Used to clean up after a
+/// cherry-pick merge has made the task branch redundant.
+pub fn reset_worktree_to_base(worktree_path: &Path, base_branch: &str) -> Result<()> {
+    let checkout = run_git(worktree_path, ["checkout", base_branch])?;
+    if !checkout.status.success() {
+        bail!(
+            "failed to checkout '{}' in {}: {}",
+            base_branch,
+            worktree_path.display(),
+            String::from_utf8_lossy(&checkout.stderr).trim()
+        );
+    }
+    let reset = run_git(worktree_path, ["reset", "--hard", "main"])?;
+    if !reset.status.success() {
+        bail!(
+            "failed to reset to main in {}: {}",
+            worktree_path.display(),
+            String::from_utf8_lossy(&reset.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -1013,5 +1087,134 @@ mod tests {
         sync_phase_board_to_worktree(tmp.path(), &worktree.path, "nonexistent").unwrap();
 
         cleanup_worktree(tmp.path(), &worktree);
+    }
+
+    #[test]
+    fn branch_fully_merged_true_after_cherry_pick() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        // Create a feature branch with a commit.
+        git(tmp.path(), &["checkout", "-b", "feature"]);
+        fs::write(tmp.path().join("feature.txt"), "feature work\n").unwrap();
+        git(tmp.path(), &["add", "feature.txt"]);
+        git(tmp.path(), &["commit", "-q", "-m", "add feature"]);
+
+        // Go back to main and cherry-pick the commit.
+        git(tmp.path(), &["checkout", "main"]);
+        git(tmp.path(), &["cherry-pick", "feature"]);
+
+        // Now all commits on feature are present on main.
+        assert!(branch_fully_merged(tmp.path(), "feature", "main").unwrap());
+    }
+
+    #[test]
+    fn branch_fully_merged_false_with_unique_commits() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        // Create a feature branch with a commit NOT on main.
+        git(tmp.path(), &["checkout", "-b", "feature"]);
+        fs::write(tmp.path().join("unique.txt"), "unique work\n").unwrap();
+        git(tmp.path(), &["add", "unique.txt"]);
+        git(tmp.path(), &["commit", "-q", "-m", "unique commit"]);
+        git(tmp.path(), &["checkout", "main"]);
+
+        assert!(!branch_fully_merged(tmp.path(), "feature", "main").unwrap());
+    }
+
+    #[test]
+    fn branch_fully_merged_true_when_same_tip() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        // Feature branch at the same commit as main — no unique commits.
+        git(tmp.path(), &["checkout", "-b", "feature"]);
+        git(tmp.path(), &["checkout", "main"]);
+
+        assert!(branch_fully_merged(tmp.path(), "feature", "main").unwrap());
+    }
+
+    #[test]
+    fn branch_fully_merged_false_partial_merge() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        // Create a feature branch with two commits.
+        git(tmp.path(), &["checkout", "-b", "feature"]);
+        fs::write(tmp.path().join("a.txt"), "a\n").unwrap();
+        git(tmp.path(), &["add", "a.txt"]);
+        git(tmp.path(), &["commit", "-q", "-m", "first"]);
+
+        fs::write(tmp.path().join("b.txt"), "b\n").unwrap();
+        git(tmp.path(), &["add", "b.txt"]);
+        git(tmp.path(), &["commit", "-q", "-m", "second"]);
+
+        // Cherry-pick only the first commit onto main.
+        git(tmp.path(), &["checkout", "main"]);
+        git(tmp.path(), &["cherry-pick", "feature~1"]);
+
+        // One commit is still unique — should be false.
+        assert!(!branch_fully_merged(tmp.path(), "feature", "main").unwrap());
+    }
+
+    #[test]
+    fn git_current_branch_returns_branch_name() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        // Default branch after init_repo is "main" (or whatever git defaults to).
+        let branch = git_current_branch(tmp.path()).unwrap();
+        // The init_repo doesn't specify -b, so branch could be "main" or "master".
+        assert!(!branch.is_empty(), "should return a non-empty branch name");
+    }
+
+    #[test]
+    fn reset_worktree_to_base_switches_branch() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        // Create a worktree on a feature branch.
+        let wt_path = tmp.path().join("wt");
+        git(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature-reset",
+                wt_path.to_str().unwrap(),
+                "main",
+            ],
+        );
+        fs::write(wt_path.join("work.txt"), "work\n").unwrap();
+        git(&wt_path, &["add", "work.txt"]);
+        git(&wt_path, &["commit", "-q", "-m", "work on feature"]);
+
+        // Verify we're on the feature branch.
+        let branch_before = git_current_branch(&wt_path).unwrap();
+        assert_eq!(branch_before, "feature-reset");
+
+        // Create a base branch for the worktree to reset to.
+        git(tmp.path(), &["branch", "eng-main/test-eng"]);
+
+        reset_worktree_to_base(&wt_path, "eng-main/test-eng").unwrap();
+
+        let branch_after = git_current_branch(&wt_path).unwrap();
+        assert_eq!(branch_after, "eng-main/test-eng");
+
+        // Cleanup
+        let _ = run_git(
+            tmp.path(),
+            ["worktree", "remove", "--force", wt_path.to_str().unwrap()],
+        );
+        let _ = run_git(tmp.path(), ["branch", "-D", "feature-reset"]);
+        let _ = run_git(tmp.path(), ["branch", "-D", "eng-main/test-eng"]);
     }
 }
