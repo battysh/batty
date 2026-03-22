@@ -251,7 +251,7 @@ pub fn cmd_auto_merge(task_id: u32, enabled: bool) {
     // to a file that the daemon watches.
 }
 
-fn find_task_path(board_dir: &Path, task_id: u32) -> Result<PathBuf> {
+pub(crate) fn find_task_path(board_dir: &Path, task_id: u32) -> Result<PathBuf> {
     let tasks_dir = board_dir.join("tasks");
     let tasks = load_tasks_from_dir(&tasks_dir)
         .with_context(|| format!("failed to load tasks from {}", tasks_dir.display()))?;
@@ -304,7 +304,7 @@ fn review_disposition_name(disposition: ReviewDisposition) -> &'static str {
     }
 }
 
-fn update_task_frontmatter<F>(task_path: &Path, mutator: F) -> Result<()>
+pub(crate) fn update_task_frontmatter<F>(task_path: &Path, mutator: F) -> Result<()>
 where
     F: FnOnce(&mut Mapping),
 {
@@ -363,7 +363,7 @@ fn clear_blocked(mapping: &mut Mapping) {
     mapping.remove(yaml_key("blocked_on"));
 }
 
-fn set_optional_string(mapping: &mut Mapping, key: &str, value: Option<&str>) {
+pub(crate) fn set_optional_string(mapping: &mut Mapping, key: &str, value: Option<&str>) {
     let key = yaml_key(key);
     match value {
         Some(value) => {
@@ -375,7 +375,7 @@ fn set_optional_string(mapping: &mut Mapping, key: &str, value: Option<&str>) {
     }
 }
 
-fn yaml_key(name: &str) -> Value {
+pub(crate) fn yaml_key(name: &str) -> Value {
     Value::String(name.to_string())
 }
 
