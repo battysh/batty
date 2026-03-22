@@ -1084,4 +1084,506 @@ roles:
 
         crate::tmux::kill_session(session).unwrap();
     }
+
+    // --- New tests for #255 ---
+
+    #[test]
+    fn split_off_current_member_pct_single_member() {
+        // 1 member = 100%, clamped to 90
+        assert_eq!(split_off_current_member_pct(1), 90);
+    }
+
+    #[test]
+    fn split_off_current_member_pct_large_count() {
+        // 20 members = 5%, clamped to 10
+        assert_eq!(split_off_current_member_pct(20), 10);
+    }
+
+    #[test]
+    fn split_off_current_member_pct_boundary_values() {
+        assert_eq!(split_off_current_member_pct(10), 10);
+        assert_eq!(split_off_current_member_pct(3), 33);
+        assert_eq!(split_off_current_member_pct(4), 25);
+    }
+
+    #[test]
+    fn shell_single_quote_no_quotes() {
+        assert_eq!(shell_single_quote("hello world"), "hello world");
+    }
+
+    #[test]
+    fn shell_single_quote_with_single_quotes() {
+        assert_eq!(shell_single_quote("it's"), "it'\"'\"'s");
+    }
+
+    #[test]
+    fn shell_single_quote_multiple_quotes() {
+        assert_eq!(shell_single_quote("a'b'c"), "a'\"'\"'b'\"'\"'c");
+    }
+
+    #[test]
+    fn auto_zones_only_architects() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+    instances: 3
+"#,
+        );
+        let pane_members: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_type != RoleType::User)
+            .collect();
+        let zones = build_zones_auto(&pane_members);
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].members.len(), 3);
+        assert!(
+            zones[0]
+                .members
+                .iter()
+                .all(|m| m.role_type == RoleType::Architect)
+        );
+    }
+
+    #[test]
+    fn auto_zones_only_managers() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: manager
+    role_type: manager
+    agent: claude
+    instances: 2
+"#,
+        );
+        let pane_members: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_type != RoleType::User)
+            .collect();
+        let zones = build_zones_auto(&pane_members);
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].members.len(), 2);
+    }
+
+    #[test]
+    fn auto_zones_architect_and_engineers_no_managers() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 4
+"#,
+        );
+        let pane_members: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_type != RoleType::User)
+            .collect();
+        let zones = build_zones_auto(&pane_members);
+        assert_eq!(zones.len(), 2);
+        assert_eq!(zones[0].members[0].role_type, RoleType::Architect);
+        assert_eq!(zones[1].members.len(), 4);
+        assert!(
+            zones[1]
+                .members
+                .iter()
+                .all(|m| m.role_type == RoleType::Engineer)
+        );
+    }
+
+    #[test]
+    fn auto_zones_width_pct_minimum_enforcement() {
+        // With 1 arch, 1 mgr, 10 eng = 12 total
+        // Architect raw = 1/12*100 = 8% → clamped to 10%
+        // Manager raw = 1/12*100 = 8% → clamped to 15%
+        // Engineer raw = 10/12*100 = 83% → stays at 83% (>20%)
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: manager
+    role_type: manager
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 10
+"#,
+        );
+        let pane_members: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_type != RoleType::User)
+            .collect();
+        let zones = build_zones_auto(&pane_members);
+        assert_eq!(zones.len(), 3);
+        assert!(zones[0].width_pct >= 10, "architect zone min 10%");
+        assert!(zones[1].width_pct >= 15, "manager zone min 15%");
+        assert!(zones[2].width_pct >= 20, "engineer zone min 20%");
+    }
+
+    #[test]
+    fn split_zone_subgroups_mixed_roles_returns_single_group() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: manager
+    role_type: manager
+    agent: claude
+"#,
+        );
+        let pane_members: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_type != RoleType::User)
+            .collect();
+        let subgroups = split_zone_subgroups(&pane_members);
+        assert_eq!(subgroups.len(), 1);
+        assert_eq!(subgroups[0].len(), 2);
+    }
+
+    #[test]
+    fn split_zone_subgroups_single_manager_all_engineers_one_group() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: manager
+    role_type: manager
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 3
+    talks_to: [manager]
+"#,
+        );
+        let engineers: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_type == RoleType::Engineer)
+            .collect();
+        let subgroups = split_zone_subgroups(&engineers);
+        // All engineers report to same manager → single subgroup
+        assert_eq!(subgroups.len(), 1);
+        assert_eq!(subgroups[0].len(), 3);
+    }
+
+    #[test]
+    fn split_members_into_columns_single_column() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 4
+"#,
+        );
+        let pane_members: Vec<_> = members.iter().collect();
+        let columns = split_members_into_columns(&pane_members, 1);
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].len(), 4);
+    }
+
+    #[test]
+    fn split_members_into_columns_more_columns_than_members() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 2
+"#,
+        );
+        let pane_members: Vec<_> = members.iter().collect();
+        // Request 5 columns but only 2 members → clamped to 2
+        let columns = split_members_into_columns(&pane_members, 5);
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].len(), 1);
+        assert_eq!(columns[1].len(), 1);
+    }
+
+    #[test]
+    fn split_members_into_columns_exact_division() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 6
+"#,
+        );
+        let pane_members: Vec<_> = members.iter().collect();
+        let columns = split_members_into_columns(&pane_members, 3);
+        assert_eq!(columns.len(), 3);
+        assert_eq!(columns[0].len(), 2);
+        assert_eq!(columns[1].len(), 2);
+        assert_eq!(columns[2].len(), 2);
+    }
+
+    #[test]
+    fn split_members_into_columns_zero_desired_clamps_to_one() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 3
+"#,
+        );
+        let pane_members: Vec<_> = members.iter().collect();
+        let columns = split_members_into_columns(&pane_members, 0);
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].len(), 3);
+    }
+
+    #[test]
+    fn config_zones_role_type_keyword_matching() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: manager
+    role_type: manager
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 2
+"#,
+        );
+        // Zone names contain role-type keywords
+        let layout = LayoutConfig {
+            zones: vec![
+                super::super::config::ZoneDef {
+                    name: "my-architect-zone".to_string(),
+                    width_pct: 20,
+                    split: None,
+                },
+                super::super::config::ZoneDef {
+                    name: "the-manager-area".to_string(),
+                    width_pct: 30,
+                    split: None,
+                },
+                super::super::config::ZoneDef {
+                    name: "engineer-pool".to_string(),
+                    width_pct: 50,
+                    split: None,
+                },
+            ],
+        };
+        let pane_members: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_type != RoleType::User)
+            .collect();
+        let zones = build_zones_from_config(&layout, &pane_members);
+        assert_eq!(zones.len(), 3);
+        assert_eq!(zones[0].members[0].role_type, RoleType::Architect);
+        assert_eq!(zones[1].members[0].role_type, RoleType::Manager);
+        assert_eq!(zones[2].members.len(), 2);
+        assert!(
+            zones[2]
+                .members
+                .iter()
+                .all(|m| m.role_type == RoleType::Engineer)
+        );
+    }
+
+    #[test]
+    fn config_zones_no_matching_zones_all_go_to_last() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 2
+"#,
+        );
+        let layout = LayoutConfig {
+            zones: vec![super::super::config::ZoneDef {
+                name: "unrelated-zone".to_string(),
+                width_pct: 100,
+                split: None,
+            }],
+        };
+        let pane_members: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_type != RoleType::User)
+            .collect();
+        let zones = build_zones_from_config(&layout, &pane_members);
+        assert_eq!(zones.len(), 1);
+        // All members land in last (only) zone
+        assert_eq!(zones[0].members.len(), 3);
+    }
+
+    #[test]
+    fn config_zones_empty_zones_are_removed() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+"#,
+        );
+        let layout = LayoutConfig {
+            zones: vec![
+                super::super::config::ZoneDef {
+                    name: "architect".to_string(),
+                    width_pct: 30,
+                    split: None,
+                },
+                super::super::config::ZoneDef {
+                    name: "engineers".to_string(),
+                    width_pct: 70,
+                    split: None,
+                },
+            ],
+        };
+        let pane_members: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_type != RoleType::User)
+            .collect();
+        let zones = build_zones_from_config(&layout, &pane_members);
+        // Engineer zone is empty and should be removed
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].members[0].name, "architect");
+    }
+
+    #[test]
+    fn config_zones_horizontal_columns_stored_from_split() {
+        let layout = LayoutConfig {
+            zones: vec![super::super::config::ZoneDef {
+                name: "engineers".to_string(),
+                width_pct: 100,
+                split: Some(super::super::config::SplitDef { horizontal: 4 }),
+            }],
+        };
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 8
+"#,
+        );
+        let pane_members: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_type != RoleType::User)
+            .collect();
+        let zones = build_zones_from_config(&layout, &pane_members);
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].horizontal_columns, 4);
+        assert_eq!(zones[0].members.len(), 8);
+    }
+
+    #[test]
+    fn auto_zones_user_role_excluded() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: human
+    role_type: user
+    talks_to: [architect]
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+"#,
+        );
+        let pane_members: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_type != RoleType::User)
+            .collect();
+        let zones = build_zones_auto(&pane_members);
+        // Only architect and engineer zones — no user zone
+        assert_eq!(zones.len(), 2);
+        assert!(
+            zones
+                .iter()
+                .all(|z| z.members.iter().all(|m| m.role_type != RoleType::User))
+        );
+    }
+
+    #[test]
+    fn workflow_mode_legacy_never_enables_orchestrator() {
+        assert!(!should_launch_orchestrator_pane(WorkflowMode::Legacy, true));
+        assert!(!should_launch_orchestrator_pane(
+            WorkflowMode::Legacy,
+            false
+        ));
+    }
+
+    #[test]
+    fn config_zones_max_members_via_split_horizontal() {
+        let members = make_members(
+            r#"
+name: test
+roles:
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 6
+"#,
+        );
+        // Limit engineer zone to only 3 via split.horizontal
+        let layout = LayoutConfig {
+            zones: vec![
+                super::super::config::ZoneDef {
+                    name: "engineers".to_string(),
+                    width_pct: 50,
+                    split: Some(super::super::config::SplitDef { horizontal: 3 }),
+                },
+                super::super::config::ZoneDef {
+                    name: "overflow".to_string(),
+                    width_pct: 50,
+                    split: None,
+                },
+            ],
+        };
+        let pane_members: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_type != RoleType::User)
+            .collect();
+        let zones = build_zones_from_config(&layout, &pane_members);
+        // First zone gets 3 engineers (capped by split.horizontal)
+        assert_eq!(zones[0].members.len(), 3);
+        // Remaining 3 go to last zone
+        assert_eq!(zones[1].members.len(), 3);
+    }
 }

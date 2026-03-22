@@ -157,8 +157,9 @@ mod tests {
     use crate::team::comms::Channel;
     use crate::team::config::{
         AutomationConfig, BoardConfig, ChannelConfig, OrchestratorPosition, RoleDef, StandupConfig,
-        WorkflowMode, WorkflowPolicy,
+        TeamConfig, WorkflowMode, WorkflowPolicy,
     };
+    use crate::team::daemon::DaemonConfig;
     use crate::team::errors::DeliveryError;
     use crate::team::events::EventSink;
     use crate::team::failure_patterns::FailureTracker;
@@ -668,5 +669,448 @@ mod tests {
         let config = daemon_config_with_roles(tmp.path(), roles);
         let daemon = TeamDaemon::new(config).unwrap();
         assert!(daemon.telegram_bot.is_none());
+    }
+
+    // --- New tests for #255 ---
+
+    #[test]
+    fn build_telegram_bot_returns_none_when_no_user_role() {
+        let roles = vec![RoleDef {
+            name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            instances: 1,
+            prompt: None,
+            talks_to: Vec::new(),
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: None,
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            use_worktrees: false,
+        }];
+        let tc = crate::team::test_helpers::team_config_with_roles(roles);
+        assert!(build_telegram_bot(&tc).is_none());
+    }
+
+    #[test]
+    fn build_telegram_bot_returns_none_when_user_has_different_channel() {
+        let roles = vec![RoleDef {
+            name: "human".to_string(),
+            role_type: RoleType::User,
+            agent: None,
+            instances: 1,
+            prompt: None,
+            talks_to: vec!["architect".to_string()],
+            channel: Some("slack".to_string()),
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: None,
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            use_worktrees: false,
+        }];
+        let tc = crate::team::test_helpers::team_config_with_roles(roles);
+        assert!(build_telegram_bot(&tc).is_none());
+    }
+
+    #[test]
+    fn build_telegram_bot_returns_none_when_channel_config_missing() {
+        let roles = vec![RoleDef {
+            name: "human".to_string(),
+            role_type: RoleType::User,
+            agent: None,
+            instances: 1,
+            prompt: None,
+            talks_to: vec!["architect".to_string()],
+            channel: Some("telegram".to_string()),
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: None,
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            use_worktrees: false,
+        }];
+        let tc = crate::team::test_helpers::team_config_with_roles(roles);
+        assert!(build_telegram_bot(&tc).is_none());
+    }
+
+    #[test]
+    fn process_telegram_queue_no_pending_messages_is_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roles = vec![RoleDef {
+            name: "human".to_string(),
+            role_type: RoleType::User,
+            agent: None,
+            instances: 1,
+            prompt: None,
+            talks_to: vec!["architect".to_string()],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: None,
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            use_worktrees: false,
+        }];
+        let config = daemon_config_with_roles(tmp.path(), roles);
+        let mut daemon = TeamDaemon::new(config).unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        daemon.channels.insert(
+            "human".to_string(),
+            Box::new(RecordingChannel {
+                messages: Arc::clone(&sent),
+            }),
+        );
+
+        daemon.process_telegram_queue().unwrap();
+        assert!(sent.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn deliver_user_inbox_multiple_messages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let roles = vec![RoleDef {
+            name: "human".to_string(),
+            role_type: RoleType::User,
+            agent: None,
+            instances: 1,
+            prompt: None,
+            talks_to: vec!["architect".to_string()],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: None,
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            use_worktrees: false,
+        }];
+        let config = daemon_config_with_roles(tmp.path(), roles);
+        let mut daemon = TeamDaemon::new(config).unwrap();
+        daemon.channels.insert(
+            "human".to_string(),
+            Box::new(RecordingChannel {
+                messages: Arc::clone(&sent),
+            }),
+        );
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("architect", "human", "First message"),
+        )
+        .unwrap();
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("manager", "human", "Second message"),
+        )
+        .unwrap();
+
+        daemon.process_telegram_queue().unwrap();
+
+        let messages = sent.lock().unwrap();
+        assert_eq!(messages.len(), 2);
+        // Order depends on filesystem listing — check both messages are present
+        let combined: String = messages.join("\n");
+        assert!(combined.contains("First message"));
+        assert!(combined.contains("Second message"));
+    }
+
+    #[test]
+    fn deliver_user_inbox_no_channel_skips_delivery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roles = vec![RoleDef {
+            name: "human".to_string(),
+            role_type: RoleType::User,
+            agent: None,
+            instances: 1,
+            prompt: None,
+            talks_to: vec!["architect".to_string()],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: None,
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            use_worktrees: false,
+        }];
+        let config = daemon_config_with_roles(tmp.path(), roles);
+        let mut daemon = TeamDaemon::new(config).unwrap();
+        // Intentionally do NOT insert a channel
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("architect", "human", "Test"),
+        )
+        .unwrap();
+
+        // Should not panic — just skips delivery
+        daemon.process_telegram_queue().unwrap();
+
+        // Message should still be pending since it couldn't be delivered
+        let pending = inbox::pending_messages(&root, "human").unwrap();
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn automation_sender_for_unknown_recipient_uses_config_sender() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                agent: None,
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: Some("boss".to_string()),
+                external_senders: Vec::new(),
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+                retro_min_duration_secs: 60,
+                roles: Vec::new(),
+            },
+            session: "test".to_string(),
+            members: Vec::new(),
+            pane_map: HashMap::new(),
+        };
+        let daemon = TeamDaemon::new(config).unwrap();
+        // "nobody" is not a member → falls through to automation_sender config
+        assert_eq!(daemon.automation_sender_for("nobody"), "boss");
+    }
+
+    #[test]
+    fn automation_sender_for_unknown_recipient_no_config_defaults_to_daemon() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                agent: None,
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                external_senders: Vec::new(),
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+                retro_min_duration_secs: 60,
+                roles: Vec::new(),
+            },
+            session: "test".to_string(),
+            members: Vec::new(),
+            pane_map: HashMap::new(),
+        };
+        let daemon = TeamDaemon::new(config).unwrap();
+        assert_eq!(daemon.automation_sender_for("nobody"), "daemon");
+    }
+
+    #[test]
+    fn deliver_user_inbox_marks_messages_delivered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let roles = vec![RoleDef {
+            name: "human".to_string(),
+            role_type: RoleType::User,
+            agent: None,
+            instances: 1,
+            prompt: None,
+            talks_to: vec!["architect".to_string()],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: None,
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            use_worktrees: false,
+        }];
+        let config = daemon_config_with_roles(tmp.path(), roles);
+        let mut daemon = TeamDaemon::new(config).unwrap();
+        daemon.channels.insert(
+            "human".to_string(),
+            Box::new(RecordingChannel {
+                messages: Arc::clone(&sent),
+            }),
+        );
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("architect", "human", "Test delivery"),
+        )
+        .unwrap();
+
+        daemon.process_telegram_queue().unwrap();
+
+        // After delivery, no pending messages should remain
+        let pending = inbox::pending_messages(&root, "human").unwrap();
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn deliver_user_inbox_formats_message_with_sender() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let roles = vec![RoleDef {
+            name: "human".to_string(),
+            role_type: RoleType::User,
+            agent: None,
+            instances: 1,
+            prompt: None,
+            talks_to: vec!["architect".to_string()],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: None,
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            use_worktrees: false,
+        }];
+        let config = daemon_config_with_roles(tmp.path(), roles);
+        let mut daemon = TeamDaemon::new(config).unwrap();
+        daemon.channels.insert(
+            "human".to_string(),
+            Box::new(RecordingChannel {
+                messages: Arc::clone(&sent),
+            }),
+        );
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("engineer-1", "human", "Task done"),
+        )
+        .unwrap();
+
+        daemon.process_telegram_queue().unwrap();
+
+        let messages = sent.lock().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].starts_with("--- Message from engineer-1 ---\n"));
+        assert!(messages[0].contains("Task done"));
+    }
+
+    #[test]
+    fn deliver_user_inbox_multiple_users() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sent_alice = Arc::new(Mutex::new(Vec::new()));
+        let sent_bob = Arc::new(Mutex::new(Vec::new()));
+        let roles = vec![
+            RoleDef {
+                name: "alice".to_string(),
+                role_type: RoleType::User,
+                agent: None,
+                instances: 1,
+                prompt: None,
+                talks_to: vec!["architect".to_string()],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                use_worktrees: false,
+            },
+            RoleDef {
+                name: "bob".to_string(),
+                role_type: RoleType::User,
+                agent: None,
+                instances: 1,
+                prompt: None,
+                talks_to: vec!["architect".to_string()],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                use_worktrees: false,
+            },
+        ];
+        let config = daemon_config_with_roles(tmp.path(), roles);
+        let mut daemon = TeamDaemon::new(config).unwrap();
+        daemon.channels.insert(
+            "alice".to_string(),
+            Box::new(RecordingChannel {
+                messages: Arc::clone(&sent_alice),
+            }),
+        );
+        daemon.channels.insert(
+            "bob".to_string(),
+            Box::new(RecordingChannel {
+                messages: Arc::clone(&sent_bob),
+            }),
+        );
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("architect", "alice", "Hello Alice"),
+        )
+        .unwrap();
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("architect", "bob", "Hello Bob"),
+        )
+        .unwrap();
+
+        daemon.process_telegram_queue().unwrap();
+
+        assert_eq!(sent_alice.lock().unwrap().len(), 1);
+        assert!(sent_alice.lock().unwrap()[0].contains("Hello Alice"));
+        assert_eq!(sent_bob.lock().unwrap().len(), 1);
+        assert!(sent_bob.lock().unwrap()[0].contains("Hello Bob"));
+    }
+
+    #[test]
+    fn automation_sender_for_member_with_reports_to_returns_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                agent: None,
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: Some("default-sender".to_string()),
+                external_senders: Vec::new(),
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+                retro_min_duration_secs: 60,
+                roles: Vec::new(),
+            },
+            session: "test".to_string(),
+            members: vec![MemberInstance {
+                name: "mgr".to_string(),
+                role_name: "manager".to_string(),
+                role_type: RoleType::Manager,
+                agent: Some("claude".to_string()),
+                prompt: None,
+                reports_to: Some("boss".to_string()),
+                use_worktrees: false,
+            }],
+            pane_map: HashMap::new(),
+        };
+        let daemon = TeamDaemon::new(config).unwrap();
+        assert_eq!(daemon.automation_sender_for("mgr"), "boss");
     }
 }
