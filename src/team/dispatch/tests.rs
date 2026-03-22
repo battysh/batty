@@ -975,3 +975,167 @@ fn manual_cooldown_only_affects_assigned_engineer() {
     );
     assert_eq!(daemon.dispatch_queue[0].engineer, "eng-2");
 }
+
+// -- dispatch_priority_rank tests --
+
+#[test]
+fn priority_rank_critical() {
+    assert_eq!(super::dispatch_priority_rank("critical"), 0);
+}
+
+#[test]
+fn priority_rank_high() {
+    assert_eq!(super::dispatch_priority_rank("high"), 1);
+}
+
+#[test]
+fn priority_rank_medium() {
+    assert_eq!(super::dispatch_priority_rank("medium"), 2);
+}
+
+#[test]
+fn priority_rank_low() {
+    assert_eq!(super::dispatch_priority_rank("low"), 3);
+}
+
+#[test]
+fn priority_rank_unknown_defaults_highest_number() {
+    assert_eq!(super::dispatch_priority_rank(""), 4);
+    assert_eq!(super::dispatch_priority_rank("urgent"), 4);
+}
+
+// -- parse_assignment_task_id tests --
+
+#[test]
+fn parse_task_id_standard_format() {
+    assert_eq!(
+        super::parse_assignment_task_id("Task #42: do stuff"),
+        Some(42)
+    );
+}
+
+#[test]
+fn parse_task_id_no_match() {
+    assert_eq!(super::parse_assignment_task_id("just a message"), None);
+}
+
+#[test]
+fn parse_task_id_case_insensitive() {
+    assert_eq!(
+        super::parse_assignment_task_id("TASK #99: uppercase"),
+        Some(99)
+    );
+    assert_eq!(
+        super::parse_assignment_task_id("task #77: lowercase"),
+        Some(77)
+    );
+}
+
+#[test]
+fn parse_task_id_multiple_returns_first() {
+    assert_eq!(
+        super::parse_assignment_task_id("Task #10: depends on Task #5"),
+        Some(10)
+    );
+}
+
+#[test]
+fn parse_task_id_empty_digits() {
+    assert_eq!(super::parse_assignment_task_id("Task #: no digits"), None);
+}
+
+// -- slugify_task_branch tests --
+
+#[test]
+fn slugify_basic_text() {
+    assert_eq!(
+        super::slugify_task_branch("Fix castling rights"),
+        "fix-castling-rights"
+    );
+}
+
+#[test]
+fn slugify_special_characters() {
+    assert_eq!(
+        super::slugify_task_branch("Add feature (v2) — fix!"),
+        "add-feature-v2-fix"
+    );
+}
+
+#[test]
+fn slugify_empty_returns_task() {
+    assert_eq!(super::slugify_task_branch(""), "task");
+}
+
+#[test]
+fn slugify_only_special_chars() {
+    assert_eq!(super::slugify_task_branch("--- !!!"), "task");
+}
+
+#[test]
+fn slugify_preserves_numbers() {
+    assert_eq!(super::slugify_task_branch("Task 42 fix"), "task-42-fix");
+}
+
+// -- summarize_assignment edge cases --
+
+#[test]
+fn summarize_empty_body() {
+    assert_eq!(super::summarize_assignment(""), "task");
+}
+
+#[test]
+fn summarize_only_whitespace() {
+    assert_eq!(super::summarize_assignment("   \n  \n  "), "task");
+}
+
+#[test]
+fn summarize_truncates_long_line() {
+    let long = "a".repeat(200);
+    let result = super::summarize_assignment(&long);
+    assert_eq!(result.len(), 120);
+    assert!(result.ends_with("..."));
+}
+
+#[test]
+fn summarize_preserves_short_line() {
+    assert_eq!(super::summarize_assignment("Short task"), "Short task");
+}
+
+// -- DispatchQueueEntry serde roundtrip --
+
+#[test]
+fn dispatch_queue_entry_serde_roundtrip() {
+    use super::DispatchQueueEntry;
+
+    let entry = DispatchQueueEntry {
+        engineer: "eng-1".to_string(),
+        task_id: 42,
+        task_title: "Test task".to_string(),
+        queued_at: 1234567890,
+        validation_failures: 2,
+        last_failure: Some("worktree dirty".to_string()),
+    };
+
+    let json = serde_json::to_string(&entry).unwrap();
+    let restored: DispatchQueueEntry = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, entry);
+}
+
+#[test]
+fn dispatch_queue_entry_serde_no_failure() {
+    use super::DispatchQueueEntry;
+
+    let entry = DispatchQueueEntry {
+        engineer: "eng-2".to_string(),
+        task_id: 1,
+        task_title: "Clean task".to_string(),
+        queued_at: 0,
+        validation_failures: 0,
+        last_failure: None,
+    };
+
+    let json = serde_json::to_string(&entry).unwrap();
+    let restored: DispatchQueueEntry = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, entry);
+}
