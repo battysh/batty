@@ -638,8 +638,7 @@ Second task description.
 
     #[test]
     fn is_schedule_blocked_malformed_returns_false() {
-        let content =
-            "---\nid: 303\ntitle: bad date\nstatus: todo\nscheduled_for: \"not-a-date\"\n---\n\nDesc.\n";
+        let content = "---\nid: 303\ntitle: bad date\nstatus: todo\nscheduled_for: \"not-a-date\"\n---\n\nDesc.\n";
         let task = Task::parse(content).unwrap();
         assert!(!task.is_schedule_blocked());
     }
