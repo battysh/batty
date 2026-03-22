@@ -748,6 +748,7 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    external_senders: Vec::new(),
                     orchestrator_pane: true,
                     orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
@@ -826,6 +827,7 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    external_senders: Vec::new(),
                     orchestrator_pane: true,
                     orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
@@ -946,6 +948,7 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    external_senders: Vec::new(),
                     orchestrator_pane: true,
                     orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
@@ -1033,6 +1036,7 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    external_senders: Vec::new(),
                     orchestrator_pane: true,
                     orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
@@ -1166,6 +1170,7 @@ mod tests {
                 standup: StandupConfig::default(),
                 automation: AutomationConfig::default(),
                 automation_sender: None,
+                external_senders: Vec::new(),
                 orchestrator_pane: true,
                 orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
@@ -1232,6 +1237,7 @@ mod tests {
                     standup: StandupConfig::default(),
                     automation: AutomationConfig::default(),
                     automation_sender: None,
+                    external_senders: Vec::new(),
                     orchestrator_pane: true,
                     orchestrator_position: OrchestratorPosition::Bottom,
                     layout: None,
@@ -1342,5 +1348,60 @@ mod tests {
                 .contains("Live message delivery failed after 3 attempts.")
         );
         assert!(messages[0].body.contains("Recipient: eng-1"));
+    }
+
+    #[test]
+    fn external_sender_delivery() {
+        // Messages from an external sender (e.g. email-router) should be
+        // queued to the recipient's inbox and not blocked by routing validation.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = empty_legacy_daemon(&tmp);
+
+        // Configure external_senders and a manager role so can_talk succeeds
+        daemon.config.team_config.external_senders = vec!["email-router".to_string()];
+        daemon.config.team_config.roles = vec![RoleDef {
+            name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            instances: 1,
+            prompt: None,
+            talks_to: vec![],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: None,
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            use_worktrees: false,
+        }];
+        daemon.config.members = vec![MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        }];
+
+        // Queue a message from external sender to manager
+        daemon
+            .queue_message("email-router", "manager", "New email from user@example.com")
+            .unwrap();
+
+        // Verify the message landed in manager's inbox
+        let root = inbox::inboxes_root(tmp.path());
+        let messages = inbox::pending_messages(&root, "manager").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].from, "email-router");
+        assert!(messages[0].body.contains("New email from user@example.com"));
+
+        // Also verify routing would be allowed via can_talk
+        assert!(
+            daemon
+                .config
+                .team_config
+                .can_talk("email-router", "manager")
+        );
     }
 }

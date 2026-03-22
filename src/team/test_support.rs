@@ -268,6 +268,7 @@ impl<'a> TestDaemonBuilder<'a> {
                 standup: StandupConfig::default(),
                 automation: self.automation,
                 automation_sender: None,
+                external_senders: Vec::new(),
                 orchestrator_pane: self.orchestrator_pane,
                 orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,

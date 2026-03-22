@@ -43,6 +43,7 @@ impl TestHarness {
                 standup: StandupConfig::default(),
                 automation: AutomationConfig::default(),
                 automation_sender: None,
+                external_senders: Vec::new(),
                 orchestrator_pane: false,
                 orchestrator_position: OrchestratorPosition::Bottom,
                 layout: None,
