@@ -427,6 +427,30 @@ pub(crate) fn merge_engineer_branch(
     let branch = current_worktree_branch(&worktree_dir)?;
     info!(engineer = engineer_name, branch = %branch, "merging worktree branch");
 
+    // Ensure project_root is on main before merging. Without this check,
+    // the merge silently lands on whatever branch happens to be checked out,
+    // causing "merge reported success but commits not on main" (#189, #198).
+    let main_branch = current_worktree_branch(project_root)?;
+    if main_branch != "main" {
+        warn!(
+            engineer = engineer_name,
+            branch = %branch,
+            actual_branch = %main_branch,
+            "project root not on main before merge, attempting checkout"
+        );
+        let checkout = run_git_with_context(
+            project_root,
+            &["checkout", "main"],
+            "checkout main in project root before merge",
+        )?;
+        if !checkout.status.success() {
+            let stderr = String::from_utf8_lossy(&checkout.stderr).trim().to_string();
+            return Ok(MergeOutcome::MergeFailure(format!(
+                "project root is on '{main_branch}', not 'main', and checkout failed: {stderr}"
+            )));
+        }
+    }
+
     let rebase = run_git_with_context(
         &worktree_dir,
         &["rebase", "main"],
