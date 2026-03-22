@@ -38,6 +38,7 @@ pub mod status;
 pub mod task_cmd;
 pub mod task_loop;
 pub mod telegram;
+pub mod telemetry_db;
 #[cfg(test)]
 pub mod test_helpers;
 #[cfg(test)]
