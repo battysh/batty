@@ -1093,8 +1093,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
                     member_name, transition, agent_name,
                 ));
             }
-            self.backend_health
-                .insert(member_name.clone(), new_health);
+            self.backend_health.insert(member_name.clone(), new_health);
         }
 
         Ok(())
@@ -7048,6 +7047,163 @@ exit 1
                 .count(),
             0,
             "cooldown should suppress all stall handling"
+        );
+    }
+
+    #[test]
+    fn health_check_interval_config_default() {
+        use super::super::config::WorkflowPolicy;
+        let policy = WorkflowPolicy::default();
+        assert_eq!(policy.health_check_interval_secs, 60);
+    }
+
+    #[test]
+    fn check_backend_health_skipped_before_interval() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let engineer = MemberInstance {
+            name: "eng-health".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
+        // Set last_health_check to now so the interval hasn't elapsed.
+        daemon.last_health_check = Instant::now();
+        daemon.check_backend_health().unwrap();
+        // No health entries should have been recorded because the check was skipped.
+        assert!(daemon.backend_health.is_empty());
+    }
+
+    #[test]
+    fn check_backend_health_runs_after_interval() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let engineer = MemberInstance {
+            name: "eng-health-run".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
+        // Force last_health_check to be old enough.
+        daemon.last_health_check = Instant::now() - Duration::from_secs(3600);
+        daemon.check_backend_health().unwrap();
+        // Should have recorded health for the engineer.
+        assert!(daemon.backend_health.contains_key("eng-health-run"));
+    }
+
+    #[test]
+    fn check_backend_health_skips_user_roles() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let user = MemberInstance {
+            name: "user-role".to_string(),
+            role_name: "user".to_string(),
+            role_type: RoleType::User,
+            agent: None,
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![user]);
+        daemon.last_health_check = Instant::now() - Duration::from_secs(3600);
+        daemon.check_backend_health().unwrap();
+        // User roles should not be checked.
+        assert!(!daemon.backend_health.contains_key("user-role"));
+    }
+
+    #[test]
+    fn check_backend_health_emits_event_on_transition() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let engineer = MemberInstance {
+            name: "eng-health-ev".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
+        // Pre-populate with a different state to force a transition.
+        daemon
+            .backend_health
+            .insert("eng-health-ev".to_string(), BackendHealth::Unreachable);
+        daemon.last_health_check = Instant::now() - Duration::from_secs(3600);
+        // Health check runs: claude binary should be found → Healthy.
+        // Previous state was Unreachable → emits transition event.
+        daemon.check_backend_health().unwrap();
+
+        // Check events for health_changed.
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        let health_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.event == "health_changed")
+            .collect();
+        assert_eq!(health_events.len(), 1);
+        assert_eq!(health_events[0].role.as_deref(), Some("eng-health-ev"));
+        assert_eq!(
+            health_events[0].reason.as_deref(),
+            Some("unreachable→healthy")
+        );
+    }
+
+    #[test]
+    fn check_backend_health_no_event_when_state_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let engineer = MemberInstance {
+            name: "eng-health-stable".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            // claude is installed, so health check returns Healthy.
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
+        // Pre-populate with Healthy (matching expected check result).
+        daemon
+            .backend_health
+            .insert("eng-health-stable".to_string(), BackendHealth::Healthy);
+        daemon.last_health_check = Instant::now() - Duration::from_secs(3600);
+        daemon.check_backend_health().unwrap();
+
+        // No health_changed events — state didn't change.
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap_or_default();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.event == "health_changed")
+                .count(),
+            0,
+            "no event when state is unchanged"
         );
     }
 }
