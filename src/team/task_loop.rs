@@ -273,6 +273,13 @@ pub(crate) fn refresh_engineer_worktree(
     };
     let _ = retry_git(|| git_cmd::rebase_abort(worktree_dir));
 
+    if !is_worktree_safe_to_mutate(worktree_dir)? {
+        bail!(
+            "worktree at {} has uncommitted changes on a task branch after failed rebase — refusing to destroy. Commit or stash first.",
+            worktree_dir.display()
+        );
+    }
+
     map_git_error(
         retry_git(|| git_cmd::worktree_remove(project_root, worktree_dir, true)),
         &format!("failed to remove conflicted worktree after rebase error '{stderr}'"),
@@ -413,6 +420,41 @@ fn worktree_has_user_changes(worktree_dir: &Path) -> Result<bool> {
     )?
     .lines()
     .any(|line| !line.starts_with("?? .batty/")))
+}
+
+/// Returns `false` if the worktree has uncommitted changes on a task branch
+/// (i.e. not an `eng-main/*` base branch). This gate should be checked before
+/// any operation that would destroy worktree state (reset, clean, checkout).
+pub(crate) fn is_worktree_safe_to_mutate(worktree_dir: &Path) -> Result<bool> {
+    if !worktree_dir.exists() {
+        return Ok(true);
+    }
+
+    let has_changes = worktree_has_user_changes(worktree_dir)?;
+    if !has_changes {
+        return Ok(true);
+    }
+
+    let branch = match map_git_error(
+        retry_git(|| git_cmd::rev_parse_branch(worktree_dir)),
+        "failed to determine worktree branch for safety check",
+    ) {
+        Ok(b) => b,
+        Err(_) => return Ok(true), // Can't determine branch — allow mutation
+    };
+
+    // eng-main/* branches are base branches with no user work worth preserving.
+    if branch.starts_with("eng-main/") {
+        return Ok(true);
+    }
+
+    // Task branch with uncommitted changes — NOT safe to mutate.
+    warn!(
+        worktree = %worktree_dir.display(),
+        branch = %branch,
+        "worktree has uncommitted changes on task branch, refusing to mutate"
+    );
+    Ok(false)
 }
 
 fn auto_clean_worktree(worktree_dir: &Path) -> Result<()> {
