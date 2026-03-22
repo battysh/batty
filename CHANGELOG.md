@@ -2,6 +2,60 @@
 
 All notable changes to Batty are documented here.
 
+## 0.4.1 — 2026-03-22
+
+Stability patch focused on test coverage expansion and reliability. 664 new
+tests added across 4 waves, bringing the suite from ~1,285 to 1,949 tests.
+Zero new features — pure quality investment.
+
+### Test Infrastructure
+
+- **Unit/integration test split** (#251) — tests categorized with a Cargo
+  feature gate (`--features integration`). Unit tests run without tmux; 56
+  integration tests require a running tmux server and are auto-skipped in CI.
+- **Flaky test stabilization** (#250) — timing-dependent tmux tests converted
+  to retry/poll patterns, eliminating intermittent CI failures.
+
+### Coverage Expansion — Wave 1
+
+- **daemon/automation.rs + cost.rs** (#254) — 78 new tests covering automation
+  rules and cost calculation edge cases.
+- **daemon/health.rs** (#256) — 24 tests covering health check scheduling and
+  state transitions.
+
+### Coverage Expansion — Wave 2
+
+- **board_cmd, resolver, workflow, nudge** (#260) — 59 tests across 4 board
+  and workflow modules.
+- **daemon interventions** (#253) — 72 tests covering all 6 intervention
+  subsystem submodules.
+- **delivery.rs** (#258) — 43 tests for message delivery, circuit breaker, and
+  Telegram retry logic.
+- **standup.rs + retrospective.rs** (#259) — 57 tests for periodic summary
+  generation and retrospective reports.
+- **layout.rs + telegram_bridge.rs** (#255) — 35 tests for tmux layout
+  building and Telegram bridge communication.
+- **Cross-module behavioral verification** (#257) — 28 tests validating
+  interactions across module boundaries.
+
+### Coverage Expansion — Wave 3
+
+- **tmux.rs** (#262) — 42 tests for core tmux runtime infrastructure (pane
+  ops, session management, output capture).
+- **task_loop.rs + message.rs** (#263) — 36 tests for the autonomous dispatch
+  loop and message routing types.
+- **capability.rs + policy.rs** (#261) — 33 tests for topology-independent
+  capabilities and config-driven workflow policies.
+
+### Coverage Expansion — Wave 4
+
+- **Config validation edge cases** (#264) — 43 tests for YAML config parsing
+  boundaries, invalid inputs, and default handling.
+- **Error path and recovery** (#265) — 76 tests exercising error propagation,
+  fallback behavior, and graceful degradation paths.
+- **CLI argument parsing** (#266) — 38 tests verifying all subcommands parse
+  correctly with valid and invalid argument combinations.
+
 ## 0.4.0 — 2026-03-22
 
 Major release introducing agent backend abstraction, backend health monitoring,
