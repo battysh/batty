@@ -30,6 +30,7 @@ impl Channel for RecordingChannel {
 pub(crate) fn team_config_with_roles(roles: Vec<RoleDef>) -> TeamConfig {
     TeamConfig {
         name: "test".to_string(),
+        agent: None,
         workflow_mode: WorkflowMode::Legacy,
         workflow_policy: WorkflowPolicy::default(),
         board: BoardConfig::default(),
