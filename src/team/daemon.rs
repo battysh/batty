@@ -46,7 +46,7 @@ use super::task_loop::next_unclaimed_task;
 use super::task_loop::{engineer_base_branch_name, setup_engineer_worktree};
 use super::watcher::{SessionTrackerConfig, SessionWatcher, WatcherState};
 use super::{AssignmentDeliveryResult, AssignmentResultStatus, now_unix, store_assignment_result};
-use crate::agent;
+use crate::agent::{self, BackendHealth};
 use crate::tmux;
 use dispatch::DispatchQueueEntry;
 
@@ -123,6 +123,10 @@ pub struct TeamDaemon {
     pub(super) recent_dispatches: HashMap<(u32, String), Instant>,
     /// SQLite telemetry database connection (None if open failed).
     pub(super) telemetry_db: Option<rusqlite::Connection>,
+    /// Per-member agent backend health state.
+    pub(super) backend_health: HashMap<String, BackendHealth>,
+    /// When the last periodic health check was run.
+    pub(super) last_health_check: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -367,6 +371,9 @@ impl TeamDaemon {
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
             telemetry_db,
+            backend_health: HashMap::new(),
+            // Start far enough in the past to trigger an immediate check.
+            last_health_check: Instant::now() - Duration::from_secs(3600),
         })
     }
 
@@ -514,6 +521,9 @@ impl TeamDaemon {
                 daemon.process_telegram_queue()
             });
             self.run_recoverable_step("maybe_fire_nudges", |daemon| daemon.maybe_fire_nudges());
+            self.run_recoverable_step("check_backend_health", |daemon| {
+                daemon.check_backend_health()
+            });
             self.run_recoverable_step_with_catch_unwind("maybe_generate_standup", |daemon| {
                 let generated =
                     standup::maybe_generate_standup(standup::StandupGenerationContext {
@@ -526,6 +536,7 @@ impl TeamDaemon {
                         telegram_bot: daemon.telegram_bot.as_ref(),
                         paused_standups: &daemon.paused_standups,
                         last_standup: &mut daemon.last_standup,
+                        backend_health: &daemon.backend_health,
                     })?;
                 for recipient in generated {
                     daemon.record_standup_generated(&recipient);
@@ -1030,6 +1041,63 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             .filter(|event| event.reason.as_deref() == Some("stalled"))
             .count() as u32;
         Ok(count)
+    }
+
+    /// Periodically check agent backend health and emit events on transitions.
+    fn check_backend_health(&mut self) -> Result<()> {
+        let interval = Duration::from_secs(
+            self.config
+                .team_config
+                .workflow_policy
+                .health_check_interval_secs,
+        );
+        if self.last_health_check.elapsed() < interval {
+            return Ok(());
+        }
+        self.last_health_check = Instant::now();
+
+        // Collect (member_name, agent_name) pairs to avoid borrowing self.config during mutation.
+        let checks: Vec<(String, String)> = self
+            .config
+            .members
+            .iter()
+            .filter(|m| m.role_type != RoleType::User)
+            .map(|m| {
+                (
+                    m.name.clone(),
+                    m.agent.as_deref().unwrap_or("claude").to_string(),
+                )
+            })
+            .collect();
+
+        for (member_name, agent_name) in &checks {
+            let new_health =
+                agent::health_check_by_name(agent_name).unwrap_or(BackendHealth::Healthy);
+            let prev_health = self
+                .backend_health
+                .get(member_name)
+                .copied()
+                .unwrap_or(BackendHealth::Healthy);
+
+            if new_health != prev_health {
+                let transition = format!("{}→{}", prev_health.as_str(), new_health.as_str());
+                info!(
+                    member = %member_name,
+                    agent = %agent_name,
+                    transition = %transition,
+                    "backend health changed"
+                );
+                self.emit_event(TeamEvent::health_changed(member_name, &transition));
+                self.record_orchestrator_action(format!(
+                    "health: {} backend {} ({})",
+                    member_name, transition, agent_name,
+                ));
+            }
+            self.backend_health
+                .insert(member_name.clone(), new_health);
+        }
+
+        Ok(())
     }
 
     /// Load the prompt template for a member, substituting role-specific info.

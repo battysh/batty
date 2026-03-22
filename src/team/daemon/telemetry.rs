@@ -548,6 +548,8 @@ mod tests {
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
             telemetry_db: None,
+            backend_health: HashMap::new(),
+            last_health_check: Instant::now(),
         };
 
         let sent = Arc::new(Mutex::new(Vec::new()));
@@ -923,6 +925,8 @@ mod tests {
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
             telemetry_db: None,
+            backend_health: HashMap::new(),
+            last_health_check: Instant::now(),
         };
 
         daemon.poll_watchers().unwrap();
