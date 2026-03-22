@@ -276,17 +276,23 @@ mod tests {
             rework_count: 1,
             review_nudge_count: 3,
             review_escalation_count: 0,
+            avg_review_stall_secs: Some(120),
+            max_review_stall_secs: Some(200),
+            max_review_stall_task: Some("T-1".to_string()),
+            task_rework_counts: vec![("T-2".to_string(), 1)],
         };
 
         let path = generate_retrospective(tmp.path(), &stats).unwrap();
         let content = std::fs::read_to_string(path).unwrap();
 
-        assert!(content.contains("## Review Performance"));
+        assert!(content.contains("## Review Pipeline"));
         assert!(content.contains("Auto-merged: 5"));
         assert!(content.contains("Manually merged: 2"));
         assert!(content.contains("Auto-merge rate: 71%"));
-        assert!(content.contains("Rework: 1"));
+        assert!(content.contains("Rework cycles: 1"));
         assert!(content.contains("Review nudges: 3"));
         assert!(content.contains("Review escalations: 0"));
+        assert!(content.contains("Avg review stall: 2m 00s"));
+        assert!(content.contains("Max review stall: 3m 20s (T-1)"));
     }
 }

@@ -29,6 +29,13 @@ pub struct RunStats {
     pub rework_count: u32,
     pub review_nudge_count: u32,
     pub review_escalation_count: u32,
+    /// Average time (seconds) tasks spent in review before merge.
+    pub avg_review_stall_secs: Option<u64>,
+    /// Longest review stall and the associated task.
+    pub max_review_stall_secs: Option<u64>,
+    pub max_review_stall_task: Option<String>,
+    /// Per-task rework cycle counts (task_id → rework count).
+    pub task_rework_counts: Vec<(String, u32)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +182,10 @@ pub fn analyze_events(events: &[TeamEvent]) -> Option<RunStats> {
     let mut rework_count = 0u32;
     let mut review_nudge_count = 0u32;
     let mut review_escalation_count = 0u32;
+    // Track per-task: completion timestamp (for stall calc) and rework counts.
+    let mut task_completed_at: HashMap<String, u64> = HashMap::new();
+    let mut review_stall_durations: Vec<(String, u64)> = Vec::new();
+    let mut per_task_rework: HashMap<String, u32> = HashMap::new();
 
     for event in run_events {
         match event.event.as_str() {
@@ -210,6 +221,8 @@ pub fn analyze_events(events: &[TeamEvent]) -> Option<RunStats> {
                     task.completed_at = Some(event.ts);
                     task.cycle_time_secs = Some(event.ts.saturating_sub(task.assigned_at));
                 }
+                // Record completion time for review stall calculation.
+                task_completed_at.insert(task_id, event.ts);
             }
             "task_escalated" => {
                 escalation_count += 1;
@@ -227,12 +240,30 @@ pub fn analyze_events(events: &[TeamEvent]) -> Option<RunStats> {
             }
             "task_auto_merged" => {
                 auto_merge_count += 1;
+                if let Some(task) = event.task.as_deref() {
+                    let task_id = task_reference(task);
+                    if let Some(completed_ts) = task_completed_at.get(&task_id) {
+                        review_stall_durations
+                            .push((task_id, event.ts.saturating_sub(*completed_ts)));
+                    }
+                }
             }
             "task_manual_merged" => {
                 manual_merge_count += 1;
+                if let Some(task) = event.task.as_deref() {
+                    let task_id = task_reference(task);
+                    if let Some(completed_ts) = task_completed_at.get(&task_id) {
+                        review_stall_durations
+                            .push((task_id, event.ts.saturating_sub(*completed_ts)));
+                    }
+                }
             }
             "task_reworked" => {
                 rework_count += 1;
+                if let Some(task) = event.task.as_deref() {
+                    let task_id = task_reference(task);
+                    *per_task_rework.entry(task_id).or_insert(0) += 1;
+                }
             }
             "review_nudge_sent" => {
                 review_nudge_count += 1;
@@ -279,6 +310,25 @@ pub fn analyze_events(events: &[TeamEvent]) -> Option<RunStats> {
         longest_cycle_time_secs,
     ) = cycle_time_metrics(&task_stats);
 
+    // Compute review stall metrics.
+    let (avg_review_stall_secs, max_review_stall_secs, max_review_stall_task) =
+        if review_stall_durations.is_empty() {
+            (None, None, None)
+        } else {
+            let total: u64 = review_stall_durations.iter().map(|(_, d)| *d).sum();
+            let avg = total / review_stall_durations.len() as u64;
+            let (max_task, max_dur) = review_stall_durations
+                .iter()
+                .max_by_key(|(_, d)| *d)
+                .map(|(t, d)| (t.clone(), *d))
+                .expect("non-empty");
+            (Some(avg), Some(max_dur), Some(max_task))
+        };
+
+    // Collect per-task rework counts, sorted by count descending.
+    let mut task_rework_counts: Vec<(String, u32)> = per_task_rework.into_iter().collect();
+    task_rework_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
     Some(RunStats {
         run_start,
         run_end,
@@ -297,6 +347,10 @@ pub fn analyze_events(events: &[TeamEvent]) -> Option<RunStats> {
         rework_count,
         review_nudge_count,
         review_escalation_count,
+        avg_review_stall_secs,
+        max_review_stall_secs,
+        max_review_stall_task,
+        task_rework_counts,
     })
 }
 
@@ -491,23 +545,56 @@ fn render_review_performance(stats: &RunStats) -> String {
         "-".to_string()
     };
 
-    format!(
-        "## Review Performance\n\n\
+    let avg_stall = stats
+        .avg_review_stall_secs
+        .map(format_duration)
+        .unwrap_or_else(|| "-".to_string());
+    let max_stall = stats
+        .max_review_stall_secs
+        .map(|secs| {
+            format!(
+                "{} ({})",
+                format_duration(secs),
+                stats.max_review_stall_task.as_deref().unwrap_or("-")
+            )
+        })
+        .unwrap_or_else(|| "-".to_string());
+
+    let mut section = format!(
+        "## Review Pipeline\n\n\
 - Auto-merged: {}\n\
 - Manually merged: {}\n\
 - Auto-merge rate: {}\n\
-- Rework: {}\n\
+- Avg review stall: {}\n\
+- Max review stall: {}\n\
+- Rework cycles: {}\n\
 - Rework rate: {}\n\
 - Review nudges: {}\n\
-- Review escalations: {}\n\n",
+- Review escalations: {}\n",
         stats.auto_merge_count,
         stats.manual_merge_count,
         auto_rate,
+        avg_stall,
+        max_stall,
         stats.rework_count,
         rework_rate,
         stats.review_nudge_count,
         stats.review_escalation_count,
-    )
+    );
+
+    if !stats.task_rework_counts.is_empty() {
+        section.push_str(
+            "\n### Rework by Task\n\n\
+| Task | Rework Cycles |\n\
+| --- | --- |\n",
+        );
+        for (task_id, count) in &stats.task_rework_counts {
+            section.push_str(&format!("| {} | {} |\n", task_id, count));
+        }
+    }
+
+    section.push('\n');
+    section
 }
 
 fn render_task_cycle_rows(tasks: &[TaskStats]) -> String {
@@ -804,6 +891,10 @@ mod tests {
             rework_count: 0,
             review_nudge_count: 0,
             review_escalation_count: 0,
+            avg_review_stall_secs: None,
+            max_review_stall_secs: None,
+            max_review_stall_task: None,
+            task_rework_counts: Vec::new(),
         };
 
         let path = generate_retrospective(tmp.path(), &stats).unwrap();
@@ -848,6 +939,10 @@ mod tests {
             rework_count: 0,
             review_nudge_count: 0,
             review_escalation_count: 0,
+            avg_review_stall_secs: None,
+            max_review_stall_secs: None,
+            max_review_stall_task: None,
+            task_rework_counts: Vec::new(),
         };
 
         let path = generate_retrospective(tmp.path(), &stats).unwrap();
@@ -882,6 +977,10 @@ mod tests {
             rework_count: 0,
             review_nudge_count: 0,
             review_escalation_count: 0,
+            avg_review_stall_secs: None,
+            max_review_stall_secs: None,
+            max_review_stall_task: None,
+            task_rework_counts: Vec::new(),
         };
 
         let path = generate_retrospective(tmp.path(), &stats).unwrap();
@@ -912,6 +1011,10 @@ mod tests {
             rework_count: 0,
             review_nudge_count: 0,
             review_escalation_count: 0,
+            avg_review_stall_secs: None,
+            max_review_stall_secs: None,
+            max_review_stall_task: None,
+            task_rework_counts: Vec::new(),
         };
 
         let path = generate_retrospective(tmp.path(), &stats).unwrap();
@@ -1078,5 +1181,168 @@ Task body.
         assert!(stats.is_some());
         let stats = stats.unwrap();
         assert_eq!(stats.total_duration_secs, 30);
+    }
+
+    #[test]
+    fn analyze_events_computes_review_stall_duration() {
+        let events = vec![
+            at(TeamEvent::daemon_started(), 100),
+            at(
+                TeamEvent::task_assigned("eng-1", "Task #10: fast task"),
+                110,
+            ),
+            at(TeamEvent::task_completed("eng-1", None), 150),
+            // 30s stall before auto-merge
+            at(
+                TeamEvent::task_auto_merged("eng-1", "Task #10: fast task", 0.9, 2, 10),
+                180,
+            ),
+            at(
+                TeamEvent::task_assigned("eng-2", "Task #20: slow task"),
+                120,
+            ),
+            at(TeamEvent::task_completed("eng-2", None), 200),
+            // 100s stall before manual merge
+            at(TeamEvent::task_manual_merged("Task #20: slow task"), 300),
+            at(TeamEvent::daemon_stopped_with_reason("signal", 210), 310),
+        ];
+
+        let stats = analyze_events(&events).unwrap();
+
+        assert_eq!(stats.auto_merge_count, 1);
+        assert_eq!(stats.manual_merge_count, 1);
+        // avg of 30s and 100s = 65s
+        assert_eq!(stats.avg_review_stall_secs, Some(65));
+        // max is 100s for task 20
+        assert_eq!(stats.max_review_stall_secs, Some(100));
+        assert_eq!(stats.max_review_stall_task.as_deref(), Some("20"));
+    }
+
+    #[test]
+    fn analyze_events_no_stall_without_merges() {
+        let events = vec![
+            at(TeamEvent::daemon_started(), 100),
+            at(TeamEvent::task_assigned("eng-1", "42"), 110),
+            at(TeamEvent::task_completed("eng-1", None), 150),
+            at(TeamEvent::daemon_stopped_with_reason("signal", 60), 160),
+        ];
+
+        let stats = analyze_events(&events).unwrap();
+
+        assert_eq!(stats.avg_review_stall_secs, None);
+        assert_eq!(stats.max_review_stall_secs, None);
+        assert_eq!(stats.max_review_stall_task, None);
+    }
+
+    #[test]
+    fn analyze_events_tracks_per_task_rework() {
+        let events = vec![
+            at(TeamEvent::daemon_started(), 100),
+            at(TeamEvent::task_assigned("eng-1", "Task #10: reworked"), 110),
+            at(TeamEvent::task_reworked("eng-1", "Task #10: reworked"), 120),
+            at(TeamEvent::task_reworked("eng-1", "Task #10: reworked"), 130),
+            at(TeamEvent::task_assigned("eng-2", "Task #20: once"), 115),
+            at(TeamEvent::task_reworked("eng-2", "Task #20: once"), 140),
+            at(TeamEvent::daemon_stopped_with_reason("signal", 60), 160),
+        ];
+
+        let stats = analyze_events(&events).unwrap();
+
+        assert_eq!(stats.rework_count, 3);
+        // Sorted by count descending: task 10 (2), task 20 (1)
+        assert_eq!(stats.task_rework_counts.len(), 2);
+        assert_eq!(stats.task_rework_counts[0], ("10".to_string(), 2));
+        assert_eq!(stats.task_rework_counts[1], ("20".to_string(), 1));
+    }
+
+    #[test]
+    fn analyze_events_empty_rework_list() {
+        let events = vec![
+            at(TeamEvent::daemon_started(), 100),
+            at(TeamEvent::task_assigned("eng-1", "42"), 110),
+            at(TeamEvent::task_completed("eng-1", None), 150),
+            at(TeamEvent::daemon_stopped_with_reason("signal", 60), 160),
+        ];
+
+        let stats = analyze_events(&events).unwrap();
+
+        assert!(stats.task_rework_counts.is_empty());
+    }
+
+    #[test]
+    fn render_review_pipeline_section_includes_stall_and_rework() {
+        let tmp = tempdir().unwrap();
+        let stats = RunStats {
+            run_start: 100,
+            run_end: 500,
+            total_duration_secs: 400,
+            task_stats: Vec::new(),
+            average_cycle_time_secs: None,
+            fastest_task_id: None,
+            fastest_cycle_time_secs: None,
+            longest_task_id: None,
+            longest_cycle_time_secs: None,
+            idle_time_pct: 0.0,
+            escalation_count: 0,
+            message_count: 0,
+            auto_merge_count: 3,
+            manual_merge_count: 1,
+            rework_count: 2,
+            review_nudge_count: 1,
+            review_escalation_count: 0,
+            avg_review_stall_secs: Some(90),
+            max_review_stall_secs: Some(180),
+            max_review_stall_task: Some("T-5".to_string()),
+            task_rework_counts: vec![("T-5".to_string(), 2)],
+        };
+
+        let path = generate_retrospective(tmp.path(), &stats).unwrap();
+        let content = fs::read_to_string(path).unwrap();
+
+        assert!(content.contains("## Review Pipeline"));
+        assert!(content.contains("Auto-merged: 3"));
+        assert!(content.contains("Manually merged: 1"));
+        assert!(content.contains("Auto-merge rate: 75%"));
+        assert!(content.contains("Avg review stall: 1m 30s"));
+        assert!(content.contains("Max review stall: 3m 00s (T-5)"));
+        assert!(content.contains("Rework cycles: 2"));
+        assert!(content.contains("### Rework by Task"));
+        assert!(content.contains("| T-5 | 2 |"));
+    }
+
+    #[test]
+    fn render_review_pipeline_no_stall_data() {
+        let tmp = tempdir().unwrap();
+        let stats = RunStats {
+            run_start: 100,
+            run_end: 300,
+            total_duration_secs: 200,
+            task_stats: Vec::new(),
+            average_cycle_time_secs: None,
+            fastest_task_id: None,
+            fastest_cycle_time_secs: None,
+            longest_task_id: None,
+            longest_cycle_time_secs: None,
+            idle_time_pct: 0.0,
+            escalation_count: 0,
+            message_count: 0,
+            auto_merge_count: 2,
+            manual_merge_count: 0,
+            rework_count: 0,
+            review_nudge_count: 0,
+            review_escalation_count: 0,
+            avg_review_stall_secs: None,
+            max_review_stall_secs: None,
+            max_review_stall_task: None,
+            task_rework_counts: Vec::new(),
+        };
+
+        let path = generate_retrospective(tmp.path(), &stats).unwrap();
+        let content = fs::read_to_string(path).unwrap();
+
+        assert!(content.contains("## Review Pipeline"));
+        assert!(content.contains("Avg review stall: -"));
+        assert!(content.contains("Max review stall: -"));
+        assert!(!content.contains("### Rework by Task"));
     }
 }
