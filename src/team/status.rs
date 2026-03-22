@@ -43,6 +43,7 @@ pub(crate) struct TeamStatusRow {
     pub(crate) runtime_label: Option<String>,
     pub(crate) health: AgentHealthSummary,
     pub(crate) health_summary: String,
+    pub(crate) eta: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,6 +321,7 @@ pub(crate) fn build_team_status_rows(
                 runtime_label,
                 health,
                 health_summary,
+                eta: "-".to_string(),
             }
         })
         .collect()
@@ -1571,6 +1573,7 @@ mod tests {
                 runtime_label: None,
                 health: AgentHealthSummary::default(),
                 health_summary: "-".to_string(),
+                eta: "-".to_string(),
             },
             TeamStatusRow {
                 name: "eng-2".to_string(),
@@ -1593,6 +1596,7 @@ mod tests {
                     backend_health: crate::agent::BackendHealth::default(),
                 },
                 health_summary: "r1".to_string(),
+                eta: "-".to_string(),
             },
             TeamStatusRow {
                 name: "eng-1".to_string(),
@@ -1615,6 +1619,7 @@ mod tests {
                     backend_health: crate::agent::BackendHealth::default(),
                 },
                 health_summary: "c1 d1".to_string(),
+                eta: "-".to_string(),
             },
         ];
 
@@ -1823,6 +1828,7 @@ mod tests {
                 runtime_label: Some("idle".to_string()),
                 health: AgentHealthSummary::default(),
                 health_summary: "-".to_string(),
+                eta: "-".to_string(),
             }],
         });
 
@@ -1998,6 +2004,7 @@ mod tests {
                         backend_health: crate::agent::BackendHealth::default(),
                     },
                     health_summary: "r1 t30s".to_string(),
+                    eta: "-".to_string(),
                 },
                 TeamStatusRow {
                     name: "eng-2".to_string(),
@@ -2014,6 +2021,7 @@ mod tests {
                     runtime_label: Some("idle".to_string()),
                     health: AgentHealthSummary::default(),
                     health_summary: "-".to_string(),
+                    eta: "-".to_string(),
                 },
             ],
         });
@@ -2219,6 +2227,7 @@ mod tests {
                 ..AgentHealthSummary::default()
             },
             health_summary: "B:unreachable".to_string(),
+            eta: "-".to_string(),
         }];
         let health = build_team_status_health(&rows, true, false);
         assert_eq!(health.unhealthy_members, vec!["eng-bad".to_string()]);
