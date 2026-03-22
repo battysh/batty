@@ -371,6 +371,8 @@ The cron recycler runs as part of the daemon poll loop. When it finds a done tas
 with a `cron_schedule`, it moves the task back to todo, updates `cron_last_run`,
 and emits a `task_recycled` event.
 
+For the full guide including cron expression examples, missed-trigger behavior, and frontmatter field reference, see [Scheduled Tasks and Cron Recurrence](scheduled-tasks.md).
+
 ## Nudge CLI
 
 The daemon runs several intervention types: replenish, triage, review, dispatch,
