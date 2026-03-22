@@ -538,13 +538,19 @@ mod tests {
                 "cwd_corrected",
                 TeamEvent::cwd_corrected("eng-1", "/tmp/worktree"),
             ),
-            ("task_escalated", TeamEvent::task_escalated("eng-1", "task", None)),
+            (
+                "task_escalated",
+                TeamEvent::task_escalated("eng-1", "task", None),
+            ),
             ("task_unblocked", TeamEvent::task_unblocked("eng-1", "task")),
             (
                 "performance_regression",
                 TeamEvent::performance_regression("42", "runtime_ms=1300 avg_ms=1000 pct=30"),
             ),
-            ("task_completed", TeamEvent::task_completed("eng-1", Some("42"))),
+            (
+                "task_completed",
+                TeamEvent::task_completed("eng-1", Some("42")),
+            ),
             ("standup_generated", TeamEvent::standup_generated("manager")),
             ("retro_generated", TeamEvent::retro_generated()),
             (
@@ -1034,6 +1040,66 @@ mod tests {
                     && (trimmed.contains(".unwrap(") || trimmed.contains(".expect("))
             })
             .count()
+    }
+
+    #[test]
+    fn task_completed_includes_task_id() {
+        let event = TeamEvent::task_completed("eng-1", Some("42"));
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"].as_str().unwrap(), "task_completed");
+        assert_eq!(parsed["role"].as_str().unwrap(), "eng-1");
+        assert_eq!(parsed["task"].as_str().unwrap(), "42");
+    }
+
+    #[test]
+    fn task_completed_without_task_id_omits_task_field() {
+        let event = TeamEvent::task_completed("eng-1", None);
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"task_completed\""));
+        assert!(json.contains("\"role\":\"eng-1\""));
+        assert!(!json.contains("\"task\""));
+    }
+
+    #[test]
+    fn task_escalated_without_reason_omits_reason_field() {
+        let event = TeamEvent::task_escalated("eng-1", "42", None);
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"].as_str().unwrap(), "task_escalated");
+        assert_eq!(parsed["task"].as_str().unwrap(), "42");
+        assert!(parsed.get("reason").is_none());
+    }
+
+    #[test]
+    fn task_escalated_with_reason_includes_reason_field() {
+        let event = TeamEvent::task_escalated("eng-1", "42", Some("merge_conflict"));
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"].as_str().unwrap(), "task_escalated");
+        assert_eq!(parsed["task"].as_str().unwrap(), "42");
+        assert_eq!(parsed["reason"].as_str().unwrap(), "merge_conflict");
+    }
+
+    #[test]
+    fn task_completed_round_trip_preserves_task_id() {
+        let original = TeamEvent::task_completed("eng-1", Some("99"));
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: TeamEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.event, "task_completed");
+        assert_eq!(parsed.role.as_deref(), Some("eng-1"));
+        assert_eq!(parsed.task.as_deref(), Some("99"));
+    }
+
+    #[test]
+    fn task_escalated_round_trip_preserves_reason() {
+        let original = TeamEvent::task_escalated("eng-1", "42", Some("context_exhausted"));
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: TeamEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.event, "task_escalated");
+        assert_eq!(parsed.role.as_deref(), Some("eng-1"));
+        assert_eq!(parsed.task.as_deref(), Some("42"));
+        assert_eq!(parsed.reason.as_deref(), Some("context_exhausted"));
     }
 
     #[test]

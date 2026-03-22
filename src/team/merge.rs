@@ -348,11 +348,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                 );
                 daemon.queue_message("daemon", engineer, &engineer_notice)?;
 
-                daemon.record_task_escalated(
-                    engineer,
-                    task_id.to_string(),
-                    Some("merge_failure"),
-                );
+                daemon.record_task_escalated(engineer, task_id.to_string(), Some("merge_failure"));
                 daemon.clear_active_task(engineer);
                 daemon.set_member_idle(engineer);
                 warn!(
