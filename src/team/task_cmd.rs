@@ -70,7 +70,12 @@ pub(crate) fn assign_task_owners(
     Ok(())
 }
 
-pub fn cmd_review(board_dir: &Path, task_id: u32, disposition: &str) -> Result<()> {
+pub fn cmd_review(
+    board_dir: &Path,
+    task_id: u32,
+    disposition: &str,
+    feedback: Option<&str>,
+) -> Result<()> {
     let task_path = find_task_path(board_dir, task_id)?;
     let task = Task::from_file(&task_path)?;
     let current = parse_task_state(&task.status)?;
@@ -86,6 +91,9 @@ pub fn cmd_review(board_dir: &Path, task_id: u32, disposition: &str) -> Result<(
     update_task_frontmatter(&task_path, |mapping| {
         set_status(mapping, target);
         clear_blocked(mapping);
+        if let Some(text) = feedback {
+            set_optional_string(mapping, "review_feedback", Some(text));
+        }
     })?;
 
     let mut metadata = read_workflow_metadata(&task_path)?;
@@ -95,10 +103,44 @@ pub fn cmd_review(board_dir: &Path, task_id: u32, disposition: &str) -> Result<(
     }
     write_workflow_metadata(&task_path, &metadata)?;
 
+    if disposition == ReviewDisposition::ChangesRequested {
+        if let Some(text) = feedback {
+            // Deliver feedback to the engineer's inbox.
+            // board_dir is <project_root>/.batty/team_config/board
+            if let Some(engineer) = task.claimed_by.as_deref() {
+                if let Some(project_root) = board_dir
+                    .parent() // team_config
+                    .and_then(|p| p.parent()) // .batty
+                    .and_then(|p| p.parent()) // project_root
+                {
+                    let inbox_root = super::inbox::inboxes_root(project_root);
+                    if let Ok(()) = queue_review_feedback(&inbox_root, engineer, task_id, text) {
+                        println!("Review feedback delivered to {engineer}'s inbox.");
+                    }
+                }
+            }
+        }
+    }
+
     println!(
         "Task #{task_id} review recorded as {}.",
         review_disposition_name(disposition)
     );
+    Ok(())
+}
+
+fn queue_review_feedback(
+    inbox_root: &Path,
+    engineer: &str,
+    task_id: u32,
+    feedback: &str,
+) -> Result<()> {
+    use super::inbox;
+    let message = format!(
+        "Review feedback for task #{task_id}: {feedback}"
+    );
+    let msg = inbox::InboxMessage::new_send("reviewer", engineer, &message);
+    inbox::deliver_to_inbox(inbox_root, &msg)?;
     Ok(())
 }
 
@@ -340,7 +382,7 @@ mod tests {
         let board_dir = tmp.path();
         let task_path = write_task_file(board_dir, 10, "review");
 
-        cmd_review(board_dir, 10, "approved").unwrap();
+        cmd_review(board_dir, 10, "approved", None).unwrap();
 
         let task = Task::from_file(&task_path).unwrap();
         assert_eq!(task.status, "done");
@@ -411,7 +453,7 @@ mod tests {
             ]),
         )
         .unwrap();
-        cmd_review(board_dir, 13, "approved").unwrap();
+        cmd_review(board_dir, 13, "approved", None).unwrap();
 
         let task = Task::from_file(&task_path).unwrap();
         let metadata = read_workflow_metadata(&task_path).unwrap();

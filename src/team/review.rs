@@ -2,6 +2,8 @@
 
 //! Review and merge transitions for Batty-managed workflow metadata.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use serde::{Deserialize, Serialize};
 
 use super::workflow::{ReviewDisposition, TaskState, WorkflowMeta, can_transition};
@@ -23,6 +25,10 @@ pub struct ReviewState {
     pub disposition: MergeDisposition,
     #[serde(default)]
     pub notes: Option<String>,
+    #[serde(default)]
+    pub reviewed_at: Option<u64>,
+    #[serde(default)]
+    pub nudge_sent: bool,
 }
 
 pub fn apply_review(
@@ -59,11 +65,17 @@ pub fn apply_review(
     meta.state = next_state;
     meta.review_owner = Some(reviewer.to_string());
     meta.review_disposition = review_disposition;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     meta.review = Some(ReviewState {
         reviewer: reviewer.to_string(),
         packet_ref,
         disposition,
         notes,
+        reviewed_at: Some(now),
+        nudge_sent: false,
     });
     meta.blocked_on = blocked_on;
 
@@ -93,6 +105,8 @@ mod tests {
                 packet_ref: Some("review/packet-1.json".to_string()),
                 disposition: MergeDisposition::MergeReady,
                 notes: Some("initial packet".to_string()),
+                reviewed_at: None,
+                nudge_sent: false,
             }),
             ..WorkflowMeta::default()
         }
@@ -196,9 +210,12 @@ mod tests {
             packet_ref: Some("packet-42".to_string()),
             disposition: MergeDisposition::MergeReady,
             notes: Some("ready to merge".to_string()),
+            reviewed_at: Some(1700000000),
+            nudge_sent: false,
         };
 
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains("\"disposition\":\"merge_ready\""));
+        assert!(json.contains("\"reviewed_at\":1700000000"));
     }
 }
