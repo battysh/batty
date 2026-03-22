@@ -1313,4 +1313,98 @@ mod tests {
         assert!(json.contains("\"task\":\"#7\""));
         assert!(json.contains("\"reason\":\"30 8 * * *\""));
     }
+
+    // -- Integration tests --
+
+    #[test]
+    fn cron_recycler_integration_resets_done_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+
+        // cron_last_run 2 minutes ago — next minutely trigger is already past
+        let two_min_ago = (chrono::Utc::now() - chrono::Duration::minutes(2)).to_rfc3339();
+        write_cron_task(
+            board_dir,
+            10,
+            "done",
+            "0 * * * * *",
+            &format!(
+                "cron_last_run: \"{two_min_ago}\"\nclaimed_by: eng-1-1\nbranch: eng-1-1/10\ncommit: deadbeef\nnext_action: review\nreview_owner: manager\nblocked_on: other\nworktree_path: /tmp/wt\n"
+            ),
+        );
+
+        let recycled = recycle_cron_tasks(board_dir).unwrap();
+        assert_eq!(recycled.len(), 1, "done cron task should be recycled");
+        assert_eq!(recycled[0].0, 10);
+
+        let task = crate::task::Task::from_file(&board_dir.join("tasks").join("010-cron-task.md"))
+            .unwrap();
+
+        // Status reset to todo
+        assert_eq!(task.status, "todo");
+
+        // scheduled_for set to a future time
+        let scheduled = task
+            .scheduled_for
+            .as_deref()
+            .expect("scheduled_for should be set");
+        let scheduled_dt = chrono::DateTime::parse_from_rfc3339(scheduled).unwrap();
+        assert!(
+            scheduled_dt > chrono::Utc::now(),
+            "scheduled_for should be in the future, got: {scheduled}"
+        );
+
+        // cron_last_run updated (should be more recent than 2 min ago)
+        let last_run = task
+            .cron_last_run
+            .as_deref()
+            .expect("cron_last_run should be set");
+        let last_run_dt = chrono::DateTime::parse_from_rfc3339(last_run).unwrap();
+        let two_min_ago_dt = chrono::DateTime::parse_from_rfc3339(&two_min_ago).unwrap();
+        assert!(
+            last_run_dt > two_min_ago_dt,
+            "cron_last_run should be updated to now, not the old value"
+        );
+
+        // Transient fields cleared
+        assert!(task.claimed_by.is_none(), "claimed_by should be cleared");
+        assert!(task.branch.is_none(), "branch should be cleared");
+        assert!(task.commit.is_none(), "commit should be cleared");
+        assert!(task.next_action.is_none(), "next_action should be cleared");
+        assert!(
+            task.review_owner.is_none(),
+            "review_owner should be cleared"
+        );
+        assert!(task.blocked_on.is_none(), "blocked_on should be cleared");
+        assert!(
+            task.worktree_path.is_none(),
+            "worktree_path should be cleared"
+        );
+    }
+
+    #[test]
+    fn cron_recycler_skips_non_cron_done_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+
+        // Done task WITHOUT cron_schedule
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let path = tasks_dir.join("011-regular-task.md");
+        std::fs::write(
+            &path,
+            "---\nid: 11\ntitle: Regular Task\nstatus: done\npriority: medium\n---\n\nNon-cron task.\n",
+        )
+        .unwrap();
+
+        let recycled = recycle_cron_tasks(board_dir).unwrap();
+        assert!(
+            recycled.is_empty(),
+            "non-cron done task should not be recycled"
+        );
+
+        // Verify task unchanged
+        let task = crate::task::Task::from_file(&path).unwrap();
+        assert_eq!(task.status, "done", "status should remain done");
+    }
 }
