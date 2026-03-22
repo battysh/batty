@@ -583,6 +583,7 @@ roles:
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn build_layout_supports_architect_two_managers_and_six_engineers() {
         let session = "batty-test-team-layout-nine";
         let _ = crate::tmux::kill_session(session);
@@ -889,6 +890,7 @@ roles:
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn build_layout_adds_orchestrator_pane_when_enabled() {
         let session = "batty-test-team-layout-orchestrator";
         let _ = crate::tmux::kill_session(session);
@@ -944,6 +946,7 @@ roles:
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn build_layout_skips_orchestrator_pane_when_disabled() {
         let session = "batty-test-team-layout-no-orchestrator";
         let _ = crate::tmux::kill_session(session);
@@ -1010,6 +1013,7 @@ roles:
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn build_layout_honors_horizontal_split_for_architect_zone() {
         let session = "batty-test-team-layout-architect-pair";
         let _ = crate::tmux::kill_session(session);

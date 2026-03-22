@@ -2422,6 +2422,7 @@ roles:
     }
 
     #[test]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn doctor_detects_orphaned_test_sessions() {
         let session1 = format!("batty-test-doctor-orphan-{}-a", std::process::id());
         let session2 = format!("batty-test-doctor-orphan-{}-b", std::process::id());
