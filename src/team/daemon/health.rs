@@ -459,6 +459,82 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         Ok(count)
     }
 
+    /// Detect worktrees stuck on stale branches whose commits have already
+    /// been cherry-picked onto main, and auto-reset them to the base branch.
+    ///
+    /// Rate-limited to once per 60 seconds via the existing health check
+    /// interval.
+    pub(super) fn check_worktree_staleness(&mut self) -> Result<()> {
+        let members: Vec<_> = self
+            .config
+            .members
+            .iter()
+            .filter(|m| m.role_type == RoleType::Engineer && m.use_worktrees)
+            .map(|m| m.name.clone())
+            .collect();
+
+        for name in &members {
+            let worktree_path = self.worktree_dir(name);
+            if !worktree_path.is_dir() {
+                continue;
+            }
+
+            let current_branch = match crate::worktree::git_current_branch(&worktree_path) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+
+            let base = format!("eng-main/{}", name);
+
+            // Skip if already on base branch or main.
+            if current_branch == base || current_branch == "main" {
+                continue;
+            }
+
+            // Skip if engineer has an active task — don't reset mid-work.
+            if self.active_tasks.contains_key(name.as_str()) {
+                continue;
+            }
+
+            match crate::worktree::branch_fully_merged(
+                &self.config.project_root,
+                &current_branch,
+                "main",
+            ) {
+                Ok(true) => {
+                    info!(
+                        member = %name,
+                        branch = %current_branch,
+                        "stale branch detected; resetting worktree"
+                    );
+                    if let Err(error) =
+                        crate::worktree::reset_worktree_to_base(&worktree_path, &base)
+                    {
+                        warn!(
+                            member = %name,
+                            error = %error,
+                            "failed to auto-reset stale worktree; continuing"
+                        );
+                        continue;
+                    }
+                    self.record_orchestrator_action(format!(
+                        "runtime: auto-reset {}'s worktree — branch {} already on main",
+                        name, current_branch
+                    ));
+                }
+                Ok(false) => { /* branch has unique commits; not stale */ }
+                Err(error) => {
+                    warn!(
+                        member = %name,
+                        error = %error,
+                        "failed to check worktree staleness; continuing"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Periodically check agent backend health and emit events on transitions.
     pub(super) fn check_backend_health(&mut self) -> Result<()> {
         let interval = Duration::from_secs(
@@ -4403,5 +4479,107 @@ exit 1
             lines >= 3,
             "new staged file should count as added lines, got {lines}"
         );
+    }
+
+    #[test]
+    fn check_worktree_staleness_skips_base_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "staleness-skip");
+
+        // Create engineer worktree on its base branch.
+        let eng_name = "eng-stale-skip";
+        let base = format!("eng-main/{eng_name}");
+        let wt_dir = repo.join(".batty").join("worktrees").join(eng_name);
+        std::fs::create_dir_all(wt_dir.parent().unwrap()).unwrap();
+        git_ok(&repo, &["branch", &base]);
+        git_ok(&repo, &["worktree", "add", wt_dir.to_str().unwrap(), &base]);
+
+        let engineer = MemberInstance {
+            name: eng_name.to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: true,
+        };
+        let mut daemon = make_test_daemon(&repo, vec![engineer]);
+        daemon.is_git_repo = true;
+
+        // Should not error and should not attempt any reset.
+        daemon.check_worktree_staleness().unwrap();
+
+        // Cleanup.
+        let _ = Command::new("git")
+            .current_dir(&repo)
+            .args(["worktree", "remove", "--force", wt_dir.to_str().unwrap()])
+            .output();
+        let _ = Command::new("git")
+            .current_dir(&repo)
+            .args(["branch", "-D", &base])
+            .output();
+    }
+
+    #[test]
+    fn check_worktree_staleness_skips_unmerged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "staleness-unmerged");
+
+        let eng_name = "eng-stale-unmerged";
+        let base = format!("eng-main/{eng_name}");
+        let task_branch = format!("{eng_name}/task-99");
+        let wt_dir = repo.join(".batty").join("worktrees").join(eng_name);
+        std::fs::create_dir_all(wt_dir.parent().unwrap()).unwrap();
+
+        // Create base and task branches.
+        git_ok(&repo, &["branch", &base]);
+        git_ok(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &task_branch,
+                wt_dir.to_str().unwrap(),
+                &base,
+            ],
+        );
+
+        // Add a unique commit to the task branch (not on main).
+        std::fs::write(wt_dir.join("unique_work.txt"), "unique\n").unwrap();
+        git_ok(&wt_dir, &["add", "unique_work.txt"]);
+        git_ok(&wt_dir, &["commit", "-m", "unique commit"]);
+
+        let engineer = MemberInstance {
+            name: eng_name.to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: true,
+        };
+        let mut daemon = make_test_daemon(&repo, vec![engineer]);
+        daemon.is_git_repo = true;
+
+        daemon.check_worktree_staleness().unwrap();
+
+        // Branch should NOT have been reset — still on the task branch.
+        let current = git_stdout(&wt_dir, &["branch", "--show-current"]);
+        assert_eq!(current, task_branch);
+
+        // Cleanup.
+        let _ = Command::new("git")
+            .current_dir(&repo)
+            .args(["worktree", "remove", "--force", wt_dir.to_str().unwrap()])
+            .output();
+        let _ = Command::new("git")
+            .current_dir(&repo)
+            .args(["branch", "-D", &task_branch])
+            .output();
+        let _ = Command::new("git")
+            .current_dir(&repo)
+            .args(["branch", "-D", &base])
+            .output();
     }
 }

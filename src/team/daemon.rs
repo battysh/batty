@@ -538,6 +538,9 @@ impl TeamDaemon {
             self.run_recoverable_step("maybe_reconcile_stale_worktrees", |daemon| {
                 daemon.maybe_reconcile_stale_worktrees()
             });
+            self.run_recoverable_step("check_worktree_staleness", |daemon| {
+                daemon.check_worktree_staleness()
+            });
             self.run_recoverable_step("maybe_warn_uncommitted_work", |daemon| {
                 daemon.maybe_warn_uncommitted_work()
             });
