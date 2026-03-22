@@ -6,6 +6,8 @@
 
 use std::path::Path;
 
+use anyhow::Context;
+
 use crate::agent::{AgentAdapter, SpawnConfig};
 use crate::prompt::PromptPatterns;
 
@@ -60,6 +62,33 @@ impl AgentAdapter for CodexCliAdapter {
     fn reset_context_keys(&self) -> Vec<(String, bool)> {
         // Codex: send Ctrl-C to kill, then relaunch
         vec![("C-c".to_string(), false)]
+    }
+
+    fn launch_command(
+        &self,
+        prompt: &str,
+        idle: bool,
+        resume: bool,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let escaped = prompt.replace('\'', "'\\''");
+        if resume {
+            let sid = session_id.context("missing Codex session ID for resume")?;
+            Ok(format!(
+                "exec codex resume '{sid}' --dangerously-bypass-approvals-and-sandbox"
+            ))
+        } else {
+            let prefix = "exec codex --dangerously-bypass-approvals-and-sandbox";
+            if idle {
+                Ok(prefix.to_string())
+            } else {
+                Ok(format!("{prefix} '{escaped}'"))
+            }
+        }
+    }
+
+    fn supports_resume(&self) -> bool {
+        true
     }
 }
 
@@ -128,5 +157,55 @@ mod tests {
         let wrapped = adapter.wrap_launch_prompt("Launch body");
         assert!(wrapped.contains("Codex under Batty supervision"));
         assert!(wrapped.contains("Launch body"));
+    }
+
+    // --- Backend trait method tests ---
+
+    #[test]
+    fn launch_command_active_includes_prompt() {
+        let adapter = CodexCliAdapter::new(None);
+        let cmd = adapter
+            .launch_command("do the thing", false, false, None)
+            .unwrap();
+        assert!(cmd.contains("exec codex --dangerously-bypass-approvals-and-sandbox"));
+        assert!(cmd.contains("'do the thing'"));
+    }
+
+    #[test]
+    fn launch_command_idle_omits_prompt() {
+        let adapter = CodexCliAdapter::new(None);
+        let cmd = adapter
+            .launch_command("ignored", true, false, None)
+            .unwrap();
+        assert_eq!(cmd, "exec codex --dangerously-bypass-approvals-and-sandbox");
+    }
+
+    #[test]
+    fn launch_command_resume_uses_session_id() {
+        let adapter = CodexCliAdapter::new(None);
+        let cmd = adapter
+            .launch_command("ignored", false, true, Some("codex-sess-1"))
+            .unwrap();
+        assert!(cmd.contains("exec codex resume 'codex-sess-1'"));
+        assert!(cmd.contains("--dangerously-bypass-approvals-and-sandbox"));
+    }
+
+    #[test]
+    fn launch_command_resume_without_session_id_errors() {
+        let adapter = CodexCliAdapter::new(None);
+        let result = adapter.launch_command("ignored", false, true, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn new_session_id_returns_none() {
+        let adapter = CodexCliAdapter::new(None);
+        assert!(adapter.new_session_id().is_none());
+    }
+
+    #[test]
+    fn supports_resume_is_true() {
+        let adapter = CodexCliAdapter::new(None);
+        assert!(adapter.supports_resume());
     }
 }

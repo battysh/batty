@@ -13,6 +13,9 @@
 
 use std::path::Path;
 
+use anyhow::Context;
+use uuid::Uuid;
+
 use crate::agent::{AgentAdapter, SpawnConfig};
 use crate::prompt::PromptPatterns;
 
@@ -94,6 +97,44 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
     fn format_input(&self, response: &str) -> String {
         format!("{response}\n")
+    }
+
+    fn launch_command(
+        &self,
+        prompt: &str,
+        idle: bool,
+        resume: bool,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let escaped = prompt.replace('\'', "'\\''");
+        if resume {
+            let sid = session_id.context("missing Claude session ID for resume")?;
+            Ok(format!(
+                "exec claude --dangerously-skip-permissions --resume '{sid}'"
+            ))
+        } else if idle {
+            let session_flag = session_id
+                .map(|id| format!(" --session-id '{id}'"))
+                .unwrap_or_default();
+            Ok(format!(
+                "exec claude --dangerously-skip-permissions{session_flag} --append-system-prompt '{escaped}'"
+            ))
+        } else {
+            let session_flag = session_id
+                .map(|id| format!(" --session-id '{id}'"))
+                .unwrap_or_default();
+            Ok(format!(
+                "exec claude --dangerously-skip-permissions{session_flag} '{escaped}'"
+            ))
+        }
+    }
+
+    fn new_session_id(&self) -> Option<String> {
+        Some(Uuid::new_v4().to_string())
+    }
+
+    fn supports_resume(&self) -> bool {
+        true
     }
 }
 
@@ -213,5 +254,70 @@ mod tests {
     fn name_is_claude_code() {
         let adapter = ClaudeCodeAdapter::new(None);
         assert_eq!(adapter.name(), "claude-code");
+    }
+
+    // --- Backend trait method tests ---
+
+    #[test]
+    fn launch_command_active_includes_prompt() {
+        let adapter = ClaudeCodeAdapter::new(None);
+        let cmd = adapter
+            .launch_command("do the thing", false, false, Some("sess-1"))
+            .unwrap();
+        assert!(cmd.contains("exec claude --dangerously-skip-permissions"));
+        assert!(cmd.contains("--session-id 'sess-1'"));
+        assert!(cmd.contains("'do the thing'"));
+        assert!(!cmd.contains("--append-system-prompt"));
+    }
+
+    #[test]
+    fn launch_command_idle_uses_append_system_prompt() {
+        let adapter = ClaudeCodeAdapter::new(None);
+        let cmd = adapter
+            .launch_command("role prompt", true, false, Some("sess-2"))
+            .unwrap();
+        assert!(cmd.contains("--append-system-prompt"));
+        assert!(cmd.contains("--session-id 'sess-2'"));
+    }
+
+    #[test]
+    fn launch_command_resume_uses_resume_flag() {
+        let adapter = ClaudeCodeAdapter::new(None);
+        let cmd = adapter
+            .launch_command("ignored", false, true, Some("sess-3"))
+            .unwrap();
+        assert!(cmd.contains("--resume 'sess-3'"));
+        assert!(!cmd.contains("--append-system-prompt"));
+    }
+
+    #[test]
+    fn launch_command_resume_without_session_id_errors() {
+        let adapter = ClaudeCodeAdapter::new(None);
+        let result = adapter.launch_command("ignored", false, true, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn launch_command_escapes_single_quotes() {
+        let adapter = ClaudeCodeAdapter::new(None);
+        let cmd = adapter
+            .launch_command("fix user's bug", false, false, None)
+            .unwrap();
+        assert!(cmd.contains("user'\\''s"));
+    }
+
+    #[test]
+    fn new_session_id_returns_uuid() {
+        let adapter = ClaudeCodeAdapter::new(None);
+        let session_id = adapter.new_session_id();
+        assert!(session_id.is_some());
+        let sid = session_id.unwrap();
+        assert_eq!(sid.len(), 36); // UUID v4 format
+    }
+
+    #[test]
+    fn supports_resume_is_true() {
+        let adapter = ClaudeCodeAdapter::new(None);
+        assert!(adapter.supports_resume());
     }
 }
