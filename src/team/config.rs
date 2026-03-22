@@ -89,6 +89,10 @@ pub struct WorkflowPolicy {
     pub auto_archive_done_after_secs: Option<u64>,
     #[serde(default)]
     pub capability_overrides: HashMap<String, Vec<String>>,
+    #[serde(default = "default_stall_threshold_secs")]
+    pub stall_threshold_secs: u64,
+    #[serde(default = "default_max_stall_restarts")]
+    pub max_stall_restarts: u32,
     #[serde(default)]
     pub auto_merge: AutoMergePolicy,
 }
@@ -116,6 +120,8 @@ impl Default for WorkflowPolicy {
             review_timeout_overrides: HashMap::new(),
             auto_archive_done_after_secs: None,
             capability_overrides: HashMap::new(),
+            stall_threshold_secs: default_stall_threshold_secs(),
+            max_stall_restarts: default_max_stall_restarts(),
             auto_merge: AutoMergePolicy::default(),
         }
     }
@@ -447,6 +453,14 @@ fn default_review_nudge_threshold_secs() -> u64 {
 
 fn default_review_timeout_secs() -> u64 {
     7200
+}
+
+fn default_stall_threshold_secs() -> u64 {
+    300
+}
+
+fn default_max_stall_restarts() -> u32 {
+    2
 }
 
 fn default_enabled() -> bool {
