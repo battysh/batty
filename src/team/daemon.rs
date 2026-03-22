@@ -121,6 +121,8 @@ pub struct TeamDaemon {
     pub(super) auto_merge_overrides: HashMap<u32, bool>,
     /// Tracks recent (task_id, engineer) dispatch pairs for deduplication.
     pub(super) recent_dispatches: HashMap<(u32, String), Instant>,
+    /// SQLite telemetry database connection (None if open failed).
+    pub(super) telemetry_db: Option<rusqlite::Connection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -320,6 +322,18 @@ impl TeamDaemon {
             }
         }
 
+        // Open telemetry database (best-effort — log and continue if it fails).
+        let telemetry_db = match super::telemetry_db::open(&config.project_root) {
+            Ok(conn) => {
+                info!("telemetry database opened");
+                Some(conn)
+            }
+            Err(error) => {
+                warn!(error = %error, "failed to open telemetry database; telemetry disabled");
+                None
+            }
+        };
+
         Ok(Self {
             config,
             watchers,
@@ -352,6 +366,7 @@ impl TeamDaemon {
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
+            telemetry_db,
         })
     }
 
