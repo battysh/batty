@@ -357,6 +357,7 @@ mod tests {
                 backend_health: HashMap::new(),
                 last_health_check: Instant::now(),
                 last_uncommitted_warn: HashMap::new(),
+                pending_delivery_queue: HashMap::new(),
             };
 
             backdate_idle_grace(&mut daemon, "scientist");
@@ -475,6 +476,7 @@ mod tests {
             backend_health: HashMap::new(),
             last_health_check: Instant::now(),
             last_uncommitted_warn: HashMap::new(),
+            pending_delivery_queue: HashMap::new(),
         };
 
         let root = inbox::inboxes_root(tmp.path());
@@ -608,6 +610,7 @@ mod tests {
             backend_health: HashMap::new(),
             last_health_check: Instant::now(),
             last_uncommitted_warn: HashMap::new(),
+            pending_delivery_queue: HashMap::new(),
         };
 
         assert_eq!(daemon.automation_sender_for("eng-1"), "lead");

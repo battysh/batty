@@ -476,6 +476,7 @@ mod tests {
             backend_health: HashMap::new(),
             last_health_check: Instant::now(),
             last_uncommitted_warn: HashMap::new(),
+            pending_delivery_queue: HashMap::new(),
         };
 
         let sent = Arc::new(Mutex::new(Vec::new()));
@@ -858,6 +859,7 @@ mod tests {
             backend_health: HashMap::new(),
             last_health_check: Instant::now(),
             last_uncommitted_warn: HashMap::new(),
+            pending_delivery_queue: HashMap::new(),
         };
 
         daemon.poll_watchers().unwrap();

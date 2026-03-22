@@ -752,6 +752,21 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
                 self.update_automation_timers_for_state(name, member_state);
             }
 
+            // When an agent transitions to Ready for the first time, drain
+            // any messages that were buffered while it was still starting.
+            if new_state == WatcherState::Ready
+                && prev_watcher_state != WatcherState::Ready
+                && self.pending_delivery_queue.contains_key(name)
+            {
+                if let Err(error) = self.drain_pending_queue(name) {
+                    warn!(
+                        member = %name,
+                        error = %error,
+                        "failed to drain pending delivery queue on readiness"
+                    );
+                }
+            }
+
             if new_state == WatcherState::PaneDead {
                 if prev_watcher_state != WatcherState::PaneDead {
                     warn!(member = %name, "detected pane death");

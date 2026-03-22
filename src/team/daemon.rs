@@ -31,7 +31,7 @@ use super::comms::{self, Channel};
 #[cfg(test)]
 use super::config::OrchestratorPosition;
 use super::config::{RoleType, TeamConfig};
-use super::delivery::FailedDelivery;
+use super::delivery::{FailedDelivery, PendingMessage};
 use super::events::EventSink;
 use super::events::TeamEvent;
 use super::failure_patterns::FailureTracker;
@@ -136,6 +136,9 @@ pub struct TeamDaemon {
     pub(super) last_health_check: Instant,
     /// Rate-limiting: last time each engineer received an uncommitted-work warning.
     pub(super) last_uncommitted_warn: HashMap<String, Instant>,
+    /// Messages deferred because the target agent was still starting.
+    /// Drained automatically when the agent transitions to ready.
+    pub(super) pending_delivery_queue: HashMap<String, Vec<PendingMessage>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,6 +388,7 @@ impl TeamDaemon {
             // Start far enough in the past to trigger an immediate check.
             last_health_check: Instant::now() - Duration::from_secs(3600),
             last_uncommitted_warn: HashMap::new(),
+            pending_delivery_queue: HashMap::new(),
         })
     }
 
