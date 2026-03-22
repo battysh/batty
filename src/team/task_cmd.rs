@@ -111,7 +111,8 @@ pub fn cmd_review(
                 if let Some(project_root) = board_dir
                     .parent() // team_config
                     .and_then(|p| p.parent()) // .batty
-                    .and_then(|p| p.parent()) // project_root
+                    .and_then(|p| p.parent())
+                // project_root
                 {
                     let inbox_root = super::inbox::inboxes_root(project_root);
                     if let Ok(()) = queue_review_feedback(&inbox_root, engineer, task_id, text) {
@@ -136,9 +137,7 @@ fn queue_review_feedback(
     feedback: &str,
 ) -> Result<()> {
     use super::inbox;
-    let message = format!(
-        "Review feedback for task #{task_id}: {feedback}"
-    );
+    let message = format!("Review feedback for task #{task_id}: {feedback}");
     let msg = inbox::InboxMessage::new_send("reviewer", engineer, &message);
     inbox::deliver_to_inbox(inbox_root, &msg)?;
     Ok(())
@@ -463,5 +462,81 @@ mod tests {
         assert_eq!(metadata.branch.as_deref(), Some("eng-1-2/task-13"));
         assert_eq!(metadata.commit.as_deref(), Some("deadbeef"));
         assert_eq!(metadata.outcome.as_deref(), Some("approved"));
+    }
+
+    fn write_review_task_with_engineer(dir: &Path, id: u32, engineer: &str) -> PathBuf {
+        let tasks_dir = dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let path = tasks_dir.join(format!("{id:03}-task-{id}.md"));
+        std::fs::write(
+            &path,
+            format!(
+                "---\nid: {id}\ntitle: Task {id}\nstatus: review\npriority: high\nclass: standard\nclaimed_by: {engineer}\n---\n\nTask body.\n"
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn review_feedback_stored_in_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        let task_path = write_review_task_with_engineer(board_dir, 42, "eng-1-2");
+
+        cmd_review(
+            board_dir,
+            42,
+            "changes_requested",
+            Some("fix the error handling"),
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&task_path).unwrap();
+        assert!(
+            content.contains("fix the error handling"),
+            "feedback should be stored in task frontmatter"
+        );
+    }
+
+    #[test]
+    fn review_feedback_delivered_to_engineer() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create project structure: board_dir must be at <root>/.batty/team_config/board
+        let project_root = tmp.path().join("project");
+        let actual_board_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        std::fs::create_dir_all(actual_board_dir.join("tasks")).unwrap();
+
+        // Create inbox for engineer
+        let inbox_root = crate::team::inbox::inboxes_root(&project_root);
+        crate::team::inbox::init_inbox(&inbox_root, "eng-1-2").unwrap();
+
+        // Write task in the actual board dir
+        let task_path = actual_board_dir.join("tasks").join("042-task-42.md");
+        std::fs::write(
+            &task_path,
+            "---\nid: 42\ntitle: Task 42\nstatus: review\npriority: high\nclass: standard\nclaimed_by: eng-1-2\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        cmd_review(
+            &actual_board_dir,
+            42,
+            "changes_requested",
+            Some("fix the error handling"),
+        )
+        .unwrap();
+
+        let pending = crate::team::inbox::pending_messages(&inbox_root, "eng-1-2").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(
+            pending[0].body.contains("fix the error handling"),
+            "feedback message should be delivered to engineer inbox"
+        );
+        assert!(pending[0].body.contains("#42"));
     }
 }
