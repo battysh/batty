@@ -745,8 +745,28 @@ fn spawn_daemon(project_root: &Path, resume: bool) -> Result<u32> {
         cmd.process_group(0);
     }
 
-    let child = cmd.spawn().context("failed to spawn daemon process")?;
+    let mut child = cmd.spawn().context("failed to spawn daemon process")?;
     let pid = child.id();
+
+    // Give the child a moment to start up and verify it didn't exit immediately
+    // (e.g. due to an unrecognized subcommand in an outdated binary).
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            let _ = std::fs::remove_file(&pid_path);
+            bail!(
+                "daemon process exited immediately with {status}; \
+                 this usually means the installed batty binary is outdated \
+                 and missing the `daemon` subcommand — rebuild and reinstall \
+                 (see {log})",
+                log = log_path.display(),
+            );
+        }
+        Ok(None) => {} // still running — good
+        Err(e) => {
+            warn!(pid, error = %e, "failed to check daemon process status");
+        }
+    }
 
     std::fs::write(&pid_path, pid.to_string())
         .with_context(|| format!("failed to write PID file: {}", pid_path.display()))?;
