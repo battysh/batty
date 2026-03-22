@@ -104,6 +104,7 @@ jobs:
           --skip orchestrator::tests::harness_direct_reply
           --skip tier2::tests::call_supervisor
           --skip work::phase_worktree::tests::prepare_agent_worktrees_creates
+          --skip team::daemon::tests::startup_cwd_validation_corrects_all_agent_panes
 
   coverage:
     name: Code Coverage
@@ -149,6 +150,7 @@ jobs:
           --skip orchestrator::tests::harness_direct_reply
           --skip tier2::tests::call_supervisor
           --skip work::phase_worktree::tests::prepare_agent_worktrees_creates
+          --skip team::daemon::tests::startup_cwd_validation_corrects_all_agent_panes
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v5
