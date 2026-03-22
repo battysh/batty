@@ -181,6 +181,22 @@ Production code uses typed domain errors (`GitError`, `BoardError`, `TmuxError`,
 
 Each role prompt may contain a `## Nudge` section with role-specific reminders. The daemon extracts this at startup and prepends it to system-generated intervention messages. This combines human-authored role guidance ("check the board for review items") with machine-generated context ("3 tasks waiting, eng-1-2 idle 5 min"). Nudge intervals are configurable per role via `nudge_interval_secs` in team.yaml.
 
+## Non-Code Project Support
+
+Batty was designed for git-tracked code projects but is also used for non-code workspaces (e.g., marketing campaigns, content teams). The system must gracefully handle the absence of git: skip worktree operations, skip merge/branch workflows, and avoid noisy warnings. The `use_worktrees: false` config flag is the gate — when set, all git-dependent daemon operations (worktree setup, branch detection, merge, cwd correction to worktree paths) must be bypassed entirely.
+
+Additionally, non-role message sources (e.g., email routers, webhook bridges) need a way to inject messages into the team without being listed as full roles in team.yaml. The `external_senders` config list permits delivery from named sources that aren't part of the role hierarchy.
+
+## Review Automation
+
+The review queue is the primary throughput constraint. Manual review serializes the pipeline: engineers complete tasks faster than the manager can review and merge, creating idle time that scales with engineer count.
+
+The review automation system adds a policy-driven auto-merge path alongside the existing manual review flow. When a completed task meets configurable criteria (tests pass, diff size below threshold, no conflicts, no sensitive files touched), the daemon merges it without waiting for manual review. Tasks that don't meet auto-merge criteria remain in the manual review queue, which gains time-based escalation to prevent stalls.
+
+The key architectural constraint: auto-merge must be conservative by default. The system should never auto-merge something a human would reject. Better to route a safe change to manual review than to auto-merge a risky one. The confidence scoring layer evaluates diff characteristics beyond raw size — touching migrations, config files, or multiple modules reduces confidence regardless of line count.
+
+Review feedback becomes structured data (disposition + specific comments stored in task frontmatter) rather than free-text chat messages. This makes rework cycles deterministic: the engineer receives exactly what needs to change, not a vague instruction.
+
 ## Key Design Decisions
 
 **Why tmux?** Output capture (pipe-pane), input injection (send-keys/paste-buffer), status bar, panes, session persistence — all for free. No custom terminal code.

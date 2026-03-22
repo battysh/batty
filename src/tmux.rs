@@ -787,59 +787,6 @@ pub fn take_supervisor_hotkey_action(session: &str) -> Result<Option<String>> {
     Ok(Some(action))
 }
 
-
-/// Split the window vertically by fixed line count.
-pub fn split_window_vertical_lines(session: &str, lines: u32, command: &[String]) -> Result<()> {
-    let mut cmd = Command::new("tmux");
-    cmd.args([
-        "split-window",
-        "-v",
-        "-l",
-        &lines.to_string(),
-        "-t",
-        session,
-    ]);
-    for arg in command {
-        cmd.arg(arg);
-    }
-
-    let output = cmd
-        .output()
-        .with_context(|| format!("failed to split window in session '{session}'"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("tmux split-window -l failed: {stderr}");
-    }
-
-    Ok(())
-}
-
-/// Split the window vertically by percentage and run command in the new pane.
-pub fn split_window_vertical_percent(
-    session: &str,
-    percent: u32,
-    command: &[String],
-) -> Result<()> {
-    let size = format!("{percent}%");
-    let mut cmd = Command::new("tmux");
-    cmd.args(["split-window", "-v", "-l", &size, "-t", session]);
-    for arg in command {
-        cmd.arg(arg);
-    }
-
-    let output = cmd
-        .output()
-        .with_context(|| format!("failed to split window in session '{session}'"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("tmux split-window -p failed: {stderr}");
-    }
-
-    Ok(())
-}
-
 /// List panes in a session.
 ///
 /// Returns a list of pane IDs (e.g., ["%0", "%1"]).

@@ -1032,6 +1032,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         &self.config.project_root
     }
 
+    #[cfg(test)]
     pub(super) fn set_auto_merge_override(&mut self, task_id: u32, enabled: bool) {
         self.auto_merge_overrides.insert(task_id, enabled);
     }
