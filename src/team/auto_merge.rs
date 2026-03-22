@@ -46,6 +46,12 @@ pub struct DiffSummary {
     pub sensitive_files: Vec<String>,
     pub has_unsafe: bool,
     pub has_conflicts: bool,
+    /// Number of renamed files (pure renames are lower risk).
+    pub rename_count: usize,
+    /// Whether the diff touches migration-like files (schema changes, etc.).
+    pub has_migrations: bool,
+    /// Whether the diff touches config files (YAML, TOML, JSON config).
+    pub has_config_changes: bool,
 }
 
 impl DiffSummary {
@@ -118,6 +124,26 @@ pub fn analyze_diff(repo: &Path, base: &str, branch: &str) -> Result<DiffSummary
         line.starts_with('+') && (line.contains("unsafe {") || line.contains("unsafe fn"))
     });
 
+    // Count renames (pure renames are lower risk than logic changes)
+    let rename_output = Command::new("git")
+        .args([
+            "diff",
+            "--diff-filter=R",
+            "--name-only",
+            &format!("{}...{}", base, branch),
+        ])
+        .current_dir(repo)
+        .output()
+        .context("failed to run git diff --diff-filter=R")?;
+    let rename_count = String::from_utf8_lossy(&rename_output.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .count();
+
+    // Detect migration and config file changes
+    let has_migrations = changed_paths.iter().any(is_migration_file);
+    let has_config_changes = changed_paths.iter().any(is_config_file);
+
     // Check if branch can merge cleanly into base
     let has_conflicts = check_has_conflicts(repo, base, branch);
 
@@ -129,6 +155,9 @@ pub fn analyze_diff(repo: &Path, base: &str, branch: &str) -> Result<DiffSummary
         sensitive_files: changed_paths, // filtered by caller via policy
         has_unsafe,
         has_conflicts,
+        rename_count,
+        has_migrations,
+        has_config_changes,
     })
 }
 
@@ -156,6 +185,27 @@ fn check_has_conflicts(repo: &Path, base: &str, branch: &str) -> bool {
         }
         Err(_) => true, // merge-tree failed — assume conflicts
     }
+}
+
+/// Returns true if the path looks like a migration file.
+fn is_migration_file(path: &String) -> bool {
+    let lower = path.to_lowercase();
+    lower.contains("migration")
+        || lower.contains("migrate")
+        || lower.contains("/db/")
+        || lower.contains("schema")
+        || lower.ends_with(".sql")
+}
+
+/// Returns true if the path looks like a config file (not source code).
+fn is_config_file(path: &String) -> bool {
+    let lower = path.to_lowercase();
+    lower.ends_with(".yaml")
+        || lower.ends_with(".yml")
+        || lower.ends_with(".toml")
+        || lower.ends_with(".json")
+        || lower.ends_with(".env")
+        || lower.ends_with(".env.example")
 }
 
 /// Compute merge confidence score (0.0-1.0) from a diff summary and policy.
@@ -196,6 +246,22 @@ pub fn compute_merge_confidence(summary: &DiffSummary, policy: &AutoMergePolicy)
     // Subtract 0.5 if conflicts detected with main
     if summary.has_conflicts {
         confidence -= 0.5;
+    }
+
+    // Subtract 0.3 for migration/schema changes (high risk)
+    if summary.has_migrations {
+        confidence -= 0.3;
+    }
+
+    // Subtract 0.15 for config file changes
+    if summary.has_config_changes {
+        confidence -= 0.15;
+    }
+
+    // Boost confidence when most changes are renames (low-risk)
+    if summary.rename_count > 0 && summary.files_changed > 0 {
+        let rename_ratio = summary.rename_count as f64 / summary.files_changed as f64;
+        confidence += 0.1 * rename_ratio;
     }
 
     // Floor at 0.0
@@ -272,6 +338,14 @@ pub fn should_auto_merge(
         reasons.push("contains unsafe blocks".to_string());
     }
 
+    if summary.has_migrations {
+        reasons.push("contains migration/schema changes".to_string());
+    }
+
+    if summary.has_config_changes {
+        reasons.push("contains config file changes".to_string());
+    }
+
     if reasons.is_empty() {
         AutoMergeDecision::AutoMerge { confidence }
     } else {
@@ -313,6 +387,9 @@ mod tests {
             sensitive_files: sensitive.into_iter().map(String::from).collect(),
             has_unsafe,
             has_conflicts: false,
+            rename_count: 0,
+            has_migrations: false,
+            has_config_changes: false,
         }
     }
 
@@ -501,6 +578,138 @@ mod tests {
             }
             other => panic!("expected ManualReview, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn migrations_reduce_confidence() {
+        let mut summary = make_summary(2, 30, 20, vec!["team"], vec![], false);
+        summary.has_migrations = true;
+        let policy = enabled_policy();
+        let confidence = compute_merge_confidence(&summary, &policy);
+        // 1.0 - 0.3 = 0.7
+        assert!(
+            (confidence - 0.7).abs() < 0.001,
+            "confidence should be 0.7, got {}",
+            confidence
+        );
+    }
+
+    #[test]
+    fn migrations_route_to_review() {
+        let mut summary = make_summary(2, 30, 20, vec!["team"], vec![], false);
+        summary.has_migrations = true;
+        let policy = enabled_policy();
+        let decision = should_auto_merge(&summary, &policy, true);
+        match decision {
+            AutoMergeDecision::ManualReview { reasons, .. } => {
+                assert!(
+                    reasons.iter().any(|r| r.contains("migration")),
+                    "should mention migration: {:?}",
+                    reasons
+                );
+            }
+            other => panic!("expected ManualReview, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn config_changes_reduce_confidence() {
+        let mut summary = make_summary(2, 30, 20, vec!["team"], vec![], false);
+        summary.has_config_changes = true;
+        let policy = enabled_policy();
+        let confidence = compute_merge_confidence(&summary, &policy);
+        // 1.0 - 0.15 = 0.85
+        assert!(
+            (confidence - 0.85).abs() < 0.001,
+            "confidence should be 0.85, got {}",
+            confidence
+        );
+    }
+
+    #[test]
+    fn config_changes_route_to_review() {
+        let mut summary = make_summary(2, 30, 20, vec!["team"], vec![], false);
+        summary.has_config_changes = true;
+        let policy = enabled_policy();
+        let decision = should_auto_merge(&summary, &policy, true);
+        match decision {
+            AutoMergeDecision::ManualReview { reasons, .. } => {
+                assert!(
+                    reasons.iter().any(|r| r.contains("config")),
+                    "should mention config: {:?}",
+                    reasons
+                );
+            }
+            other => panic!("expected ManualReview, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn renames_boost_confidence() {
+        let mut summary = make_summary(4, 10, 10, vec!["team"], vec![], false);
+        // 4 files changed, 3 of them are renames
+        summary.rename_count = 3;
+        let policy = enabled_policy();
+        let confidence_with_renames = compute_merge_confidence(&summary, &policy);
+
+        let summary_no_renames = make_summary(4, 10, 10, vec!["team"], vec![], false);
+        let confidence_without = compute_merge_confidence(&summary_no_renames, &policy);
+
+        assert!(
+            confidence_with_renames > confidence_without,
+            "renames should boost confidence: with={}, without={}",
+            confidence_with_renames,
+            confidence_without
+        );
+    }
+
+    #[test]
+    fn all_renames_gives_full_boost() {
+        let mut summary = make_summary(4, 0, 0, vec!["team"], vec![], false);
+        summary.rename_count = 4;
+        let policy = enabled_policy();
+        let confidence = compute_merge_confidence(&summary, &policy);
+        // 1.0 - 0.1*(4-3) + 0.1*(4/4) = 1.0 - 0.1 + 0.1 = 1.0
+        assert!(
+            (confidence - 1.0).abs() < 0.001,
+            "all-rename diff should have full confidence: {}",
+            confidence
+        );
+    }
+
+    #[test]
+    fn migration_file_detection() {
+        assert!(is_migration_file(&"db/migrate/001_add_users.sql".into()));
+        assert!(is_migration_file(&"src/migrations/v2.rs".into()));
+        assert!(is_migration_file(&"schema.sql".into()));
+        assert!(!is_migration_file(&"src/team/mod.rs".into()));
+    }
+
+    #[test]
+    fn config_file_detection() {
+        assert!(is_config_file(&"team.yaml".into()));
+        assert!(is_config_file(&"Cargo.toml".into()));
+        assert!(is_config_file(&"package.json".into()));
+        assert!(is_config_file(&".env".into()));
+        assert!(!is_config_file(&"src/team/config.rs".into()));
+    }
+
+    #[test]
+    fn combined_risk_factors_accumulate() {
+        let mut summary = make_summary(
+            6,
+            200,
+            100,
+            vec!["team", "cli", "tmux"],
+            vec!["Cargo.toml"],
+            true,
+        );
+        summary.has_migrations = true;
+        summary.has_config_changes = true;
+        summary.has_conflicts = true;
+        let policy = enabled_policy();
+        let confidence = compute_merge_confidence(&summary, &policy);
+        assert_eq!(confidence, 0.0, "extreme risk diff should floor at 0.0");
     }
 
     #[test]
