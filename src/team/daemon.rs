@@ -890,6 +890,148 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         Ok(())
     }
 
+    /// Handle a stalled agent — no output change for longer than the configured threshold.
+    fn handle_stalled_agent(&mut self, member_name: &str, stall_secs: u64) -> Result<()> {
+        let Some(task) = self.active_task(member_name)? else {
+            return Ok(());
+        };
+        let member = match self.config.members.iter().find(|m| m.name == member_name) {
+            Some(m) => m.clone(),
+            None => return Ok(()),
+        };
+        let Some(pane_id) = self.config.pane_map.get(member_name).cloned() else {
+            return Ok(());
+        };
+
+        let stall_cooldown_key = format!("stall-restart::{member_name}");
+        let on_cooldown = self
+            .intervention_cooldowns
+            .get(&stall_cooldown_key)
+            .is_some_and(|last| last.elapsed() < CONTEXT_RESTART_COOLDOWN);
+        if on_cooldown {
+            return Ok(());
+        }
+
+        let task_id_str = task.id.to_string();
+        let prior_restarts = self.stall_restart_count(task.id)?;
+        let max_restarts = self.config.team_config.workflow_policy.max_stall_restarts;
+
+        warn!(
+            member = %member_name,
+            task_id = task.id,
+            stall_secs,
+            prior_restarts,
+            "agent stalled — no output change"
+        );
+
+        self.emit_event(TeamEvent::stall_detected(
+            member_name,
+            Some(task.id),
+            stall_secs,
+        ));
+        self.record_orchestrator_action(format!(
+            "stall: detected agent stall for {} on task #{} ({}s no output, {} prior restarts)",
+            member_name, task.id, stall_secs, prior_restarts,
+        ));
+
+        if prior_restarts >= max_restarts {
+            // Escalate to manager instead of restarting again.
+            let escalation_key = format!("stall-escalation::{member_name}");
+            let escalation_on_cooldown = self
+                .intervention_cooldowns
+                .get(&escalation_key)
+                .is_some_and(|last| last.elapsed() < CONTEXT_RESTART_COOLDOWN);
+            if escalation_on_cooldown {
+                return Ok(());
+            }
+            self.escalate_stalled_agent(&member, &task, prior_restarts + 1)?;
+            self.intervention_cooldowns
+                .insert(escalation_key, Instant::now());
+            return Ok(());
+        }
+
+        // Restart the stalled agent with task context.
+        tmux::respawn_pane(&pane_id, "bash")?;
+        std::thread::sleep(Duration::from_millis(200));
+
+        let assignment = Self::restart_assignment_message(&task);
+        let launch =
+            self.launch_task_assignment(member_name, &assignment, Some(task.id), false, false)?;
+        let mut restart_notice = format!(
+            "Restarted after stall ({}s no output). Continue task #{} from the current worktree state.",
+            stall_secs, task.id
+        );
+        if let Some(branch) = launch.branch.as_deref() {
+            restart_notice.push_str(&format!("\nBranch: {branch}"));
+        }
+        restart_notice.push_str(&format!("\nWorktree: {}", launch.work_dir.display()));
+        if let Err(error) = self.queue_message("daemon", member_name, &restart_notice) {
+            warn!(member = %member_name, error = %error, "failed to inject stall restart notice");
+        }
+        self.record_orchestrator_action(format!(
+            "stall: relaunched {} on task #{} after {}s stall",
+            member_name, task.id, stall_secs,
+        ));
+        self.intervention_cooldowns
+            .insert(stall_cooldown_key, Instant::now());
+        self.record_agent_restarted(member_name, task_id_str, "stalled", prior_restarts + 1);
+        Ok(())
+    }
+
+    /// Escalate a stalled agent to its manager after max restarts exceeded.
+    fn escalate_stalled_agent(
+        &mut self,
+        member: &MemberInstance,
+        task: &crate::task::Task,
+        restart_count: u32,
+    ) -> Result<()> {
+        let Some(manager) = member.reports_to.as_deref() else {
+            warn!(
+                member = %member.name,
+                task_id = task.id,
+                restart_count,
+                "stall exceeded restart limit with no escalation target"
+            );
+            return Ok(());
+        };
+
+        let body = format!(
+            "Task #{task_id} for {member_name} stalled {restart_count} times (no output). \
+             Batty restarted it {max} time(s) already and will not restart again automatically.\n\
+             Task: {title}\n\
+             Next step: decide whether to split the task, redirect the engineer, or intervene directly.",
+            task_id = task.id,
+            member_name = member.name,
+            title = task.title,
+            max = restart_count.saturating_sub(1),
+        );
+        self.queue_message("daemon", manager, &body)?;
+        self.record_orchestrator_action(format!(
+            "stall: escalated stall for {} on task #{} after {} stalls",
+            member.name, task.id, restart_count,
+        ));
+        self.record_task_escalated(&member.name, task.id.to_string(), Some("stalled"));
+        Ok(())
+    }
+
+    /// Count prior stall restarts for a given task from the event log.
+    fn stall_restart_count(&self, task_id: u32) -> Result<u32> {
+        let events_path = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let task_id = task_id.to_string();
+        let count = super::events::read_events(&events_path)?
+            .into_iter()
+            .filter(|event| event.event == "agent_restarted")
+            .filter(|event| event.task.as_deref() == Some(task_id.as_str()))
+            .filter(|event| event.reason.as_deref() == Some("stalled"))
+            .count() as u32;
+        Ok(count)
+    }
+
     /// Load the prompt template for a member, substituting role-specific info.
     fn load_prompt(&self, member: &MemberInstance, config_dir: &Path) -> String {
         let prompt_file = member.prompt.as_deref().unwrap_or(match member.role_type {
@@ -929,7 +1071,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
                 .get(name)
                 .map(|watcher| watcher.state)
                 .unwrap_or(WatcherState::Idle);
-            let (new_state, completion_observed, session_size_bytes) = {
+            let (new_state, completion_observed, session_size_bytes, secs_since_output) = {
                 let watcher = match self.watcher_mut(name) {
                     Ok(watcher) => watcher,
                     Err(error) => {
@@ -942,6 +1084,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
                         new_state,
                         watcher.take_completion_event(),
                         watcher.current_session_size_bytes(),
+                        watcher.secs_since_last_output_change(),
                     ),
                     Err(e) => {
                         warn!(member = %name, error = %e, "watcher poll failed");
@@ -1006,6 +1149,21 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
                     );
                 }
                 continue;
+            }
+
+            // Stall detection: active agent with no output change beyond threshold.
+            if new_state == WatcherState::Active && self.active_task_id(name).is_some() {
+                let threshold = self.config.team_config.workflow_policy.stall_threshold_secs;
+                if secs_since_output >= threshold {
+                    if let Err(error) = self.handle_stalled_agent(name, secs_since_output) {
+                        warn!(
+                            member = %name,
+                            error = %error,
+                            "stall restart handling failed; continuing"
+                        );
+                    }
+                    continue;
+                }
             }
 
             if completion_observed && self.active_task_id(name).is_some() {
@@ -6413,6 +6571,404 @@ exit 1
         assert!(
             !daemon.review_nudge_sent.contains(&61),
             "medium task should NOT be nudged at 400s (threshold 1800s)"
+        );
+    }
+
+    #[test]
+    fn stall_restart_count_returns_zero_with_no_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let daemon = make_test_daemon(tmp.path(), vec![]);
+        let count = daemon.stall_restart_count(42).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn stall_restart_count_counts_only_stalled_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        write_event_log(
+            tmp.path(),
+            &[
+                TeamEvent::agent_restarted("eng-1-1", "42", "context_exhausted", 1),
+                TeamEvent::agent_restarted("eng-1-1", "42", "stalled", 1),
+                TeamEvent::agent_restarted("eng-1-1", "42", "stalled", 2),
+                TeamEvent::agent_restarted("eng-1-1", "99", "stalled", 1),
+            ],
+        );
+
+        let daemon = make_test_daemon(tmp.path(), vec![]);
+        // Only counts stalled reason for task 42
+        assert_eq!(daemon.stall_restart_count(42).unwrap(), 2);
+        // Task 99 has only 1 stalled restart
+        assert_eq!(daemon.stall_restart_count(99).unwrap(), 1);
+        // Task 100 has no events
+        assert_eq!(daemon.stall_restart_count(100).unwrap(), 0);
+    }
+
+    #[test]
+    fn stall_detection_config_defaults() {
+        let policy = WorkflowPolicy::default();
+        assert_eq!(policy.stall_threshold_secs, 300);
+        assert_eq!(policy.max_stall_restarts, 2);
+    }
+
+    #[test]
+    #[serial]
+    fn stall_restart_relaunches_stalled_agent_with_task_context() {
+        let session = format!("batty-test-stall-restart-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let member_name = "eng-stall";
+        let lead_name = "lead-stall";
+        let (fake_bin, fake_log) = setup_fake_claude(&tmp, member_name);
+        let worktree_path = tmp.path().join("worktree");
+        std::fs::create_dir_all(&worktree_path).unwrap();
+
+        crate::tmux::create_session(&session, "bash", &[], tmp.path().to_str().unwrap()).unwrap();
+        crate::tmux::create_window(
+            &session,
+            "keeper",
+            "sleep",
+            &["30".to_string()],
+            tmp.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let pane_id = crate::tmux::pane_id(&session).unwrap();
+        Command::new("tmux")
+            .args(["set-option", "-p", "-t", &pane_id, "remain-on-exit", "on"])
+            .output()
+            .unwrap();
+
+        let lead = MemberInstance {
+            name: lead_name.to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: member_name.to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some(lead_name.to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                external_senders: Vec::new(),
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+                retro_min_duration_secs: 60,
+                roles: Vec::new(),
+            },
+            session: session.clone(),
+            members: vec![lead, engineer],
+            pane_map: HashMap::from([(member_name.to_string(), pane_id.clone())]),
+        })
+        .unwrap();
+        daemon
+            .states
+            .insert(member_name.to_string(), MemberState::Working);
+        daemon.active_tasks.insert(member_name.to_string(), 42);
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, member_name).unwrap();
+        inbox::init_inbox(&root, lead_name).unwrap();
+        write_owned_task_file_with_context(
+            tmp.path(),
+            42,
+            "stall-test-task",
+            "in-progress",
+            member_name,
+            "eng-stall/42",
+            &worktree_path.display().to_string(),
+        );
+
+        daemon.handle_stalled_agent(member_name, 300).unwrap();
+
+        let log = (0..100)
+            .find_map(|_| {
+                let content = match std::fs::read_to_string(&fake_log) {
+                    Ok(content) => content,
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_millis(100));
+                        return None;
+                    }
+                };
+                if content.contains("Continuing Task #42") {
+                    Some(content)
+                } else {
+                    std::thread::sleep(Duration::from_millis(100));
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "fake claude log was not written by restarted member at {}",
+                    fake_log.display()
+                )
+            });
+        assert!(log.contains("stall-test-task"));
+        assert!(log.contains("Branch: eng-stall/42"));
+        assert!(log.contains(&format!("Worktree: {}", worktree_path.display())));
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+
+        // Should have stall_detected event
+        let stall_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.event == "stall_detected")
+            .collect();
+        assert_eq!(stall_events.len(), 1);
+        assert_eq!(stall_events[0].role.as_deref(), Some(member_name));
+        assert_eq!(stall_events[0].task.as_deref(), Some("42"));
+        assert_eq!(stall_events[0].uptime_secs, Some(300));
+
+        // Should have agent_restarted event with "stalled" reason
+        let restart_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.event == "agent_restarted")
+            .collect();
+        assert_eq!(restart_events.len(), 1);
+        assert_eq!(restart_events[0].role.as_deref(), Some(member_name));
+        assert_eq!(restart_events[0].task.as_deref(), Some("42"));
+        assert_eq!(restart_events[0].reason.as_deref(), Some("stalled"));
+        assert_eq!(restart_events[0].restart_count, Some(1));
+
+        // Should have injected a restart notice via message routing
+        assert!(events.iter().any(|e| {
+            e.event == "message_routed"
+                && e.from.as_deref() == Some("daemon")
+                && e.to.as_deref() == Some(member_name)
+        }));
+
+        crate::tmux::kill_session(&session).unwrap();
+        let _ = std::fs::remove_dir_all(&fake_bin);
+    }
+
+    #[test]
+    #[serial]
+    fn stall_escalates_after_max_restarts() {
+        let session = format!("batty-test-stall-escalate-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let member_name = "eng-stall-esc";
+        let lead_name = "lead-stall-esc";
+        let (fake_bin, fake_log) = setup_fake_claude(&tmp, member_name);
+
+        crate::tmux::create_session(&session, "bash", &[], tmp.path().to_str().unwrap()).unwrap();
+        crate::tmux::create_window(
+            &session,
+            "keeper",
+            "sleep",
+            &["30".to_string()],
+            tmp.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let pane_id = crate::tmux::pane_id(&session).unwrap();
+
+        let lead = MemberInstance {
+            name: lead_name.to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: member_name.to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some(lead_name.to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy {
+                    max_stall_restarts: 2,
+                    ..WorkflowPolicy::default()
+                },
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                external_senders: Vec::new(),
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+                retro_min_duration_secs: 60,
+                roles: Vec::new(),
+            },
+            session: session.clone(),
+            members: vec![lead, engineer],
+            pane_map: HashMap::from([(member_name.to_string(), pane_id)]),
+        })
+        .unwrap();
+        daemon
+            .states
+            .insert(member_name.to_string(), MemberState::Working);
+        daemon.active_tasks.insert(member_name.to_string(), 50);
+
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&root, lead_name).unwrap();
+        write_owned_task_file(
+            tmp.path(),
+            50,
+            "stall-escalate-task",
+            "in-progress",
+            member_name,
+        );
+
+        // Write 2 prior stall restarts to event log
+        write_event_log(
+            tmp.path(),
+            &[
+                TeamEvent::agent_restarted(member_name, "50", "stalled", 1),
+                TeamEvent::agent_restarted(member_name, "50", "stalled", 2),
+            ],
+        );
+
+        daemon.handle_stalled_agent(member_name, 600).unwrap();
+
+        // Should have escalated to manager, not restarted
+        let pending = inbox::pending_messages(&root, lead_name).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].body.contains("Task #50"));
+        assert!(pending[0].body.contains("stalled"));
+        assert!(pending[0].body.contains("will not restart again"));
+
+        // Should NOT have re-launched the agent
+        let log = std::fs::read_to_string(&fake_log).unwrap_or_default();
+        assert!(!log.contains("Continuing Task #50"));
+
+        // Check events
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        // 2 prior + 0 new restarts (escalation, not restart)
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.event == "agent_restarted")
+                .count(),
+            2
+        );
+        // Should have task_escalated event
+        assert!(events.iter().any(|e| {
+            e.event == "task_escalated"
+                && e.role.as_deref() == Some(member_name)
+                && e.reason.as_deref() == Some("stalled")
+        }));
+        // Should have stall_detected event
+        assert!(events.iter().any(|e| e.event == "stall_detected"));
+
+        crate::tmux::kill_session(&session).unwrap();
+        let _ = std::fs::remove_dir_all(&fake_bin);
+    }
+
+    #[test]
+    fn stall_restart_cooldown_prevents_repeat_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let member_name = "eng-stall-cd";
+        let lead_name = "lead-stall-cd";
+
+        let lead = MemberInstance {
+            name: lead_name.to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: member_name.to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some(lead_name.to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![lead, engineer]);
+        daemon.active_tasks.insert(member_name.to_string(), 77);
+        daemon
+            .config
+            .pane_map
+            .insert(member_name.to_string(), "%999".to_string());
+        write_owned_task_file(tmp.path(), 77, "cooldown-task", "in-progress", member_name);
+
+        // Set cooldown as if we just restarted
+        daemon
+            .intervention_cooldowns
+            .insert(format!("stall-restart::{member_name}"), Instant::now());
+
+        // Should be a no-op due to cooldown
+        daemon.handle_stalled_agent(member_name, 300).unwrap();
+
+        // No events should have been emitted (cooldown blocks before event emission?
+        // Actually looking at the code, the stall_detected event is emitted before
+        // cooldown check. Let me re-check...
+        // Actually the cooldown check is BEFORE the event emission in handle_stalled_agent.
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap_or_default();
+        // No stall_detected or agent_restarted should be emitted
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.event == "stall_detected" || e.event == "agent_restarted")
+                .count(),
+            0,
+            "cooldown should suppress all stall handling"
         );
     }
 }

@@ -257,6 +257,15 @@ impl TeamEvent {
         }
     }
 
+    pub fn stall_detected(role: &str, task: Option<u32>, stall_duration_secs: u64) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: task.map(|id| id.to_string()),
+            uptime_secs: Some(stall_duration_secs),
+            ..Self::base("stall_detected")
+        }
+    }
+
     pub fn message_routed(from: &str, to: &str) -> Self {
         Self {
             from: Some(from.into()),
@@ -1180,5 +1189,32 @@ mod tests {
             0,
             "production events.rs should avoid unwrap/expect"
         );
+    }
+
+    #[test]
+    fn stall_detected_event_fields() {
+        let event = TeamEvent::stall_detected("eng-1-1", Some(42), 300);
+        assert_eq!(event.event, "stall_detected");
+        assert_eq!(event.role.as_deref(), Some("eng-1-1"));
+        assert_eq!(event.task.as_deref(), Some("42"));
+        assert_eq!(event.uptime_secs, Some(300));
+    }
+
+    #[test]
+    fn stall_detected_event_without_task() {
+        let event = TeamEvent::stall_detected("eng-1-1", None, 600);
+        assert_eq!(event.event, "stall_detected");
+        assert_eq!(event.role.as_deref(), Some("eng-1-1"));
+        assert!(event.task.is_none());
+        assert_eq!(event.uptime_secs, Some(600));
+    }
+
+    #[test]
+    fn stall_detected_event_serializes_to_jsonl() {
+        let event = TeamEvent::stall_detected("eng-1-1", Some(42), 300);
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"stall_detected\""));
+        assert!(json.contains("\"eng-1-1\""));
+        assert!(json.contains("\"42\""));
     }
 }
