@@ -432,4 +432,348 @@ mod tests {
             other => panic!("expected valid send command, got {other:?}"),
         }
     }
+
+    // --- Additional serialization edge cases ---
+
+    #[test]
+    fn send_command_preserves_multiline_message() {
+        let cmd = QueuedCommand::Send {
+            from: "manager".into(),
+            to: "eng-1".into(),
+            message: "line one\nline two\nline three".into(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let parsed: QueuedCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            QueuedCommand::Send { message, .. } => {
+                assert_eq!(message, "line one\nline two\nline three");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn send_command_preserves_empty_message() {
+        let cmd = QueuedCommand::Send {
+            from: "human".into(),
+            to: "architect".into(),
+            message: "".into(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let parsed: QueuedCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            QueuedCommand::Send { message, .. } => assert!(message.is_empty()),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn send_command_preserves_unicode() {
+        let cmd = QueuedCommand::Send {
+            from: "人間".into(),
+            to: "アーキ".into(),
+            message: "日本語テスト 🚀".into(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let parsed: QueuedCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            QueuedCommand::Send { from, to, message } => {
+                assert_eq!(from, "人間");
+                assert_eq!(to, "アーキ");
+                assert_eq!(message, "日本語テスト 🚀");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn assign_command_preserves_special_chars_in_task() {
+        let cmd = QueuedCommand::Assign {
+            from: "manager".into(),
+            engineer: "eng-1-1".into(),
+            task: "Task #42: Fix \"auth\" — it's broken!".into(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let parsed: QueuedCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            QueuedCommand::Assign { task, .. } => {
+                assert_eq!(task, "Task #42: Fix \"auth\" — it's broken!");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    // --- enqueue_command edge cases ---
+
+    #[test]
+    fn enqueue_creates_parent_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue = tmp
+            .path()
+            .join("deep")
+            .join("nested")
+            .join("commands.jsonl");
+
+        enqueue_command(
+            &queue,
+            &QueuedCommand::Send {
+                from: "human".into(),
+                to: "arch".into(),
+                message: "hello".into(),
+            },
+        )
+        .unwrap();
+
+        assert!(queue.exists());
+        let commands = read_command_queue(&queue).unwrap();
+        assert_eq!(commands.len(), 1);
+    }
+
+    #[test]
+    fn enqueue_appends_multiple_commands_preserving_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue = tmp.path().join("commands.jsonl");
+
+        for i in 0..5 {
+            enqueue_command(
+                &queue,
+                &QueuedCommand::Send {
+                    from: "human".into(),
+                    to: "arch".into(),
+                    message: format!("msg-{i}"),
+                },
+            )
+            .unwrap();
+        }
+
+        let commands = read_command_queue(&queue).unwrap();
+        assert_eq!(commands.len(), 5);
+        for (i, cmd) in commands.iter().enumerate() {
+            match cmd {
+                QueuedCommand::Send { message, .. } => {
+                    assert_eq!(message, &format!("msg-{i}"));
+                }
+                _ => panic!("wrong variant at index {i}"),
+            }
+        }
+    }
+
+    // --- read_command_queue edge cases ---
+
+    #[test]
+    fn read_command_queue_skips_empty_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue = tmp.path().join("commands.jsonl");
+        std::fs::write(
+            &queue,
+            "\n\n{\"type\":\"send\",\"from\":\"a\",\"to\":\"b\",\"message\":\"hi\"}\n\n\n",
+        )
+        .unwrap();
+
+        let commands = read_command_queue(&queue).unwrap();
+        assert_eq!(commands.len(), 1);
+    }
+
+    #[test]
+    fn read_command_queue_skips_whitespace_only_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue = tmp.path().join("commands.jsonl");
+        std::fs::write(
+            &queue,
+            "   \n\t\n{\"type\":\"send\",\"from\":\"a\",\"to\":\"b\",\"message\":\"ok\"}\n  \n",
+        )
+        .unwrap();
+
+        let commands = read_command_queue(&queue).unwrap();
+        assert_eq!(commands.len(), 1);
+    }
+
+    #[test]
+    fn read_command_queue_mixed_valid_and_malformed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue = tmp.path().join("commands.jsonl");
+        std::fs::write(
+            &queue,
+            concat!(
+                "{\"type\":\"send\",\"from\":\"a\",\"to\":\"b\",\"message\":\"first\"}\n",
+                "garbage line\n",
+                "{\"type\":\"assign\",\"from\":\"m\",\"engineer\":\"e1\",\"task\":\"t1\"}\n",
+                "{\"invalid json\n",
+                "{\"type\":\"send\",\"from\":\"c\",\"to\":\"d\",\"message\":\"last\"}\n",
+            ),
+        )
+        .unwrap();
+
+        let commands = read_command_queue(&queue).unwrap();
+        assert_eq!(
+            commands.len(),
+            3,
+            "should parse 3 valid commands, skip 2 malformed"
+        );
+    }
+
+    // --- write_command_queue edge cases ---
+
+    #[test]
+    fn write_command_queue_empty_slice_creates_empty_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue = tmp.path().join("commands.jsonl");
+
+        // First enqueue something
+        enqueue_command(
+            &queue,
+            &QueuedCommand::Send {
+                from: "a".into(),
+                to: "b".into(),
+                message: "hello".into(),
+            },
+        )
+        .unwrap();
+
+        // Overwrite with empty
+        write_command_queue(&queue, &[]).unwrap();
+
+        let commands = read_command_queue(&queue).unwrap();
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn write_command_queue_creates_parent_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue = tmp.path().join("sub").join("dir").join("q.jsonl");
+
+        write_command_queue(
+            &queue,
+            &[QueuedCommand::Assign {
+                from: "m".into(),
+                engineer: "e1".into(),
+                task: "t1".into(),
+            }],
+        )
+        .unwrap();
+
+        let commands = read_command_queue(&queue).unwrap();
+        assert_eq!(commands.len(), 1);
+    }
+
+    // --- command_queue_path ---
+
+    #[test]
+    fn command_queue_path_returns_expected_path() {
+        let root = Path::new("/project");
+        let path = command_queue_path(root);
+        assert_eq!(
+            path,
+            PathBuf::from("/project/.batty/team_config/commands.jsonl")
+        );
+    }
+
+    #[test]
+    fn command_queue_path_with_trailing_slash() {
+        let root = Path::new("/project/");
+        let path = command_queue_path(root);
+        assert_eq!(
+            path,
+            PathBuf::from("/project/.batty/team_config/commands.jsonl")
+        );
+    }
+
+    // --- drain_command_queue ---
+
+    #[test]
+    fn drain_empties_queue_file_but_keeps_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue = tmp.path().join("commands.jsonl");
+
+        enqueue_command(
+            &queue,
+            &QueuedCommand::Send {
+                from: "a".into(),
+                to: "b".into(),
+                message: "msg".into(),
+            },
+        )
+        .unwrap();
+
+        let drained = drain_command_queue(&queue).unwrap();
+        assert_eq!(drained.len(), 1);
+
+        // File should still exist but be effectively empty
+        assert!(queue.exists());
+        let commands = read_command_queue(&queue).unwrap();
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn drain_twice_second_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue = tmp.path().join("commands.jsonl");
+
+        enqueue_command(
+            &queue,
+            &QueuedCommand::Assign {
+                from: "m".into(),
+                engineer: "e".into(),
+                task: "t".into(),
+            },
+        )
+        .unwrap();
+
+        let first = drain_command_queue(&queue).unwrap();
+        assert_eq!(first.len(), 1);
+
+        let second = drain_command_queue(&queue).unwrap();
+        assert!(second.is_empty());
+    }
+
+    // --- QueuedCommand Debug derive ---
+
+    #[test]
+    fn queued_command_debug_format() {
+        let cmd = QueuedCommand::Send {
+            from: "human".into(),
+            to: "arch".into(),
+            message: "test".into(),
+        };
+        let debug = format!("{cmd:?}");
+        assert!(debug.contains("Send"));
+        assert!(debug.contains("human"));
+    }
+
+    #[test]
+    fn queued_command_clone() {
+        let cmd = QueuedCommand::Assign {
+            from: "manager".into(),
+            engineer: "eng-1".into(),
+            task: "build feature".into(),
+        };
+        let cloned = cmd.clone();
+        let json_original = serde_json::to_string(&cmd).unwrap();
+        let json_cloned = serde_json::to_string(&cloned).unwrap();
+        assert_eq!(json_original, json_cloned);
+    }
+
+    // --- JSON tag format verification ---
+
+    #[test]
+    fn send_command_json_has_type_send_tag() {
+        let cmd = QueuedCommand::Send {
+            from: "a".into(),
+            to: "b".into(),
+            message: "c".into(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"send\""), "got: {json}");
+    }
+
+    #[test]
+    fn assign_command_json_has_type_assign_tag() {
+        let cmd = QueuedCommand::Assign {
+            from: "a".into(),
+            engineer: "b".into(),
+            task: "c".into(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"assign\""), "got: {json}");
+    }
 }

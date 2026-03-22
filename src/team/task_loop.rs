@@ -1806,4 +1806,267 @@ mod tests {
             "should have wip commit, got: {log}"
         );
     }
+
+    // --- priority_rank tests ---
+
+    #[test]
+    fn priority_rank_known_values() {
+        assert_eq!(priority_rank("critical"), 0);
+        assert_eq!(priority_rank("high"), 1);
+        assert_eq!(priority_rank("medium"), 2);
+        assert_eq!(priority_rank("low"), 3);
+    }
+
+    #[test]
+    fn priority_rank_unknown_returns_lowest() {
+        assert_eq!(priority_rank(""), 4);
+        assert_eq!(priority_rank("urgent"), 4);
+        assert_eq!(priority_rank("CRITICAL"), 4); // case-sensitive
+    }
+
+    // --- next_unclaimed_task edge cases ---
+
+    #[test]
+    fn next_unclaimed_task_all_done_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_file(tmp.path(), 1, "done-task", "done", "high", None, &[]);
+        write_task_file(
+            tmp.path(),
+            2,
+            "in-progress-task",
+            "in-progress",
+            "critical",
+            None,
+            &[],
+        );
+
+        let task = next_unclaimed_task(tmp.path()).unwrap();
+        assert!(task.is_none());
+    }
+
+    #[test]
+    fn next_unclaimed_task_respects_backlog_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_file(
+            tmp.path(),
+            1,
+            "backlog-task",
+            "backlog",
+            "medium",
+            None,
+            &[],
+        );
+
+        let task = next_unclaimed_task(tmp.path()).unwrap().unwrap();
+        assert_eq!(task.id, 1);
+    }
+
+    #[test]
+    fn next_unclaimed_task_tiebreaks_by_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_file(tmp.path(), 10, "task-ten", "todo", "high", None, &[]);
+        write_task_file(tmp.path(), 5, "task-five", "todo", "high", None, &[]);
+        write_task_file(tmp.path(), 20, "task-twenty", "todo", "high", None, &[]);
+
+        let task = next_unclaimed_task(tmp.path()).unwrap().unwrap();
+        assert_eq!(task.id, 5, "should pick lowest id when priority is tied");
+    }
+
+    #[test]
+    fn next_unclaimed_task_skips_blocked_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_file_with_workflow_frontmatter(tmp.path(), 1, "blocked-task", "blocked: yes\n");
+        write_task_file(tmp.path(), 2, "free-task", "todo", "low", None, &[]);
+
+        let task = next_unclaimed_task(tmp.path()).unwrap().unwrap();
+        assert_eq!(task.id, 2);
+    }
+
+    #[test]
+    fn next_unclaimed_task_allows_done_dependency() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_file(tmp.path(), 1, "done-dep", "done", "low", None, &[]);
+        write_task_file(tmp.path(), 2, "depends-on-done", "todo", "high", None, &[1]);
+
+        let task = next_unclaimed_task(tmp.path()).unwrap().unwrap();
+        assert_eq!(task.id, 2, "task with done dependency should be available");
+    }
+
+    #[test]
+    fn next_unclaimed_task_blocks_on_undone_dependency() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_file(
+            tmp.path(),
+            1,
+            "in-progress-dep",
+            "in-progress",
+            "low",
+            None,
+            &[],
+        );
+        write_task_file(
+            tmp.path(),
+            2,
+            "blocked-by-dep",
+            "todo",
+            "critical",
+            None,
+            &[1],
+        );
+
+        // Task 2 depends on task 1 which is in-progress — should not be picked
+        let task = next_unclaimed_task(tmp.path()).unwrap();
+        assert!(
+            task.is_none(),
+            "task with in-progress dependency should not be available"
+        );
+    }
+
+    #[test]
+    fn next_unclaimed_task_nonexistent_dependency_treated_as_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Task depends on id 999 which doesn't exist — treated as satisfied
+        write_task_file(tmp.path(), 1, "orphan-dep", "todo", "high", None, &[999]);
+
+        let task = next_unclaimed_task(tmp.path()).unwrap().unwrap();
+        assert_eq!(task.id, 1);
+    }
+
+    // --- read_task_title edge cases ---
+
+    #[test]
+    fn read_task_title_quoted_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("007-quoted.md"),
+            "---\ntitle: 'My Quoted Task'\nstatus: todo\n---\nBody\n",
+        )
+        .unwrap();
+        let title = read_task_title(tmp.path(), 7);
+        assert_eq!(title, "My Quoted Task");
+    }
+
+    #[test]
+    fn read_task_title_double_quoted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("008-double.md"),
+            "---\ntitle: \"Double Quoted\"\nstatus: todo\n---\nBody\n",
+        )
+        .unwrap();
+        let title = read_task_title(tmp.path(), 8);
+        assert_eq!(title, "Double Quoted");
+    }
+
+    #[test]
+    fn read_task_title_no_title_line_returns_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("009-no-title.md"),
+            "---\nstatus: todo\npriority: low\n---\nBody\n",
+        )
+        .unwrap();
+        let title = read_task_title(tmp.path(), 9);
+        assert_eq!(title, "Task #9");
+    }
+
+    #[test]
+    fn read_task_title_three_digit_id_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("123-big-id.md"),
+            "---\ntitle: Big ID Task\nstatus: todo\n---\n",
+        )
+        .unwrap();
+        let title = read_task_title(tmp.path(), 123);
+        assert_eq!(title, "Big ID Task");
+    }
+
+    // --- engineer_base_branch_name ---
+
+    #[test]
+    fn engineer_base_branch_name_format() {
+        assert_eq!(engineer_base_branch_name("eng-1-1"), "eng-main/eng-1-1");
+        assert_eq!(engineer_base_branch_name("eng-2"), "eng-main/eng-2");
+    }
+
+    // --- map_git_error ---
+
+    #[test]
+    fn map_git_error_ok_passes_through() {
+        let result: std::result::Result<i32, super::git_cmd::GitError> = Ok(42);
+        let mapped = map_git_error(result, "test action");
+        assert_eq!(mapped.unwrap(), 42);
+    }
+
+    #[test]
+    fn map_git_error_err_wraps_message() {
+        let result: std::result::Result<i32, super::git_cmd::GitError> =
+            Err(super::git_cmd::GitError::Permanent {
+                message: "git status failed".to_string(),
+                stderr: "fatal: something".to_string(),
+            });
+        let err = map_git_error(result, "checking status").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("checking status"), "got: {msg}");
+    }
+
+    // --- cron edge cases ---
+
+    #[test]
+    fn cron_recycle_invalid_expression_skips() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_cron_task(
+            tmp.path(),
+            1,
+            "done",
+            "not a cron expression",
+            "cron_last_run: \"2020-01-01T00:00:00+00:00\"\n",
+        );
+
+        let recycled = recycle_cron_tasks(tmp.path()).unwrap();
+        assert!(
+            recycled.is_empty(),
+            "invalid cron expression should be skipped"
+        );
+    }
+
+    #[test]
+    fn cron_recycle_no_last_run_defaults_to_yesterday() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Done cron task with no cron_last_run — should use now - 1 day as reference
+        write_cron_task(tmp.path(), 1, "done", "0 * * * * *", "");
+
+        let recycled = recycle_cron_tasks(tmp.path()).unwrap();
+        assert_eq!(
+            recycled.len(),
+            1,
+            "should recycle even without cron_last_run"
+        );
+    }
+
+    #[test]
+    fn cron_recycle_future_trigger_skips() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Set last run to now so next trigger is in the future
+        let now = chrono::Utc::now().to_rfc3339();
+        write_cron_task(
+            tmp.path(),
+            1,
+            "done",
+            "0 0 1 1 * 2099",
+            &format!("cron_last_run: \"{now}\"\n"),
+        );
+
+        let recycled = recycle_cron_tasks(tmp.path()).unwrap();
+        assert!(recycled.is_empty(), "future trigger should be skipped");
+    }
 }
