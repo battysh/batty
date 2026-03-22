@@ -1321,4 +1321,439 @@ mod tests {
         let result = Cli::try_parse_from(["batty", "review", "42", "maybe"]);
         assert!(result.is_err());
     }
+
+    // --- send: missing required args ---
+
+    #[test]
+    fn send_rejects_missing_role() {
+        let result = Cli::try_parse_from(["batty", "send"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn send_rejects_missing_message() {
+        let result = Cli::try_parse_from(["batty", "send", "architect"]);
+        assert!(result.is_err());
+    }
+
+    // --- assign: missing required args ---
+
+    #[test]
+    fn assign_rejects_missing_engineer() {
+        let result = Cli::try_parse_from(["batty", "assign"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn assign_rejects_missing_task() {
+        let result = Cli::try_parse_from(["batty", "assign", "eng-1-1"]);
+        assert!(result.is_err());
+    }
+
+    // --- review: missing required args ---
+
+    #[test]
+    fn review_rejects_missing_task_id() {
+        let result = Cli::try_parse_from(["batty", "review"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn review_rejects_missing_disposition() {
+        let result = Cli::try_parse_from(["batty", "review", "42"]);
+        assert!(result.is_err());
+    }
+
+    // --- merge: missing required args ---
+
+    #[test]
+    fn merge_rejects_missing_engineer() {
+        let result = Cli::try_parse_from(["batty", "merge"]);
+        assert!(result.is_err());
+    }
+
+    // --- read/ack: missing required args ---
+
+    #[test]
+    fn read_rejects_missing_member() {
+        let result = Cli::try_parse_from(["batty", "read"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn read_rejects_missing_id() {
+        let result = Cli::try_parse_from(["batty", "read", "architect"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn ack_rejects_missing_args() {
+        let result = Cli::try_parse_from(["batty", "ack"]);
+        assert!(result.is_err());
+    }
+
+    // --- telemetry subcommands ---
+
+    #[test]
+    fn telemetry_summary_parses() {
+        let cli = Cli::parse_from(["batty", "telemetry", "summary"]);
+        match cli.command {
+            Command::Telemetry {
+                command: TelemetryCommand::Summary,
+            } => {}
+            other => panic!("expected telemetry summary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn telemetry_agents_parses() {
+        let cli = Cli::parse_from(["batty", "telemetry", "agents"]);
+        match cli.command {
+            Command::Telemetry {
+                command: TelemetryCommand::Agents,
+            } => {}
+            other => panic!("expected telemetry agents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn telemetry_tasks_parses() {
+        let cli = Cli::parse_from(["batty", "telemetry", "tasks"]);
+        match cli.command {
+            Command::Telemetry {
+                command: TelemetryCommand::Tasks,
+            } => {}
+            other => panic!("expected telemetry tasks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn telemetry_reviews_parses() {
+        let cli = Cli::parse_from(["batty", "telemetry", "reviews"]);
+        match cli.command {
+            Command::Telemetry {
+                command: TelemetryCommand::Reviews,
+            } => {}
+            other => panic!("expected telemetry reviews, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn telemetry_events_default_limit() {
+        let cli = Cli::parse_from(["batty", "telemetry", "events"]);
+        match cli.command {
+            Command::Telemetry {
+                command: TelemetryCommand::Events { limit },
+            } => assert_eq!(limit, 50),
+            other => panic!("expected telemetry events, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn telemetry_events_custom_limit() {
+        let cli = Cli::parse_from(["batty", "telemetry", "events", "-n", "10"]);
+        match cli.command {
+            Command::Telemetry {
+                command: TelemetryCommand::Events { limit },
+            } => assert_eq!(limit, 10),
+            other => panic!("expected telemetry events with limit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn telemetry_rejects_missing_subcommand() {
+        let result = Cli::try_parse_from(["batty", "telemetry"]);
+        assert!(result.is_err());
+    }
+
+    // --- task auto-merge ---
+
+    #[test]
+    fn task_auto_merge_enable_parses() {
+        let cli = Cli::parse_from(["batty", "task", "auto-merge", "30", "enable"]);
+        match cli.command {
+            Command::Task {
+                command: TaskCommand::AutoMerge { task_id, action },
+            } => {
+                assert_eq!(task_id, 30);
+                assert_eq!(action, AutoMergeAction::Enable);
+            }
+            other => panic!("expected task auto-merge enable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn task_auto_merge_disable_parses() {
+        let cli = Cli::parse_from(["batty", "task", "auto-merge", "31", "disable"]);
+        match cli.command {
+            Command::Task {
+                command: TaskCommand::AutoMerge { task_id, action },
+            } => {
+                assert_eq!(task_id, 31);
+                assert_eq!(action, AutoMergeAction::Disable);
+            }
+            other => panic!("expected task auto-merge disable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn task_auto_merge_rejects_invalid_action() {
+        let result = Cli::try_parse_from(["batty", "task", "auto-merge", "30", "toggle"]);
+        assert!(result.is_err());
+    }
+
+    // --- task assign with partial owners ---
+
+    #[test]
+    fn task_assign_execution_owner_only() {
+        let cli = Cli::parse_from([
+            "batty",
+            "task",
+            "assign",
+            "10",
+            "--execution-owner",
+            "eng-1-3",
+        ]);
+        match cli.command {
+            Command::Task {
+                command:
+                    TaskCommand::Assign {
+                        task_id,
+                        execution_owner,
+                        review_owner,
+                    },
+            } => {
+                assert_eq!(task_id, 10);
+                assert_eq!(execution_owner.as_deref(), Some("eng-1-3"));
+                assert!(review_owner.is_none());
+            }
+            other => panic!("expected task assign command, got {other:?}"),
+        }
+    }
+
+    // --- task rejects missing subcommand ---
+
+    #[test]
+    fn task_rejects_missing_subcommand() {
+        let result = Cli::try_parse_from(["batty", "task"]);
+        assert!(result.is_err());
+    }
+
+    // --- doctor: --yes requires --fix ---
+
+    #[test]
+    fn doctor_rejects_yes_without_fix() {
+        let result = Cli::try_parse_from(["batty", "doctor", "--yes"]);
+        assert!(result.is_err());
+    }
+
+    // --- daemon hidden subcommand ---
+
+    #[test]
+    fn daemon_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "daemon", "--project-root", "/tmp/project"]);
+        match cli.command {
+            Command::Daemon {
+                project_root,
+                resume,
+            } => {
+                assert_eq!(project_root, "/tmp/project");
+                assert!(!resume);
+            }
+            other => panic!("expected daemon command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_subcommand_parses_resume_flag() {
+        let cli = Cli::parse_from([
+            "batty",
+            "daemon",
+            "--project-root",
+            "/tmp/project",
+            "--resume",
+        ]);
+        match cli.command {
+            Command::Daemon {
+                project_root,
+                resume,
+            } => {
+                assert_eq!(project_root, "/tmp/project");
+                assert!(resume);
+            }
+            other => panic!("expected daemon command with resume, got {other:?}"),
+        }
+    }
+
+    // --- completions: all shell variants ---
+
+    #[test]
+    fn completions_all_shells_parse() {
+        for (arg, expected) in [
+            ("bash", CompletionShell::Bash),
+            ("zsh", CompletionShell::Zsh),
+            ("fish", CompletionShell::Fish),
+        ] {
+            let cli = Cli::parse_from(["batty", "completions", arg]);
+            match cli.command {
+                Command::Completions { shell } => assert_eq!(shell, expected, "shell arg={arg}"),
+                other => panic!("expected completions command for {arg}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn completions_rejects_unknown_shell() {
+        let result = Cli::try_parse_from(["batty", "completions", "powershell"]);
+        assert!(result.is_err());
+    }
+
+    // --- init: all template variants ---
+
+    #[test]
+    fn init_all_template_variants() {
+        for (arg, expected) in [
+            ("solo", InitTemplate::Solo),
+            ("pair", InitTemplate::Pair),
+            ("simple", InitTemplate::Simple),
+            ("squad", InitTemplate::Squad),
+            ("large", InitTemplate::Large),
+            ("research", InitTemplate::Research),
+            ("software", InitTemplate::Software),
+            ("batty", InitTemplate::Batty),
+        ] {
+            let cli = Cli::parse_from(["batty", "init", "--template", arg]);
+            match cli.command {
+                Command::Init { template, from } => {
+                    assert_eq!(template, Some(expected), "template arg={arg}");
+                    assert!(from.is_none());
+                }
+                other => panic!("expected init command for template {arg}, got {other:?}"),
+            }
+        }
+    }
+
+    // --- task review with feedback ---
+
+    #[test]
+    fn task_review_with_feedback_parses() {
+        let cli = Cli::parse_from([
+            "batty",
+            "task",
+            "review",
+            "15",
+            "--disposition",
+            "changes_requested",
+            "--feedback",
+            "please fix tests",
+        ]);
+        match cli.command {
+            Command::Task {
+                command:
+                    TaskCommand::Review {
+                        task_id,
+                        disposition,
+                        feedback,
+                    },
+            } => {
+                assert_eq!(task_id, 15);
+                assert_eq!(disposition, ReviewDispositionArg::ChangesRequested);
+                assert_eq!(feedback.as_deref(), Some("please fix tests"));
+            }
+            other => panic!("expected task review command, got {other:?}"),
+        }
+    }
+
+    // --- task transition: all states ---
+
+    #[test]
+    fn task_transition_all_states() {
+        for (arg, expected) in [
+            ("backlog", TaskStateArg::Backlog),
+            ("todo", TaskStateArg::Todo),
+            ("in-progress", TaskStateArg::InProgress),
+            ("review", TaskStateArg::Review),
+            ("blocked", TaskStateArg::Blocked),
+            ("done", TaskStateArg::Done),
+            ("archived", TaskStateArg::Archived),
+        ] {
+            let cli = Cli::parse_from(["batty", "task", "transition", "1", arg]);
+            match cli.command {
+                Command::Task {
+                    command:
+                        TaskCommand::Transition {
+                            task_id,
+                            target_state,
+                        },
+                } => {
+                    assert_eq!(task_id, 1);
+                    assert_eq!(target_state, expected, "state arg={arg}");
+                }
+                other => panic!("expected task transition for {arg}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn task_transition_rejects_invalid_state() {
+        let result = Cli::try_parse_from(["batty", "task", "transition", "1", "cancelled"]);
+        assert!(result.is_err());
+    }
+
+    // --- unknown subcommand ---
+
+    #[test]
+    fn rejects_unknown_subcommand() {
+        let result = Cli::try_parse_from(["batty", "foobar"]);
+        assert!(result.is_err());
+    }
+
+    // --- no args ---
+
+    #[test]
+    fn rejects_no_subcommand() {
+        let result = Cli::try_parse_from(["batty"]);
+        assert!(result.is_err());
+    }
+
+    // --- inbox purge requires role or all-roles ---
+
+    #[test]
+    fn inbox_purge_rejects_missing_role_and_all_roles() {
+        let result = Cli::try_parse_from(["batty", "inbox", "purge", "--all"]);
+        assert!(result.is_err());
+    }
+
+    // --- nudge: all intervention variants ---
+
+    #[test]
+    fn nudge_enable_all_interventions() {
+        for (arg, expected) in [
+            ("replenish", NudgeIntervention::Replenish),
+            ("triage", NudgeIntervention::Triage),
+            ("review", NudgeIntervention::Review),
+            ("dispatch", NudgeIntervention::Dispatch),
+            ("utilization", NudgeIntervention::Utilization),
+            ("owned-task", NudgeIntervention::OwnedTask),
+        ] {
+            let cli = Cli::parse_from(["batty", "nudge", "enable", arg]);
+            match cli.command {
+                Command::Nudge {
+                    command: NudgeCommand::Enable { name },
+                } => assert_eq!(name, expected, "nudge enable arg={arg}"),
+                other => panic!("expected nudge enable for {arg}, got {other:?}"),
+            }
+        }
+    }
+
+    // --- config: default (no --json) ---
+
+    #[test]
+    fn config_subcommand_defaults_no_json() {
+        let cli = Cli::parse_from(["batty", "config"]);
+        match cli.command {
+            Command::Config { json } => assert!(!json),
+            other => panic!("expected config command, got {other:?}"),
+        }
+    }
 }
