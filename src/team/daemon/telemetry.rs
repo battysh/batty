@@ -472,6 +472,7 @@ mod tests {
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
             telemetry_db: None,
+            manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
             last_health_check: Instant::now(),
         };
@@ -851,6 +852,7 @@ mod tests {
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
             telemetry_db: None,
+            manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
             last_health_check: Instant::now(),
         };

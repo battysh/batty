@@ -242,6 +242,8 @@ pub struct BoardConfig {
     pub dispatch_stabilization_delay_secs: u64,
     #[serde(default = "default_dispatch_dedup_window_secs")]
     pub dispatch_dedup_window_secs: u64,
+    #[serde(default = "default_dispatch_manual_cooldown_secs")]
+    pub dispatch_manual_cooldown_secs: u64,
 }
 
 impl Default for BoardConfig {
@@ -251,6 +253,7 @@ impl Default for BoardConfig {
             auto_dispatch: default_board_auto_dispatch(),
             dispatch_stabilization_delay_secs: default_dispatch_stabilization_delay_secs(),
             dispatch_dedup_window_secs: default_dispatch_dedup_window_secs(),
+            dispatch_manual_cooldown_secs: default_dispatch_manual_cooldown_secs(),
         }
     }
 }
@@ -433,6 +436,10 @@ fn default_dispatch_stabilization_delay_secs() -> u64 {
 
 fn default_dispatch_dedup_window_secs() -> u64 {
     60
+}
+
+fn default_dispatch_manual_cooldown_secs() -> u64 {
+    30
 }
 
 fn default_standup_interval() -> u64 {
