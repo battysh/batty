@@ -75,11 +75,23 @@ impl TeamDaemon {
             .map(|entry| entry.engineer.clone())
             .collect();
 
+        let manual_cooldown =
+            Duration::from_secs(self.config.team_config.board.dispatch_manual_cooldown_secs);
+
         let mut engineers = self.idle_engineer_names();
         engineers.sort();
         for engineer_name in engineers {
             if queued_engineers.contains(&engineer_name) {
                 continue;
+            }
+            if let Some(assigned_at) = self.manual_assign_cooldowns.get(&engineer_name) {
+                if assigned_at.elapsed() < manual_cooldown {
+                    debug!(
+                        engineer = %engineer_name,
+                        "skipping dispatch — within manual assignment cooldown"
+                    );
+                    continue;
+                }
             }
             let Some(task) = self.next_dispatch_task(&board_dir, &queued_task_ids)? else {
                 break;
