@@ -515,6 +515,81 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         Ok(())
     }
 
+    /// Check each engineer's worktree for large uncommitted diffs and send a
+    /// commit reminder when the line count exceeds the configured threshold.
+    /// Nudges are rate-limited to at most once per 5 minutes per engineer.
+    pub(super) fn maybe_warn_uncommitted_work(&mut self) -> Result<()> {
+        let threshold = self
+            .config
+            .team_config
+            .workflow_policy
+            .uncommitted_warn_threshold;
+        if threshold == 0 {
+            return Ok(());
+        }
+
+        let cooldown = Duration::from_secs(300); // 5 minutes
+
+        let engineers: Vec<String> = self
+            .config
+            .members
+            .iter()
+            .filter(|m| m.role_type == RoleType::Engineer && m.use_worktrees)
+            .map(|m| m.name.clone())
+            .collect();
+
+        for name in &engineers {
+            // Rate-limit: skip if we warned this engineer recently.
+            if let Some(last) = self.last_uncommitted_warn.get(name) {
+                if last.elapsed() < cooldown {
+                    continue;
+                }
+            }
+
+            let worktree_path = self.worktree_dir(name);
+            if !worktree_path.exists() {
+                continue;
+            }
+
+            let lines = match uncommitted_diff_lines(&worktree_path) {
+                Ok(n) => n,
+                Err(error) => {
+                    warn!(engineer = %name, error = %error, "failed to check uncommitted diff");
+                    continue;
+                }
+            };
+
+            if lines < threshold {
+                continue;
+            }
+
+            info!(
+                engineer = %name,
+                uncommitted_lines = lines,
+                threshold,
+                "sending uncommitted work warning"
+            );
+
+            let body = format!(
+                "COMMIT REMINDER: You have {lines} uncommitted lines in your worktree \
+                 (threshold: {threshold}). Please commit your work now to avoid losing progress:\n\n\
+                 git add -A && git commit -m 'wip: checkpoint'"
+            );
+
+            let sender = self.automation_sender_for(name);
+            if let Err(error) = self.queue_message(&sender, name, &body) {
+                warn!(engineer = %name, error = %error, "failed to send uncommitted work warning");
+            }
+            self.record_orchestrator_action(format!(
+                "uncommitted-warn: {name} has {lines} uncommitted lines (threshold {threshold})"
+            ));
+            self.last_uncommitted_warn
+                .insert(name.clone(), Instant::now());
+        }
+
+        Ok(())
+    }
+
     /// Load the prompt template for a member, substituting role-specific info.
     pub(super) fn load_prompt(&self, member: &MemberInstance, config_dir: &Path) -> String {
         let prompt_file = member.prompt.as_deref().unwrap_or(match member.role_type {
@@ -730,6 +805,31 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         }
         message
     }
+}
+
+/// Count total inserted + deleted lines from uncommitted changes in a worktree.
+/// Runs `git diff --numstat` (unstaged) + `git diff --cached --numstat` (staged).
+fn uncommitted_diff_lines(worktree: &Path) -> Result<usize> {
+    let mut total = 0usize;
+    for extra_args in [&["--numstat"] as &[&str], &["--cached", "--numstat"]] {
+        let output = std::process::Command::new("git")
+            .arg("diff")
+            .args(extra_args)
+            .current_dir(worktree)
+            .output()
+            .with_context(|| format!("failed to run git diff in {}", worktree.display()))?;
+        if !output.status.success() {
+            continue;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let mut parts = line.split_whitespace();
+            let added: usize = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let removed: usize = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            total += added + removed;
+        }
+    }
+    Ok(total)
 }
 
 #[cfg(test)]
@@ -3446,5 +3546,226 @@ exit 1
             "checkpoint must be removed when task is cleared"
         );
         assert!(daemon.active_tasks.get(member_name).is_none());
+    }
+
+    // ---- uncommitted work warning tests ----
+
+    /// Initialize a bare git repo directly in a directory (no TempDir wrapper needed).
+    fn init_bare_git_repo(path: &Path) {
+        git_ok(
+            path.parent().unwrap(),
+            &["init", "-b", "main", path.to_str().unwrap()],
+        );
+        git_ok(path, &["config", "user.email", "batty@example.com"]);
+        git_ok(path, &["config", "user.name", "Batty Tests"]);
+    }
+
+    #[test]
+    fn uncommitted_diff_lines_counts_unstaged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_bare_git_repo(&repo);
+
+        std::fs::write(repo.join("hello.txt"), "line1\nline2\nline3\n").unwrap();
+        git_ok(&repo, &["add", "hello.txt"]);
+        git_ok(&repo, &["commit", "-m", "init"]);
+
+        // Modify 2 of 3 lines (unstaged): 2 removed + 2 added = 4 lines
+        std::fs::write(repo.join("hello.txt"), "changed1\nchanged2\nline3\n").unwrap();
+
+        let lines = super::uncommitted_diff_lines(&repo).unwrap();
+        assert!(lines >= 3, "expected >=3 uncommitted lines, got {lines}");
+    }
+
+    #[test]
+    fn uncommitted_diff_lines_empty_when_clean() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_bare_git_repo(&repo);
+
+        std::fs::write(repo.join("hello.txt"), "line1\n").unwrap();
+        git_ok(&repo, &["add", "hello.txt"]);
+        git_ok(&repo, &["commit", "-m", "init"]);
+
+        let lines = super::uncommitted_diff_lines(&repo).unwrap();
+        assert_eq!(lines, 0, "clean repo should have 0 uncommitted lines");
+    }
+
+    #[test]
+    fn uncommitted_diff_lines_includes_staged_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_bare_git_repo(&repo);
+
+        std::fs::write(repo.join("hello.txt"), "original\n").unwrap();
+        git_ok(&repo, &["add", "hello.txt"]);
+        git_ok(&repo, &["commit", "-m", "init"]);
+
+        // Stage a modification
+        std::fs::write(repo.join("hello.txt"), "modified\n").unwrap();
+        git_ok(&repo, &["add", "hello.txt"]);
+
+        let lines = super::uncommitted_diff_lines(&repo).unwrap();
+        assert!(lines >= 2, "staged changes should count, got {lines}");
+    }
+
+    fn make_uncommitted_warn_daemon(tmp: &tempfile::TempDir, threshold: usize) -> TeamDaemon {
+        let repo = tmp.path();
+        let team_config_dir = repo.join(".batty").join("team_config");
+        std::fs::create_dir_all(&team_config_dir).unwrap();
+
+        // Create a worktree dir for eng-1 that is a standalone git repo
+        let wt = repo.join(".batty").join("worktrees").join("eng-1");
+        std::fs::create_dir_all(&wt).unwrap();
+        init_bare_git_repo(&wt);
+
+        // Create a tracked file and commit it
+        std::fs::write(wt.join("big.txt"), "a\n".repeat(300)).unwrap();
+        git_ok(&wt, &["add", "big.txt"]);
+        git_ok(&wt, &["commit", "-m", "init"]);
+        // Now modify to create an uncommitted diff (300 lines changed)
+        std::fs::write(wt.join("big.txt"), "b\n".repeat(300)).unwrap();
+
+        // Create inbox dirs
+        let inbox_root = crate::team::inbox::inboxes_root(repo);
+        crate::team::inbox::init_inbox(&inbox_root, "eng-1").unwrap();
+        crate::team::inbox::init_inbox(&inbox_root, "daemon").unwrap();
+        crate::team::inbox::init_inbox(&inbox_root, "manager").unwrap();
+
+        TestDaemonBuilder::new(repo)
+            .members(vec![
+                manager_member("manager", Some("architect")),
+                engineer_member("eng-1", Some("manager"), true),
+            ])
+            .workflow_policy(WorkflowPolicy {
+                uncommitted_warn_threshold: threshold,
+                ..WorkflowPolicy::default()
+            })
+            .build()
+    }
+
+    #[test]
+    fn maybe_warn_uncommitted_work_sends_nudge_above_threshold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = make_uncommitted_warn_daemon(&tmp, 100);
+        daemon.is_git_repo = true;
+
+        daemon.maybe_warn_uncommitted_work().unwrap();
+
+        assert!(
+            daemon.last_uncommitted_warn.contains_key("eng-1"),
+            "should have tracked the warning time for eng-1"
+        );
+
+        // Check that a message was queued to eng-1's inbox
+        let inbox_root = crate::team::inbox::inboxes_root(tmp.path());
+        let messages = crate::team::inbox::all_messages(&inbox_root, "eng-1").unwrap();
+        assert!(
+            !messages.is_empty(),
+            "eng-1 should have received a commit reminder"
+        );
+        let body = &messages[0].0.body;
+        assert!(
+            body.contains("COMMIT REMINDER"),
+            "message should contain COMMIT REMINDER, got: {body}"
+        );
+    }
+
+    #[test]
+    fn maybe_warn_uncommitted_work_rate_limited() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = make_uncommitted_warn_daemon(&tmp, 100);
+        daemon.is_git_repo = true;
+
+        // First call should send a warning
+        daemon.maybe_warn_uncommitted_work().unwrap();
+        let inbox_root = crate::team::inbox::inboxes_root(tmp.path());
+        let count_after_first = crate::team::inbox::all_messages(&inbox_root, "eng-1")
+            .unwrap()
+            .len();
+
+        // Second call should be rate-limited (no additional message)
+        daemon.maybe_warn_uncommitted_work().unwrap();
+        let count_after_second = crate::team::inbox::all_messages(&inbox_root, "eng-1")
+            .unwrap()
+            .len();
+
+        assert_eq!(
+            count_after_first, count_after_second,
+            "second call within cooldown should not send another warning"
+        );
+    }
+
+    #[test]
+    fn maybe_warn_uncommitted_work_disabled_when_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = make_uncommitted_warn_daemon(&tmp, 0);
+        daemon.is_git_repo = true;
+
+        daemon.maybe_warn_uncommitted_work().unwrap();
+
+        assert!(
+            daemon.last_uncommitted_warn.is_empty(),
+            "threshold=0 should disable warnings"
+        );
+    }
+
+    #[test]
+    fn maybe_warn_uncommitted_work_skips_below_threshold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = make_uncommitted_warn_daemon(&tmp, 100);
+        daemon.is_git_repo = true;
+
+        // Reset the worktree to have a clean state
+        let wt = tmp.path().join(".batty").join("worktrees").join("eng-1");
+        git_ok(&wt, &["checkout", "--", "."]);
+
+        daemon.maybe_warn_uncommitted_work().unwrap();
+
+        assert!(
+            daemon.last_uncommitted_warn.is_empty(),
+            "clean worktree should not trigger a warning"
+        );
+    }
+
+    #[test]
+    fn maybe_warn_uncommitted_work_skips_non_worktree_engineers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let team_config_dir = tmp.path().join(".batty").join("team_config");
+        std::fs::create_dir_all(&team_config_dir).unwrap();
+
+        let inbox_root = crate::team::inbox::inboxes_root(tmp.path());
+        crate::team::inbox::init_inbox(&inbox_root, "eng-1").unwrap();
+        crate::team::inbox::init_inbox(&inbox_root, "daemon").unwrap();
+        crate::team::inbox::init_inbox(&inbox_root, "manager").unwrap();
+
+        // Engineer without worktree (use_worktrees: false)
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("manager", Some("architect")),
+                engineer_member("eng-1", Some("manager"), false),
+            ])
+            .workflow_policy(WorkflowPolicy {
+                uncommitted_warn_threshold: 10,
+                ..WorkflowPolicy::default()
+            })
+            .build();
+        daemon.is_git_repo = true;
+
+        daemon.maybe_warn_uncommitted_work().unwrap();
+
+        assert!(
+            daemon.last_uncommitted_warn.is_empty(),
+            "engineer without worktrees should be skipped"
+        );
+    }
+
+    #[test]
+    fn uncommitted_warn_threshold_config_default() {
+        let policy = WorkflowPolicy::default();
+        assert_eq!(policy.uncommitted_warn_threshold, 200);
     }
 }

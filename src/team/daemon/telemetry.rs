@@ -475,6 +475,7 @@ mod tests {
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
             last_health_check: Instant::now(),
+            last_uncommitted_warn: HashMap::new(),
         };
 
         let sent = Arc::new(Mutex::new(Vec::new()));
@@ -855,6 +856,7 @@ mod tests {
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
             last_health_check: Instant::now(),
+            last_uncommitted_warn: HashMap::new(),
         };
 
         daemon.poll_watchers().unwrap();
