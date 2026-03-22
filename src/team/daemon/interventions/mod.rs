@@ -144,6 +144,18 @@ impl TeamDaemon {
             .is_some_and(|fired_at| fired_at.elapsed() < cooldown)
     }
 
+    fn utilization_intervention_on_cooldown(&self, key: &str) -> bool {
+        let cooldown = Duration::from_secs(
+            self.config
+                .team_config
+                .automation
+                .utilization_recovery_interval_secs,
+        );
+        self.intervention_cooldowns
+            .get(key)
+            .is_some_and(|fired_at| fired_at.elapsed() < cooldown)
+    }
+
     fn is_member_idle(&self, member_name: &str) -> bool {
         self.watchers
             .get(member_name)
