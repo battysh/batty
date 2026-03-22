@@ -7,7 +7,6 @@ use anyhow::Result;
 use tracing::{info, warn};
 
 use super::super::*;
-use crate::team::config::PlanningDirectiveFile;
 
 impl TeamDaemon {
     pub(in super::super) fn maybe_intervene_triage_backlog(&mut self) -> Result<()> {
@@ -80,8 +79,7 @@ impl TeamDaemon {
                 continue;
             }
 
-            let text =
-                self.build_triage_intervention_message(&member, reports, triage_state.count);
+            let text = self.build_triage_intervention_message(&member, reports, triage_state.count);
             info!(member = %name, triage_backlog = triage_state.count, "firing triage intervention");
             let delivered_live = match self.queue_daemon_message(&name, &text) {
                 Ok(MessageDelivery::LivePane) => true,
