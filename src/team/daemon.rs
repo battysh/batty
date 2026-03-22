@@ -2414,6 +2414,7 @@ exit 1
     fn test_team_config(name: &str) -> TeamConfig {
         TeamConfig {
             name: name.to_string(),
+            agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
             board: BoardConfig::default(),
@@ -2532,6 +2533,7 @@ exit 1
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 board: BoardConfig::default(),
                 standup: StandupConfig::default(),
@@ -2805,6 +2807,7 @@ exit 1
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
@@ -2915,6 +2918,7 @@ exit 1
             project_root: repo.clone(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
@@ -3128,6 +3132,7 @@ exit 1
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
@@ -3246,6 +3251,7 @@ exit 1
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
@@ -3373,6 +3379,7 @@ exit 1
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
@@ -3508,6 +3515,7 @@ exit 1
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
@@ -3656,6 +3664,7 @@ exit 1
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
@@ -3764,6 +3773,7 @@ exit 1
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
@@ -3888,6 +3898,7 @@ exit 1
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
@@ -4120,6 +4131,7 @@ exit 1
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
@@ -4204,6 +4216,7 @@ exit 1
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
@@ -4298,6 +4311,7 @@ exit 1
             project_root: repo.clone(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
@@ -6214,6 +6228,7 @@ exit 1
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                agent: None,
                 workflow_mode: WorkflowMode::Hybrid,
                 workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
@@ -6745,6 +6760,7 @@ exit 1
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
@@ -6897,6 +6913,7 @@ exit 1
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: WorkflowPolicy {
                     max_stall_restarts: 2,

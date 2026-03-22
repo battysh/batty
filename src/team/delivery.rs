@@ -742,6 +742,7 @@ mod tests {
                 project_root: tmp.path().to_path_buf(),
                 team_config: super::super::config::TeamConfig {
                     name: "test".to_string(),
+                    agent: None,
                     workflow_mode: WorkflowMode::Legacy,
                     workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
@@ -831,6 +832,7 @@ mod tests {
                 project_root: tmp.path().to_path_buf(),
                 team_config: super::super::config::TeamConfig {
                     name: "test".to_string(),
+                    agent: None,
                     workflow_mode: WorkflowMode::Legacy,
                     workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
@@ -953,6 +955,7 @@ mod tests {
                 project_root: tmp.path().to_path_buf(),
                 team_config: super::super::config::TeamConfig {
                     name: "test".to_string(),
+                    agent: None,
                     workflow_mode: WorkflowMode::Legacy,
                     workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
@@ -1042,6 +1045,7 @@ mod tests {
                 project_root: tmp.path().to_path_buf(),
                 team_config: super::super::config::TeamConfig {
                     name: "test".to_string(),
+                    agent: None,
                     workflow_mode: WorkflowMode::Legacy,
                     workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),
@@ -1177,6 +1181,7 @@ mod tests {
             project_root: tmp.path().to_path_buf(),
             team_config: super::super::config::TeamConfig {
                 name: "test".to_string(),
+                agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: WorkflowPolicy::default(),
                 board: BoardConfig::default(),
@@ -1245,6 +1250,7 @@ mod tests {
                 project_root: tmp.path().to_path_buf(),
                 team_config: super::super::config::TeamConfig {
                     name: "test".to_string(),
+                    agent: None,
                     workflow_mode: WorkflowMode::Legacy,
                     workflow_policy: WorkflowPolicy::default(),
                     board: BoardConfig::default(),

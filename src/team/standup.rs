@@ -867,6 +867,7 @@ mod tests {
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
+            agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
             board: BoardConfig::default(),
@@ -935,6 +936,7 @@ mod tests {
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
+            agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
             board: BoardConfig::default(),
@@ -1027,6 +1029,7 @@ mod tests {
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
+            agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
             board: BoardConfig::default(),

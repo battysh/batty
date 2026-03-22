@@ -13,6 +13,11 @@ use crate::agent;
 #[derive(Debug, Clone, Deserialize)]
 pub struct TeamConfig {
     pub name: String,
+    /// Team-level default agent backend. Individual roles can override this
+    /// with their own `agent` field. Resolution order:
+    /// role-level agent > team-level agent > "claude" (hardcoded default).
+    #[serde(default)]
+    pub agent: Option<String>,
     #[serde(default = "default_workflow_mode")]
     pub workflow_mode: WorkflowMode,
     #[serde(default)]
@@ -503,6 +508,21 @@ impl TeamConfig {
         self.workflow_mode.enables_runtime_surface() && self.orchestrator_pane
     }
 
+    /// Resolve the effective agent for a role.
+    ///
+    /// Resolution order: role-level agent > team-level agent > "claude".
+    pub fn resolve_agent(&self, role: &RoleDef) -> Option<String> {
+        if role.role_type == RoleType::User {
+            return None;
+        }
+        Some(
+            role.agent
+                .clone()
+                .or_else(|| self.agent.clone())
+                .unwrap_or_else(|| "claude".to_string()),
+        )
+    }
+
     /// Check if a role is allowed to send messages to another role.
     ///
     /// Uses `talks_to` if configured. If `talks_to` is empty for a role,
@@ -573,15 +593,27 @@ impl TeamConfig {
             bail!("team must have at least one role");
         }
 
+        // Validate team-level agent if specified.
+        if let Some(team_agent) = self.agent.as_deref() {
+            if agent::adapter_from_name(team_agent).is_none() {
+                bail!(
+                    "team-level agent '{}' is not a supported backend",
+                    team_agent
+                );
+            }
+        }
+
         let mut role_names: HashSet<&str> = HashSet::new();
         for role in &self.roles {
             if !role_names.insert(&role.name) {
                 bail!("duplicate role name: '{}'", role.name);
             }
 
-            if role.role_type != RoleType::User && role.agent.is_none() {
+            // Non-user roles need an agent — either their own or the team default.
+            if role.role_type != RoleType::User && role.agent.is_none() && self.agent.is_none() {
                 bail!(
-                    "role '{}' is not a user but has no agent configured",
+                    "role '{}' is not a user but has no agent configured \
+                     (set role-level or team-level agent)",
                     role.name
                 );
             }
@@ -1597,5 +1629,169 @@ roles:
     fn empty_overrides_when_absent_in_yaml() {
         let config: TeamConfig = serde_yaml::from_str(minimal_yaml()).unwrap();
         assert!(config.workflow_policy.review_timeout_overrides.is_empty());
+    }
+
+    // --- Mixed-backend / team-level agent tests ---
+
+    #[test]
+    fn team_level_agent_parsed() {
+        let yaml = r#"
+name: test
+agent: codex
+roles:
+  - name: worker
+    role_type: engineer
+    instances: 2
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.agent.as_deref(), Some("codex"));
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn team_level_agent_absent_defaults_to_none() {
+        let config: TeamConfig = serde_yaml::from_str(minimal_yaml()).unwrap();
+        assert!(config.agent.is_none());
+    }
+
+    #[test]
+    fn resolve_agent_role_overrides_team() {
+        let yaml = r#"
+name: test
+agent: codex
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: worker
+    role_type: engineer
+    instances: 2
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        let architect = &config.roles[0];
+        let worker = &config.roles[1];
+        // Role-level agent overrides team-level
+        assert_eq!(config.resolve_agent(architect).as_deref(), Some("claude"));
+        // No role-level agent, falls back to team-level
+        assert_eq!(config.resolve_agent(worker).as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn resolve_agent_defaults_to_claude_when_nothing_set() {
+        let yaml = r#"
+name: test
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        // Override the role to have no agent for testing
+        let mut role = config.roles[0].clone();
+        role.agent = None;
+        let mut config_no_team = config.clone();
+        config_no_team.agent = None;
+        assert_eq!(
+            config_no_team.resolve_agent(&role).as_deref(),
+            Some("claude")
+        );
+    }
+
+    #[test]
+    fn resolve_agent_returns_none_for_user() {
+        let yaml = r#"
+name: test
+agent: codex
+roles:
+  - name: human
+    role_type: user
+  - name: worker
+    role_type: engineer
+    instances: 1
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        let user = &config.roles[0];
+        assert!(config.resolve_agent(user).is_none());
+    }
+
+    #[test]
+    fn validate_team_level_agent_rejects_unknown() {
+        let yaml = r#"
+name: test
+agent: mystery
+roles:
+  - name: worker
+    role_type: engineer
+    instances: 1
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("team-level agent"));
+        assert!(err.contains("mystery"));
+    }
+
+    #[test]
+    fn validate_accepts_team_level_agent_without_role_agent() {
+        let yaml = r#"
+name: test
+agent: codex
+roles:
+  - name: architect
+    role_type: architect
+  - name: manager
+    role_type: manager
+  - name: engineer
+    role_type: engineer
+    instances: 2
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_no_agent_at_any_level() {
+        let yaml = r#"
+name: test
+roles:
+  - name: worker
+    role_type: engineer
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("no agent"));
+    }
+
+    #[test]
+    fn validate_mixed_backend_team() {
+        let yaml = r#"
+name: mixed
+agent: codex
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: manager
+    role_type: manager
+    agent: claude
+  - name: eng-claude
+    role_type: engineer
+    agent: claude
+    instances: 2
+    talks_to: [manager]
+  - name: eng-codex
+    role_type: engineer
+    instances: 2
+    talks_to: [manager]
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok());
+        // eng-claude has explicit agent
+        assert_eq!(config.roles[2].agent.as_deref(), Some("claude"));
+        // eng-codex inherits team default
+        assert!(config.roles[3].agent.is_none());
+        assert_eq!(
+            config.resolve_agent(&config.roles[3]).as_deref(),
+            Some("codex")
+        );
     }
 }
