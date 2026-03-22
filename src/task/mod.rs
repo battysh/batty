@@ -26,6 +26,7 @@ pub struct Task {
     pub scheduled_for: Option<String>,
     pub cron_schedule: Option<String>,
     pub cron_last_run: Option<String>,
+    pub completed: Option<String>,
     pub description: String,
     pub batty_config: Option<TaskBattyConfig>,
     pub source_path: PathBuf,
@@ -78,6 +79,8 @@ struct Frontmatter {
     cron_schedule: Option<String>,
     #[serde(default)]
     cron_last_run: Option<String>,
+    #[serde(default)]
+    completed: Option<String>,
 }
 
 fn default_status() -> String {
@@ -130,6 +133,7 @@ impl Task {
             scheduled_for: fm.scheduled_for,
             cron_schedule: fm.cron_schedule,
             cron_last_run: fm.cron_last_run,
+            completed: fm.completed,
             description,
             batty_config,
             source_path: PathBuf::new(),
