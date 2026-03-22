@@ -1776,4 +1776,563 @@ mod tests {
             "delivery should have been attempted"
         );
     }
+
+    // --- New tests: FailedDelivery struct ---
+
+    #[test]
+    fn failed_delivery_is_not_ready_for_retry_when_recent() {
+        let delivery = FailedDelivery::new("eng-1", "manager", "test");
+        // Just created — last_attempt is now, so not ready for retry
+        assert!(!delivery.is_ready_for_retry(Instant::now()));
+    }
+
+    #[test]
+    fn failed_delivery_is_ready_for_retry_after_delay() {
+        let mut delivery = FailedDelivery::new("eng-1", "manager", "test");
+        delivery.last_attempt =
+            Instant::now() - FAILED_DELIVERY_RETRY_DELAY - Duration::from_secs(1);
+        assert!(delivery.is_ready_for_retry(Instant::now()));
+    }
+
+    #[test]
+    fn failed_delivery_has_attempts_remaining_at_boundary() {
+        let mut delivery = FailedDelivery::new("eng-1", "manager", "test");
+        delivery.attempts = FAILED_DELIVERY_MAX_ATTEMPTS - 1;
+        assert!(delivery.has_attempts_remaining());
+        delivery.attempts = FAILED_DELIVERY_MAX_ATTEMPTS;
+        assert!(!delivery.has_attempts_remaining());
+    }
+
+    #[test]
+    fn failed_delivery_message_marker_uses_from_field() {
+        let delivery = FailedDelivery::new("eng-1", "architect", "body");
+        assert_eq!(delivery.message_marker(), "--- Message from architect ---");
+    }
+
+    // --- MessageDelivery enum ---
+
+    #[test]
+    fn message_delivery_variants_are_distinct() {
+        assert_ne!(MessageDelivery::Channel, MessageDelivery::LivePane);
+        assert_ne!(MessageDelivery::LivePane, MessageDelivery::InboxQueued);
+        assert_ne!(
+            MessageDelivery::InboxQueued,
+            MessageDelivery::SkippedUnknownRecipient
+        );
+        assert_eq!(MessageDelivery::Channel, MessageDelivery::Channel);
+    }
+
+    // --- Telegram circuit breaker key generation ---
+
+    #[test]
+    fn telegram_failure_key_contains_recipient() {
+        let key = TeamDaemon::telegram_failure_key("human");
+        assert_eq!(key, "telegram-delivery-failures::human");
+    }
+
+    #[test]
+    fn telegram_circuit_breaker_key_contains_recipient() {
+        let key = TeamDaemon::telegram_circuit_breaker_key("user-1");
+        assert_eq!(key, "telegram-delivery-breaker::user-1");
+    }
+
+    // --- Telegram retry config ---
+
+    #[test]
+    fn telegram_retry_config_has_expected_defaults() {
+        let config = TeamDaemon::telegram_retry_config();
+        assert_eq!(config.max_retries, 3);
+        assert_eq!(config.base_delay_ms, 100);
+        assert_eq!(config.max_delay_ms, 1_000);
+        assert!(!config.jitter);
+    }
+
+    // --- Telegram channel paused ---
+
+    #[test]
+    fn telegram_channel_not_paused_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = empty_legacy_daemon(&tmp);
+        assert!(!daemon.telegram_channel_paused("human"));
+    }
+
+    #[test]
+    fn telegram_channel_paused_when_breaker_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = empty_legacy_daemon(&tmp);
+        daemon.intervention_cooldowns.insert(
+            TeamDaemon::telegram_circuit_breaker_key("human"),
+            Instant::now(),
+        );
+        assert!(daemon.telegram_channel_paused("human"));
+    }
+
+    #[test]
+    fn telegram_channel_not_paused_after_cooldown_expires() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = empty_legacy_daemon(&tmp);
+        daemon.intervention_cooldowns.insert(
+            TeamDaemon::telegram_circuit_breaker_key("human"),
+            Instant::now() - TELEGRAM_DELIVERY_CIRCUIT_BREAKER_COOLDOWN - Duration::from_secs(1),
+        );
+        assert!(!daemon.telegram_channel_paused("human"));
+    }
+
+    // --- Clear telegram delivery failures ---
+
+    #[test]
+    fn clear_telegram_delivery_failures_removes_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = empty_legacy_daemon(&tmp);
+        daemon
+            .retry_counts
+            .insert(TeamDaemon::telegram_failure_key("human"), 3);
+        daemon.intervention_cooldowns.insert(
+            TeamDaemon::telegram_circuit_breaker_key("human"),
+            Instant::now(),
+        );
+
+        daemon.clear_telegram_delivery_failures("human");
+
+        assert!(
+            !daemon
+                .retry_counts
+                .contains_key(&TeamDaemon::telegram_failure_key("human"))
+        );
+        assert!(
+            !daemon
+                .intervention_cooldowns
+                .contains_key(&TeamDaemon::telegram_circuit_breaker_key("human"))
+        );
+    }
+
+    // --- Increment telegram delivery failures ---
+
+    #[test]
+    fn increment_telegram_delivery_failures_starts_at_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = empty_legacy_daemon(&tmp);
+        let count = daemon.increment_telegram_delivery_failures("human");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn increment_telegram_delivery_failures_accumulates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = empty_legacy_daemon(&tmp);
+        daemon.increment_telegram_delivery_failures("human");
+        daemon.increment_telegram_delivery_failures("human");
+        let count = daemon.increment_telegram_delivery_failures("human");
+        assert_eq!(count, 3);
+    }
+
+    // --- Delivery to unknown recipient ---
+
+    #[test]
+    fn deliver_message_skips_unknown_recipient() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = empty_legacy_daemon(&tmp);
+        let result = daemon
+            .deliver_message("manager", "nonexistent-role", "hello")
+            .unwrap();
+        assert_eq!(result, MessageDelivery::SkippedUnknownRecipient);
+    }
+
+    // --- Delivery to member without pane falls back to inbox ---
+
+    #[test]
+    fn deliver_message_to_member_without_pane_goes_to_inbox() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = empty_legacy_daemon(&tmp);
+        // Add member without pane
+        daemon.config.members.push(MemberInstance {
+            name: "eng-2".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+        });
+
+        let result = daemon
+            .deliver_message("manager", "eng-2", "Go fix the bug")
+            .unwrap();
+        assert_eq!(result, MessageDelivery::InboxQueued);
+
+        let root = inbox::inboxes_root(tmp.path());
+        let messages = inbox::pending_messages(&root, "eng-2").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].from, "manager");
+        assert!(messages[0].body.contains("Go fix the bug"));
+    }
+
+    // --- Non-telegram channel delivery ---
+
+    #[test]
+    fn deliver_channel_message_records_routing_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = empty_legacy_daemon(&tmp);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        daemon.channels.insert(
+            "user".to_string(),
+            Box::new(RecordingChannel {
+                messages: Arc::clone(&sent),
+            }),
+        );
+
+        let result = daemon
+            .deliver_channel_message("eng-1", "user", "Status update")
+            .unwrap();
+        assert_eq!(result, MessageDelivery::Channel);
+        assert_eq!(sent.lock().unwrap().as_slice(), ["Status update"]);
+    }
+
+    // --- Failed delivery deduplication ---
+
+    #[test]
+    fn record_failed_delivery_deduplicates_same_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+
+        daemon.record_failed_delivery("eng-1", "manager", "test msg");
+        let first_attempt_time = daemon.failed_deliveries[0].last_attempt;
+        std::thread::sleep(Duration::from_millis(10));
+        daemon.record_failed_delivery("eng-1", "manager", "test msg");
+
+        // Should still have only one entry
+        assert_eq!(daemon.failed_deliveries.len(), 1);
+        // But last_attempt should be updated
+        assert!(daemon.failed_deliveries[0].last_attempt >= first_attempt_time);
+    }
+
+    #[test]
+    fn record_failed_delivery_tracks_different_messages_separately() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+
+        daemon.record_failed_delivery("eng-1", "manager", "msg A");
+        daemon.record_failed_delivery("eng-1", "manager", "msg B");
+
+        assert_eq!(daemon.failed_deliveries.len(), 2);
+    }
+
+    #[test]
+    fn record_failed_delivery_tracks_different_recipients_separately() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        // Add another pane mapping for a second engineer
+        daemon
+            .config
+            .pane_map
+            .insert("eng-2".to_string(), "%8888888".to_string());
+
+        daemon.record_failed_delivery("eng-1", "manager", "same msg");
+        daemon.record_failed_delivery("eng-2", "manager", "same msg");
+
+        assert_eq!(daemon.failed_deliveries.len(), 2);
+    }
+
+    // --- Clear failed delivery ---
+
+    #[test]
+    fn clear_failed_delivery_removes_matching_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        daemon
+            .failed_deliveries
+            .push(FailedDelivery::new("eng-1", "manager", "msg A"));
+        daemon
+            .failed_deliveries
+            .push(FailedDelivery::new("eng-1", "manager", "msg B"));
+
+        daemon.clear_failed_delivery("eng-1", "manager", "msg A");
+
+        assert_eq!(daemon.failed_deliveries.len(), 1);
+        assert_eq!(daemon.failed_deliveries[0].body, "msg B");
+    }
+
+    #[test]
+    fn clear_failed_delivery_no_op_when_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        daemon
+            .failed_deliveries
+            .push(FailedDelivery::new("eng-1", "manager", "msg A"));
+
+        daemon.clear_failed_delivery("eng-1", "manager", "nonexistent");
+
+        assert_eq!(daemon.failed_deliveries.len(), 1);
+    }
+
+    // --- Escalation recipient resolution ---
+
+    #[test]
+    fn escalation_recipient_uses_reports_to() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = failed_delivery_test_daemon(&tmp);
+        // eng-1 reports to manager
+        let target = daemon.failed_delivery_escalation_recipient("eng-1");
+        assert_eq!(target.as_deref(), Some("manager"));
+    }
+
+    #[test]
+    fn escalation_recipient_falls_back_to_any_manager() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        // Add a member without reports_to but there's a manager in the team
+        daemon.config.members.push(MemberInstance {
+            name: "standalone".to_string(),
+            role_name: "standalone".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        });
+
+        let target = daemon.failed_delivery_escalation_recipient("standalone");
+        assert_eq!(target.as_deref(), Some("manager"));
+    }
+
+    #[test]
+    fn escalation_recipient_none_for_unknown_member_without_managers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = empty_legacy_daemon(&tmp);
+        // No members at all
+        let target = daemon.failed_delivery_escalation_recipient("unknown");
+        // automation_sender_for returns "daemon" by default, which isn't a member
+        assert!(target.is_none());
+    }
+
+    // --- Escalate failed delivery ---
+
+    #[test]
+    fn escalate_failed_delivery_sends_to_manager_inbox() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let delivery = FailedDelivery::new("eng-1", "architect", "critical update");
+
+        daemon.escalate_failed_delivery(&delivery).unwrap();
+
+        let root = inbox::inboxes_root(tmp.path());
+        // eng-1 reports to manager
+        let messages = inbox::pending_messages(&root, "manager").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].from, "daemon");
+        assert!(messages[0].body.contains("Live message delivery failed"));
+        assert!(messages[0].body.contains("Recipient: eng-1"));
+        assert!(messages[0].body.contains("From: architect"));
+        assert!(messages[0].body.contains("critical update"));
+    }
+
+    #[test]
+    fn escalate_failed_delivery_no_crash_without_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = empty_legacy_daemon(&tmp);
+        let delivery = FailedDelivery::new("orphan", "ghost", "lost message");
+
+        // Should not panic or error — just warns
+        daemon.escalate_failed_delivery(&delivery).unwrap();
+    }
+
+    // --- Retry failed deliveries ---
+
+    #[test]
+    fn retry_failed_deliveries_noop_when_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        daemon.retry_failed_deliveries().unwrap();
+        assert!(daemon.failed_deliveries.is_empty());
+    }
+
+    #[test]
+    fn retry_failed_deliveries_skips_too_recent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        // Create a delivery that was just attempted (not ready for retry)
+        let delivery = FailedDelivery::new("eng-1", "manager", "recent msg");
+        daemon.failed_deliveries.push(delivery);
+
+        daemon.retry_failed_deliveries().unwrap();
+
+        // Should still be in the queue, not attempted
+        assert_eq!(daemon.failed_deliveries.len(), 1);
+        assert_eq!(daemon.failed_deliveries[0].attempts, 1); // unchanged
+    }
+
+    #[test]
+    fn retry_failed_deliveries_escalates_without_pane() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        // Remove pane mapping for eng-1 so retry has no pane target
+        daemon.config.pane_map.clear();
+        let mut delivery = FailedDelivery::new("eng-1", "manager", "no pane msg");
+        delivery.last_attempt =
+            Instant::now() - FAILED_DELIVERY_RETRY_DELAY - Duration::from_secs(1);
+        daemon.failed_deliveries.push(delivery);
+
+        daemon.retry_failed_deliveries().unwrap();
+
+        // Delivery should be removed (escalated)
+        assert!(daemon.failed_deliveries.is_empty());
+        // Escalation should have been sent to manager
+        let root = inbox::inboxes_root(tmp.path());
+        let messages = inbox::pending_messages(&root, "manager").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].body.contains("Live message delivery failed"));
+    }
+
+    // --- Resolve role name ---
+
+    #[test]
+    fn resolve_role_name_returns_human_for_human() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = failed_delivery_test_daemon(&tmp);
+        assert_eq!(daemon.resolve_role_name("human"), "human");
+    }
+
+    #[test]
+    fn resolve_role_name_returns_daemon_for_daemon() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = failed_delivery_test_daemon(&tmp);
+        assert_eq!(daemon.resolve_role_name("daemon"), "daemon");
+    }
+
+    #[test]
+    fn resolve_role_name_maps_member_to_role_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = failed_delivery_test_daemon(&tmp);
+        // eng-1 has role_name "eng"
+        assert_eq!(daemon.resolve_role_name("eng-1"), "eng");
+    }
+
+    #[test]
+    fn resolve_role_name_returns_input_for_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = failed_delivery_test_daemon(&tmp);
+        assert_eq!(daemon.resolve_role_name("unknown-member"), "unknown-member");
+    }
+
+    // --- Capture contains marker ---
+
+    #[test]
+    fn capture_contains_marker_empty_capture() {
+        assert!(!capture_contains_message_marker(
+            "",
+            "--- Message from x ---"
+        ));
+    }
+
+    #[test]
+    fn capture_contains_marker_partial_match_fails() {
+        let marker = message_delivery_marker("manager");
+        assert!(!capture_contains_message_marker(
+            "--- Message from",
+            &marker
+        ));
+    }
+
+    #[test]
+    fn capture_contains_marker_multiline_capture() {
+        let marker = message_delivery_marker("eng-1");
+        let capture = "line1\nline2\n--- Message from eng-1 ---\nline4\n";
+        assert!(capture_contains_message_marker(capture, &marker));
+    }
+
+    // --- Queue daemon message uses automation sender ---
+
+    #[test]
+    fn queue_daemon_message_to_unknown_skips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = empty_legacy_daemon(&tmp);
+        let result = daemon.queue_daemon_message("nobody", "test msg").unwrap();
+        assert_eq!(result, MessageDelivery::SkippedUnknownRecipient);
+    }
+
+    // --- Deliver channel with failing non-telegram channel ---
+
+    #[test]
+    fn deliver_channel_message_failing_non_telegram_channel_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = empty_legacy_daemon(&tmp);
+        daemon
+            .channels
+            .insert("user".to_string(), Box::new(FailingChannel));
+
+        let result = daemon.deliver_channel_message("eng-1", "user", "test");
+        assert!(result.is_err());
+    }
+
+    // --- Telegram circuit breaker blocks further attempts ---
+
+    #[test]
+    fn telegram_delivery_blocked_when_circuit_breaker_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = empty_legacy_daemon(&tmp);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        daemon.channels.insert(
+            "user".to_string(),
+            Box::new(RecordingChannel {
+                messages: Arc::clone(&sent),
+            }),
+        );
+        // Simulate telegram channel type by using SequencedTelegramChannel
+        daemon.channels.insert(
+            "tg-user".to_string(),
+            Box::new(SequencedTelegramChannel {
+                results: Arc::new(Mutex::new(VecDeque::from([
+                    Ok(()),
+                    Ok(()),
+                    Ok(()),
+                    Ok(()),
+                    Ok(()),
+                ]))),
+                attempts: Arc::new(Mutex::new(0)),
+            }),
+        );
+        // Open circuit breaker for tg-user
+        daemon.intervention_cooldowns.insert(
+            TeamDaemon::telegram_circuit_breaker_key("tg-user"),
+            Instant::now(),
+        );
+
+        let result = daemon.deliver_channel_message("eng-1", "tg-user", "blocked msg");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("circuit breaker is open"));
+    }
+
+    // --- Constants verification ---
+
+    #[test]
+    fn delivery_verification_constants_are_sane() {
+        assert!(
+            DELIVERY_VERIFICATION_CAPTURE_LINES_RECENTLY_READY
+                > DELIVERY_VERIFICATION_CAPTURE_LINES
+        );
+        assert!(DELIVERY_VERIFICATION_CAPTURE_LINES > 0);
+        assert!(FAILED_DELIVERY_MAX_ATTEMPTS >= 2);
+        assert!(FAILED_DELIVERY_RETRY_DELAY >= Duration::from_secs(1));
+    }
+
+    // --- Verify message content in pane ---
+
+    #[test]
+    fn verify_message_content_in_pane_returns_false_for_nonexistent_pane() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = failed_delivery_test_daemon(&tmp);
+        assert!(!daemon.verify_message_content_in_pane("%99999999", "--- Message from test ---"));
+    }
+
+    #[test]
+    fn verify_message_content_in_pane_lines_returns_false_for_nonexistent_pane() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = failed_delivery_test_daemon(&tmp);
+        assert!(!daemon.verify_message_content_in_pane_lines(
+            "%99999999",
+            "--- Message from test ---",
+            100
+        ));
+    }
 }
