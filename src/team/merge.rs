@@ -1979,7 +1979,7 @@ mod tests {
             auto_event
                 .reason
                 .as_ref()
-                .map_or(false, |r| r.contains("files=") && r.contains("lines=")),
+                .is_some_and(|r| r.contains("files=") && r.contains("lines=")),
             "reason should contain diff stats: {:?}",
             auto_event.reason
         );
