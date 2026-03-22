@@ -208,8 +208,11 @@ impl TeamDaemon {
         );
 
         // Write progress checkpoint before restarting.
-        let checkpoint =
-            super::super::checkpoint::gather_checkpoint(&self.config.project_root, member_name, &task);
+        let checkpoint = super::super::checkpoint::gather_checkpoint(
+            &self.config.project_root,
+            member_name,
+            &task,
+        );
         if let Err(error) =
             super::super::checkpoint::write_checkpoint(&self.config.project_root, &checkpoint)
         {
@@ -292,7 +295,11 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
     }
 
     /// Handle a stalled agent — no output change for longer than the configured threshold.
-    pub(super) fn handle_stalled_agent(&mut self, member_name: &str, stall_secs: u64) -> Result<()> {
+    pub(super) fn handle_stalled_agent(
+        &mut self,
+        member_name: &str,
+        stall_secs: u64,
+    ) -> Result<()> {
         let Some(task) = self.active_task(member_name)? else {
             return Ok(());
         };
@@ -352,8 +359,11 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         }
 
         // Write progress checkpoint before restarting.
-        let checkpoint =
-            super::super::checkpoint::gather_checkpoint(&self.config.project_root, member_name, &task);
+        let checkpoint = super::super::checkpoint::gather_checkpoint(
+            &self.config.project_root,
+            member_name,
+            &task,
+        );
         if let Err(error) =
             super::super::checkpoint::write_checkpoint(&self.config.project_root, &checkpoint)
         {
@@ -725,25 +735,26 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use crate::team::config::{AutomationConfig, BoardConfig, OrchestratorPosition, StandupConfig, TeamConfig, RoleType, WorkflowMode, WorkflowPolicy};
-    use crate::team::events::{EventSink, TeamEvent};
+    use crate::team::config::{
+        AutomationConfig, BoardConfig, OrchestratorPosition, RoleType, StandupConfig, TeamConfig,
+        WorkflowMode, WorkflowPolicy,
+    };
+    use crate::team::events::TeamEvent;
     use crate::team::hierarchy::MemberInstance;
+    use crate::team::standup::MemberState;
     use crate::team::test_helpers::{make_test_daemon, write_event_log};
     use crate::team::test_support::{
-        TestDaemonBuilder, architect_member, engineer_member, init_git_repo,
-        manager_member, setup_fake_claude, write_board_task_file,
-        write_owned_task_file, write_owned_task_file_with_context,
+        TestDaemonBuilder, architect_member, engineer_member, git_ok, git_stdout, init_git_repo,
+        manager_member, setup_fake_claude, write_owned_task_file,
+        write_owned_task_file_with_context,
     };
     use crate::team::watcher::WatcherState;
-    use crate::team::standup::MemberState;
     use serial_test::serial;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::{LazyLock, Mutex};
     use std::time::{Duration, Instant};
-    use std::sync::{LazyLock, Mutex};
-
-    use std::sync::{LazyLock, Mutex};
 
     static PATH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -774,7 +785,6 @@ mod tests {
             }
         }
     }
-
 
     fn setup_fake_kanban(tmp: &tempfile::TempDir, script_name: &str) -> PathBuf {
         let fake_bin = tmp.path().join(format!("{script_name}-bin"));
@@ -811,7 +821,6 @@ exit 1
         fake_bin
     }
 
-
     fn test_team_config(name: &str) -> TeamConfig {
         TeamConfig {
             name: name.to_string(),
@@ -832,8 +841,6 @@ exit 1
             roles: Vec::new(),
         }
     }
-
-
 
     #[test]
     fn test_retry_count_increments_and_resets() {
@@ -2190,7 +2197,6 @@ exit 1
         crate::tmux::kill_session(&session).unwrap();
     }
 
-
     #[test]
     fn stall_restart_count_returns_zero_with_no_events() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2591,10 +2597,9 @@ exit 1
         );
     }
 
-
     #[test]
     fn health_check_interval_config_default() {
-        use super::super::config::WorkflowPolicy;
+        use crate::team::config::WorkflowPolicy;
         let policy = WorkflowPolicy::default();
         assert_eq!(policy.health_check_interval_secs, 60);
     }
@@ -2751,12 +2756,8 @@ exit 1
 
     // ---- Worktree reconciliation tests ----
 
-
-
     /// Helper: set up a test repo, engineer worktree on a merged task branch.
-    fn setup_reconcile_scenario(
-        engineer: &str,
-    ) -> (tempfile::TempDir, PathBuf, PathBuf) {
+    fn setup_reconcile_scenario(engineer: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "batty-reconcile");
         let worktree_dir = repo.join(".batty").join("worktrees").join(engineer);
@@ -2779,7 +2780,7 @@ exit 1
 
     #[test]
     fn reconcile_resets_idle_engineer_on_merged_branch() {
-        let (tmp, repo, worktree_dir) = setup_reconcile_scenario("eng-reconcile");
+        let (_tmp, repo, worktree_dir) = setup_reconcile_scenario("eng-reconcile");
 
         let members = vec![
             manager_member("manager", None),
@@ -2804,7 +2805,7 @@ exit 1
 
     #[test]
     fn reconcile_skips_working_engineer() {
-        let (tmp, repo, worktree_dir) = setup_reconcile_scenario("eng-working");
+        let (_tmp, repo, worktree_dir) = setup_reconcile_scenario("eng-working");
 
         let members = vec![
             manager_member("manager", None),
@@ -2828,7 +2829,7 @@ exit 1
 
     #[test]
     fn reconcile_skips_idle_engineer_with_active_task() {
-        let (tmp, repo, worktree_dir) = setup_reconcile_scenario("eng-active");
+        let (_tmp, repo, worktree_dir) = setup_reconcile_scenario("eng-active");
 
         let members = vec![
             manager_member("manager", None),

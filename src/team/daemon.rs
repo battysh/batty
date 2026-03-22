@@ -53,12 +53,12 @@ use crate::agent::{self, BackendHealth};
 use crate::tmux;
 use dispatch::DispatchQueueEntry;
 
+#[path = "daemon/automation.rs"]
+mod automation;
 #[path = "dispatch/mod.rs"]
 mod dispatch;
 #[path = "daemon/error_handling.rs"]
 mod error_handling;
-#[path = "daemon/automation.rs"]
-mod automation;
 #[path = "daemon/health.rs"]
 mod health;
 #[path = "daemon/interventions/mod.rs"]
@@ -88,10 +88,8 @@ pub struct DaemonConfig {
     pub pane_map: HashMap<String, String>,
 }
 
-
 const HOT_RELOAD_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const HOT_RELOAD_MIN_INTERVAL: Duration = Duration::from_secs(30);
-
 
 /// The running team daemon.
 pub struct TeamDaemon {
@@ -748,7 +746,6 @@ impl TeamDaemon {
         self.states.insert(engineer.to_string(), state);
     }
 
-
     pub(super) fn increment_retry(&mut self, engineer: &str) -> u32 {
         let count = self.retry_counts.entry(engineer.to_string()).or_insert(0);
         *count += 1;
@@ -779,7 +776,11 @@ impl TeamDaemon {
     }
 
     /// Update automation countdowns when a member's state changes.
-    pub(super) fn update_automation_timers_for_state(&mut self, member_name: &str, new_state: MemberState) {
+    pub(super) fn update_automation_timers_for_state(
+        &mut self,
+        member_name: &str,
+        new_state: MemberState,
+    ) {
         match new_state {
             MemberState::Idle => {
                 self.idle_started_at
@@ -800,7 +801,6 @@ impl TeamDaemon {
         );
         self.update_triage_intervention_for_state(member_name, new_state);
     }
-
 
     fn restore_runtime_state(&mut self) {
         let Some(state) = load_daemon_state(&self.config.project_root) else {
@@ -863,7 +863,6 @@ impl TeamDaemon {
         };
         save_daemon_state(&self.config.project_root, &state)
     }
-
 }
 
 fn describe_command_failure(command: &str, args: &[&str], output: &std::process::Output) -> String {
@@ -1133,19 +1132,18 @@ mod tests {
     use crate::team::config::AutomationConfig;
     use crate::team::config::{BoardConfig, RoleDef, StandupConfig, WorkflowMode, WorkflowPolicy};
     use crate::team::events::EventSink;
-    use crate::team::test_helpers::{make_test_daemon, write_event_log};
+    use crate::team::test_helpers::make_test_daemon;
     use crate::team::test_support::{
-        TestDaemonBuilder, architect_member, backdate_idle_grace, engineer_member, git_ok,
-        git_stdout, init_git_repo, manager_member, setup_fake_claude, write_board_task_file,
-        write_open_task_file, write_owned_task_file, write_owned_task_file_with_context,
+        TestDaemonBuilder, architect_member, backdate_idle_grace, engineer_member, init_git_repo,
+        manager_member, write_board_task_file, write_open_task_file, write_owned_task_file,
     };
-    use crate::team::watcher::WatcherState;
+    use std::time::UNIX_EPOCH;
+
     use serial_test::serial;
     use std::collections::HashMap;
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::path::{Path, PathBuf};
-    use std::process::Command;
 
     fn production_unwrap_expect_count(path: &Path) -> usize {
         let content = std::fs::read_to_string(path).unwrap();
