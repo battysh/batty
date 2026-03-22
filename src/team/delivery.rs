@@ -30,6 +30,14 @@ pub(super) fn is_agent_ready(pane_id: &str) -> bool {
 }
 
 #[derive(Debug, Clone)]
+pub(super) struct PendingMessage {
+    pub(super) from: String,
+    pub(super) body: String,
+    #[allow(dead_code)] // Useful for future queue-age diagnostics.
+    pub(super) queued_at: Instant,
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct FailedDelivery {
     pub(super) recipient: String,
     pub(super) from: String,
@@ -67,6 +75,7 @@ pub(super) enum MessageDelivery {
     Channel,
     LivePane,
     InboxQueued,
+    DeferredPending,
     SkippedUnknownRecipient,
 }
 
@@ -369,7 +378,21 @@ impl TeamDaemon {
             if delivery.has_attempts_remaining() {
                 self.failed_deliveries.push(delivery);
             } else {
-                self.escalate_failed_delivery(&delivery)?;
+                // Don't escalate if the agent is still starting — it hasn't
+                // had a chance to accept messages yet. Keep retrying.
+                let agent_still_starting = self
+                    .watchers
+                    .get(&delivery.recipient)
+                    .is_some_and(|w| !w.is_ready_for_delivery());
+                if agent_still_starting {
+                    debug!(
+                        recipient = %delivery.recipient,
+                        "agent still starting; suppressing escalation"
+                    );
+                    self.failed_deliveries.push(delivery);
+                } else {
+                    self.escalate_failed_delivery(&delivery)?;
+                }
             }
         }
 
@@ -531,6 +554,27 @@ impl TeamDaemon {
         }
     }
 
+    /// Drain pending messages for an agent that just became ready.
+    /// Called from `poll_watchers()` when `ready_confirmed` transitions to true.
+    pub(super) fn drain_pending_queue(&mut self, recipient: &str) -> Result<()> {
+        let messages = self
+            .pending_delivery_queue
+            .remove(recipient)
+            .unwrap_or_default();
+        if messages.is_empty() {
+            return Ok(());
+        }
+        info!(
+            recipient,
+            count = messages.len(),
+            "draining pending delivery queue after agent became ready"
+        );
+        for msg in messages {
+            self.deliver_message(&msg.from, recipient, &msg.body)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn queue_daemon_message(
         &mut self,
         recipient: &str,
@@ -569,6 +613,31 @@ impl TeamDaemon {
         if let Some(pane_id) = self.config.pane_map.get(recipient).cloned() {
             // Readiness gate: check for the agent prompt before injecting.
             if !self.check_agent_ready(recipient, &pane_id) {
+                // If the agent has *never* been ready (still starting up), buffer
+                // in the pending queue — these will be drained when readiness is
+                // confirmed.  If the agent was previously ready, fall through to
+                // inbox delivery (existing behaviour for transient unreadiness).
+                let never_been_ready = self
+                    .watchers
+                    .get(recipient)
+                    .is_some_and(|w| !w.is_ready_for_delivery());
+                if never_been_ready {
+                    info!(
+                        from,
+                        to = recipient,
+                        pane_id = pane_id.as_str(),
+                        "agent still starting; deferring to pending queue"
+                    );
+                    self.pending_delivery_queue
+                        .entry(recipient.to_string())
+                        .or_default()
+                        .push(PendingMessage {
+                            from: from.to_string(),
+                            body: body.to_string(),
+                            queued_at: Instant::now(),
+                        });
+                    return Ok(MessageDelivery::DeferredPending);
+                }
                 info!(
                     from,
                     to = recipient,
@@ -957,6 +1026,7 @@ mod tests {
             backend_health: HashMap::new(),
             last_health_check: Instant::now(),
             last_uncommitted_warn: HashMap::new(),
+            pending_delivery_queue: HashMap::new(),
         }
     }
 
@@ -2403,5 +2473,197 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let daemon = empty_legacy_daemon(&tmp);
         assert!(!daemon.telegram_channel_paused("eng-1"));
+    }
+
+    // --- Pending delivery queue tests (Task #276) ---
+
+    #[test]
+    fn pending_queue_buffers_message_when_agent_not_ready() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        // Watcher present but not yet confirmed ready (starting state).
+        let watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        assert!(!watcher.is_ready_for_delivery());
+        daemon.watchers.insert("eng-1".to_string(), watcher);
+
+        let result = daemon
+            .deliver_message("manager", "eng-1", "task assignment")
+            .unwrap();
+
+        assert_eq!(
+            result,
+            MessageDelivery::DeferredPending,
+            "message to starting agent must be deferred to pending queue"
+        );
+        let queue = daemon.pending_delivery_queue.get("eng-1").unwrap();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].from, "manager");
+        assert_eq!(queue[0].body, "task assignment");
+    }
+
+    #[test]
+    fn drain_pending_queue_delivers_when_agent_ready() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+
+        // Pre-populate the pending queue.
+        daemon
+            .pending_delivery_queue
+            .entry("eng-1".to_string())
+            .or_default()
+            .push(PendingMessage {
+                from: "manager".to_string(),
+                body: "queued assignment".to_string(),
+                queued_at: Instant::now(),
+            });
+
+        // Mark the watcher as ready so deliver_message proceeds past the gate.
+        let mut watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        watcher.confirm_ready();
+        daemon.watchers.insert("eng-1".to_string(), watcher);
+
+        daemon.drain_pending_queue("eng-1").unwrap();
+
+        // Queue must be empty after drain.
+        assert!(
+            daemon
+                .pending_delivery_queue
+                .get("eng-1")
+                .map(|q| q.is_empty())
+                .unwrap_or(true),
+            "pending queue must be empty after drain"
+        );
+
+        // Message should have fallen through to inbox (pane %9999999 doesn't exist).
+        let root = inbox::inboxes_root(tmp.path());
+        let messages = inbox::pending_messages(&root, "eng-1").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].body, "queued assignment");
+    }
+
+    #[test]
+    fn drain_pending_queue_noop_when_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        // No pending messages — should not panic or error.
+        daemon.drain_pending_queue("eng-1").unwrap();
+        assert!(
+            daemon
+                .pending_delivery_queue
+                .get("eng-1")
+                .map(|q| q.is_empty())
+                .unwrap_or(true)
+        );
+    }
+
+    #[test]
+    fn escalation_skipped_for_starting_agents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+
+        // Agent watcher is present but not yet confirmed ready.
+        let watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        assert!(!watcher.is_ready_for_delivery());
+        daemon.watchers.insert("eng-1".to_string(), watcher);
+
+        // Build a delivery targeting eng-1 that has used all its retry attempts.
+        // FailedDelivery::new(recipient, from, body).
+        let mut delivery = FailedDelivery::new("eng-1", "manager", "assignment");
+        delivery.attempts = FAILED_DELIVERY_MAX_ATTEMPTS - 1;
+        delivery.last_attempt =
+            Instant::now() - FAILED_DELIVERY_RETRY_DELAY - Duration::from_secs(1);
+        daemon.failed_deliveries.push(delivery);
+
+        daemon.retry_failed_deliveries().unwrap();
+
+        // Agent is not ready → delivery pushed back to queue at the readiness check.
+        // Escalation should NOT have happened — architect inbox must be empty.
+        let root = inbox::inboxes_root(tmp.path());
+        let architect_inbox = inbox::pending_messages(&root, "architect").unwrap();
+        assert!(
+            architect_inbox.is_empty(),
+            "no escalation expected while agent is starting"
+        );
+        // Delivery should still be in the retry queue.
+        assert_eq!(
+            daemon.failed_deliveries.len(),
+            1,
+            "failed delivery must stay in queue for starting agent"
+        );
+    }
+
+    #[test]
+    fn escalation_happens_for_ready_agents_with_failed_delivery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+
+        // Agent is ready.
+        let mut watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        watcher.confirm_ready();
+        daemon.watchers.insert("eng-1".to_string(), watcher);
+
+        // Build a delivery that has used all retry attempts and is due for retry.
+        let mut delivery = FailedDelivery::new("eng-1", "manager", "assignment");
+        delivery.attempts = FAILED_DELIVERY_MAX_ATTEMPTS - 1;
+        delivery.last_attempt =
+            Instant::now() - FAILED_DELIVERY_RETRY_DELAY - Duration::from_secs(1);
+        daemon.failed_deliveries.push(delivery);
+
+        daemon.retry_failed_deliveries().unwrap();
+
+        // After all retries exhausted for a ready agent, it must escalate.
+        // (eng-1 reports_to=manager)
+        let root = inbox::inboxes_root(tmp.path());
+        let manager_inbox = inbox::pending_messages(&root, "manager").unwrap();
+        assert!(
+            !manager_inbox.is_empty(),
+            "failed delivery for ready agent must be escalated"
+        );
+    }
+
+    #[test]
+    fn multiple_messages_queued_and_drained_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+
+        // Watcher not ready — all messages should be buffered.
+        let watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        daemon.watchers.insert("eng-1".to_string(), watcher);
+
+        for i in 1..=3u32 {
+            let result = daemon
+                .deliver_message("manager", "eng-1", &format!("msg-{i}"))
+                .unwrap();
+            assert_eq!(result, MessageDelivery::DeferredPending);
+        }
+
+        let queue = daemon.pending_delivery_queue.get("eng-1").unwrap();
+        assert_eq!(queue.len(), 3);
+        // Verify FIFO order in the queue.
+        assert_eq!(queue[0].body, "msg-1");
+        assert_eq!(queue[1].body, "msg-2");
+        assert_eq!(queue[2].body, "msg-3");
+
+        // Confirm readiness and drain.
+        daemon.watchers.get_mut("eng-1").unwrap().confirm_ready();
+        daemon.drain_pending_queue("eng-1").unwrap();
+
+        // Queue must be empty.
+        assert!(
+            daemon
+                .pending_delivery_queue
+                .get("eng-1")
+                .map(|q| q.is_empty())
+                .unwrap_or(true)
+        );
+
+        // All three messages must be in inbox (pane doesn't exist → inbox fallback).
+        let root = inbox::inboxes_root(tmp.path());
+        let inbox_msgs = inbox::pending_messages(&root, "eng-1").unwrap();
+        assert_eq!(inbox_msgs.len(), 3, "all queued messages must be delivered");
+        // Verify all messages present (inbox ordering depends on filesystem).
+        let mut bodies: Vec<&str> = inbox_msgs.iter().map(|m| m.body.as_str()).collect();
+        bodies.sort();
+        assert_eq!(bodies, vec!["msg-1", "msg-2", "msg-3"]);
     }
 }
