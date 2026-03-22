@@ -359,58 +359,15 @@ pub(super) fn write_launch_script(
         .unwrap_or_else(|| "default".to_string());
     let script_path =
         std::env::temp_dir().join(format!("batty-launch-{project_slug}-{member_name}.sh"));
-    let escaped_prompt = prompt.replace('\'', "'\\''");
     let launch_dir = match agent_name {
         "codex" | "codex-cli" => prepare_codex_context(member_name, role_context, work_dir)?,
         _ => work_dir.to_path_buf(),
     };
     let launch_dir_str = launch_dir.to_string_lossy();
 
-    let agent_cmd = match agent_name {
-        "codex" | "codex-cli" => {
-            if resume {
-                let session_id = session_id.context("missing Codex session ID for resume")?;
-                format!(
-                    "exec codex resume '{session_id}' --dangerously-bypass-approvals-and-sandbox"
-                )
-            } else {
-                let prefix = "exec codex --dangerously-bypass-approvals-and-sandbox";
-                if idle {
-                    prefix.to_string()
-                } else {
-                    format!("{prefix} '{escaped_prompt}'")
-                }
-            }
-        }
-        "kiro" | "kiro-cli" => {
-            let prefix = "exec kiro chat --mode agent";
-            if idle {
-                prefix.to_string()
-            } else {
-                format!("{prefix} '{escaped_prompt}'")
-            }
-        }
-        _ => {
-            if resume {
-                let session_id = session_id.context("missing Claude session ID for resume")?;
-                format!("exec claude --dangerously-skip-permissions --resume '{session_id}'")
-            } else if idle {
-                let session_flag = session_id
-                    .map(|id| format!(" --session-id '{id}'"))
-                    .unwrap_or_default();
-                format!(
-                    "exec claude --dangerously-skip-permissions{session_flag} --append-system-prompt '{escaped_prompt}'"
-                )
-            } else {
-                let session_flag = session_id
-                    .map(|id| format!(" --session-id '{id}'"))
-                    .unwrap_or_default();
-                format!(
-                    "exec claude --dangerously-skip-permissions{session_flag} '{escaped_prompt}'"
-                )
-            }
-        }
-    };
+    let adapter = agent::adapter_from_name(agent_name)
+        .unwrap_or_else(|| agent::adapter_from_name("claude").unwrap());
+    let agent_cmd = adapter.launch_command(prompt, idle, resume, session_id)?;
 
     let wrapper_dir = std::env::temp_dir().join(format!("batty-bin-{project_slug}-{member_name}"));
     std::fs::create_dir_all(&wrapper_dir).ok();
@@ -466,7 +423,7 @@ pub(super) fn canonical_agent_name(agent_name: &str) -> String {
 }
 
 pub(super) fn new_member_session_id(agent_name: &str) -> Option<String> {
-    (agent_name == "claude-code").then(|| Uuid::new_v4().to_string())
+    agent::adapter_from_name(agent_name).and_then(|a| a.new_session_id())
 }
 
 fn role_starts_idle() -> bool {

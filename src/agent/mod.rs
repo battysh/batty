@@ -81,6 +81,34 @@ pub trait AgentAdapter: Send + Sync {
         // Default: send /clear then Enter
         vec![("/clear".to_string(), true)]
     }
+
+    // --- Launch lifecycle methods (Backend trait) ---
+
+    /// Build the shell command to launch this agent.
+    ///
+    /// Returns the `exec <agent> ...` command string that will be written into
+    /// the launch script. Each backend encodes its own CLI flags, resume
+    /// semantics, and idle/prompt handling.
+    fn launch_command(
+        &self,
+        prompt: &str,
+        idle: bool,
+        resume: bool,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<String>;
+
+    /// Generate a new session ID for this backend, if supported.
+    ///
+    /// Backends that support session resume (e.g., Claude Code) return
+    /// `Some(uuid)`. Backends without session management return `None`.
+    fn new_session_id(&self) -> Option<String> {
+        None
+    }
+
+    /// Whether this backend supports resuming a previous session.
+    fn supports_resume(&self) -> bool {
+        false
+    }
 }
 
 /// Look up an agent adapter by name.
@@ -170,5 +198,45 @@ mod tests {
         let adapter = claude::ClaudeCodeAdapter::new(None);
         let prompt = "test launch prompt";
         assert_eq!(adapter.wrap_launch_prompt(prompt), prompt);
+    }
+
+    // --- Backend trait dispatch tests ---
+
+    #[test]
+    fn launch_command_dispatches_through_trait_object() {
+        let backends: Vec<Box<dyn AgentAdapter>> = vec![
+            Box::new(claude::ClaudeCodeAdapter::new(None)),
+            Box::new(codex::CodexCliAdapter::new(None)),
+            Box::new(kiro::KiroCliAdapter::new(None)),
+        ];
+        for backend in &backends {
+            let cmd = backend.launch_command("test prompt", true, false, None);
+            assert!(cmd.is_ok(), "launch_command failed for {}", backend.name());
+            assert!(
+                !cmd.unwrap().is_empty(),
+                "launch_command empty for {}",
+                backend.name()
+            );
+        }
+    }
+
+    #[test]
+    fn supports_resume_varies_by_backend() {
+        let claude = adapter_from_name("claude").unwrap();
+        let codex = adapter_from_name("codex").unwrap();
+        let kiro = adapter_from_name("kiro").unwrap();
+        assert!(claude.supports_resume());
+        assert!(codex.supports_resume());
+        assert!(!kiro.supports_resume());
+    }
+
+    #[test]
+    fn new_session_id_varies_by_backend() {
+        let claude = adapter_from_name("claude").unwrap();
+        let codex = adapter_from_name("codex").unwrap();
+        let kiro = adapter_from_name("kiro").unwrap();
+        assert!(claude.new_session_id().is_some());
+        assert!(codex.new_session_id().is_none());
+        assert!(kiro.new_session_id().is_none());
     }
 }
