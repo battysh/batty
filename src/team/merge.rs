@@ -109,14 +109,14 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     let manager_name = daemon.manager_name(engineer);
 
     if commits_ahead_of_main(&worktree_dir)? == 0 {
+        // Do NOT clear active task or set idle — the engineer still owns this task.
+        // Clearing would orphan the board task in-progress with no engineer tracking it.
         let msg = "Completion rejected: your branch has no commits ahead of main. Commit your changes before reporting done again.";
         daemon.queue_message("batty", engineer, msg)?;
-        daemon.clear_active_task(engineer);
-        daemon.set_member_idle(engineer);
-        info!(
+        warn!(
             engineer,
             task_id,
-            "Cleared stale assignment for {engineer} after no-commits rejection on task #{task_id}"
+            "engineer idle but no commits on task branch — keeping task #{task_id} active for {engineer}"
         );
         return Ok(());
     }
@@ -1262,7 +1262,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_gate_rejects_zero_commits() {
+    fn completion_gate_rejects_zero_commits_but_keeps_task_active() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "batty-merge-test");
         write_task_file(&repo, 42, "zero-commit-task");
@@ -1284,14 +1284,12 @@ mod tests {
         let mut daemon = make_test_daemon(&repo, vec![engineer]);
 
         daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
         handle_engineer_completion(&mut daemon, "eng-1").unwrap();
 
-        assert_eq!(daemon.active_task_id("eng-1"), None);
+        // Task stays active — engineer still owns it (false-done prevention)
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
         assert_eq!(daemon.retry_count_for_test("eng-1"), None);
-        assert_eq!(
-            daemon.member_state_for_test("eng-1"),
-            Some(MemberState::Idle)
-        );
     }
 
     #[test]
@@ -1398,10 +1396,10 @@ mod tests {
     }
 
     #[test]
-    fn no_commits_rejection_clears_assignment() {
+    fn no_commits_rejection_keeps_assignment() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "batty-merge-test");
-        write_task_file(&repo, 42, "no-commits-clear");
+        write_task_file(&repo, 42, "no-commits-keep");
 
         let team_config_dir = repo.join(".batty").join("team_config");
         let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
@@ -1415,16 +1413,12 @@ mod tests {
 
         handle_engineer_completion(&mut daemon, "eng-1").unwrap();
 
-        // Assignment should be cleared — engineer is free for new dispatch
-        assert_eq!(daemon.active_task_id("eng-1"), None);
-        assert_eq!(
-            daemon.member_state_for_test("eng-1"),
-            Some(MemberState::Idle)
-        );
+        // Assignment kept — engineer still owns the task (false-done prevention)
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
     }
 
     #[test]
-    fn no_commits_rejection_does_not_retry() {
+    fn no_commits_rejection_does_not_retry_and_keeps_task() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "batty-merge-test");
         write_task_file(&repo, 42, "no-commits-no-retry");
@@ -1441,10 +1435,10 @@ mod tests {
 
         handle_engineer_completion(&mut daemon, "eng-1").unwrap();
 
-        // Retry count should not be incremented — task is abandoned, not retried
+        // Retry count should not be incremented
         assert_eq!(daemon.retry_count_for_test("eng-1"), None);
-        // Active task cleared, so no re-dispatch will happen
-        assert_eq!(daemon.active_task_id("eng-1"), None);
+        // Active task kept — engineer still owns it (false-done prevention)
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
     }
 
     #[test]
