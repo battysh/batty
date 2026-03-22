@@ -126,7 +126,7 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 - Maildir inbox routing with explicit `talks_to` communication rules
 - Stable per-engineer worktrees with fresh task branches on each assignment
 - Kanban-driven task loop with auto-dispatch, retry tracking, and test gating
-- Scheduled tasks: `scheduled_for` delays dispatch until a future time, `cron_schedule` enables recurring tasks that auto-recycle from done back to todo
+- Scheduled tasks: `scheduled_for` delays dispatch until a future time, `cron_schedule` enables recurring tasks that auto-recycle from done back to todo ([guide](docs/scheduled-tasks.md))
 - Per-intervention runtime toggles via `batty nudge` to disable or re-enable specific daemon behaviors without restarting
 - Orchestrator automation for triage, review, owned-task recovery, dispatch-gap recovery, utilization recovery, standups, nudges, and retrospectives
 - Auto-merge policy engine with confidence scoring and configurable thresholds for safe unattended merges
@@ -242,6 +242,7 @@ This session shows Batty coordinating a live team in `~/mafia_solver`: the `arch
 - [CLI Reference](docs/reference/cli.md)
 - [Runtime Config Reference](docs/reference/config.md)
 - [Module Reference](docs/reference/modules.md)
+- [Scheduled Tasks & Cron](docs/scheduled-tasks.md)
 - [Orchestrator Guide](docs/orchestrator.md)
 - [Architecture](docs/architecture.md)
 - [Troubleshooting](docs/troubleshooting.md)
