@@ -50,7 +50,7 @@ use crate::agent;
 use crate::tmux;
 use dispatch::DispatchQueueEntry;
 
-#[path = "dispatch.rs"]
+#[path = "dispatch/mod.rs"]
 mod dispatch;
 #[path = "daemon/interventions/mod.rs"]
 mod interventions;
