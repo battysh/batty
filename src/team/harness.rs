@@ -154,6 +154,12 @@ impl TestHarness {
             pane_map: self.pane_map.clone(),
         })?;
         daemon.states = self.availability.clone();
+        // Test panes are assumed to be already running — pre-confirm readiness so
+        // that delivery goes through the normal inject-then-inbox path rather than
+        // the pending-delivery-queue path (which is only for freshly-spawned agents).
+        for watcher in daemon.watchers.values_mut() {
+            watcher.confirm_ready();
+        }
         Ok(daemon)
     }
 

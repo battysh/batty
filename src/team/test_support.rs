@@ -299,6 +299,11 @@ impl<'a> TestDaemonBuilder<'a> {
         if let Some(watchers) = self.watchers {
             daemon.watchers = watchers;
         }
+        // Test panes are assumed to be already running — pre-confirm readiness so
+        // delivery goes through the normal inject-then-inbox path.
+        for watcher in daemon.watchers.values_mut() {
+            watcher.confirm_ready();
+        }
         daemon
     }
 }
