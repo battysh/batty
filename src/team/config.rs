@@ -265,6 +265,8 @@ pub struct AutomationConfig {
     pub intervention_idle_grace_secs: u64,
     #[serde(default = "default_intervention_cooldown_secs")]
     pub intervention_cooldown_secs: u64,
+    #[serde(default = "default_utilization_recovery_interval_secs")]
+    pub utilization_recovery_interval_secs: u64,
 }
 
 impl Default for AutomationConfig {
@@ -281,6 +283,7 @@ impl Default for AutomationConfig {
             replenishment_threshold: None,
             intervention_idle_grace_secs: default_intervention_idle_grace_secs(),
             intervention_cooldown_secs: default_intervention_cooldown_secs(),
+            utilization_recovery_interval_secs: default_utilization_recovery_interval_secs(),
         }
     }
 }
@@ -436,6 +439,10 @@ fn default_intervention_idle_grace_secs() -> u64 {
 
 fn default_intervention_cooldown_secs() -> u64 {
     120
+}
+
+fn default_utilization_recovery_interval_secs() -> u64 {
+    1200
 }
 
 fn default_event_log_max_bytes() -> u64 {
