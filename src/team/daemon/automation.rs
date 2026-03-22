@@ -818,6 +818,1014 @@ mod tests {
         );
     }
 
+    // ── reconcile_active_tasks ──────────────────────────────────────
+
+    #[test]
+    fn reconcile_active_tasks_clears_done_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
+        daemon.active_tasks.insert("eng-1".to_string(), 10);
+
+        write_board_task_file(
+            tmp.path(),
+            10,
+            "done-task",
+            "done",
+            Some("eng-1"),
+            &[],
+            None,
+        );
+
+        daemon.reconcile_active_tasks().unwrap();
+        assert!(!daemon.active_tasks.contains_key("eng-1"));
+    }
+
+    #[test]
+    fn reconcile_active_tasks_clears_archived_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
+        daemon.active_tasks.insert("eng-1".to_string(), 10);
+
+        write_board_task_file(
+            tmp.path(),
+            10,
+            "archived-task",
+            "archived",
+            Some("eng-1"),
+            &[],
+            None,
+        );
+
+        daemon.reconcile_active_tasks().unwrap();
+        assert!(!daemon.active_tasks.contains_key("eng-1"));
+    }
+
+    #[test]
+    fn reconcile_active_tasks_clears_missing_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
+        daemon.active_tasks.insert("eng-1".to_string(), 999);
+
+        // No task files exist at all — task 999 is missing from board
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        daemon.reconcile_active_tasks().unwrap();
+        assert!(!daemon.active_tasks.contains_key("eng-1"));
+    }
+
+    #[test]
+    fn reconcile_active_tasks_keeps_in_progress_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
+        daemon.active_tasks.insert("eng-1".to_string(), 10);
+
+        write_board_task_file(
+            tmp.path(),
+            10,
+            "active-task",
+            "in-progress",
+            Some("eng-1"),
+            &[],
+            None,
+        );
+
+        daemon.reconcile_active_tasks().unwrap();
+        assert_eq!(daemon.active_tasks.get("eng-1"), Some(&10));
+    }
+
+    #[test]
+    fn reconcile_active_tasks_noop_when_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = make_test_daemon(tmp.path(), Vec::new());
+        // No active tasks — should return immediately
+        daemon.reconcile_active_tasks().unwrap();
+        assert!(daemon.active_tasks.is_empty());
+    }
+
+    // ── manager_for_member_name ──────────────────────────────────
+
+    #[test]
+    fn manager_for_member_name_returns_reports_to() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+        };
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let daemon = make_test_daemon(tmp.path(), vec![manager, engineer]);
+        assert_eq!(daemon.manager_for_member_name("eng-1"), Some("manager"));
+    }
+
+    #[test]
+    fn manager_for_member_name_returns_none_for_top_level() {
+        let tmp = tempfile::tempdir().unwrap();
+        let architect = MemberInstance {
+            name: "architect".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let daemon = make_test_daemon(tmp.path(), vec![architect]);
+        assert_eq!(daemon.manager_for_member_name("architect"), None);
+    }
+
+    #[test]
+    fn manager_for_member_name_returns_none_for_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = make_test_daemon(tmp.path(), Vec::new());
+        assert_eq!(daemon.manager_for_member_name("nobody"), None);
+    }
+
+    // ── auto_unblock_notification_recipient ──────────────────────
+
+    #[test]
+    fn auto_unblock_recipient_is_task_owner_when_known() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let daemon = make_test_daemon(tmp.path(), vec![engineer]);
+
+        let task = crate::task::Task {
+            id: 10,
+            title: "test".to_string(),
+            status: "blocked".to_string(),
+            priority: "high".to_string(),
+            claimed_by: Some("eng-1".to_string()),
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: vec![1],
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description: String::new(),
+            batty_config: None,
+            source_path: std::path::PathBuf::new(),
+        };
+        assert_eq!(
+            daemon.auto_unblock_notification_recipient(&task),
+            Some("eng-1".to_string())
+        );
+    }
+
+    #[test]
+    fn auto_unblock_recipient_falls_back_to_manager() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let daemon = make_test_daemon(tmp.path(), vec![manager]);
+
+        let task = crate::task::Task {
+            id: 10,
+            title: "test".to_string(),
+            status: "blocked".to_string(),
+            priority: "high".to_string(),
+            claimed_by: None,
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: vec![1],
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description: String::new(),
+            batty_config: None,
+            source_path: std::path::PathBuf::new(),
+        };
+        assert_eq!(
+            daemon.auto_unblock_notification_recipient(&task),
+            Some("manager".to_string())
+        );
+    }
+
+    #[test]
+    fn auto_unblock_recipient_ignores_unknown_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let daemon = make_test_daemon(tmp.path(), vec![manager]);
+
+        let task = crate::task::Task {
+            id: 10,
+            title: "test".to_string(),
+            status: "blocked".to_string(),
+            priority: "high".to_string(),
+            claimed_by: Some("unknown-eng".to_string()),
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: vec![1],
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description: String::new(),
+            batty_config: None,
+            source_path: std::path::PathBuf::new(),
+        };
+        // Owner not in members → falls back to manager
+        assert_eq!(
+            daemon.auto_unblock_notification_recipient(&task),
+            Some("manager".to_string())
+        );
+    }
+
+    // ── truly_idle_engineer_count ────────────────────────────────
+
+    #[test]
+    fn truly_idle_counts_only_idle_engineers_without_board_items() {
+        use crate::team::standup::MemberState;
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut states = std::collections::HashMap::new();
+        states.insert("eng-1".to_string(), MemberState::Idle);
+        states.insert("eng-2".to_string(), MemberState::Idle);
+        states.insert("eng-3".to_string(), MemberState::Working);
+
+        let eng1 = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let eng2 = MemberInstance {
+            name: "eng-2".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let eng3 = MemberInstance {
+            name: "eng-3".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+
+        let daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![eng1, eng2, eng3])
+            .states(states)
+            .build();
+
+        // eng-2 has an in-progress task on the board
+        let tasks = vec![crate::task::Task {
+            id: 1,
+            title: "active-task".to_string(),
+            status: "in-progress".to_string(),
+            priority: "high".to_string(),
+            claimed_by: Some("eng-2".to_string()),
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description: String::new(),
+            batty_config: None,
+            source_path: std::path::PathBuf::new(),
+        }];
+
+        // eng-1 is idle with no board items → truly idle
+        // eng-2 is idle but has in-progress task → not truly idle
+        // eng-3 is working → not idle at all
+        assert_eq!(daemon.truly_idle_engineer_count(&tasks), 1);
+    }
+
+    #[test]
+    fn truly_idle_count_is_zero_when_all_busy() {
+        use crate::team::standup::MemberState;
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut states = std::collections::HashMap::new();
+        states.insert("eng-1".to_string(), MemberState::Working);
+
+        let eng1 = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+
+        let daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![eng1])
+            .states(states)
+            .build();
+
+        assert_eq!(daemon.truly_idle_engineer_count(&[]), 0);
+    }
+
+    #[test]
+    fn truly_idle_strips_at_prefix_from_claimed_by() {
+        use crate::team::standup::MemberState;
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut states = std::collections::HashMap::new();
+        states.insert("eng-1".to_string(), MemberState::Idle);
+
+        let eng1 = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+
+        let daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![eng1])
+            .states(states)
+            .build();
+
+        let tasks = vec![crate::task::Task {
+            id: 1,
+            title: "task".to_string(),
+            status: "todo".to_string(),
+            priority: "high".to_string(),
+            claimed_by: Some("@eng-1".to_string()),
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description: String::new(),
+            batty_config: None,
+            source_path: std::path::PathBuf::new(),
+        }];
+
+        // eng-1 has a todo task (with @ prefix) — not truly idle
+        assert_eq!(daemon.truly_idle_engineer_count(&tasks), 0);
+    }
+
+    // ── maybe_escalate_stale_reviews ─────────────────────────────
+
+    #[test]
+    fn escalate_stale_reviews_sends_nudge_then_escalation() {
+        use crate::team::config::WorkflowPolicy;
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let events_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "manager").unwrap();
+        inbox::init_inbox(&inbox_root, "architect").unwrap();
+
+        let architect = MemberInstance {
+            name: "architect".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+
+        // Use tiny thresholds for testing
+        let policy = WorkflowPolicy {
+            review_nudge_threshold_secs: 5,
+            review_timeout_secs: 10,
+            ..WorkflowPolicy::default()
+        };
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![architect, manager])
+            .workflow_policy(policy)
+            .build();
+        daemon.event_sink = EventSink::new(&events_path).unwrap();
+
+        // Write a task in review
+        write_board_task_file(
+            tmp.path(),
+            50,
+            "review-task",
+            "review",
+            Some("eng-1"),
+            &[],
+            None,
+        );
+
+        // First call: task just entered review, no nudge yet (age = 0)
+        daemon.maybe_escalate_stale_reviews().unwrap();
+        let pending_manager = inbox::pending_messages(&inbox_root, "manager").unwrap();
+        assert!(pending_manager.is_empty(), "no nudge should fire at age 0");
+
+        // Simulate the task having been first seen long enough ago for nudge
+        daemon.review_first_seen.insert(50, 0); // epoch = 0, so age will be huge
+        daemon.review_nudge_sent.clear();
+
+        daemon.maybe_escalate_stale_reviews().unwrap();
+
+        // At this point the age is >> both nudge (5s) and timeout (10s),
+        // so escalation fires (escalation > nudge, and escalation check comes first)
+        let pending_architect = inbox::pending_messages(&inbox_root, "architect").unwrap();
+        assert!(
+            pending_architect
+                .iter()
+                .any(|msg| msg.body.contains("Review timeout")),
+            "architect should receive escalation message"
+        );
+
+        let events = crate::team::events::read_events(&events_path).unwrap();
+        assert!(
+            events.iter().any(|e| e.event == "review_escalated"),
+            "review_escalated event should be emitted"
+        );
+    }
+
+    #[test]
+    fn escalate_stale_reviews_sends_nudge_below_timeout() {
+        use crate::team::config::WorkflowPolicy;
+        use crate::team::test_support::TestDaemonBuilder;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let events_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "manager").unwrap();
+
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+
+        let policy = WorkflowPolicy {
+            review_nudge_threshold_secs: 5,
+            review_timeout_secs: 999_999, // very high so escalation won't fire
+            ..WorkflowPolicy::default()
+        };
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![manager])
+            .workflow_policy(policy)
+            .build();
+        daemon.event_sink = EventSink::new(&events_path).unwrap();
+
+        write_board_task_file(tmp.path(), 60, "nudge-task", "review", None, &[], None);
+
+        // Simulate first_seen long enough ago to trigger nudge but not timeout
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        daemon.review_first_seen.insert(60, now - 100);
+
+        daemon.maybe_escalate_stale_reviews().unwrap();
+
+        let pending_manager = inbox::pending_messages(&inbox_root, "manager").unwrap();
+        assert!(
+            pending_manager
+                .iter()
+                .any(|msg| msg.body.contains("Review nudge")),
+            "manager should receive nudge"
+        );
+        assert!(daemon.review_nudge_sent.contains(&60));
+
+        let events = crate::team::events::read_events(&events_path).unwrap();
+        assert!(events.iter().any(|e| e.event == "review_nudge_sent"));
+    }
+
+    #[test]
+    fn escalate_stale_reviews_skips_non_review_tasks() {
+        use crate::team::config::WorkflowPolicy;
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "manager").unwrap();
+
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+
+        let policy = WorkflowPolicy {
+            review_nudge_threshold_secs: 1,
+            review_timeout_secs: 2,
+            ..WorkflowPolicy::default()
+        };
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![manager])
+            .workflow_policy(policy)
+            .build();
+
+        // Only in-progress and todo tasks — no review tasks
+        write_board_task_file(tmp.path(), 70, "ip-task", "in-progress", None, &[], None);
+        write_board_task_file(tmp.path(), 71, "todo-task", "todo", None, &[], None);
+
+        daemon.maybe_escalate_stale_reviews().unwrap();
+
+        let pending = inbox::pending_messages(&inbox_root, "manager").unwrap();
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn escalate_stale_reviews_prunes_tracking_for_non_review_tasks() {
+        use crate::team::config::WorkflowPolicy;
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![manager])
+            .workflow_policy(WorkflowPolicy::default())
+            .build();
+
+        // Pre-populate tracking with task IDs that are no longer in review
+        daemon.review_first_seen.insert(80, 1000);
+        daemon.review_first_seen.insert(81, 2000);
+        daemon.review_nudge_sent.insert(80);
+
+        // Only task 80 exists and it's done, 81 doesn't exist at all
+        write_board_task_file(tmp.path(), 80, "done-task", "done", None, &[], None);
+
+        daemon.maybe_escalate_stale_reviews().unwrap();
+
+        assert!(!daemon.review_first_seen.contains_key(&80));
+        assert!(!daemon.review_first_seen.contains_key(&81));
+        assert!(!daemon.review_nudge_sent.contains(&80));
+    }
+
+    // ── maybe_rotate_board ───────────────────────────────────────
+
+    #[test]
+    fn maybe_rotate_board_skips_when_board_dir_exists() {
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        std::fs::create_dir_all(&board_dir).unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+        // Force last rotation far in the past to trigger the check
+        daemon.last_board_rotation =
+            std::time::Instant::now() - std::time::Duration::from_secs(700);
+
+        daemon.maybe_rotate_board().unwrap();
+        // No crash, no rotation needed for kanban-md directory board
+    }
+
+    #[test]
+    fn maybe_rotate_board_skips_when_too_recent() {
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+        // last_board_rotation is now (set by builder) — should skip
+        daemon.maybe_rotate_board().unwrap();
+        // No crash, just a no-op early return
+    }
+
+    // ── member_worktree_context ──────────────────────────────────
+
+    #[test]
+    fn member_worktree_context_returns_none_for_non_worktree_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let daemon = make_test_daemon(tmp.path(), vec![engineer]);
+        assert!(daemon.member_worktree_context("eng-1").is_none());
+    }
+
+    #[test]
+    fn member_worktree_context_returns_none_when_worktree_missing() {
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: true,
+        };
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![engineer])
+            .build();
+        daemon.is_git_repo = true;
+
+        // Worktree directory doesn't exist
+        assert!(daemon.member_worktree_context("eng-1").is_none());
+    }
+
+    // ── maybe_detect_pipeline_starvation ─────────────────────────
+
+    #[test]
+    fn pipeline_starvation_skipped_when_threshold_is_none() {
+        use crate::team::config::WorkflowPolicy;
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = WorkflowPolicy {
+            pipeline_starvation_threshold: None,
+            ..WorkflowPolicy::default()
+        };
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .workflow_policy(policy)
+            .build();
+
+        daemon.maybe_detect_pipeline_starvation().unwrap();
+        assert!(!daemon.pipeline_starvation_fired);
+    }
+
+    #[test]
+    fn pipeline_starvation_skipped_when_no_idle_engineers() {
+        use crate::team::config::WorkflowPolicy;
+        use crate::team::standup::MemberState;
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        let policy = WorkflowPolicy {
+            pipeline_starvation_threshold: Some(1),
+            ..WorkflowPolicy::default()
+        };
+
+        let eng1 = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+
+        let mut states = std::collections::HashMap::new();
+        states.insert("eng-1".to_string(), MemberState::Working);
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![eng1])
+            .states(states)
+            .workflow_policy(policy)
+            .build();
+
+        daemon.maybe_detect_pipeline_starvation().unwrap();
+        assert!(!daemon.pipeline_starvation_fired);
+    }
+
+    #[test]
+    fn pipeline_starvation_fires_when_deficit_exceeds_threshold() {
+        use crate::team::config::WorkflowPolicy;
+        use crate::team::standup::MemberState;
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "architect").unwrap();
+
+        let policy = WorkflowPolicy {
+            pipeline_starvation_threshold: Some(1),
+            ..WorkflowPolicy::default()
+        };
+
+        let architect = MemberInstance {
+            name: "architect".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let eng1 = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+
+        let mut states = std::collections::HashMap::new();
+        states.insert("eng-1".to_string(), MemberState::Idle);
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![architect, eng1])
+            .states(states)
+            .workflow_policy(policy)
+            .build();
+
+        // No todo tasks at all, 1 idle engineer → deficit = 1 >= threshold 1
+        daemon.maybe_detect_pipeline_starvation().unwrap();
+
+        assert!(daemon.pipeline_starvation_fired);
+        let pending = inbox::pending_messages(&inbox_root, "architect").unwrap();
+        assert!(
+            pending
+                .iter()
+                .any(|msg| msg.body.contains("Pipeline running dry")),
+            "architect should be notified"
+        );
+    }
+
+    #[test]
+    fn pipeline_starvation_suppressed_when_enough_todo_tasks() {
+        use crate::team::config::WorkflowPolicy;
+        use crate::team::standup::MemberState;
+        use crate::team::test_support::{TestDaemonBuilder, write_open_task_file};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "architect").unwrap();
+
+        let policy = WorkflowPolicy {
+            pipeline_starvation_threshold: Some(1),
+            ..WorkflowPolicy::default()
+        };
+
+        let architect = MemberInstance {
+            name: "architect".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let eng1 = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+
+        let mut states = std::collections::HashMap::new();
+        states.insert("eng-1".to_string(), MemberState::Idle);
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![architect, eng1])
+            .states(states)
+            .workflow_policy(policy)
+            .build();
+
+        // 1 unclaimed todo task >= 1 idle engineer → no starvation
+        write_open_task_file(tmp.path(), 90, "available-task", "todo");
+
+        daemon.maybe_detect_pipeline_starvation().unwrap();
+        assert!(!daemon.pipeline_starvation_fired);
+    }
+
+    #[test]
+    fn pipeline_starvation_suppressed_when_manager_working() {
+        use crate::team::config::WorkflowPolicy;
+        use crate::team::standup::MemberState;
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        let policy = WorkflowPolicy {
+            pipeline_starvation_threshold: Some(1),
+            ..WorkflowPolicy::default()
+        };
+
+        let architect = MemberInstance {
+            name: "architect".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let eng1 = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+        };
+
+        let mut states = std::collections::HashMap::new();
+        states.insert("eng-1".to_string(), MemberState::Idle);
+        states.insert("manager".to_string(), MemberState::Working);
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![architect, manager, eng1])
+            .states(states)
+            .workflow_policy(policy)
+            .build();
+
+        daemon.maybe_detect_pipeline_starvation().unwrap();
+        assert!(
+            !daemon.pipeline_starvation_fired,
+            "should suppress when manager is working"
+        );
+    }
+
     #[test]
     fn auto_retro_does_not_fire_twice() {
         let tmp = tempfile::tempdir().unwrap();

@@ -956,4 +956,726 @@ mod tests {
 
         assert!(report.entries.is_empty());
     }
+
+    // ── TokenUsage ───────────────────────────────────────────────
+
+    #[test]
+    fn token_usage_total_tokens_sums_all_fields() {
+        let usage = TokenUsage {
+            input_tokens: 100,
+            cached_input_tokens: 50,
+            cache_creation_input_tokens: 30,
+            cache_creation_5m_input_tokens: 0,
+            cache_creation_1h_input_tokens: 0,
+            cache_read_input_tokens: 20,
+            output_tokens: 10,
+            reasoning_output_tokens: 5,
+        };
+        assert_eq!(usage.total_tokens(), 100 + 50 + 30 + 20 + 10 + 5);
+    }
+
+    #[test]
+    fn token_usage_total_tokens_zero_when_default() {
+        let usage = TokenUsage::default();
+        assert_eq!(usage.total_tokens(), 0);
+    }
+
+    #[test]
+    fn token_usage_display_cache_tokens_sums_cache_fields() {
+        let usage = TokenUsage {
+            cached_input_tokens: 100,
+            cache_creation_input_tokens: 200,
+            cache_read_input_tokens: 50,
+            ..TokenUsage::default()
+        };
+        assert_eq!(usage.display_cache_tokens(), 350);
+    }
+
+    // ── truncate_model ───────────────────────────────────────────
+
+    #[test]
+    fn truncate_model_short_name_unchanged() {
+        assert_eq!(truncate_model("gpt-5.4"), "gpt-5.4");
+    }
+
+    #[test]
+    fn truncate_model_exact_limit_unchanged() {
+        let model = "a".repeat(20);
+        assert_eq!(truncate_model(&model), model);
+    }
+
+    #[test]
+    fn truncate_model_long_name_truncated() {
+        let model = "a".repeat(25);
+        let result = truncate_model(&model);
+        assert_eq!(result.len(), 20);
+        assert!(result.ends_with("..."));
+    }
+
+    // ── member_session_target ────────────────────────────────────
+
+    #[test]
+    fn member_session_target_returns_none_for_user_role() {
+        let member = MemberInstance {
+            name: "human".to_string(),
+            role_name: "human".to_string(),
+            role_type: super::super::config::RoleType::User,
+            agent: None,
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        assert!(member_session_target(Path::new("/tmp"), &member).is_none());
+    }
+
+    #[test]
+    fn member_session_target_codex_agent() {
+        let member = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: super::super::config::RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let (agent, cwd, label) = member_session_target(Path::new("/tmp/repo"), &member).unwrap();
+        assert!(matches!(agent, SessionAgent::Codex));
+        assert_eq!(label, "codex");
+        assert!(cwd.to_string_lossy().contains("codex-context"));
+    }
+
+    #[test]
+    fn member_session_target_claude_agent() {
+        let member = MemberInstance {
+            name: "architect".to_string(),
+            role_name: "architect".to_string(),
+            role_type: super::super::config::RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let (agent, cwd, label) = member_session_target(Path::new("/tmp/repo"), &member).unwrap();
+        assert!(matches!(agent, SessionAgent::Claude));
+        assert_eq!(label, "claude");
+        assert_eq!(cwd, Path::new("/tmp/repo"));
+    }
+
+    #[test]
+    fn member_session_target_claude_code_agent() {
+        let member = MemberInstance {
+            name: "eng-2".to_string(),
+            role_name: "eng".to_string(),
+            role_type: super::super::config::RoleType::Engineer,
+            agent: Some("claude-code".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let (agent, _, label) = member_session_target(Path::new("/tmp/repo"), &member).unwrap();
+        assert!(matches!(agent, SessionAgent::Claude));
+        assert_eq!(label, "claude");
+    }
+
+    #[test]
+    fn member_session_target_none_agent_defaults_to_claude() {
+        let member = MemberInstance {
+            name: "eng-3".to_string(),
+            role_name: "eng".to_string(),
+            role_type: super::super::config::RoleType::Engineer,
+            agent: None,
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let (agent, _, label) = member_session_target(Path::new("/tmp/repo"), &member).unwrap();
+        assert!(matches!(agent, SessionAgent::Claude));
+        assert_eq!(label, "claude");
+    }
+
+    #[test]
+    fn member_session_target_unknown_agent_returns_none() {
+        let member = MemberInstance {
+            name: "eng-4".to_string(),
+            role_name: "eng".to_string(),
+            role_type: super::super::config::RoleType::Engineer,
+            agent: Some("gemini".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        assert!(member_session_target(Path::new("/tmp/repo"), &member).is_none());
+    }
+
+    #[test]
+    fn member_session_target_worktree_path_for_codex() {
+        let member = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: super::super::config::RoleType::Engineer,
+            agent: Some("codex-cli".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: true,
+        };
+        let (_, cwd, _) = member_session_target(Path::new("/tmp/repo"), &member).unwrap();
+        assert!(cwd.starts_with("/tmp/repo/.batty/worktrees/eng-1"));
+    }
+
+    #[test]
+    fn member_session_target_worktree_path_for_claude() {
+        let member = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: super::super::config::RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: true,
+        };
+        let (_, cwd, _) = member_session_target(Path::new("/tmp/repo"), &member).unwrap();
+        assert_eq!(cwd, Path::new("/tmp/repo/.batty/worktrees/eng-1"));
+    }
+
+    // ── load_launch_state ────────────────────────────────────────
+
+    #[test]
+    fn load_launch_state_returns_empty_when_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = load_launch_state(tmp.path());
+        assert!(state.is_empty());
+    }
+
+    #[test]
+    fn load_launch_state_parses_valid_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let batty_dir = tmp.path().join(".batty");
+        fs::create_dir_all(&batty_dir).unwrap();
+        fs::write(
+            batty_dir.join("launch-state.json"),
+            r#"{"eng-1": {"session_id": "abc123"}, "eng-2": {}}"#,
+        )
+        .unwrap();
+
+        let state = load_launch_state(tmp.path());
+        assert_eq!(state.len(), 2);
+        assert_eq!(
+            state.get("eng-1").unwrap().session_id.as_deref(),
+            Some("abc123")
+        );
+        assert!(state.get("eng-2").unwrap().session_id.is_none());
+    }
+
+    #[test]
+    fn load_launch_state_returns_empty_on_invalid_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let batty_dir = tmp.path().join(".batty");
+        fs::create_dir_all(&batty_dir).unwrap();
+        fs::write(batty_dir.join("launch-state.json"), "not json").unwrap();
+
+        let state = load_launch_state(tmp.path());
+        assert!(state.is_empty());
+    }
+
+    // ── load_active_tasks ────────────────────────────────────────
+
+    #[test]
+    fn load_active_tasks_returns_empty_when_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks = load_active_tasks(tmp.path());
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn load_active_tasks_parses_valid_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = daemon_state_path(tmp.path());
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        fs::write(&state_path, r#"{"active_tasks":{"eng-1":42,"eng-2":99}}"#).unwrap();
+
+        let tasks = load_active_tasks(tmp.path());
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks.get("eng-1"), Some(&42));
+        assert_eq!(tasks.get("eng-2"), Some(&99));
+    }
+
+    #[test]
+    fn load_active_tasks_returns_empty_on_invalid_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = daemon_state_path(tmp.path());
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        fs::write(&state_path, "garbage").unwrap();
+
+        let tasks = load_active_tasks(tmp.path());
+        assert!(tasks.is_empty());
+    }
+
+    // ── pricing_for_model ────────────────────────────────────────
+
+    #[test]
+    fn pricing_for_model_uses_override_exact_match() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "custom-model".to_string(),
+            ModelPricing {
+                input_usd_per_mtok: 99.0,
+                cached_input_usd_per_mtok: 0.0,
+                cache_creation_input_usd_per_mtok: None,
+                cache_creation_5m_input_usd_per_mtok: None,
+                cache_creation_1h_input_usd_per_mtok: None,
+                cache_read_input_usd_per_mtok: 0.0,
+                output_usd_per_mtok: 99.0,
+                reasoning_output_usd_per_mtok: None,
+            },
+        );
+        let pricing = pricing_for_model(&overrides, "custom-model").unwrap();
+        assert!((pricing.input_usd_per_mtok - 99.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn pricing_for_model_normalized_case_match() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "my-model".to_string(),
+            ModelPricing {
+                input_usd_per_mtok: 5.0,
+                cached_input_usd_per_mtok: 0.0,
+                cache_creation_input_usd_per_mtok: None,
+                cache_creation_5m_input_usd_per_mtok: None,
+                cache_creation_1h_input_usd_per_mtok: None,
+                cache_read_input_usd_per_mtok: 0.0,
+                output_usd_per_mtok: 5.0,
+                reasoning_output_usd_per_mtok: None,
+            },
+        );
+        let pricing = pricing_for_model(&overrides, "My-Model").unwrap();
+        assert!((pricing.input_usd_per_mtok - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn pricing_for_model_returns_none_for_unknown() {
+        assert!(pricing_for_model(&HashMap::new(), "totally-unknown-model").is_none());
+    }
+
+    // ── built_in_model_pricing ───────────────────────────────────
+
+    #[test]
+    fn built_in_pricing_gpt54_has_reasoning_rate() {
+        let pricing = built_in_model_pricing("gpt-5.4").unwrap();
+        assert!(pricing.reasoning_output_usd_per_mtok.is_some());
+    }
+
+    #[test]
+    fn built_in_pricing_opus_has_cache_tiers() {
+        let pricing = built_in_model_pricing("claude-opus-4-6").unwrap();
+        assert!(pricing.cache_creation_5m_input_usd_per_mtok.is_some());
+        assert!(pricing.cache_creation_1h_input_usd_per_mtok.is_some());
+    }
+
+    #[test]
+    fn built_in_pricing_sonnet_has_cache_tiers() {
+        let pricing = built_in_model_pricing("claude-sonnet-4-6").unwrap();
+        assert!(pricing.cache_creation_5m_input_usd_per_mtok.is_some());
+        assert!(pricing.cache_creation_1h_input_usd_per_mtok.is_some());
+    }
+
+    #[test]
+    fn built_in_pricing_unknown_returns_none() {
+        assert!(built_in_model_pricing("llama-3").is_none());
+    }
+
+    // ── estimate_cost_usd edge cases ─────────────────────────────
+
+    #[test]
+    fn estimate_cost_zero_usage_returns_zero() {
+        let usage = TokenUsage::default();
+        let pricing = ModelPricing {
+            input_usd_per_mtok: 10.0,
+            cached_input_usd_per_mtok: 5.0,
+            cache_creation_input_usd_per_mtok: None,
+            cache_creation_5m_input_usd_per_mtok: None,
+            cache_creation_1h_input_usd_per_mtok: None,
+            cache_read_input_usd_per_mtok: 1.0,
+            output_usd_per_mtok: 20.0,
+            reasoning_output_usd_per_mtok: None,
+        };
+        assert!((estimate_cost_usd(&usage, &pricing)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn estimate_cost_uses_output_rate_when_no_reasoning_rate() {
+        let usage = TokenUsage {
+            reasoning_output_tokens: 1_000_000,
+            ..TokenUsage::default()
+        };
+        let pricing = ModelPricing {
+            input_usd_per_mtok: 0.0,
+            cached_input_usd_per_mtok: 0.0,
+            cache_creation_input_usd_per_mtok: None,
+            cache_creation_5m_input_usd_per_mtok: None,
+            cache_creation_1h_input_usd_per_mtok: None,
+            cache_read_input_usd_per_mtok: 0.0,
+            output_usd_per_mtok: 10.0,
+            reasoning_output_usd_per_mtok: None,
+        };
+        // reasoning falls back to output rate: 1M tokens * 10/M = $10
+        assert!((estimate_cost_usd(&usage, &pricing) - 10.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn estimate_cost_unclassified_cache_creation_uses_generic_rate() {
+        let usage = TokenUsage {
+            cache_creation_input_tokens: 1_000_000,
+            // No 5m or 1h breakdown → all goes to unclassified
+            ..TokenUsage::default()
+        };
+        let pricing = ModelPricing {
+            input_usd_per_mtok: 0.0,
+            cached_input_usd_per_mtok: 0.0,
+            cache_creation_input_usd_per_mtok: Some(5.0),
+            cache_creation_5m_input_usd_per_mtok: None,
+            cache_creation_1h_input_usd_per_mtok: None,
+            cache_read_input_usd_per_mtok: 0.0,
+            output_usd_per_mtok: 0.0,
+            reasoning_output_usd_per_mtok: None,
+        };
+        assert!((estimate_cost_usd(&usage, &pricing) - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn estimate_cost_generic_rate_falls_back_to_5m_then_input() {
+        let usage = TokenUsage {
+            cache_creation_input_tokens: 1_000_000,
+            ..TokenUsage::default()
+        };
+        // No generic rate → falls back to 5m rate
+        let pricing = ModelPricing {
+            input_usd_per_mtok: 2.0,
+            cached_input_usd_per_mtok: 0.0,
+            cache_creation_input_usd_per_mtok: None,
+            cache_creation_5m_input_usd_per_mtok: Some(4.0),
+            cache_creation_1h_input_usd_per_mtok: None,
+            cache_read_input_usd_per_mtok: 0.0,
+            output_usd_per_mtok: 0.0,
+            reasoning_output_usd_per_mtok: None,
+        };
+        // unclassified = 1M, generic rate = 5m rate = 4.0 → $4
+        assert!((estimate_cost_usd(&usage, &pricing) - 4.0).abs() < f64::EPSILON);
+
+        // No generic rate AND no 5m rate → falls back to input rate
+        let pricing2 = ModelPricing {
+            input_usd_per_mtok: 2.0,
+            cached_input_usd_per_mtok: 0.0,
+            cache_creation_input_usd_per_mtok: None,
+            cache_creation_5m_input_usd_per_mtok: None,
+            cache_creation_1h_input_usd_per_mtok: None,
+            cache_read_input_usd_per_mtok: 0.0,
+            output_usd_per_mtok: 0.0,
+            reasoning_output_usd_per_mtok: None,
+        };
+        assert!((estimate_cost_usd(&usage, &pricing2) - 2.0).abs() < f64::EPSILON);
+    }
+
+    // ── parse session files edge cases ───────────────────────────
+
+    #[test]
+    fn parse_codex_session_returns_none_for_empty_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("empty.jsonl");
+        fs::write(&path, "").unwrap();
+
+        assert!(parse_codex_session_usage(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_codex_session_skips_malformed_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("mixed.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "not valid json\n",
+                "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.4\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":100}}}}\n",
+            ),
+        )
+        .unwrap();
+
+        let usage = parse_codex_session_usage(&path).unwrap().unwrap();
+        assert_eq!(usage.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(usage.usage.input_tokens, 100);
+    }
+
+    #[test]
+    fn parse_claude_session_returns_none_for_empty_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("empty.jsonl");
+        fs::write(&path, "").unwrap();
+
+        assert!(parse_claude_session_usage(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_claude_session_skips_entries_without_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("mixed.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"not_message\":true}\n",
+                "{\"message\":{\"model\":\"claude-sonnet-4\",\"usage\":{\"input_tokens\":50,\"output_tokens\":10}}}\n",
+            ),
+        )
+        .unwrap();
+
+        let usage = parse_claude_session_usage(&path).unwrap().unwrap();
+        assert_eq!(usage.model.as_deref(), Some("claude-sonnet-4"));
+        assert_eq!(usage.usage.input_tokens, 50);
+    }
+
+    // ── json_u64 ─────────────────────────────────────────────────
+
+    #[test]
+    fn json_u64_returns_value_for_number() {
+        let v: Value = serde_json::json!(42);
+        assert_eq!(json_u64(Some(&v)), 42);
+    }
+
+    #[test]
+    fn json_u64_returns_zero_for_none() {
+        assert_eq!(json_u64(None), 0);
+    }
+
+    #[test]
+    fn json_u64_returns_zero_for_non_number() {
+        let v: Value = serde_json::json!("not a number");
+        assert_eq!(json_u64(Some(&v)), 0);
+    }
+
+    // ── read_codex_session_meta ──────────────────────────────────
+
+    #[test]
+    fn read_codex_session_meta_parses_session_meta_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("session.jsonl");
+        fs::write(
+            &path,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"sess-123\",\"cwd\":\"/tmp/work\"}}\n",
+        )
+        .unwrap();
+
+        let meta = read_codex_session_meta(&path).unwrap().unwrap();
+        assert_eq!(meta.id.as_deref(), Some("sess-123"));
+        assert_eq!(meta.cwd.as_deref(), Some(std::ffi::OsStr::new("/tmp/work")));
+    }
+
+    #[test]
+    fn read_codex_session_meta_returns_none_for_no_meta() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("no-meta.jsonl");
+        fs::write(
+            &path,
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\"}}\n",
+        )
+        .unwrap();
+
+        assert!(read_codex_session_meta(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn read_codex_session_meta_skips_blank_and_malformed_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("messy.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "\n",
+                "not json\n",
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"found\"}}\n",
+            ),
+        )
+        .unwrap();
+
+        let meta = read_codex_session_meta(&path).unwrap().unwrap();
+        assert_eq!(meta.id.as_deref(), Some("found"));
+    }
+
+    // ── discover session files ───────────────────────────────────
+
+    #[test]
+    fn discover_codex_session_returns_none_when_root_missing() {
+        let result = discover_codex_session_file(
+            Path::new("/nonexistent/path"),
+            Path::new("/tmp/cwd"),
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn discover_claude_session_returns_none_when_root_missing() {
+        let result = discover_claude_session_file(
+            Path::new("/nonexistent/path"),
+            Path::new("/tmp/cwd"),
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn discover_claude_session_finds_exact_session_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects_root = tmp.path().join("projects");
+        let project_dir = projects_root.join("-tmp-myrepo");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(
+            project_dir.join("session-abc.jsonl"),
+            "{\"message\":{\"model\":\"claude\"}}\n",
+        )
+        .unwrap();
+
+        let result = discover_claude_session_file(
+            &projects_root,
+            Path::new("/tmp/myrepo"),
+            Some("session-abc"),
+            true,
+        )
+        .unwrap();
+        assert!(result.is_some());
+        assert!(result.unwrap().ends_with("session-abc.jsonl"));
+    }
+
+    #[test]
+    fn discover_claude_session_cwd_fallback_finds_newest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects_root = tmp.path().join("projects");
+        let project_dir = projects_root.join("-tmp-myrepo");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        fs::write(project_dir.join("old.jsonl"), "old\n").unwrap();
+        // Give a small delay or touch to make newer file distinguishable
+        fs::write(project_dir.join("new.jsonl"), "new\n").unwrap();
+
+        let result =
+            discover_claude_session_file(&projects_root, Path::new("/tmp/myrepo"), None, true)
+                .unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn discover_claude_session_no_cwd_fallback_when_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects_root = tmp.path().join("projects");
+        let project_dir = projects_root.join("-tmp-myrepo");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("session.jsonl"), "data\n").unwrap();
+
+        let result = discover_claude_session_file(
+            &projects_root,
+            Path::new("/tmp/myrepo"),
+            None,
+            false, // cwd fallback disabled
+        )
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    // ── read_dir_paths ───────────────────────────────────────────
+
+    #[test]
+    fn read_dir_paths_returns_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a.txt"), "a").unwrap();
+        fs::write(tmp.path().join("b.txt"), "b").unwrap();
+        let paths = read_dir_paths(tmp.path()).unwrap();
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn read_dir_paths_returns_empty_for_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = read_dir_paths(tmp.path()).unwrap();
+        assert!(paths.is_empty());
+    }
+
+    // ── SessionRoots default ─────────────────────────────────────
+
+    #[test]
+    fn session_roots_default_uses_home() {
+        let roots = SessionRoots::default();
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert!(roots.codex_sessions_root.starts_with(&home));
+        assert!(roots.claude_projects_root.starts_with(&home));
+    }
+
+    // ── collect_cost_report empty board ──────────────────────────
+
+    #[test]
+    fn collect_cost_report_empty_when_no_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        fs::create_dir_all(
+            project_root
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks"),
+        )
+        .unwrap();
+
+        let report = collect_cost_report(
+            project_root,
+            &test_team_config(HashMap::new()),
+            &SessionRoots {
+                codex_sessions_root: project_root.join("no-codex"),
+                claude_projects_root: project_root.join("no-claude"),
+            },
+        )
+        .unwrap();
+
+        assert!(report.entries.is_empty());
+        assert!((report.total_estimated_cost_usd).abs() < f64::EPSILON);
+        assert!(report.unpriced_models.is_empty());
+    }
+
+    #[test]
+    fn collect_cost_report_tracks_unpriced_models() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        fs::create_dir_all(
+            project_root
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks"),
+        )
+        .unwrap();
+
+        // Create a claude session with an unknown model
+        let claude_root = project_root.join("claude-projects");
+        let claude_dir = claude_root.join(project_root.to_string_lossy().replace('/', "-"));
+        fs::create_dir_all(&claude_dir).unwrap();
+        fs::write(
+            claude_dir.join("session.jsonl"),
+            "{\"message\":{\"model\":\"totally-unknown-model\",\"usage\":{\"input_tokens\":100,\"output_tokens\":10}}}\n",
+        )
+        .unwrap();
+
+        let report = collect_cost_report(
+            project_root,
+            &test_team_config(HashMap::new()),
+            &SessionRoots {
+                codex_sessions_root: project_root.join("no-codex"),
+                claude_projects_root: claude_root,
+            },
+        )
+        .unwrap();
+
+        assert!(report.unpriced_models.contains("totally-unknown-model"));
+    }
 }
