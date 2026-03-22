@@ -523,6 +523,7 @@ mod tests {
             is_git_repo: false,
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
+            recent_dispatches: HashMap::new(),
         };
 
         let sent = Arc::new(Mutex::new(Vec::new()));
@@ -896,6 +897,7 @@ mod tests {
             is_git_repo: false,
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
+            recent_dispatches: HashMap::new(),
         };
 
         daemon.poll_watchers().unwrap();
