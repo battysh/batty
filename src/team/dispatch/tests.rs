@@ -857,3 +857,121 @@ fn dedup_window_zero_disables_dedup() {
     );
     assert_eq!(daemon.dispatch_queue[0].task_id, 101);
 }
+
+#[test]
+fn manual_cooldown_blocks_dispatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_open_task_file(tmp.path(), 101, "queued-task", "todo");
+    let members = vec![
+        manager_member("manager", None),
+        engineer_member("eng-1", Some("manager"), false),
+    ];
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(members)
+        .board(BoardConfig {
+            auto_dispatch: true,
+            dispatch_stabilization_delay_secs: 0,
+            dispatch_manual_cooldown_secs: 30,
+            ..BoardConfig::default()
+        })
+        .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+        .build();
+    daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+    daemon.idle_started_at.insert(
+        "eng-1".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+    daemon
+        .manual_assign_cooldowns
+        .insert("eng-1".to_string(), Instant::now());
+
+    daemon.maybe_auto_dispatch().unwrap();
+
+    assert!(
+        daemon.dispatch_queue.is_empty(),
+        "engineer within manual cooldown should not be enqueued"
+    );
+}
+
+#[test]
+fn manual_cooldown_expires_and_allows_dispatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_open_task_file(tmp.path(), 101, "queued-task", "todo");
+    let members = vec![
+        manager_member("manager", None),
+        engineer_member("eng-1", Some("manager"), false),
+    ];
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(members)
+        .board(BoardConfig {
+            auto_dispatch: true,
+            dispatch_stabilization_delay_secs: 0,
+            dispatch_manual_cooldown_secs: 30,
+            ..BoardConfig::default()
+        })
+        .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+        .build();
+    daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+    daemon.idle_started_at.insert(
+        "eng-1".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+    daemon.manual_assign_cooldowns.insert(
+        "eng-1".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+
+    daemon.maybe_auto_dispatch().unwrap();
+
+    assert_eq!(
+        daemon.dispatch_queue.len(),
+        1,
+        "expired manual cooldown should allow dispatch"
+    );
+    assert_eq!(daemon.dispatch_queue[0].task_id, 101);
+}
+
+#[test]
+fn manual_cooldown_only_affects_assigned_engineer() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_open_task_file(tmp.path(), 101, "queued-task", "todo");
+    let members = vec![
+        manager_member("manager", None),
+        engineer_member("eng-1", Some("manager"), false),
+        engineer_member("eng-2", Some("manager"), false),
+    ];
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(members)
+        .board(BoardConfig {
+            auto_dispatch: true,
+            dispatch_stabilization_delay_secs: 0,
+            dispatch_manual_cooldown_secs: 30,
+            ..BoardConfig::default()
+        })
+        .states(HashMap::from([
+            ("eng-1".to_string(), MemberState::Idle),
+            ("eng-2".to_string(), MemberState::Idle),
+        ]))
+        .build();
+    daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+    daemon.idle_started_at.insert(
+        "eng-1".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+    daemon.idle_started_at.insert(
+        "eng-2".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+    daemon
+        .manual_assign_cooldowns
+        .insert("eng-1".to_string(), Instant::now());
+
+    daemon.maybe_auto_dispatch().unwrap();
+
+    assert_eq!(
+        daemon.dispatch_queue.len(),
+        1,
+        "only the non-cooldown engineer should be enqueued"
+    );
+    assert_eq!(daemon.dispatch_queue[0].engineer, "eng-2");
+}

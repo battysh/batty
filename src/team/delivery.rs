@@ -732,6 +732,8 @@ impl TeamDaemon {
                     }
                     inbox::MessageType::Assign => {
                         info!(to = %name, id = %msg.id, "delivering inbox assignment");
+                        self.manual_assign_cooldowns
+                            .insert(name.to_string(), Instant::now());
                         self.assign_task(name, &msg.body).map(|launch| {
                             self.record_assignment_success(name, &msg.id, &msg.body, &launch);
                             self.notify_assignment_sender_success(
@@ -951,6 +953,7 @@ mod tests {
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
             telemetry_db: None,
+            manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
             last_health_check: Instant::now(),
         }

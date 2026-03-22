@@ -128,6 +128,8 @@ pub struct TeamDaemon {
     pub(super) recent_dispatches: HashMap<(u32, String), Instant>,
     /// SQLite telemetry database connection (None if open failed).
     pub(super) telemetry_db: Option<rusqlite::Connection>,
+    /// Timestamp of the last manual assignment per engineer (for cooldown).
+    pub(super) manual_assign_cooldowns: HashMap<String, Instant>,
     /// Per-member agent backend health state.
     pub(super) backend_health: HashMap<String, BackendHealth>,
     /// When the last periodic health check was run.
@@ -376,6 +378,7 @@ impl TeamDaemon {
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
             telemetry_db,
+            manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
             // Start far enough in the past to trigger an immediate check.
             last_health_check: Instant::now() - Duration::from_secs(3600),
@@ -1144,6 +1147,8 @@ mod tests {
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::UNIX_EPOCH;
 
     fn production_unwrap_expect_count(path: &Path) -> usize {
         let content = std::fs::read_to_string(path).unwrap();
