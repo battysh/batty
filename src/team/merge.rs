@@ -128,9 +128,25 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     if tests_passed {
         let task_title = read_task_title(&board_dir, task_id);
 
-        // --- Auto-merge decision point ---
-        let policy = &daemon.config.team_config.workflow_policy.auto_merge;
+        // --- Confidence scoring (always runs for observability) ---
+        let policy = daemon.config.team_config.workflow_policy.auto_merge.clone();
         let auto_merge_override = daemon.auto_merge_override(task_id);
+
+        // Analyze diff and emit confidence score for every completed task
+        let diff_analysis = auto_merge::analyze_diff(daemon.project_root(), "main", &task_branch);
+        if let Ok(ref summary) = diff_analysis {
+            let confidence = auto_merge::compute_merge_confidence(summary, &policy);
+            daemon.record_merge_confidence_scored(
+                engineer,
+                task_id,
+                confidence,
+                summary.files_changed,
+                summary.total_lines(),
+                summary.has_migrations,
+                summary.has_config_changes,
+                summary.rename_count,
+            );
+        }
 
         // If override explicitly disables auto-merge, route to manual review
         if auto_merge_override == Some(false) {
@@ -151,15 +167,15 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         // Evaluate auto-merge if policy is enabled or override forces it
         let should_try_auto_merge = auto_merge_override == Some(true) || policy.enabled;
         if should_try_auto_merge {
-            match auto_merge::analyze_diff(daemon.project_root(), "main", &task_branch) {
-                Ok(summary) => {
+            match diff_analysis {
+                Ok(ref summary) => {
                     let decision = if auto_merge_override == Some(true) {
                         // Force auto-merge regardless of policy thresholds
                         AutoMergeDecision::AutoMerge {
-                            confidence: auto_merge::compute_merge_confidence(&summary, policy),
+                            confidence: auto_merge::compute_merge_confidence(summary, &policy),
                         }
                     } else {
-                        auto_merge::should_auto_merge(&summary, policy, true)
+                        auto_merge::should_auto_merge(summary, &policy, true)
                     };
 
                     match decision {
@@ -204,7 +220,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                         }
                     }
                 }
-                Err(error) => {
+                Err(ref error) => {
                     warn!(engineer, task_id, error = %error, "auto-merge diff analysis failed, falling through to normal merge");
                 }
             }

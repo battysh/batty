@@ -533,8 +533,14 @@ fn main() -> Result<()> {
                         println!("No task metrics recorded yet.");
                     } else {
                         println!(
-                            "{:<8} {:<20} {:<20} {:>7} {:>11} {:>10}",
-                            "TASK", "STARTED", "COMPLETED", "RETRIES", "ESCALATIONS", "MERGE_SECS"
+                            "{:<8} {:<20} {:<20} {:>7} {:>11} {:>10} {:>10}",
+                            "TASK",
+                            "STARTED",
+                            "COMPLETED",
+                            "RETRIES",
+                            "ESCALATIONS",
+                            "MERGE_SECS",
+                            "CONFIDENCE"
                         );
                         for row in &rows {
                             let started = row
@@ -549,14 +555,19 @@ fn main() -> Result<()> {
                                 .merge_time_secs
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| "-".to_string());
+                            let confidence = row
+                                .confidence_score
+                                .map(|c| format!("{:.2}", c))
+                                .unwrap_or_else(|| "-".to_string());
                             println!(
-                                "{:<8} {:<20} {:<20} {:>7} {:>11} {:>10}",
+                                "{:<8} {:<20} {:<20} {:>7} {:>11} {:>10} {:>10}",
                                 row.task_id,
                                 started,
                                 completed,
                                 row.retries,
                                 row.escalations,
-                                merge
+                                merge,
+                                confidence
                             );
                         }
                     }
