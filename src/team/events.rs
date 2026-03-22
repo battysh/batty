@@ -261,6 +261,44 @@ impl TeamEvent {
         }
     }
 
+    pub fn task_auto_merged(task: &str) -> Self {
+        Self {
+            task: Some(task.into()),
+            ..Self::base("task_auto_merged")
+        }
+    }
+
+    pub fn task_manual_merged(task: &str) -> Self {
+        Self {
+            task: Some(task.into()),
+            ..Self::base("task_manual_merged")
+        }
+    }
+
+    pub fn review_nudge_sent(role: &str, task: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            ..Self::base("review_nudge_sent")
+        }
+    }
+
+    pub fn review_escalated(role: &str, task: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            ..Self::base("review_escalated")
+        }
+    }
+
+    pub fn task_reworked(role: &str, task: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            ..Self::base("task_reworked")
+        }
+    }
+
     pub fn load_snapshot(working_members: u32, total_members: u32, session_running: bool) -> Self {
         let load = if total_members == 0 {
             0.0
@@ -499,6 +537,17 @@ mod tests {
                 "delivery_failed",
                 TeamEvent::delivery_failed("eng-1", "manager", "message marker missing"),
             ),
+            ("task_auto_merged", TeamEvent::task_auto_merged("42")),
+            ("task_manual_merged", TeamEvent::task_manual_merged("42")),
+            (
+                "review_nudge_sent",
+                TeamEvent::review_nudge_sent("manager", "42"),
+            ),
+            (
+                "review_escalated",
+                TeamEvent::review_escalated("manager", "42"),
+            ),
+            ("task_reworked", TeamEvent::task_reworked("eng-1", "42")),
             ("load_snapshot", TeamEvent::load_snapshot(2, 5, true)),
         ];
         for (expected_event, event) in &variants {

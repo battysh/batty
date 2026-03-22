@@ -73,7 +73,7 @@ struct PersistedDaemonHealthState {
     retry_counts: HashMap<String, u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
 pub struct WorkflowMetrics {
     pub runnable_count: u32,
     pub blocked_count: u32,
@@ -82,6 +82,15 @@ pub struct WorkflowMetrics {
     pub idle_with_runnable: Vec<String>,
     pub oldest_review_age_secs: Option<u64>,
     pub oldest_assignment_age_secs: Option<u64>,
+    // Review pipeline metrics (computed from event log)
+    pub auto_merge_count: u32,
+    pub manual_merge_count: u32,
+    pub auto_merge_rate: Option<f64>,
+    pub rework_count: u32,
+    pub rework_rate: Option<f64>,
+    pub review_nudge_count: u32,
+    pub review_escalation_count: u32,
+    pub avg_review_latency_secs: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -110,7 +119,7 @@ pub(crate) struct TeamStatusHealth {
     pub(crate) unhealthy_members: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct TeamStatusJsonReport {
     pub(crate) team: String,
     pub(crate) session: String,
@@ -814,6 +823,14 @@ pub(crate) fn build_team_status_json_report(
 }
 
 pub fn compute_metrics(board_dir: &Path, members: &[MemberInstance]) -> Result<WorkflowMetrics> {
+    compute_metrics_with_events(board_dir, members, None)
+}
+
+pub fn compute_metrics_with_events(
+    board_dir: &Path,
+    members: &[MemberInstance],
+    events_path: Option<&Path>,
+) -> Result<WorkflowMetrics> {
     let tasks_dir = board_dir.join("tasks");
     if !tasks_dir.is_dir() {
         return Ok(WorkflowMetrics::default());
@@ -868,6 +885,8 @@ pub fn compute_metrics(board_dir: &Path, members: &[MemberInstance]) -> Result<W
 
     let idle_with_runnable = compute_idle_with_runnable(board_dir, members, &tasks, runnable_count);
 
+    let review = compute_review_metrics(events_path);
+
     Ok(WorkflowMetrics {
         runnable_count,
         blocked_count,
@@ -876,7 +895,108 @@ pub fn compute_metrics(board_dir: &Path, members: &[MemberInstance]) -> Result<W
         idle_with_runnable,
         oldest_review_age_secs,
         oldest_assignment_age_secs,
+        auto_merge_count: review.auto_merge_count,
+        manual_merge_count: review.manual_merge_count,
+        auto_merge_rate: review.auto_merge_rate,
+        rework_count: review.rework_count,
+        rework_rate: review.rework_rate,
+        review_nudge_count: review.review_nudge_count,
+        review_escalation_count: review.review_escalation_count,
+        avg_review_latency_secs: review.avg_review_latency_secs,
     })
+}
+
+struct ReviewMetrics {
+    auto_merge_count: u32,
+    manual_merge_count: u32,
+    auto_merge_rate: Option<f64>,
+    rework_count: u32,
+    rework_rate: Option<f64>,
+    review_nudge_count: u32,
+    review_escalation_count: u32,
+    avg_review_latency_secs: Option<f64>,
+}
+
+fn compute_review_metrics(events_path: Option<&Path>) -> ReviewMetrics {
+    let events = events_path
+        .and_then(|path| events::read_events(path).ok())
+        .unwrap_or_default();
+
+    let mut auto_merge_count: u32 = 0;
+    let mut manual_merge_count: u32 = 0;
+    let mut rework_count: u32 = 0;
+    let mut review_nudge_count: u32 = 0;
+    let mut review_escalation_count: u32 = 0;
+
+    // Track review enter/exit times per task for latency computation.
+    // "task_completed" with a task field entering review; merged events exiting.
+    let mut review_enter_ts: HashMap<String, u64> = HashMap::new();
+    let mut review_latencies: Vec<f64> = Vec::new();
+
+    for event in &events {
+        match event.event.as_str() {
+            "task_auto_merged" => {
+                auto_merge_count += 1;
+                if let Some(task_id) = &event.task {
+                    if let Some(enter_ts) = review_enter_ts.remove(task_id) {
+                        review_latencies.push((event.ts - enter_ts) as f64);
+                    }
+                }
+            }
+            "task_manual_merged" => {
+                manual_merge_count += 1;
+                if let Some(task_id) = &event.task {
+                    if let Some(enter_ts) = review_enter_ts.remove(task_id) {
+                        review_latencies.push((event.ts - enter_ts) as f64);
+                    }
+                }
+            }
+            "task_reworked" => {
+                rework_count += 1;
+            }
+            "review_nudge_sent" => {
+                review_nudge_count += 1;
+            }
+            "review_escalated" => {
+                review_escalation_count += 1;
+            }
+            "task_completed" => {
+                if let Some(task_id) = &event.task {
+                    review_enter_ts.insert(task_id.clone(), event.ts);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let total_merges = auto_merge_count + manual_merge_count;
+    let auto_merge_rate = if total_merges > 0 {
+        Some(auto_merge_count as f64 / total_merges as f64)
+    } else {
+        None
+    };
+    let total_reviewed = total_merges + rework_count;
+    let rework_rate = if total_reviewed > 0 {
+        Some(rework_count as f64 / total_reviewed as f64)
+    } else {
+        None
+    };
+    let avg_review_latency_secs = if review_latencies.is_empty() {
+        None
+    } else {
+        Some(review_latencies.iter().sum::<f64>() / review_latencies.len() as f64)
+    };
+
+    ReviewMetrics {
+        auto_merge_count,
+        manual_merge_count,
+        auto_merge_rate,
+        rework_count,
+        rework_rate,
+        review_nudge_count,
+        review_escalation_count,
+        avg_review_latency_secs,
+    }
 }
 
 pub fn format_metrics(metrics: &WorkflowMetrics) -> String {
@@ -886,6 +1006,19 @@ pub fn format_metrics(metrics: &WorkflowMetrics) -> String {
         metrics.idle_with_runnable.join(", ")
     };
 
+    let auto_merge_rate_str = metrics
+        .auto_merge_rate
+        .map(|r| format!("{:.0}%", r * 100.0))
+        .unwrap_or_else(|| "-".to_string());
+    let rework_rate_str = metrics
+        .rework_rate
+        .map(|r| format!("{:.0}%", r * 100.0))
+        .unwrap_or_else(|| "-".to_string());
+    let avg_latency_str = metrics
+        .avg_review_latency_secs
+        .map(|secs| format_age(Some(secs as u64)))
+        .unwrap_or_else(|| "-".to_string());
+
     format!(
         "Workflow Metrics\n\
 Runnable: {}\n\
@@ -894,7 +1027,10 @@ In Review: {}\n\
 In Progress: {}\n\
 Idle With Runnable: {}\n\
 Oldest Review Age: {}\n\
-Oldest Assignment Age: {}",
+Oldest Assignment Age: {}\n\n\
+Review Pipeline\n\
+Queue: {} | Avg Latency: {} | Auto-merge Rate: {} | Rework Rate: {}\n\
+Auto: {} | Manual: {} | Rework: {} | Nudges: {} | Escalations: {}",
         metrics.runnable_count,
         metrics.blocked_count,
         metrics.in_review_count,
@@ -902,6 +1038,15 @@ Oldest Assignment Age: {}",
         idle,
         format_age(metrics.oldest_review_age_secs),
         format_age(metrics.oldest_assignment_age_secs),
+        metrics.in_review_count,
+        avg_latency_str,
+        auto_merge_rate_str,
+        rework_rate_str,
+        metrics.auto_merge_count,
+        metrics.manual_merge_count,
+        metrics.rework_count,
+        metrics.review_nudge_count,
+        metrics.review_escalation_count,
     )
 }
 
@@ -1780,6 +1925,7 @@ mod tests {
                 idle_with_runnable: vec!["eng-2".to_string()],
                 oldest_review_age_secs: Some(60),
                 oldest_assignment_age_secs: Some(120),
+                ..Default::default()
             }),
             active_tasks: vec![StatusTaskEntry {
                 id: 41,

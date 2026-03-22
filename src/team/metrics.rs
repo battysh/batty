@@ -1,4 +1,4 @@
-pub use super::status::{WorkflowMetrics, compute_metrics};
+pub use super::status::{WorkflowMetrics, compute_metrics, compute_metrics_with_events};
 
 #[cfg(test)]
 use super::status::format_metrics;
@@ -114,6 +114,7 @@ mod tests {
             idle_with_runnable: vec!["eng-1".to_string(), "eng-2".to_string()],
             oldest_review_age_secs: Some(120),
             oldest_assignment_age_secs: Some(360),
+            ..Default::default()
         });
 
         assert!(text.contains("Workflow Metrics"));
@@ -124,5 +125,170 @@ mod tests {
         assert!(text.contains("Idle With Runnable: eng-1, eng-2"));
         assert!(text.contains("Oldest Review Age: 120s"));
         assert!(text.contains("Oldest Assignment Age: 360s"));
+        assert!(text.contains("Review Pipeline"));
+    }
+
+    fn write_events(path: &Path, events: &[crate::team::events::TeamEvent]) {
+        let mut lines = Vec::new();
+        for event in events {
+            lines.push(serde_json::to_string(event).unwrap());
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, lines.join("\n")).unwrap();
+    }
+
+    #[test]
+    fn review_metrics_count_events() {
+        use crate::team::events::TeamEvent;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        let events_path = tmp.path().join("events.jsonl");
+        write_task(&board_dir, 1, "t1", "done", None, None, &[]);
+
+        write_events(
+            &events_path,
+            &[
+                TeamEvent::task_auto_merged("1"),
+                TeamEvent::task_auto_merged("2"),
+                TeamEvent::task_auto_merged("3"),
+                TeamEvent::task_manual_merged("4"),
+                TeamEvent::task_manual_merged("5"),
+                TeamEvent::task_reworked("eng-1", "6"),
+                TeamEvent::review_nudge_sent("manager", "7"),
+                TeamEvent::review_escalated("manager", "8"),
+                TeamEvent::review_escalated("manager", "9"),
+            ],
+        );
+
+        let metrics = compute_metrics_with_events(&board_dir, &[], Some(&events_path)).unwrap();
+
+        assert_eq!(metrics.auto_merge_count, 3);
+        assert_eq!(metrics.manual_merge_count, 2);
+        assert_eq!(metrics.rework_count, 1);
+        assert_eq!(metrics.review_nudge_count, 1);
+        assert_eq!(metrics.review_escalation_count, 2);
+
+        // auto_merge_rate = 3 / (3 + 2) = 0.6
+        let rate = metrics.auto_merge_rate.unwrap();
+        assert!((rate - 0.6).abs() < 0.01);
+
+        // rework_rate = 1 / (5 + 1) ≈ 0.167
+        let rework = metrics.rework_rate.unwrap();
+        assert!((rework - 1.0 / 6.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn review_metrics_compute_latency() {
+        use crate::team::events::TeamEvent;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        let events_path = tmp.path().join("events.jsonl");
+        write_task(&board_dir, 1, "t1", "done", None, None, &[]);
+
+        // task_completed marks review entry, task_auto/manual_merged marks exit
+        let mut e1 = TeamEvent::task_completed("eng-1");
+        e1.task = Some("10".to_string());
+        e1.ts = 1000;
+        let mut e2 = TeamEvent::task_auto_merged("10");
+        e2.ts = 1100; // 100s latency
+
+        let mut e3 = TeamEvent::task_completed("eng-2");
+        e3.task = Some("20".to_string());
+        e3.ts = 2000;
+        let mut e4 = TeamEvent::task_manual_merged("20");
+        e4.ts = 2300; // 300s latency
+
+        write_events(&events_path, &[e1, e2, e3, e4]);
+
+        let metrics = compute_metrics_with_events(&board_dir, &[], Some(&events_path)).unwrap();
+
+        // avg = (100 + 300) / 2 = 200
+        let avg = metrics.avg_review_latency_secs.unwrap();
+        assert!((avg - 200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn review_metrics_handle_no_merges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        let events_path = tmp.path().join("events.jsonl");
+        write_task(&board_dir, 1, "t1", "done", None, None, &[]);
+
+        // Empty event file — no merge events
+        std::fs::write(&events_path, "").unwrap();
+
+        let metrics = compute_metrics_with_events(&board_dir, &[], Some(&events_path)).unwrap();
+
+        assert_eq!(metrics.auto_merge_count, 0);
+        assert_eq!(metrics.manual_merge_count, 0);
+        assert!(metrics.auto_merge_rate.is_none());
+        assert!(metrics.rework_rate.is_none());
+        assert!(metrics.avg_review_latency_secs.is_none());
+    }
+
+    #[test]
+    fn status_includes_review_pipeline() {
+        let text = format_metrics(&WorkflowMetrics {
+            in_review_count: 2,
+            auto_merge_count: 3,
+            manual_merge_count: 2,
+            auto_merge_rate: Some(0.6),
+            rework_count: 1,
+            rework_rate: Some(1.0 / 6.0),
+            review_nudge_count: 1,
+            review_escalation_count: 0,
+            avg_review_latency_secs: Some(272.0),
+            ..Default::default()
+        });
+
+        assert!(text.contains("Review Pipeline"));
+        assert!(text.contains("Queue: 2"));
+        assert!(text.contains("Auto-merge Rate: 60%"));
+        assert!(text.contains("Auto: 3"));
+        assert!(text.contains("Manual: 2"));
+        assert!(text.contains("Rework: 1"));
+        assert!(text.contains("Nudges: 1"));
+        assert!(text.contains("Escalations: 0"));
+    }
+
+    #[test]
+    fn retro_includes_review_section() {
+        use crate::team::retrospective::{RunStats, generate_retrospective};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let stats = RunStats {
+            run_start: 100,
+            run_end: 500,
+            total_duration_secs: 400,
+            task_stats: Vec::new(),
+            average_cycle_time_secs: None,
+            fastest_task_id: None,
+            fastest_cycle_time_secs: None,
+            longest_task_id: None,
+            longest_cycle_time_secs: None,
+            idle_time_pct: 0.0,
+            escalation_count: 0,
+            message_count: 0,
+            auto_merge_count: 5,
+            manual_merge_count: 2,
+            rework_count: 1,
+            review_nudge_count: 3,
+            review_escalation_count: 0,
+        };
+
+        let path = generate_retrospective(tmp.path(), &stats).unwrap();
+        let content = std::fs::read_to_string(path).unwrap();
+
+        assert!(content.contains("## Review Performance"));
+        assert!(content.contains("Auto-merged: 5"));
+        assert!(content.contains("Manually merged: 2"));
+        assert!(content.contains("Auto-merge rate: 71%"));
+        assert!(content.contains("Rework: 1"));
+        assert!(content.contains("Review nudges: 3"));
+        assert!(content.contains("Review escalations: 0"));
     }
 }

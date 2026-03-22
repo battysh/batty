@@ -120,6 +120,22 @@ pub fn generate_board_aware_standup_for(
                 idle_reports.join(", ")
             ));
         }
+        let total_merges =
+            board_context.metrics.auto_merge_count + board_context.metrics.manual_merge_count;
+        if total_merges > 0 || board_context.metrics.rework_count > 0 {
+            let auto_rate = board_context
+                .metrics
+                .auto_merge_rate
+                .map(|r| format!("{:.0}%", r * 100.0))
+                .unwrap_or_else(|| "-".to_string());
+            report.push_str(&format!(
+                "  review pipeline: auto-merge rate {} | rework {} | nudges {} | escalations {}\n",
+                auto_rate,
+                board_context.metrics.rework_count,
+                board_context.metrics.review_nudge_count,
+                board_context.metrics.review_escalation_count,
+            ));
+        }
     }
 
     report.push_str("\n=== END STANDUP ===\n");
