@@ -100,6 +100,8 @@ pub struct WorkflowPolicy {
     pub max_stall_restarts: u32,
     #[serde(default = "default_health_check_interval_secs")]
     pub health_check_interval_secs: u64,
+    #[serde(default = "default_uncommitted_warn_threshold")]
+    pub uncommitted_warn_threshold: usize,
     #[serde(default)]
     pub auto_merge: AutoMergePolicy,
 }
@@ -130,6 +132,7 @@ impl Default for WorkflowPolicy {
             stall_threshold_secs: default_stall_threshold_secs(),
             max_stall_restarts: default_max_stall_restarts(),
             health_check_interval_secs: default_health_check_interval_secs(),
+            uncommitted_warn_threshold: default_uncommitted_warn_threshold(),
             auto_merge: AutoMergePolicy::default(),
         }
     }
@@ -480,6 +483,10 @@ fn default_max_stall_restarts() -> u32 {
 
 fn default_health_check_interval_secs() -> u64 {
     60
+}
+
+fn default_uncommitted_warn_threshold() -> usize {
+    200
 }
 
 fn default_enabled() -> bool {
