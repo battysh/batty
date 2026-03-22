@@ -109,10 +109,12 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     if commits_ahead_of_main(&worktree_dir)? == 0 {
         let msg = "Completion rejected: your branch has no commits ahead of main. Commit your changes before reporting done again.";
         daemon.queue_message("batty", engineer, msg)?;
-        daemon.mark_member_working(engineer);
+        daemon.clear_active_task(engineer);
+        daemon.set_member_idle(engineer);
         info!(
             engineer,
-            task_id, "completion rejected because branch has no commits"
+            task_id,
+            "Cleared stale assignment for {engineer} after no-commits rejection on task #{task_id}"
         );
         return Ok(());
     }
@@ -1079,11 +1081,11 @@ mod tests {
         daemon.set_active_task_for_test("eng-1", 42);
         handle_engineer_completion(&mut daemon, "eng-1").unwrap();
 
-        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+        assert_eq!(daemon.active_task_id("eng-1"), None);
         assert_eq!(daemon.retry_count_for_test("eng-1"), None);
         assert_eq!(
             daemon.member_state_for_test("eng-1"),
-            Some(MemberState::Working)
+            Some(MemberState::Idle)
         );
     }
 
@@ -1188,6 +1190,56 @@ mod tests {
         let manager_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
         assert!(manager_messages.is_empty());
+    }
+
+    #[test]
+    fn no_commits_rejection_clears_assignment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        write_task_file(&repo, 42, "no-commits-clear");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+        std::fs::remove_file(worktree_dir.join("Cargo.toml")).unwrap();
+
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        // Assignment should be cleared — engineer is free for new dispatch
+        assert_eq!(daemon.active_task_id("eng-1"), None);
+        assert_eq!(
+            daemon.member_state_for_test("eng-1"),
+            Some(MemberState::Idle)
+        );
+    }
+
+    #[test]
+    fn no_commits_rejection_does_not_retry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        write_task_file(&repo, 42, "no-commits-no-retry");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+        std::fs::remove_file(worktree_dir.join("Cargo.toml")).unwrap();
+
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        // Retry count should not be incremented — task is abandoned, not retried
+        assert_eq!(daemon.retry_count_for_test("eng-1"), None);
+        // Active task cleared, so no re-dispatch will happen
+        assert_eq!(daemon.active_task_id("eng-1"), None);
     }
 
     #[test]
