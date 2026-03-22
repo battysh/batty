@@ -669,6 +669,7 @@ mod tests {
             standup: Default::default(),
             automation: Default::default(),
             automation_sender: None,
+            external_senders: Vec::new(),
             orchestrator_pane: true,
             orchestrator_position: Default::default(),
             layout: None,

@@ -23,6 +23,10 @@ pub struct TeamConfig {
     pub automation: AutomationConfig,
     #[serde(default)]
     pub automation_sender: Option<String>,
+    /// External senders (e.g. email-router, slack-bridge) that are allowed to
+    /// message any role even though they are not team members.
+    #[serde(default)]
+    pub external_senders: Vec<String>,
     #[serde(default = "default_orchestrator_pane")]
     pub orchestrator_pane: bool,
     #[serde(default)]
@@ -392,6 +396,10 @@ impl TeamConfig {
         }
         // daemon-generated messages (standups, nudges) always allowed
         if from_role == "daemon" {
+            return true;
+        }
+        // external senders (e.g. email-router, slack-bridge) can send to anyone
+        if self.external_senders.iter().any(|s| s == from_role) {
             return true;
         }
 
@@ -1368,5 +1376,57 @@ roles:
         let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("talks_to unknown role"));
+    }
+
+    #[test]
+    fn external_sender_can_talk_to_any_role() {
+        let config: TeamConfig = serde_yaml::from_str(
+            r#"
+name: test
+external_senders:
+  - email-router
+  - slack-bridge
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: manager
+    role_type: manager
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+"#,
+        )
+        .unwrap();
+
+        assert!(config.can_talk("email-router", "manager"));
+        assert!(config.can_talk("email-router", "architect"));
+        assert!(config.can_talk("email-router", "engineer"));
+        assert!(config.can_talk("slack-bridge", "manager"));
+        assert!(config.can_talk("slack-bridge", "engineer"));
+    }
+
+    #[test]
+    fn unknown_sender_blocked() {
+        let config: TeamConfig = serde_yaml::from_str(
+            r#"
+name: test
+external_senders:
+  - email-router
+roles:
+  - name: manager
+    role_type: manager
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+"#,
+        )
+        .unwrap();
+
+        // "random-sender" is not in external_senders and not a known role
+        assert!(!config.can_talk("random-sender", "manager"));
+        assert!(!config.can_talk("random-sender", "engineer"));
     }
 }
