@@ -126,6 +126,8 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 - Maildir inbox routing with explicit `talks_to` communication rules
 - Stable per-engineer worktrees with fresh task branches on each assignment
 - Kanban-driven task loop with auto-dispatch, retry tracking, and test gating
+- Scheduled tasks: `scheduled_for` delays dispatch until a future time, `cron_schedule` enables recurring tasks that auto-recycle from done back to todo
+- Per-intervention runtime toggles via `batty nudge` to disable or re-enable specific daemon behaviors without restarting
 - Orchestrator automation for triage, review, owned-task recovery, dispatch-gap recovery, utilization recovery, standups, nudges, and retrospectives
 - Auto-merge policy engine with confidence scoring and configurable thresholds for safe unattended merges
 - Review timeout escalation: stale reviews are nudged and auto-escalated after configurable thresholds
@@ -148,6 +150,8 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 | `batty status [--json]` | Show current team state |
 | `batty merge <engineer>` | Merge an engineer worktree branch |
 | `batty task review <id> --disposition <d>` | Record a review disposition (approved, changes_requested, rejected) |
+| `batty task schedule <id> [--at T] [--cron E] [--clear]` | Set or clear scheduled dispatch time and cron recurrence |
+| `batty nudge disable/enable/status` | Toggle specific daemon interventions at runtime |
 | `batty retro` / `load` / `cost` / `doctor` | Inspect run history, team load, session cost, and diagnostic state |
 | `batty doctor --fix` | Clean up orphan worktrees and branches |
 | `batty pause` / `resume` / `queue` | Control automation and inspect queued dispatch work |
