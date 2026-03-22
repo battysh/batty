@@ -716,48 +716,7 @@ pub fn capture_pane_recent(target: &str, lines: u32) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// Wait for the tmux session to end (executor process exits).
-///
-/// Polls `has-session` at the given interval. Returns when the session is gone
-/// or an error occurs.
-#[allow(dead_code)]
-pub fn wait_for_session_end(session: &str, poll_interval: std::time::Duration) -> Result<()> {
-    loop {
-        if !session_exists(session) {
-            info!(session = session, "tmux session ended");
-            return Ok(());
-        }
-        std::thread::sleep(poll_interval);
-    }
-}
-
-/// Set the tmux status bar left content.
-#[allow(dead_code)]
-pub fn set_status_left(session: &str, content: &str) -> Result<()> {
-    tmux_set(session, "status-left", content)
-}
-
-/// Set the tmux status bar right content.
-#[allow(dead_code)]
-pub fn set_status_right(session: &str, content: &str) -> Result<()> {
-    tmux_set(session, "status-right", content)
-}
-
-/// Set the tmux status bar style.
-#[allow(dead_code)]
-pub fn set_status_style(session: &str, style: &str) -> Result<()> {
-    tmux_set(session, "status-style", style)
-}
-
-/// Set the terminal title via tmux.
-#[allow(dead_code)]
-pub fn set_title(session: &str, title: &str) -> Result<()> {
-    tmux_set(session, "set-titles", "on")?;
-    tmux_set(session, "set-titles-string", title)
-}
-
 /// Enable/disable tmux mouse mode for a session.
-#[allow(dead_code)]
 pub fn set_mouse(session: &str, enabled: bool) -> Result<()> {
     let value = if enabled { "on" } else { "off" };
     tmux_set(session, "mouse", value)
@@ -828,25 +787,6 @@ pub fn take_supervisor_hotkey_action(session: &str) -> Result<Option<String>> {
     Ok(Some(action))
 }
 
-/// Split the window to create a new pane.
-///
-/// Returns Ok(()) on success. The new pane is at the bottom (vertical split)
-/// with the given percentage of height.
-#[allow(dead_code)]
-pub fn split_window_vertical(session: &str, percent: u32) -> Result<()> {
-    let size = format!("{percent}%");
-    let output = Command::new("tmux")
-        .args(["split-window", "-v", "-l", &size, "-t", session])
-        .output()
-        .with_context(|| format!("failed to split window in session '{session}'"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("tmux split-window failed: {stderr}");
-    }
-
-    Ok(())
-}
 
 /// Split the window vertically by fixed line count.
 pub fn split_window_vertical_lines(session: &str, lines: u32, command: &[String]) -> Result<()> {

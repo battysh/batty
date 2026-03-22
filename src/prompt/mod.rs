@@ -110,7 +110,6 @@ impl PromptPatterns {
     ///
     /// Codex CLI uses a full-screen ratatui TUI with alternate screen buffer.
     /// These patterns target text after ANSI stripping.
-    #[allow(dead_code)]
     pub fn codex_cli() -> Self {
         Self {
             patterns: vec![
