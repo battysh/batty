@@ -57,6 +57,17 @@ fn run_git_with_status(repo_dir: &Path, args: &[&str]) -> Result<std::process::O
         })
 }
 
+/// Check whether `path` is inside a git work tree.
+pub fn is_git_repo(path: &Path) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 pub fn run_git(repo_dir: &Path, args: &[&str]) -> Result<GitOutput, GitError> {
     let output = run_git_with_status(repo_dir, args)?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -305,5 +316,22 @@ mod tests {
         assert!(!permanent.is_transient());
         assert!(!exec.is_transient());
         assert!(exec.to_string().contains("git status --porcelain"));
+    }
+
+    #[test]
+    fn non_git_dir_returns_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!is_git_repo(tmp.path()));
+    }
+
+    #[test]
+    fn git_initialized_dir_returns_true() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        assert!(is_git_repo(tmp.path()));
     }
 }

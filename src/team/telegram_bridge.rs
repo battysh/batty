@@ -344,6 +344,7 @@ mod tests {
                 retro_generated: false,
                 failed_deliveries: Vec::new(),
                 poll_interval: Duration::from_secs(5),
+                is_git_repo: false,
             };
 
             backdate_idle_grace(&mut daemon, "scientist");
@@ -451,6 +452,7 @@ mod tests {
             retro_generated: false,
             failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
+            is_git_repo: false,
         };
 
         let root = inbox::inboxes_root(tmp.path());
@@ -572,6 +574,7 @@ mod tests {
             retro_generated: false,
             failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
+            is_git_repo: false,
         };
 
         assert_eq!(daemon.automation_sender_for("eng-1"), "lead");
