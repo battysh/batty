@@ -275,7 +275,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                 }
 
                 daemon.clear_active_task(engineer);
-                daemon.record_task_completed(engineer);
+                daemon.record_task_completed(engineer, Some(task_id));
                 daemon.set_member_idle(engineer);
             }
             MergeOutcome::RebaseConflict(conflict_info) => {
@@ -298,7 +298,11 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                         daemon.mark_member_working(manager_name);
                     }
 
-                    daemon.record_task_escalated(engineer, task_id.to_string());
+                    daemon.record_task_escalated(
+                        engineer,
+                        task_id.to_string(),
+                        Some("merge_conflict"),
+                    );
 
                     if let Some(ref manager_name) = manager_name {
                         let escalation = format!(
@@ -344,7 +348,11 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                 );
                 daemon.queue_message("daemon", engineer, &engineer_notice)?;
 
-                daemon.record_task_escalated(engineer, task_id.to_string());
+                daemon.record_task_escalated(
+                    engineer,
+                    task_id.to_string(),
+                    Some("merge_failure"),
+                );
                 daemon.clear_active_task(engineer);
                 daemon.set_member_idle(engineer);
                 warn!(
@@ -377,7 +385,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         daemon.mark_member_working(manager_name);
     }
 
-    daemon.record_task_escalated(engineer, task_id.to_string());
+    daemon.record_task_escalated(engineer, task_id.to_string(), Some("tests_failed"));
 
     if let Some(ref manager_name) = manager_name {
         let escalation = format!(

@@ -868,7 +868,11 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             "restart: escalated context exhaustion for {} on task #{} after {} exhaustions",
             member.name, task.id, restart_count
         ));
-        self.record_task_escalated(&member.name, task.id.to_string());
+        self.record_task_escalated(
+            &member.name,
+            task.id.to_string(),
+            Some("context_exhausted"),
+        );
         Ok(())
     }
 
@@ -5039,7 +5043,7 @@ exit 1
             &[
                 TeamEvent::daemon_started(),
                 TeamEvent::task_assigned("eng-1", "45"),
-                TeamEvent::task_completed("eng-1"),
+                TeamEvent::task_completed("eng-1", Some("45")),
                 TeamEvent::daemon_stopped(),
             ],
         );
@@ -5080,7 +5084,7 @@ exit 1
             &[
                 TeamEvent::daemon_started(),
                 TeamEvent::task_assigned("eng-1", "45"),
-                TeamEvent::task_completed("eng-1"),
+                TeamEvent::task_completed("eng-1", Some("45")),
                 TeamEvent::daemon_stopped(),
             ],
         );
