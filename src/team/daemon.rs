@@ -119,6 +119,8 @@ pub struct TeamDaemon {
     /// Consecutive error counts per recoverable subsystem name.
     pub(super) subsystem_error_counts: HashMap<String, u32>,
     pub(super) auto_merge_overrides: HashMap<u32, bool>,
+    /// Tracks recent (task_id, engineer) dispatch pairs for deduplication.
+    pub(super) recent_dispatches: HashMap<(u32, String), Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -349,6 +351,7 @@ impl TeamDaemon {
             is_git_repo,
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
+            recent_dispatches: HashMap::new(),
         })
     }
 
