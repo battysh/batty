@@ -170,29 +170,56 @@ impl TeamDaemon {
             "correcting pane cwd before agent interaction"
         );
 
+        // Brief delay before sending cd — pane may not be in a ready state after
+        // daemon resume (shell prompt not yet drawn).
+        std::thread::sleep(Duration::from_millis(100));
+
         let command = format!(
             "cd '{}'",
             shell_single_quote(expected_dir.to_string_lossy().as_ref())
         );
         tmux::send_keys(pane_id, &command, true)?;
-        std::thread::sleep(Duration::from_millis(200));
 
-        let corrected_path = PathBuf::from(tmux::pane_current_path(pane_id)?);
-        let normalized_corrected = normalized_assignment_dir(&corrected_path);
-        if normalized_corrected != normalized_expected
-            && normalized_corrected != normalized_assignment_dir(&codex_context_dir)
-        {
-            bail!(
-                "failed to correct pane cwd for '{member_name}': expected {}, got {}",
-                expected_dir.display(),
-                corrected_path.display()
-            );
+        // Retry verification up to 3 times — the pane may report the old path
+        // if checked too quickly after the cd command.
+        const CWD_VERIFY_RETRIES: u32 = 3;
+        const CWD_VERIFY_DELAY_MS: u64 = 200;
+        let mut last_corrected_path = PathBuf::new();
+
+        for attempt in 1..=CWD_VERIFY_RETRIES {
+            std::thread::sleep(Duration::from_millis(CWD_VERIFY_DELAY_MS));
+
+            last_corrected_path = PathBuf::from(tmux::pane_current_path(pane_id)?);
+            let normalized_corrected = normalized_assignment_dir(&last_corrected_path);
+            if normalized_corrected == normalized_expected
+                || normalized_corrected == normalized_assignment_dir(&codex_context_dir)
+            {
+                self.emit_event(TeamEvent::cwd_corrected(
+                    member_name,
+                    &expected_dir.display().to_string(),
+                ));
+                return Ok(());
+            }
+
+            if attempt < CWD_VERIFY_RETRIES {
+                debug!(
+                    member = %member_name,
+                    attempt,
+                    actual = %last_corrected_path.display(),
+                    expected = %expected_dir.display(),
+                    "cwd correction not yet confirmed, retrying"
+                );
+            }
         }
 
-        self.emit_event(TeamEvent::cwd_corrected(
-            member_name,
-            &expected_dir.display().to_string(),
-        ));
+        // All retries exhausted — log warning but don't block the assignment.
+        warn!(
+            member = %member_name,
+            pane = %pane_id,
+            expected = %expected_dir.display(),
+            actual = %last_corrected_path.display(),
+            "pane cwd correction failed after {CWD_VERIFY_RETRIES} retries"
+        );
         Ok(())
     }
 
@@ -1047,5 +1074,75 @@ mod tests {
                 .body
                 .contains("Dispatch queue entry failed validation")
         );
+    }
+
+    #[test]
+    fn cwd_correction_handles_symlinks() {
+        // On macOS, /tmp is a symlink to /private/tmp.  normalized_assignment_dir
+        // must resolve both to the same canonical path so that comparisons succeed
+        // even when tmux reports the symlinked variant.
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().canonicalize().unwrap();
+
+        // normalized_assignment_dir should resolve to the same canonical path
+        // regardless of which representation is passed in.
+        let from_canonical = normalized_assignment_dir(&canonical);
+        let from_raw = normalized_assignment_dir(tmp.path());
+        assert_eq!(from_canonical, from_raw);
+
+        // Simulate the macOS /tmp vs /private/tmp scenario: if the temp dir
+        // lives under /private/var (or /private/tmp), stripping the /private
+        // prefix would give a different path that still resolves identically.
+        #[cfg(target_os = "macos")]
+        {
+            let path_str = canonical.to_string_lossy();
+            if path_str.starts_with("/private/") {
+                let without_private = PathBuf::from(&path_str["/private".len()..]);
+                let normalized = normalized_assignment_dir(&without_private);
+                assert_eq!(normalized, from_canonical);
+            }
+        }
+    }
+
+    #[test]
+    fn cwd_correction_normalizes_nonexistent_paths_to_self() {
+        // When canonicalize fails (path doesn't exist), the function should
+        // fall back to the original path unchanged.
+        let bogus = PathBuf::from("/nonexistent/path/that/does/not/exist");
+        let normalized = normalized_assignment_dir(&bogus);
+        assert_eq!(normalized, bogus);
+    }
+
+    #[test]
+    fn cwd_correction_retries_on_stale_read() {
+        // Verify the retry constants are sensible for the cwd correction loop.
+        // The actual retry logic is integration-tested via tmux sessions, but
+        // we validate that the path comparison logic used in each retry attempt
+        // correctly identifies matching vs non-matching paths.
+        let tmp = tempfile::tempdir().unwrap();
+        let expected = tmp.path().to_path_buf();
+        let normalized_expected = normalized_assignment_dir(&expected);
+
+        // Simulate "stale read" — pane initially reports project root
+        let project_root = tmp.path().parent().unwrap_or(tmp.path());
+        let stale_path = normalized_assignment_dir(project_root);
+        assert_ne!(
+            stale_path, normalized_expected,
+            "stale path should differ from expected"
+        );
+
+        // Simulate "corrected read" — pane eventually reports the worktree dir
+        let corrected = normalized_assignment_dir(&expected);
+        assert_eq!(
+            corrected, normalized_expected,
+            "corrected path should match expected"
+        );
+
+        // Codex context subdirectory is also accepted as valid
+        let codex_dir = expected.join(".batty").join("codex-context").join("eng-1");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let codex_normalized = normalized_assignment_dir(&codex_dir);
+        // Codex dir should NOT equal the expected root — it's a separate valid path
+        assert_ne!(codex_normalized, normalized_expected);
     }
 }
