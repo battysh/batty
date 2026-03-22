@@ -354,4 +354,471 @@ roles:
             capability_set(&[WorkflowCapability::Executor])
         );
     }
+
+    // --- New tests for task #261 ---
+
+    #[test]
+    fn user_role_gets_no_capabilities_and_is_excluded_from_map() {
+        let members = members_from_yaml(
+            r#"
+name: with-user
+roles:
+  - name: human
+    role_type: user
+  - name: builder
+    role_type: engineer
+    agent: codex
+    instances: 1
+"#,
+        );
+
+        let capability_map = resolve_capability_map(&members);
+
+        // User role should not appear in the capability map
+        assert!(!capability_map.contains_key(&CapabilitySubject::Member("human".to_string())));
+        // Engineer should still get full solo capabilities
+        assert_eq!(
+            member_capabilities(&capability_map, "builder"),
+            capability_set(&[
+                WorkflowCapability::Planner,
+                WorkflowCapability::Dispatcher,
+                WorkflowCapability::Executor,
+            ])
+        );
+    }
+
+    #[test]
+    fn resolve_member_capabilities_returns_empty_for_user() {
+        let member = MemberInstance {
+            name: "human".to_string(),
+            role_name: "human".to_string(),
+            role_type: RoleType::User,
+            agent: None,
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let members = vec![member.clone()];
+        let caps = resolve_member_capabilities(&member, &members);
+        assert!(caps.is_empty());
+    }
+
+    #[test]
+    fn empty_member_list_produces_operator_and_orchestrator_only() {
+        let capability_map = resolve_capability_map(&[]);
+
+        // No agent members
+        assert!(
+            !capability_map
+                .keys()
+                .any(|k| matches!(k, CapabilitySubject::Member(_)))
+        );
+
+        // Operator should have reviewer fallback since no agent reviewers
+        assert_eq!(
+            capability_map
+                .get(&CapabilitySubject::Operator)
+                .cloned()
+                .unwrap(),
+            capability_set(&[WorkflowCapability::Operator, WorkflowCapability::Reviewer])
+        );
+        assert_eq!(
+            capability_map
+                .get(&CapabilitySubject::Orchestrator)
+                .cloned()
+                .unwrap(),
+            capability_set(&[WorkflowCapability::Orchestrator])
+        );
+    }
+
+    #[test]
+    fn architect_gets_dispatch_when_no_manager_exists() {
+        let members = members_from_yaml(
+            r#"
+name: no-manager
+roles:
+  - name: arch
+    role_type: architect
+    agent: claude
+    instances: 1
+  - name: dev
+    role_type: engineer
+    agent: codex
+    instances: 1
+"#,
+        );
+
+        let capability_map = resolve_capability_map(&members);
+
+        // Architect picks up Dispatcher because no manager
+        assert!(
+            member_capabilities(&capability_map, "arch").contains(&WorkflowCapability::Dispatcher)
+        );
+    }
+
+    #[test]
+    fn architect_loses_dispatch_when_manager_present() {
+        let members = members_from_yaml(
+            r#"
+name: full-team
+roles:
+  - name: arch
+    role_type: architect
+    agent: claude
+    instances: 1
+  - name: mgr
+    role_type: manager
+    agent: claude
+    instances: 1
+  - name: dev
+    role_type: engineer
+    agent: codex
+    instances: 1
+"#,
+        );
+
+        let capability_map = resolve_capability_map(&members);
+
+        // Architect should NOT have Dispatcher when manager exists
+        assert!(
+            !member_capabilities(&capability_map, "arch").contains(&WorkflowCapability::Dispatcher)
+        );
+        // Manager should have Dispatcher
+        assert!(
+            member_capabilities(&capability_map, "mgr").contains(&WorkflowCapability::Dispatcher)
+        );
+    }
+
+    #[test]
+    fn subordinate_engineer_never_gets_planner_or_dispatcher() {
+        let members = members_from_yaml(
+            r#"
+name: hierarchy
+roles:
+  - name: lead
+    role_type: manager
+    agent: claude
+    instances: 1
+  - name: worker
+    role_type: engineer
+    agent: codex
+    instances: 3
+"#,
+        );
+
+        let capability_map = resolve_capability_map(&members);
+
+        for i in 1..=3 {
+            let name = format!("worker-1-{}", i);
+            let caps = member_capabilities(&capability_map, &name);
+            assert_eq!(caps, capability_set(&[WorkflowCapability::Executor]));
+            assert!(!caps.contains(&WorkflowCapability::Planner));
+            assert!(!caps.contains(&WorkflowCapability::Dispatcher));
+        }
+    }
+
+    #[test]
+    fn manager_without_architect_and_top_level_gets_planner() {
+        let members = members_from_yaml(
+            r#"
+name: manager-only
+roles:
+  - name: mgr
+    role_type: manager
+    agent: claude
+    instances: 1
+"#,
+        );
+
+        let capability_map = resolve_capability_map(&members);
+
+        assert!(member_capabilities(&capability_map, "mgr").contains(&WorkflowCapability::Planner));
+    }
+
+    #[test]
+    fn manager_with_architect_does_not_get_planner() {
+        let members = members_from_yaml(
+            r#"
+name: with-arch
+roles:
+  - name: arch
+    role_type: architect
+    agent: claude
+    instances: 1
+  - name: mgr
+    role_type: manager
+    agent: claude
+    instances: 1
+"#,
+        );
+
+        let capability_map = resolve_capability_map(&members);
+
+        assert!(
+            !member_capabilities(&capability_map, "mgr").contains(&WorkflowCapability::Planner)
+        );
+    }
+
+    #[test]
+    fn operator_gets_reviewer_when_no_architect_or_manager() {
+        let members = members_from_yaml(
+            r#"
+name: engineers-only
+roles:
+  - name: dev
+    role_type: engineer
+    agent: codex
+    instances: 2
+"#,
+        );
+
+        let capability_map = resolve_capability_map(&members);
+
+        // No supervisory roles → operator is review fallback
+        let operator_caps = capability_map
+            .get(&CapabilitySubject::Operator)
+            .cloned()
+            .unwrap();
+        assert!(operator_caps.contains(&WorkflowCapability::Reviewer));
+    }
+
+    #[test]
+    fn operator_does_not_get_reviewer_when_architect_exists() {
+        let members = members_from_yaml(
+            r#"
+name: with-arch
+roles:
+  - name: arch
+    role_type: architect
+    agent: claude
+    instances: 1
+  - name: dev
+    role_type: engineer
+    agent: codex
+    instances: 1
+"#,
+        );
+
+        let capability_map = resolve_capability_map(&members);
+
+        let operator_caps = capability_map
+            .get(&CapabilitySubject::Operator)
+            .cloned()
+            .unwrap();
+        assert!(!operator_caps.contains(&WorkflowCapability::Reviewer));
+    }
+
+    #[test]
+    fn operator_does_not_get_reviewer_when_manager_exists() {
+        let members = members_from_yaml(
+            r#"
+name: with-mgr
+roles:
+  - name: mgr
+    role_type: manager
+    agent: claude
+    instances: 1
+  - name: dev
+    role_type: engineer
+    agent: codex
+    instances: 1
+"#,
+        );
+
+        let capability_map = resolve_capability_map(&members);
+
+        let operator_caps = capability_map
+            .get(&CapabilitySubject::Operator)
+            .cloned()
+            .unwrap();
+        assert!(!operator_caps.contains(&WorkflowCapability::Reviewer));
+    }
+
+    #[test]
+    fn orchestrator_always_has_only_orchestrator_capability() {
+        // Test across multiple topologies
+        let topologies = vec![
+            // Solo
+            r#"
+name: solo
+roles:
+  - name: dev
+    role_type: engineer
+    agent: codex
+    instances: 1
+"#,
+            // Full team
+            r#"
+name: full
+roles:
+  - name: arch
+    role_type: architect
+    agent: claude
+    instances: 1
+  - name: mgr
+    role_type: manager
+    agent: claude
+    instances: 1
+  - name: dev
+    role_type: engineer
+    agent: codex
+    instances: 1
+"#,
+        ];
+
+        for yaml in topologies {
+            let members = members_from_yaml(yaml);
+            let capability_map = resolve_capability_map(&members);
+            assert_eq!(
+                capability_map
+                    .get(&CapabilitySubject::Orchestrator)
+                    .cloned()
+                    .unwrap(),
+                capability_set(&[WorkflowCapability::Orchestrator])
+            );
+        }
+    }
+
+    #[test]
+    fn has_agent_reviewer_returns_true_with_architect() {
+        let members = members_from_yaml(
+            r#"
+name: test
+roles:
+  - name: arch
+    role_type: architect
+    agent: claude
+    instances: 1
+  - name: dev
+    role_type: engineer
+    agent: codex
+    instances: 1
+"#,
+        );
+
+        assert!(has_agent_reviewer(&members));
+    }
+
+    #[test]
+    fn has_agent_reviewer_returns_false_with_only_engineers() {
+        let members = members_from_yaml(
+            r#"
+name: test
+roles:
+  - name: dev
+    role_type: engineer
+    agent: codex
+    instances: 2
+"#,
+        );
+
+        assert!(!has_agent_reviewer(&members));
+    }
+
+    #[test]
+    fn has_agent_reviewer_returns_false_with_only_user_roles() {
+        let member = MemberInstance {
+            name: "human".to_string(),
+            role_name: "human".to_string(),
+            role_type: RoleType::User,
+            agent: None,
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        assert!(!has_agent_reviewer(&[member]));
+    }
+
+    #[test]
+    fn capability_map_member_count_matches_non_user_members() {
+        let members = members_from_yaml(
+            r#"
+name: mixed
+roles:
+  - name: human
+    role_type: user
+  - name: arch
+    role_type: architect
+    agent: claude
+    instances: 1
+  - name: dev
+    role_type: engineer
+    agent: codex
+    instances: 2
+"#,
+        );
+
+        let capability_map = resolve_capability_map(&members);
+
+        let member_entries = capability_map
+            .keys()
+            .filter(|k| matches!(k, CapabilitySubject::Member(_)))
+            .count();
+        // 1 architect + 2 engineers = 3 members (user excluded)
+        assert_eq!(member_entries, 3);
+    }
+
+    #[test]
+    fn solo_engineer_gets_all_three_agent_capabilities() {
+        let members = members_from_yaml(
+            r#"
+name: solo
+roles:
+  - name: lone-wolf
+    role_type: engineer
+    agent: codex
+    instances: 1
+"#,
+        );
+
+        let capability_map = resolve_capability_map(&members);
+        let caps = member_capabilities(&capability_map, "lone-wolf");
+
+        assert!(caps.contains(&WorkflowCapability::Planner));
+        assert!(caps.contains(&WorkflowCapability::Dispatcher));
+        assert!(caps.contains(&WorkflowCapability::Executor));
+        assert!(!caps.contains(&WorkflowCapability::Reviewer));
+        assert!(!caps.contains(&WorkflowCapability::Orchestrator));
+        assert!(!caps.contains(&WorkflowCapability::Operator));
+    }
+
+    #[test]
+    fn multi_instance_engineers_all_get_same_capabilities() {
+        let members = members_from_yaml(
+            r#"
+name: team
+roles:
+  - name: arch
+    role_type: architect
+    agent: claude
+    instances: 1
+  - name: eng
+    role_type: engineer
+    agent: codex
+    instances: 4
+"#,
+        );
+
+        let capability_map = resolve_capability_map(&members);
+        let expected = capability_set(&[WorkflowCapability::Executor]);
+
+        // No manager → flat naming: eng-1, eng-2, eng-3, eng-4
+        for i in 1..=4 {
+            let name = format!("eng-{}", i);
+            assert_eq!(member_capabilities(&capability_map, &name), expected);
+        }
+    }
+
+    #[test]
+    fn capability_subject_ordering_is_deterministic() {
+        // CapabilitySubject derives Ord — variant order: Member, Orchestrator, Operator
+        let a = CapabilitySubject::Member("aaa".to_string());
+        let b = CapabilitySubject::Member("zzz".to_string());
+        let orch = CapabilitySubject::Orchestrator;
+        let op = CapabilitySubject::Operator;
+
+        assert!(a < b);
+        assert!(a < orch);
+        assert!(orch < op);
+    }
 }
