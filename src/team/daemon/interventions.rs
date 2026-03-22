@@ -221,6 +221,9 @@ impl TeamDaemon {
         if super::super::pause_marker_path(&self.config.project_root).exists() {
             return Ok(());
         }
+        if super::super::nudge_disabled_marker_path(&self.config.project_root, "triage").exists() {
+            return Ok(());
+        }
 
         let inbox_root = inbox::inboxes_root(&self.config.project_root);
         let direct_reports = super::super::status::direct_reports_by_member(&self.config.members);
@@ -307,6 +310,11 @@ impl TeamDaemon {
             return Ok(());
         }
         if super::super::pause_marker_path(&self.config.project_root).exists() {
+            return Ok(());
+        }
+        if super::super::nudge_disabled_marker_path(&self.config.project_root, "owned-task")
+            .exists()
+        {
             return Ok(());
         }
 
@@ -456,6 +464,9 @@ impl TeamDaemon {
         if super::super::pause_marker_path(&self.config.project_root).exists() {
             return Ok(());
         }
+        if super::super::nudge_disabled_marker_path(&self.config.project_root, "review").exists() {
+            return Ok(());
+        }
 
         let board_dir = self
             .config
@@ -562,6 +573,10 @@ impl TeamDaemon {
             return Ok(());
         }
         if super::super::pause_marker_path(&self.config.project_root).exists() {
+            return Ok(());
+        }
+        if super::super::nudge_disabled_marker_path(&self.config.project_root, "dispatch").exists()
+        {
             return Ok(());
         }
 
@@ -736,6 +751,11 @@ impl TeamDaemon {
         if super::super::pause_marker_path(&self.config.project_root).exists() {
             return Ok(());
         }
+        if super::super::nudge_disabled_marker_path(&self.config.project_root, "utilization")
+            .exists()
+        {
+            return Ok(());
+        }
 
         let board_dir = self
             .config
@@ -895,6 +915,10 @@ impl TeamDaemon {
 
     pub(super) fn maybe_intervene_board_replenishment(&mut self) -> Result<()> {
         if super::super::pause_marker_path(&self.config.project_root).exists() {
+            return Ok(());
+        }
+        if super::super::nudge_disabled_marker_path(&self.config.project_root, "replenish").exists()
+        {
             return Ok(());
         }
 
@@ -3380,5 +3404,48 @@ mod tests {
         let message = daemon.build_review_intervention_message(&member, &[&tasks[0]]);
 
         assert!(message.contains("[truncated to 2000 chars from review_policy.md]"));
+    }
+
+    #[test]
+    fn nudge_disabled_marker_suppresses_triage_intervention() {
+        use crate::team::nudge_disabled_marker_path;
+
+        let harness =
+            triage_harness().with_inbox_message("lead", delivered_result("eng-1", "done"), true);
+        let mut daemon = harness.build_daemon().unwrap();
+        enter_idle_epoch(&mut daemon, "lead");
+
+        // Create the nudge disabled marker
+        let marker = nudge_disabled_marker_path(&daemon.config.project_root, "triage");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "").unwrap();
+
+        daemon.maybe_intervene_triage_backlog().unwrap();
+
+        // No triage intervention should have fired
+        assert_eq!(daemon.triage_interventions.get("lead"), None);
+        let pending = harness.pending_inbox_messages("lead").unwrap();
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn nudge_disabled_marker_suppresses_board_replenishment() {
+        use crate::team::nudge_disabled_marker_path;
+
+        let harness = intervention_team_harness()
+            .with_member_state("architect", MemberState::Idle)
+            .with_member_state("eng-1", MemberState::Idle);
+        let mut daemon = harness.build_daemon().unwrap();
+        daemon.config.team_config.automation.replenishment_threshold = Some(10);
+
+        // Create the nudge disabled marker
+        let marker = nudge_disabled_marker_path(&daemon.config.project_root, "replenish");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "").unwrap();
+
+        daemon.maybe_intervene_board_replenishment().unwrap();
+
+        let pending = harness.pending_inbox_messages("architect").unwrap();
+        assert!(pending.is_empty());
     }
 }
