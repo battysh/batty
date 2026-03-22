@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
 use batty_cli::{
     cli::{
-        self, AutoMergeAction, BoardCommand, Cli, Command, InboxCommand, NudgeCommand,
-        ReviewDispositionArg, TaskCommand, TaskStateArg,
+        self, AutoMergeAction, BoardCommand, Cli, Command, DepsFormatArg, InboxCommand,
+        NudgeCommand, ReviewDispositionArg, TaskCommand, TaskStateArg,
     },
     team,
 };
@@ -309,6 +309,14 @@ fn main() -> Result<()> {
                     for (status, count) in board_summary_counts(&board_dir)? {
                         println!("{status:<11} {count}");
                     }
+                }
+                Some(BoardCommand::Deps { format }) => {
+                    let fmt = match format {
+                        DepsFormatArg::Tree => team::deps::DepsFormat::Tree,
+                        DepsFormatArg::Flat => team::deps::DepsFormat::Flat,
+                        DepsFormatArg::Dot => team::deps::DepsFormat::Dot,
+                    };
+                    print!("{}", team::deps::render_deps(&board_dir, fmt)?);
                 }
                 None => {
                     let status = std::process::Command::new("kanban-md")

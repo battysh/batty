@@ -265,6 +265,19 @@ pub enum BoardCommand {
     },
     /// Show per-status task counts
     Summary,
+    /// Show dependency graph
+    Deps {
+        /// Output format: tree (default), flat, or dot
+        #[arg(long, value_enum, default_value_t = DepsFormatArg::Tree)]
+        format: DepsFormatArg,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum DepsFormatArg {
+    Tree,
+    Flat,
+    Dot,
 }
 
 #[derive(Subcommand, Debug)]
@@ -505,6 +518,34 @@ mod tests {
                 command: Some(BoardCommand::Summary),
             } => {}
             other => panic!("expected board summary command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn board_deps_subcommand_defaults_to_tree() {
+        let cli = Cli::parse_from(["batty", "board", "deps"]);
+        match cli.command {
+            Command::Board {
+                command: Some(BoardCommand::Deps { format }),
+            } => assert_eq!(format, DepsFormatArg::Tree),
+            other => panic!("expected board deps command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn board_deps_subcommand_parses_format_flag() {
+        for (arg, expected) in [
+            ("tree", DepsFormatArg::Tree),
+            ("flat", DepsFormatArg::Flat),
+            ("dot", DepsFormatArg::Dot),
+        ] {
+            let cli = Cli::parse_from(["batty", "board", "deps", "--format", arg]);
+            match cli.command {
+                Command::Board {
+                    command: Some(BoardCommand::Deps { format }),
+                } => assert_eq!(format, expected, "format arg={arg}"),
+                other => panic!("expected board deps command for {arg}, got {other:?}"),
+            }
         }
     }
 

@@ -15,6 +15,7 @@ pub mod config;
 pub mod cost;
 pub mod daemon;
 pub mod delivery;
+pub mod deps;
 pub mod doctor;
 pub mod errors;
 pub mod events;
