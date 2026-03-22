@@ -422,6 +422,18 @@ fn main() -> Result<()> {
                     };
                     team::task_cmd::cmd_auto_merge(task_id, enabled);
                 }
+                TaskCommand::Schedule {
+                    task_id,
+                    at,
+                    cron,
+                    clear,
+                } => team::task_cmd::cmd_schedule(
+                    &board_dir,
+                    task_id,
+                    at.as_deref(),
+                    cron.as_deref(),
+                    clear,
+                )?,
             }
         }
 
