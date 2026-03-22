@@ -391,6 +391,14 @@ impl TeamEvent {
             ..Self::base("load_snapshot")
         }
     }
+
+    pub fn worktree_reconciled(role: &str, branch: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            reason: Some(format!("branch '{branch}' merged into main")),
+            ..Self::base("worktree_reconciled")
+        }
+    }
 }
 
 pub struct EventSink {
@@ -649,6 +657,10 @@ mod tests {
             ),
             ("task_reworked", TeamEvent::task_reworked("eng-1", "42")),
             ("load_snapshot", TeamEvent::load_snapshot(2, 5, true)),
+            (
+                "worktree_reconciled",
+                TeamEvent::worktree_reconciled("eng-1", "eng-1/42"),
+            ),
         ];
         for (expected_event, event) in &variants {
             let json = serde_json::to_string(event).unwrap();

@@ -43,7 +43,10 @@ use super::status;
 use super::task_cmd;
 #[cfg(test)]
 use super::task_loop::next_unclaimed_task;
-use super::task_loop::{engineer_base_branch_name, setup_engineer_worktree};
+use super::task_loop::{
+    branch_is_merged_into, checkout_worktree_branch_from_main, current_worktree_branch,
+    engineer_base_branch_name, is_worktree_safe_to_mutate, setup_engineer_worktree,
+};
 use super::watcher::{SessionTrackerConfig, SessionWatcher, WatcherState};
 use super::{AssignmentDeliveryResult, AssignmentResultStatus, now_unix, store_assignment_result};
 use crate::agent::{self, BackendHealth};
@@ -525,6 +528,9 @@ impl TeamDaemon {
             self.run_recoverable_step("maybe_fire_nudges", |daemon| daemon.maybe_fire_nudges());
             self.run_recoverable_step("check_backend_health", |daemon| {
                 daemon.check_backend_health()
+            });
+            self.run_recoverable_step("maybe_reconcile_stale_worktrees", |daemon| {
+                daemon.maybe_reconcile_stale_worktrees()
             });
             self.run_recoverable_step_with_catch_unwind("maybe_generate_standup", |daemon| {
                 let generated =
@@ -1956,6 +1962,94 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         })
     }
 
+    /// Detect engineer worktrees still on branches that have been merged to main.
+    /// For idle engineers with no active task, auto-reset to their base branch.
+    fn maybe_reconcile_stale_worktrees(&mut self) -> Result<()> {
+        if !self.is_git_repo {
+            return Ok(());
+        }
+
+        let engineers: Vec<(String, bool)> = self
+            .config
+            .members
+            .iter()
+            .filter(|m| m.role_type == RoleType::Engineer && m.use_worktrees)
+            .map(|m| {
+                let is_idle = self.states.get(&m.name) == Some(&MemberState::Idle);
+                (m.name.clone(), is_idle)
+            })
+            .collect();
+
+        for (engineer, is_idle) in engineers {
+            if !is_idle {
+                continue;
+            }
+            if self.active_tasks.contains_key(&engineer) {
+                continue;
+            }
+
+            let worktree_dir = self.worktree_dir(&engineer);
+            if !worktree_dir.exists() {
+                continue;
+            }
+
+            let branch = match current_worktree_branch(&worktree_dir) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+
+            let base_branch = engineer_base_branch_name(&engineer);
+            if branch == base_branch || branch == "HEAD" {
+                continue;
+            }
+
+            let merged = match branch_is_merged_into(
+                &self.config.project_root,
+                &branch,
+                "main",
+            ) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            if !merged {
+                continue;
+            }
+
+            if !is_worktree_safe_to_mutate(&worktree_dir).unwrap_or(false) {
+                debug!(
+                    engineer = %engineer,
+                    branch = %branch,
+                    "skipping worktree reconciliation — unsafe to mutate"
+                );
+                continue;
+            }
+
+            if let Err(error) = checkout_worktree_branch_from_main(&worktree_dir, &base_branch) {
+                warn!(
+                    engineer = %engineer,
+                    branch = %branch,
+                    error = %error,
+                    "worktree reconciliation failed"
+                );
+                continue;
+            }
+
+            info!(
+                engineer = %engineer,
+                stale_branch = %branch,
+                reset_to = %base_branch,
+                "auto-reconciled stale worktree"
+            );
+            self.emit_event(TeamEvent::worktree_reconciled(&engineer, &branch));
+            self.record_orchestrator_action(format!(
+                "worktree: auto-reconciled {engineer} from stale branch '{branch}' to '{base_branch}'"
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Rotate the board if enough time has passed.
     ///
     /// When using kanban-md (board/ directory), rotation is not needed — each
@@ -2299,9 +2393,9 @@ mod tests {
     use crate::team::events::EventSink;
     use crate::team::test_helpers::{make_test_daemon, write_event_log};
     use crate::team::test_support::{
-        TestDaemonBuilder, architect_member, backdate_idle_grace, engineer_member, init_git_repo,
-        manager_member, setup_fake_claude, write_board_task_file, write_open_task_file,
-        write_owned_task_file, write_owned_task_file_with_context,
+        TestDaemonBuilder, architect_member, backdate_idle_grace, engineer_member, git_ok,
+        git_stdout, init_git_repo, manager_member, setup_fake_claude, write_board_task_file,
+        write_open_task_file, write_owned_task_file, write_owned_task_file_with_context,
     };
     use crate::team::watcher::WatcherState;
     use serial_test::serial;
@@ -7256,6 +7350,170 @@ exit 1
                 .count(),
             0,
             "no event when state is unchanged"
+        );
+    }
+
+    // ---- Worktree reconciliation tests ----
+
+    /// Helper: set up a test repo, engineer worktree on a merged task branch.
+    fn setup_reconcile_scenario(
+        engineer: &str,
+    ) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-reconcile");
+        let worktree_dir = repo.join(".batty").join("worktrees").join(engineer);
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        setup_engineer_worktree(&repo, &worktree_dir, engineer, &team_config_dir).unwrap();
+
+        // Create a task branch and commit work (use flat name to avoid ref conflicts)
+        let task_branch = format!("{engineer}-42");
+        git_ok(&worktree_dir, &["checkout", "-b", &task_branch]);
+        std::fs::write(worktree_dir.join("feature.txt"), "work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "feature.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "task work"]);
+
+        // Merge the task branch into main (simulate completed merge)
+        git_ok(&repo, &["merge", &task_branch]);
+
+        (tmp, repo, worktree_dir)
+    }
+
+    #[test]
+    fn reconcile_resets_idle_engineer_on_merged_branch() {
+        let (tmp, repo, worktree_dir) = setup_reconcile_scenario("eng-reconcile");
+
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-reconcile", Some("manager"), true),
+        ];
+        let states = HashMap::from([("eng-reconcile".to_string(), MemberState::Idle)]);
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(members)
+            .states(states)
+            .build();
+        daemon.is_git_repo = true;
+
+        daemon.maybe_reconcile_stale_worktrees().unwrap();
+
+        let branch = git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(
+            branch,
+            engineer_base_branch_name("eng-reconcile"),
+            "worktree should be reset to base branch"
+        );
+    }
+
+    #[test]
+    fn reconcile_skips_working_engineer() {
+        let (tmp, repo, worktree_dir) = setup_reconcile_scenario("eng-working");
+
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-working", Some("manager"), true),
+        ];
+        let states = HashMap::from([("eng-working".to_string(), MemberState::Working)]);
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(members)
+            .states(states)
+            .build();
+        daemon.is_git_repo = true;
+
+        daemon.maybe_reconcile_stale_worktrees().unwrap();
+
+        let branch = git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(
+            branch, "eng-working-42",
+            "worktree should stay on task branch when engineer is working"
+        );
+    }
+
+    #[test]
+    fn reconcile_skips_idle_engineer_with_active_task() {
+        let (tmp, repo, worktree_dir) = setup_reconcile_scenario("eng-active");
+
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-active", Some("manager"), true),
+        ];
+        let states = HashMap::from([("eng-active".to_string(), MemberState::Idle)]);
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(members)
+            .states(states)
+            .build();
+        daemon.is_git_repo = true;
+        daemon.active_tasks.insert("eng-active".to_string(), 42);
+
+        daemon.maybe_reconcile_stale_worktrees().unwrap();
+
+        let branch = git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(
+            branch, "eng-active-42",
+            "worktree should stay on task branch when engineer has active task"
+        );
+    }
+
+    #[test]
+    fn reconcile_skips_unmerged_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-reconcile-unmerged");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-unmerged");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-unmerged", &team_config_dir).unwrap();
+
+        // Create a task branch with uncommitted merge work (not merged to main)
+        let task_branch = "eng-unmerged-99";
+        git_ok(&worktree_dir, &["checkout", "-b", task_branch]);
+        std::fs::write(worktree_dir.join("wip.txt"), "wip\n").unwrap();
+        git_ok(&worktree_dir, &["add", "wip.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "work in progress"]);
+
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-unmerged", Some("manager"), true),
+        ];
+        let states = HashMap::from([("eng-unmerged".to_string(), MemberState::Idle)]);
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(members)
+            .states(states)
+            .build();
+        daemon.is_git_repo = true;
+
+        daemon.maybe_reconcile_stale_worktrees().unwrap();
+
+        let branch = git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(
+            branch, "eng-unmerged-99",
+            "worktree should stay on unmerged task branch"
+        );
+    }
+
+    #[test]
+    fn reconcile_emits_worktree_reconciled_event() {
+        let (_tmp, repo, _worktree_dir) = setup_reconcile_scenario("eng-event");
+
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-event", Some("manager"), true),
+        ];
+        let states = HashMap::from([("eng-event".to_string(), MemberState::Idle)]);
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(members)
+            .states(states)
+            .build();
+        daemon.is_git_repo = true;
+
+        daemon.maybe_reconcile_stale_worktrees().unwrap();
+
+        let events = crate::team::events::read_events(
+            &repo.join(".batty").join("team_config").join("events.jsonl"),
+        )
+        .unwrap_or_default();
+        assert!(
+            events.iter().any(|e| e.event == "worktree_reconciled"
+                && e.role.as_deref() == Some("eng-event")),
+            "should emit worktree_reconciled event"
         );
     }
 }
