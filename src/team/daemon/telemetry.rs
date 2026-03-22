@@ -174,6 +174,23 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::task_completed(role));
     }
 
+    pub(crate) fn record_task_auto_merged(
+        &mut self,
+        engineer: &str,
+        task_id: u32,
+        confidence: f64,
+        files_changed: usize,
+        lines_changed: usize,
+    ) {
+        self.emit_event(TeamEvent::task_auto_merged(
+            engineer,
+            &task_id.to_string(),
+            confidence,
+            files_changed,
+            lines_changed,
+        ));
+    }
+
     pub(super) fn record_standup_generated(&mut self, recipient: &str) {
         self.emit_event(TeamEvent::standup_generated(recipient));
     }
@@ -505,6 +522,7 @@ mod tests {
             poll_interval: Duration::from_secs(5),
             is_git_repo: false,
             subsystem_error_counts: HashMap::new(),
+            auto_merge_overrides: HashMap::new(),
         };
 
         let sent = Arc::new(Mutex::new(Vec::new()));
@@ -877,6 +895,7 @@ mod tests {
             poll_interval: Duration::from_secs(5),
             is_git_repo: false,
             subsystem_error_counts: HashMap::new(),
+            auto_merge_overrides: HashMap::new(),
         };
 
         daemon.poll_watchers().unwrap();

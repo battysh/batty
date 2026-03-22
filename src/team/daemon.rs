@@ -118,6 +118,7 @@ pub struct TeamDaemon {
     pub(super) is_git_repo: bool,
     /// Consecutive error counts per recoverable subsystem name.
     pub(super) subsystem_error_counts: HashMap<String, u32>,
+    pub(super) auto_merge_overrides: HashMap<u32, bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,6 +348,7 @@ impl TeamDaemon {
             poll_interval: Duration::from_secs(5),
             is_git_repo,
             subsystem_error_counts: HashMap::new(),
+            auto_merge_overrides: HashMap::new(),
         })
     }
 
@@ -1028,6 +1030,14 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
 
     pub(super) fn project_root(&self) -> &Path {
         &self.config.project_root
+    }
+
+    pub(super) fn set_auto_merge_override(&mut self, task_id: u32, enabled: bool) {
+        self.auto_merge_overrides.insert(task_id, enabled);
+    }
+
+    pub(super) fn auto_merge_override(&self, task_id: u32) -> Option<bool> {
+        self.auto_merge_overrides.get(&task_id).copied()
     }
 
     pub(super) fn worktree_dir(&self, engineer: &str) -> PathBuf {
