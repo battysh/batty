@@ -61,6 +61,13 @@ fn setup_tracing(verbose: u8) {
         .init();
 }
 
+fn format_ts(unix_secs: i64) -> String {
+    use std::time::{Duration, UNIX_EPOCH};
+    let dt = UNIX_EPOCH + Duration::from_secs(unix_secs as u64);
+    let datetime: chrono::DateTime<chrono::Local> = dt.into();
+    datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 fn task_state_arg_name(state: TaskStateArg) -> &'static str {
     match state {
         TaskStateArg::Backlog => "backlog",
@@ -434,6 +441,122 @@ fn main() -> Result<()> {
                     cron.as_deref(),
                     clear,
                 )?,
+            }
+        }
+
+        Command::Telemetry { command } => {
+            let conn =
+                team::telemetry_db::open(&root).context("failed to open telemetry database")?;
+            match command {
+                cli::TelemetryCommand::Summary => {
+                    let rows = team::telemetry_db::query_session_summaries(&conn)?;
+                    if rows.is_empty() {
+                        println!("No session summaries recorded yet.");
+                    } else {
+                        println!(
+                            "{:<24} {:<20} {:<20} {:>10} {:>8} {:>8}",
+                            "SESSION", "STARTED", "ENDED", "COMPLETED", "MERGES", "EVENTS"
+                        );
+                        for row in &rows {
+                            let started = format_ts(row.started_at);
+                            let ended = row
+                                .ended_at
+                                .map(format_ts)
+                                .unwrap_or_else(|| "running".to_string());
+                            println!(
+                                "{:<24} {:<20} {:<20} {:>10} {:>8} {:>8}",
+                                row.session_id,
+                                started,
+                                ended,
+                                row.tasks_completed,
+                                row.total_merges,
+                                row.total_events
+                            );
+                        }
+                    }
+                }
+                cli::TelemetryCommand::Agents => {
+                    let rows = team::telemetry_db::query_agent_metrics(&conn)?;
+                    if rows.is_empty() {
+                        println!("No agent metrics recorded yet.");
+                    } else {
+                        println!(
+                            "{:<16} {:>11} {:>8} {:>8} {:>12} {:>8}",
+                            "ROLE", "COMPLETIONS", "FAILURES", "RESTARTS", "CYCLE_SECS", "IDLE_PCT"
+                        );
+                        for row in &rows {
+                            let total_polls = row.idle_polls + row.working_polls;
+                            let idle_pct = if total_polls > 0 {
+                                format!(
+                                    "{:.0}%",
+                                    row.idle_polls as f64 / total_polls as f64 * 100.0
+                                )
+                            } else {
+                                "-".to_string()
+                            };
+                            println!(
+                                "{:<16} {:>11} {:>8} {:>8} {:>12} {:>8}",
+                                row.role,
+                                row.completions,
+                                row.failures,
+                                row.restarts,
+                                row.total_cycle_secs,
+                                idle_pct
+                            );
+                        }
+                    }
+                }
+                cli::TelemetryCommand::Tasks => {
+                    let rows = team::telemetry_db::query_task_metrics(&conn)?;
+                    if rows.is_empty() {
+                        println!("No task metrics recorded yet.");
+                    } else {
+                        println!(
+                            "{:<8} {:<20} {:<20} {:>7} {:>11} {:>10}",
+                            "TASK", "STARTED", "COMPLETED", "RETRIES", "ESCALATIONS", "MERGE_SECS"
+                        );
+                        for row in &rows {
+                            let started = row
+                                .started_at
+                                .map(format_ts)
+                                .unwrap_or_else(|| "-".to_string());
+                            let completed = row
+                                .completed_at
+                                .map(format_ts)
+                                .unwrap_or_else(|| "-".to_string());
+                            let merge = row
+                                .merge_time_secs
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| "-".to_string());
+                            println!(
+                                "{:<8} {:<20} {:<20} {:>7} {:>11} {:>10}",
+                                row.task_id,
+                                started,
+                                completed,
+                                row.retries,
+                                row.escalations,
+                                merge
+                            );
+                        }
+                    }
+                }
+                cli::TelemetryCommand::Events { limit } => {
+                    let rows = team::telemetry_db::query_recent_events(&conn, limit)?;
+                    if rows.is_empty() {
+                        println!("No events recorded yet.");
+                    } else {
+                        println!(
+                            "{:<20} {:<24} {:<16} {:<8}",
+                            "TIMESTAMP", "EVENT", "ROLE", "TASK"
+                        );
+                        for row in &rows {
+                            let ts = format_ts(row.timestamp);
+                            let role = row.role.as_deref().unwrap_or("-");
+                            let task = row.task_id.as_deref().unwrap_or("-");
+                            println!("{:<20} {:<24} {:<16} {:<8}", ts, row.event_type, role, task);
+                        }
+                    }
+                }
             }
         }
 
