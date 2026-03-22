@@ -10,6 +10,7 @@ use super::launcher::{
 use super::task_cmd::{assign_task_owners, transition_task};
 use super::*;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use super::super::policy::check_wip_limit;
 
@@ -69,6 +70,12 @@ impl TeamDaemon {
 
         let team_config_dir = self.config.project_root.join(".batty").join("team_config");
         let use_worktrees = member.as_ref().map(|m| m.use_worktrees).unwrap_or(false);
+        if !use_worktrees {
+            debug!(
+                member = %engineer,
+                "Skipping worktree setup for {engineer}: use_worktrees=false"
+            );
+        }
         let task_branch = use_worktrees.then(|| engineer_task_branch_name(engineer, task, task_id));
         let work_dir = if let Some(task_branch) = task_branch.as_deref() {
             let work_dir = self

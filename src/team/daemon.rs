@@ -1468,6 +1468,9 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
     }
 
     fn member_worktree_context(&self, member_name: &str) -> Option<MemberWorktreeContext> {
+        if !self.member_uses_worktrees(member_name) {
+            return None;
+        }
         let worktree_path = self
             .config
             .project_root
