@@ -83,6 +83,14 @@ impl TeamDaemon {
 
     pub(super) fn emit_event(&mut self, event: TeamEvent) {
         self.failure_tracker.push(&event);
+
+        // Dual-write to SQLite telemetry database (best-effort).
+        if let Some(conn) = &self.telemetry_db {
+            if let Err(error) = crate::team::telemetry_db::insert_event(conn, &event) {
+                debug!(error = %error, "failed to write telemetry event to SQLite; continuing");
+            }
+        }
+
         if let Err(error) = self.event_sink.emit(event) {
             warn!(error = %error, "failed to write daemon event; continuing");
         }
@@ -532,6 +540,7 @@ mod tests {
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
+            telemetry_db: None,
         };
 
         let sent = Arc::new(Mutex::new(Vec::new()));
@@ -906,6 +915,7 @@ mod tests {
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
+            telemetry_db: None,
         };
 
         daemon.poll_watchers().unwrap();
