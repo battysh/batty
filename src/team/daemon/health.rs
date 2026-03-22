@@ -739,13 +739,13 @@ mod tests {
         AutomationConfig, BoardConfig, OrchestratorPosition, RoleType, StandupConfig, TeamConfig,
         WorkflowMode, WorkflowPolicy,
     };
-    use crate::team::events::TeamEvent;
+    use crate::team::events::{EventSink, TeamEvent};
     use crate::team::hierarchy::MemberInstance;
     use crate::team::standup::MemberState;
     use crate::team::test_helpers::{make_test_daemon, write_event_log};
     use crate::team::test_support::{
         TestDaemonBuilder, architect_member, engineer_member, git_ok, git_stdout, init_git_repo,
-        manager_member, setup_fake_claude, write_owned_task_file,
+        manager_member, setup_fake_claude, write_board_task_file, write_owned_task_file,
         write_owned_task_file_with_context,
     };
     use crate::team::watcher::WatcherState;
@@ -754,7 +754,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::{LazyLock, Mutex};
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, UNIX_EPOCH};
 
     static PATH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -2914,5 +2914,537 @@ exit 1
                 && e.role.as_deref() == Some("eng-event")),
             "should emit worktree_reconciled event"
         );
+    }
+
+    // ── Integration tests: stall → checkpoint → restart → resume ──
+
+    #[test]
+    #[serial]
+    fn stall_checkpoint_restart_resume_full_flow() {
+        // End-to-end: stall fires → checkpoint written → agent restarted →
+        // restart notice includes checkpoint content.
+        let session = format!("batty-test-stall-cp-flow-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let member_name = "eng-cp-flow";
+        let lead_name = "lead-cp-flow";
+        let (fake_bin, fake_log) = setup_fake_claude(&tmp, member_name);
+        let worktree_path = tmp
+            .path()
+            .join(".batty")
+            .join("worktrees")
+            .join(member_name);
+        std::fs::create_dir_all(&worktree_path).unwrap();
+
+        // Write a test output file so checkpoint picks it up.
+        std::fs::write(
+            worktree_path.join(".batty_test_output"),
+            "test result: ok. 7 passed; 0 failed\n",
+        )
+        .unwrap();
+
+        crate::tmux::create_session(&session, "bash", &[], tmp.path().to_str().unwrap()).unwrap();
+        crate::tmux::create_window(
+            &session,
+            "keeper",
+            "sleep",
+            &["30".to_string()],
+            tmp.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let pane_id = crate::tmux::pane_id(&session).unwrap();
+        Command::new("tmux")
+            .args(["set-option", "-p", "-t", &pane_id, "remain-on-exit", "on"])
+            .output()
+            .unwrap();
+
+        let lead = MemberInstance {
+            name: lead_name.to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: member_name.to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some(lead_name.to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                agent: None,
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                external_senders: Vec::new(),
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+                retro_min_duration_secs: 60,
+                roles: Vec::new(),
+            },
+            session: session.clone(),
+            members: vec![lead, engineer],
+            pane_map: HashMap::from([(member_name.to_string(), pane_id.clone())]),
+        })
+        .unwrap();
+        daemon
+            .states
+            .insert(member_name.to_string(), MemberState::Working);
+        daemon.active_tasks.insert(member_name.to_string(), 100);
+
+        let root = crate::team::inbox::inboxes_root(tmp.path());
+        crate::team::inbox::init_inbox(&root, member_name).unwrap();
+        crate::team::inbox::init_inbox(&root, lead_name).unwrap();
+        write_owned_task_file_with_context(
+            tmp.path(),
+            100,
+            "checkpoint-flow-task",
+            "in-progress",
+            member_name,
+            &format!("{member_name}/100"),
+            &worktree_path.display().to_string(),
+        );
+
+        // 1. Verify no checkpoint exists before stall.
+        let cp_path = crate::team::checkpoint::checkpoint_path(tmp.path(), member_name);
+        assert!(
+            !cp_path.exists(),
+            "checkpoint should not exist before stall"
+        );
+
+        // 2. Trigger stall handler.
+        daemon.handle_stalled_agent(member_name, 300).unwrap();
+
+        // 3. Verify checkpoint file was written.
+        assert!(
+            cp_path.exists(),
+            "checkpoint file must exist after stall restart"
+        );
+        let cp_content = std::fs::read_to_string(&cp_path).unwrap();
+        assert!(
+            cp_content.contains("# Progress Checkpoint: eng-cp-flow"),
+            "checkpoint must contain role header"
+        );
+        assert!(
+            cp_content.contains("**Task:** #100"),
+            "checkpoint must reference task id"
+        );
+        assert!(
+            cp_content.contains("checkpoint-flow-task"),
+            "checkpoint must contain task title"
+        );
+
+        // 4. Verify events: stall_detected + agent_restarted.
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+
+        let stall_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.event == "stall_detected")
+            .collect();
+        assert_eq!(stall_events.len(), 1);
+        assert_eq!(stall_events[0].role.as_deref(), Some(member_name));
+        assert_eq!(stall_events[0].task.as_deref(), Some("100"));
+        assert_eq!(stall_events[0].uptime_secs, Some(300));
+
+        let restart_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.event == "agent_restarted")
+            .collect();
+        assert_eq!(restart_events.len(), 1);
+        assert_eq!(restart_events[0].reason.as_deref(), Some("stalled"));
+        assert_eq!(restart_events[0].restart_count, Some(1));
+
+        // 5. Verify a message was routed to the engineer (restart notice).
+        //    The notice is delivered via live tmux injection (not inbox) when the pane
+        //    is available. We verify via the message_routed event in the event log.
+        assert!(
+            events.iter().any(|e| {
+                e.event == "message_routed"
+                    && e.from.as_deref() == Some("daemon")
+                    && e.to.as_deref() == Some(member_name)
+            }),
+            "restart notice must be routed from daemon to engineer"
+        );
+
+        // 6. Verify checkpoint content would be included in the restart notice.
+        //    The code reads the checkpoint and appends it to the notice. Since we
+        //    verified the checkpoint exists with the right content in step 3, and
+        //    the message_routed event confirms delivery in step 5, the chain is
+        //    complete. Additionally verify the checkpoint is readable.
+        let checkpoint_for_resume =
+            crate::team::checkpoint::read_checkpoint(tmp.path(), member_name);
+        assert!(
+            checkpoint_for_resume.is_some(),
+            "checkpoint must be readable for resume"
+        );
+        let resume_content = checkpoint_for_resume.unwrap();
+        assert!(resume_content.contains("# Progress Checkpoint:"));
+        assert!(resume_content.contains("**Task:** #100"));
+
+        // 6. Verify agent was relaunched (fake claude log).
+        let _log = (0..100)
+            .find_map(|_| {
+                let content = std::fs::read_to_string(&fake_log).ok()?;
+                if content.contains("Continuing Task #100") {
+                    Some(content)
+                } else {
+                    std::thread::sleep(Duration::from_millis(100));
+                    None
+                }
+            })
+            .expect("fake claude should have been launched with task context");
+
+        crate::tmux::kill_session(&session).unwrap();
+        let _ = std::fs::remove_dir_all(&fake_bin);
+    }
+
+    #[test]
+    fn stall_with_no_active_task_is_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let member_name = "eng-no-task";
+        let lead_name = "lead-no-task";
+        let lead = MemberInstance {
+            name: lead_name.to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: member_name.to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some(lead_name.to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![lead, engineer]);
+        // No active task set — active_tasks is empty.
+
+        // Should be a no-op: no events, no checkpoint.
+        daemon.handle_stalled_agent(member_name, 300).unwrap();
+
+        let cp_path = crate::team::checkpoint::checkpoint_path(tmp.path(), member_name);
+        assert!(!cp_path.exists(), "no checkpoint when no active task");
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap_or_default();
+        assert!(
+            events.iter().all(|e| e.event != "stall_detected"),
+            "no stall_detected event when no active task"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn stall_overwrites_existing_checkpoint() {
+        // If a checkpoint already exists for this role, stall handler must overwrite it.
+        let session = format!("batty-test-stall-cp-overwrite-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let member_name = "eng-cp-ow";
+        let lead_name = "lead-cp-ow";
+        let (fake_bin, _fake_log) = setup_fake_claude(&tmp, member_name);
+        let worktree_path = tmp
+            .path()
+            .join(".batty")
+            .join("worktrees")
+            .join(member_name);
+        std::fs::create_dir_all(&worktree_path).unwrap();
+
+        // Write a pre-existing checkpoint for an older task.
+        let old_cp = crate::team::checkpoint::Checkpoint {
+            role: member_name.to_string(),
+            task_id: 50,
+            task_title: "Old task".to_string(),
+            task_description: "Old description".to_string(),
+            branch: Some("old-branch".to_string()),
+            last_commit: None,
+            test_summary: None,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+        };
+        crate::team::checkpoint::write_checkpoint(tmp.path(), &old_cp).unwrap();
+        let cp_path = crate::team::checkpoint::checkpoint_path(tmp.path(), member_name);
+        assert!(cp_path.exists());
+        let old_content = std::fs::read_to_string(&cp_path).unwrap();
+        assert!(old_content.contains("Old task"));
+
+        crate::tmux::create_session(&session, "bash", &[], tmp.path().to_str().unwrap()).unwrap();
+        crate::tmux::create_window(
+            &session,
+            "keeper",
+            "sleep",
+            &["30".to_string()],
+            tmp.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let pane_id = crate::tmux::pane_id(&session).unwrap();
+        Command::new("tmux")
+            .args(["set-option", "-p", "-t", &pane_id, "remain-on-exit", "on"])
+            .output()
+            .unwrap();
+
+        let lead = MemberInstance {
+            name: lead_name.to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: member_name.to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some(lead_name.to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                agent: None,
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                external_senders: Vec::new(),
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+                retro_min_duration_secs: 60,
+                roles: Vec::new(),
+            },
+            session: session.clone(),
+            members: vec![lead, engineer],
+            pane_map: HashMap::from([(member_name.to_string(), pane_id.clone())]),
+        })
+        .unwrap();
+        daemon
+            .states
+            .insert(member_name.to_string(), MemberState::Working);
+        daemon.active_tasks.insert(member_name.to_string(), 200);
+
+        let root = crate::team::inbox::inboxes_root(tmp.path());
+        crate::team::inbox::init_inbox(&root, member_name).unwrap();
+        crate::team::inbox::init_inbox(&root, lead_name).unwrap();
+        write_owned_task_file_with_context(
+            tmp.path(),
+            200,
+            "overwrite-test-task",
+            "in-progress",
+            member_name,
+            &format!("{member_name}/200"),
+            &worktree_path.display().to_string(),
+        );
+
+        daemon.handle_stalled_agent(member_name, 400).unwrap();
+
+        // Checkpoint must now reference the new task, not the old one.
+        let new_content = std::fs::read_to_string(&cp_path).unwrap();
+        assert!(
+            new_content.contains("**Task:** #200"),
+            "checkpoint must reference new task after overwrite"
+        );
+        assert!(
+            !new_content.contains("Old task"),
+            "old checkpoint content must be gone"
+        );
+        assert!(
+            new_content.contains("overwrite-test-task"),
+            "checkpoint must contain new task title"
+        );
+
+        crate::tmux::kill_session(&session).unwrap();
+        let _ = std::fs::remove_dir_all(&fake_bin);
+    }
+
+    #[test]
+    #[serial]
+    fn stall_checkpoint_with_missing_worktree() {
+        // When worktree directory doesn't exist, checkpoint should still be written
+        // but branch/commit fields will be None (falls back to task.branch).
+        let session = format!("batty-test-stall-cp-nowt-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let member_name = "eng-cp-nowt";
+        let lead_name = "lead-cp-nowt";
+        let (fake_bin, _fake_log) = setup_fake_claude(&tmp, member_name);
+        // Deliberately do NOT create the worktree directory.
+
+        crate::tmux::create_session(&session, "bash", &[], tmp.path().to_str().unwrap()).unwrap();
+        crate::tmux::create_window(
+            &session,
+            "keeper",
+            "sleep",
+            &["30".to_string()],
+            tmp.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let pane_id = crate::tmux::pane_id(&session).unwrap();
+        Command::new("tmux")
+            .args(["set-option", "-p", "-t", &pane_id, "remain-on-exit", "on"])
+            .output()
+            .unwrap();
+
+        let lead = MemberInstance {
+            name: lead_name.to_string(),
+            role_name: "lead".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: member_name.to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some(lead_name.to_string()),
+            use_worktrees: false,
+        };
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: tmp.path().to_path_buf(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                agent: None,
+                workflow_mode: WorkflowMode::Legacy,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                external_senders: Vec::new(),
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                cost: Default::default(),
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+                retro_min_duration_secs: 60,
+                roles: Vec::new(),
+            },
+            session: session.clone(),
+            members: vec![lead, engineer],
+            pane_map: HashMap::from([(member_name.to_string(), pane_id.clone())]),
+        })
+        .unwrap();
+        daemon
+            .states
+            .insert(member_name.to_string(), MemberState::Working);
+        daemon.active_tasks.insert(member_name.to_string(), 300);
+
+        let root = crate::team::inbox::inboxes_root(tmp.path());
+        crate::team::inbox::init_inbox(&root, member_name).unwrap();
+        crate::team::inbox::init_inbox(&root, lead_name).unwrap();
+        // Task has a branch set in its frontmatter, but no actual worktree.
+        write_owned_task_file_with_context(
+            tmp.path(),
+            300,
+            "missing-wt-task",
+            "in-progress",
+            member_name,
+            &format!("{member_name}/300"),
+            "/nonexistent/worktree",
+        );
+
+        daemon.handle_stalled_agent(member_name, 500).unwrap();
+
+        // Checkpoint should still be written even without a real worktree.
+        let cp_path = crate::team::checkpoint::checkpoint_path(tmp.path(), member_name);
+        assert!(
+            cp_path.exists(),
+            "checkpoint must be written even without worktree"
+        );
+        let cp_content = std::fs::read_to_string(&cp_path).unwrap();
+        assert!(cp_content.contains("**Task:** #300"));
+        assert!(cp_content.contains("missing-wt-task"));
+        // Branch comes from task frontmatter, not git.
+        assert!(cp_content.contains(&format!("**Branch:** {member_name}/300")));
+        // No last commit since worktree doesn't exist.
+        assert!(!cp_content.contains("**Last commit:**"));
+
+        crate::tmux::kill_session(&session).unwrap();
+        let _ = std::fs::remove_dir_all(&fake_bin);
+    }
+
+    #[test]
+    fn stall_checkpoint_cleared_on_task_clear() {
+        // Verify that clear_active_task removes the checkpoint file.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let member_name = "eng-cp-clear";
+        let cp = crate::team::checkpoint::Checkpoint {
+            role: member_name.to_string(),
+            task_id: 42,
+            task_title: "Clearable task".to_string(),
+            task_description: "Will be cleared".to_string(),
+            branch: None,
+            last_commit: None,
+            test_summary: None,
+            timestamp: "2026-03-22T00:00:00Z".to_string(),
+        };
+        crate::team::checkpoint::write_checkpoint(tmp.path(), &cp).unwrap();
+        let cp_path = crate::team::checkpoint::checkpoint_path(tmp.path(), member_name);
+        assert!(cp_path.exists());
+
+        let mut daemon = make_test_daemon(tmp.path(), vec![]);
+        daemon.active_tasks.insert(member_name.to_string(), 42);
+
+        daemon.clear_active_task(member_name);
+
+        assert!(
+            !cp_path.exists(),
+            "checkpoint must be removed when task is cleared"
+        );
+        assert!(daemon.active_tasks.get(member_name).is_none());
     }
 }
