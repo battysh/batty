@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
 use batty_cli::{
     cli::{
-        self, AutoMergeAction, BoardCommand, Cli, Command, InboxCommand, ReviewDispositionArg,
-        TaskCommand, TaskStateArg,
+        self, AutoMergeAction, BoardCommand, Cli, Command, InboxCommand, NudgeCommand,
+        ReviewDispositionArg, TaskCommand, TaskStateArg,
     },
     team,
 };
@@ -442,6 +442,20 @@ fn main() -> Result<()> {
             };
             clap_complete::generate(shell, &mut Cli::command(), "batty", &mut std::io::stdout());
         }
+
+        Command::Nudge { command } => match command {
+            NudgeCommand::Disable { name } => {
+                team::disable_nudge(&root, name.marker_name())?;
+                println!("Intervention '{}' disabled.", name.marker_name());
+            }
+            NudgeCommand::Enable { name } => {
+                team::enable_nudge(&root, name.marker_name())?;
+                println!("Intervention '{}' re-enabled.", name.marker_name());
+            }
+            NudgeCommand::Status => {
+                team::nudge_status(&root)?;
+            }
+        },
 
         Command::Pause => {
             team::pause_team(&root)?;
