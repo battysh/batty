@@ -186,6 +186,12 @@ pub enum Command {
         yes: bool,
     },
 
+    /// Query the telemetry database for agent and task metrics
+    Telemetry {
+        #[command(subcommand)]
+        command: TelemetryCommand,
+    },
+
     /// Internal: run the daemon loop (spawned by `batty start`)
     #[command(hide = true)]
     Daemon {
@@ -195,6 +201,22 @@ pub enum Command {
         /// Resume agent sessions from a previous run
         #[arg(long)]
         resume: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TelemetryCommand {
+    /// Show session summaries
+    Summary,
+    /// Show per-agent performance metrics
+    Agents,
+    /// Show per-task lifecycle metrics
+    Tasks,
+    /// Show recent events from the telemetry database
+    Events {
+        /// Maximum number of events to show
+        #[arg(short = 'n', long = "limit", default_value_t = 50)]
+        limit: usize,
     },
 }
 
