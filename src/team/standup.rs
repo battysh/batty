@@ -1077,4 +1077,59 @@ mod tests {
         assert!(report.contains("=== STANDUP for user ==="));
         assert!(report.contains("[architect] status: working"));
     }
+
+    #[test]
+    fn standup_includes_backend_health_warning_for_unhealthy_agent() {
+        let manager = make_member("manager", RoleType::Manager, None);
+        let eng = make_member("eng-1", RoleType::Engineer, Some("manager"));
+        let members = vec![manager.clone(), eng.clone()];
+        let states = HashMap::new();
+
+        let mut backend_health = HashMap::new();
+        backend_health.insert(
+            "eng-1".to_string(),
+            crate::agent::BackendHealth::Unreachable,
+        );
+
+        let report = generate_board_aware_standup_for(
+            &manager,
+            &members,
+            &HashMap::new(),
+            &states,
+            5,
+            None,
+            &backend_health,
+        );
+
+        assert!(
+            report.contains("backend: unreachable"),
+            "standup should warn about unhealthy backend: {report}"
+        );
+    }
+
+    #[test]
+    fn standup_omits_backend_health_when_healthy() {
+        let manager = make_member("manager", RoleType::Manager, None);
+        let eng = make_member("eng-1", RoleType::Engineer, Some("manager"));
+        let members = vec![manager.clone(), eng.clone()];
+        let states = HashMap::new();
+
+        let mut backend_health = HashMap::new();
+        backend_health.insert("eng-1".to_string(), crate::agent::BackendHealth::Healthy);
+
+        let report = generate_board_aware_standup_for(
+            &manager,
+            &members,
+            &HashMap::new(),
+            &states,
+            5,
+            None,
+            &backend_health,
+        );
+
+        assert!(
+            !report.contains("backend:"),
+            "standup should not mention backend when healthy: {report}"
+        );
+    }
 }
