@@ -228,6 +228,7 @@ mod tests {
             scheduled_for: None,
             cron_schedule: None,
             cron_last_run: None,
+            completed: None,
             description: description.to_string(),
             batty_config: None,
             source_path: PathBuf::from("/tmp/fake.md"),

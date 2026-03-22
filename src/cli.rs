@@ -271,6 +271,12 @@ pub enum BoardCommand {
         #[arg(long, value_enum, default_value_t = DepsFormatArg::Tree)]
         format: DepsFormatArg,
     },
+    /// Move done tasks to archive directory
+    Archive {
+        /// Only archive tasks completed before this date (YYYY-MM-DD)
+        #[arg(long)]
+        older_than: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -546,6 +552,28 @@ mod tests {
                 } => assert_eq!(format, expected, "format arg={arg}"),
                 other => panic!("expected board deps command for {arg}, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn board_archive_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "board", "archive"]);
+        match cli.command {
+            Command::Board {
+                command: Some(BoardCommand::Archive { older_than }),
+            } => assert!(older_than.is_none()),
+            other => panic!("expected board archive command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn board_archive_subcommand_parses_older_than() {
+        let cli = Cli::parse_from(["batty", "board", "archive", "--older-than", "2026-03-15"]);
+        match cli.command {
+            Command::Board {
+                command: Some(BoardCommand::Archive { older_than }),
+            } => assert_eq!(older_than.as_deref(), Some("2026-03-15")),
+            other => panic!("expected board archive command with older_than, got {other:?}"),
         }
     }
 

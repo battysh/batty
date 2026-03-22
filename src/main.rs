@@ -318,6 +318,10 @@ fn main() -> Result<()> {
                     };
                     print!("{}", team::deps::render_deps(&board_dir, fmt)?);
                 }
+                Some(BoardCommand::Archive { older_than }) => {
+                    let count = team::board::archive_done_tasks(&board_dir, older_than.as_deref())?;
+                    println!("Archived {count} task(s)");
+                }
                 None => {
                     let status = std::process::Command::new("kanban-md")
                         .args(["tui", "--dir", &board_dir.to_string_lossy()])

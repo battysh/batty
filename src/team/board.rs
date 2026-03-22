@@ -2,12 +2,14 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use chrono::{DateTime, FixedOffset, NaiveDate};
 use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 use tracing::info;
 
 use super::errors::BoardError;
+use crate::task::{Task, load_tasks_from_dir};
 
 /// Workflow metadata stored in task frontmatter.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -90,6 +92,110 @@ pub(crate) fn write_workflow_metadata(task_path: &Path, metadata: &WorkflowMetad
     set_string_list(&mut mapping, "artifacts", &metadata.artifacts);
     set_optional_string(&mut mapping, "outcome", metadata.outcome.as_deref());
     set_string_list(&mut mapping, "review_blockers", &metadata.review_blockers);
+
+    let mut rendered =
+        serde_yaml::to_string(&mapping).context("failed to serialize task frontmatter")?;
+    if let Some(stripped) = rendered.strip_prefix("---\n") {
+        rendered = stripped.to_string();
+    }
+
+    let mut updated = String::from("---\n");
+    updated.push_str(&rendered);
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str("---\n");
+    updated.push_str(body);
+
+    std::fs::write(task_path, updated)
+        .with_context(|| format!("failed to write {}", task_path.display()))?;
+    Ok(())
+}
+
+/// Archive done tasks by moving their files from `tasks/` to `archive/`.
+///
+/// Returns the number of tasks archived. If `older_than` is provided, only
+/// tasks completed before that date are archived.
+pub fn archive_done_tasks(board_dir: &Path, older_than: Option<&str>) -> Result<u32> {
+    let tasks_dir = board_dir.join("tasks");
+    if !tasks_dir.is_dir() {
+        bail!("no tasks directory found at {}", tasks_dir.display());
+    }
+
+    let cutoff = older_than.map(parse_cutoff_date).transpose()?;
+
+    let tasks = load_tasks_from_dir(&tasks_dir)?;
+    let to_archive: Vec<&Task> = tasks
+        .iter()
+        .filter(|t| t.status == "done")
+        .filter(|t| match (&cutoff, &t.completed) {
+            (Some(cutoff_dt), Some(completed_str)) => parse_completed_date(completed_str)
+                .map(|completed| completed < *cutoff_dt)
+                .unwrap_or(false),
+            (Some(_), None) => false,
+            (None, _) => true,
+        })
+        .collect();
+
+    if to_archive.is_empty() {
+        return Ok(0);
+    }
+
+    let archive_dir = board_dir.join("archive");
+    std::fs::create_dir_all(&archive_dir)
+        .with_context(|| format!("failed to create archive dir: {}", archive_dir.display()))?;
+
+    let mut count = 0u32;
+    for task in &to_archive {
+        let source = &task.source_path;
+        let file_name = source.file_name().context("task file has no file name")?;
+        let dest = archive_dir.join(file_name);
+
+        // Update status to "archived" before moving
+        update_task_status(source, "archived")?;
+
+        std::fs::rename(source, &dest).with_context(|| {
+            format!("failed to move {} to {}", source.display(), dest.display())
+        })?;
+        count += 1;
+        info!(task_id = task.id, "archived task");
+    }
+
+    info!(count, "archived done tasks");
+    Ok(count)
+}
+
+fn parse_cutoff_date(date_str: &str) -> Result<DateTime<FixedOffset>> {
+    // Try YYYY-MM-DD first, treating it as start of day UTC
+    if let Ok(naive) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+        let dt = naive.and_hms_opt(0, 0, 0).context("invalid date")?;
+        return Ok(DateTime::<FixedOffset>::from_naive_utc_and_offset(
+            dt,
+            FixedOffset::east_opt(0).unwrap(),
+        ));
+    }
+    // Try RFC3339
+    DateTime::parse_from_rfc3339(date_str).with_context(|| {
+        format!("invalid date format: {date_str} (expected YYYY-MM-DD or RFC3339)")
+    })
+}
+
+fn parse_completed_date(completed_str: &str) -> Option<DateTime<FixedOffset>> {
+    DateTime::parse_from_rfc3339(completed_str).ok()
+}
+
+/// Update the `status` field in a task file's YAML frontmatter.
+fn update_task_status(task_path: &Path, new_status: &str) -> Result<()> {
+    let content = std::fs::read_to_string(task_path)
+        .with_context(|| format!("failed to read {}", task_path.display()))?;
+    let (frontmatter, body) = split_task_frontmatter(&content)?;
+    let mut mapping: Mapping =
+        serde_yaml::from_str(frontmatter).context("failed to parse task frontmatter")?;
+
+    mapping.insert(
+        Value::String("status".to_string()),
+        Value::String(new_status.to_string()),
+    );
 
     let mut rendered =
         serde_yaml::to_string(&mapping).context("failed to serialize task frontmatter")?;
@@ -460,5 +566,214 @@ mod tests {
         assert!(!content.contains("outcome:"));
         assert!(!content.contains("review_blockers:"));
         assert!(content.contains("class: standard"));
+    }
+
+    fn write_task_file(dir: &Path, filename: &str, id: u32, status: &str, completed: Option<&str>) {
+        let completed_line = completed
+            .map(|c| format!("completed: {c}\n"))
+            .unwrap_or_default();
+        let content = format!(
+            "---\nid: {id}\ntitle: task {id}\nstatus: {status}\npriority: medium\n{completed_line}class: standard\n---\n\nTask body.\n"
+        );
+        std::fs::write(dir.join(filename), content).unwrap();
+    }
+
+    #[test]
+    fn archive_moves_all_done_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        write_task_file(
+            &tasks_dir,
+            "001-done.md",
+            1,
+            "done",
+            Some("2026-03-20T10:00:00-04:00"),
+        );
+        write_task_file(&tasks_dir, "002-progress.md", 2, "in-progress", None);
+        write_task_file(
+            &tasks_dir,
+            "003-done.md",
+            3,
+            "done",
+            Some("2026-03-21T10:00:00-04:00"),
+        );
+
+        let count = archive_done_tasks(&board_dir, None).unwrap();
+        assert_eq!(count, 2);
+
+        // Files moved to archive
+        let archive_dir = board_dir.join("archive");
+        assert!(archive_dir.join("001-done.md").exists());
+        assert!(archive_dir.join("003-done.md").exists());
+
+        // In-progress task stays
+        assert!(tasks_dir.join("002-progress.md").exists());
+        assert!(!tasks_dir.join("001-done.md").exists());
+        assert!(!tasks_dir.join("003-done.md").exists());
+
+        // Archived file has status updated
+        let archived = std::fs::read_to_string(archive_dir.join("001-done.md")).unwrap();
+        assert!(archived.contains("status: archived"));
+    }
+
+    #[test]
+    fn archive_with_older_than_filters_by_date() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        write_task_file(
+            &tasks_dir,
+            "001-old.md",
+            1,
+            "done",
+            Some("2026-03-10T10:00:00-04:00"),
+        );
+        write_task_file(
+            &tasks_dir,
+            "002-recent.md",
+            2,
+            "done",
+            Some("2026-03-21T10:00:00-04:00"),
+        );
+
+        let count = archive_done_tasks(&board_dir, Some("2026-03-15")).unwrap();
+        assert_eq!(count, 1);
+
+        let archive_dir = board_dir.join("archive");
+        assert!(archive_dir.join("001-old.md").exists());
+        assert!(!archive_dir.join("002-recent.md").exists());
+        assert!(tasks_dir.join("002-recent.md").exists());
+    }
+
+    #[test]
+    fn archive_creates_directory_if_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        write_task_file(
+            &tasks_dir,
+            "001-done.md",
+            1,
+            "done",
+            Some("2026-03-20T10:00:00-04:00"),
+        );
+
+        let archive_dir = board_dir.join("archive");
+        assert!(!archive_dir.exists());
+
+        let count = archive_done_tasks(&board_dir, None).unwrap();
+        assert_eq!(count, 1);
+        assert!(archive_dir.is_dir());
+    }
+
+    #[test]
+    fn archive_returns_zero_when_no_done_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        write_task_file(&tasks_dir, "001-progress.md", 1, "in-progress", None);
+        write_task_file(&tasks_dir, "002-todo.md", 2, "todo", None);
+
+        let count = archive_done_tasks(&board_dir, None).unwrap();
+        assert_eq!(count, 0);
+        assert!(!board_dir.join("archive").exists());
+    }
+
+    #[test]
+    fn archive_skips_done_tasks_without_completed_date_when_older_than_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        // Done task with no completed date — should be skipped when --older-than is set
+        write_task_file(&tasks_dir, "001-no-date.md", 1, "done", None);
+        write_task_file(
+            &tasks_dir,
+            "002-old.md",
+            2,
+            "done",
+            Some("2026-01-01T00:00:00+00:00"),
+        );
+
+        let count = archive_done_tasks(&board_dir, Some("2026-03-01")).unwrap();
+        assert_eq!(count, 1);
+
+        assert!(tasks_dir.join("001-no-date.md").exists());
+        assert!(board_dir.join("archive/002-old.md").exists());
+    }
+
+    #[test]
+    fn archive_excludes_tasks_from_listing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        write_task_file(
+            &tasks_dir,
+            "001-done.md",
+            1,
+            "done",
+            Some("2026-03-20T10:00:00-04:00"),
+        );
+        write_task_file(&tasks_dir, "002-todo.md", 2, "todo", None);
+
+        archive_done_tasks(&board_dir, None).unwrap();
+
+        // load_tasks_from_dir only reads from tasks/, not archive/
+        let tasks = load_tasks_from_dir(&tasks_dir).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, 2);
+    }
+
+    #[test]
+    fn parse_cutoff_date_accepts_yyyy_mm_dd() {
+        let dt = parse_cutoff_date("2026-03-15").unwrap();
+        assert_eq!(
+            dt.date_naive(),
+            NaiveDate::from_ymd_opt(2026, 3, 15).unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_cutoff_date_accepts_rfc3339() {
+        let dt = parse_cutoff_date("2026-03-15T10:30:00-04:00").unwrap();
+        assert_eq!(
+            dt.date_naive(),
+            NaiveDate::from_ymd_opt(2026, 3, 15).unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_cutoff_date_rejects_invalid() {
+        assert!(parse_cutoff_date("not-a-date").is_err());
+    }
+
+    #[test]
+    fn update_task_status_changes_status_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let task = tmp.path().join("001-task.md");
+        std::fs::write(
+            &task,
+            "---\nid: 1\ntitle: test task\nstatus: done\npriority: medium\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        update_task_status(&task, "archived").unwrap();
+
+        let content = std::fs::read_to_string(&task).unwrap();
+        assert!(content.contains("status: archived"));
+        assert!(!content.contains("status: done"));
+        assert!(content.contains("Body."));
     }
 }

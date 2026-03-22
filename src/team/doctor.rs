@@ -2334,6 +2334,7 @@ roles:
             scheduled_for: None,
             cron_schedule: None,
             cron_last_run: None,
+            completed: None,
             description: "Task body.".to_string(),
             batty_config: None,
             source_path: PathBuf::from("task-88.md"),
