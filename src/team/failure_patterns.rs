@@ -398,9 +398,9 @@ mod tests {
     #[test]
     fn test_detect_escalation_cluster() {
         let mut window = FailureWindow::new(20);
-        let mut event1 = TeamEvent::task_escalated("eng-1", "101");
+        let mut event1 = TeamEvent::task_escalated("eng-1", "101", None);
         event1.ts = 1;
-        let mut event2 = TeamEvent::task_escalated("eng-2", "102");
+        let mut event2 = TeamEvent::task_escalated("eng-2", "102", None);
         event2.ts = 2;
         window.push(&event1);
         window.push(&event2);
@@ -473,7 +473,7 @@ mod tests {
     fn test_no_patterns_when_below_threshold() {
         let mut window = FailureWindow::new(20);
         window.push(&error_event("test_failure", "eng-1", "tests failed", 1));
-        let mut escalation = TeamEvent::task_escalated("eng-1", "101");
+        let mut escalation = TeamEvent::task_escalated("eng-1", "101", None);
         escalation.ts = 2;
         window.push(&escalation);
         window.push(&conflict_event("merge_conflict", "eng-1", "201", None, 3));

@@ -615,7 +615,7 @@ mod tests {
             at(TeamEvent::daemon_started(), 100),
             at(TeamEvent::task_assigned("eng-1", "42"), 110),
             at(TeamEvent::message_routed("manager", "eng-1"), 115),
-            at(TeamEvent::task_completed("eng-1"), 150),
+            at(TeamEvent::task_completed("eng-1", None), 150),
             at(TeamEvent::daemon_stopped_with_reason("signal", 50), 160),
         ];
 
@@ -658,7 +658,7 @@ mod tests {
                 TeamEvent::task_assigned("eng-1", "Task #42: retry task"),
                 130,
             ),
-            at(TeamEvent::task_completed("eng-1"), 170),
+            at(TeamEvent::task_completed("eng-1", None), 170),
             at(TeamEvent::daemon_stopped_with_reason("signal", 70), 180),
         ];
 
@@ -676,7 +676,7 @@ mod tests {
         let events = vec![
             at(TeamEvent::daemon_started(), 100),
             at(TeamEvent::task_assigned("eng-1", "42"), 110),
-            at(TeamEvent::task_escalated("eng-1", "42"), 125),
+            at(TeamEvent::task_escalated("eng-1", "42", None), 125),
             at(TeamEvent::daemon_stopped_with_reason("signal", 30), 130),
         ];
 
@@ -718,7 +718,7 @@ mod tests {
                 TeamEvent::task_assigned("eng-2", "Task #12: new-task\n\nTask details."),
                 210,
             ),
-            at(TeamEvent::task_completed("eng-2"), 240),
+            at(TeamEvent::task_completed("eng-2", None), 240),
             at(TeamEvent::daemon_stopped_with_reason("signal", 45), 245),
         ];
 
@@ -743,12 +743,12 @@ mod tests {
                 TeamEvent::task_assigned("eng-1", "Task #11: short task\n\nBody."),
                 110,
             ),
-            at(TeamEvent::task_completed("eng-1"), 140),
+            at(TeamEvent::task_completed("eng-1", None), 140),
             at(
                 TeamEvent::task_assigned("eng-2", "Task #12: long task\n\nBody."),
                 150,
             ),
-            at(TeamEvent::task_completed("eng-2"), 240),
+            at(TeamEvent::task_completed("eng-2", None), 240),
             at(TeamEvent::daemon_stopped_with_reason("signal", 150), 250),
         ];
 
@@ -973,7 +973,7 @@ Task body.
             &[
                 at(TeamEvent::daemon_started(), 100),
                 at(TeamEvent::task_assigned("eng-1", "45"), 110),
-                at(TeamEvent::task_completed("eng-1"), 150),
+                at(TeamEvent::task_completed("eng-1", None), 150),
                 at(TeamEvent::daemon_stopped(), 160),
             ],
         );
@@ -1006,7 +1006,7 @@ Task body.
             &[
                 at(TeamEvent::daemon_started(), 100),
                 at(TeamEvent::task_assigned("eng-1", "45"), 110),
-                at(TeamEvent::task_completed("eng-1"), 150),
+                at(TeamEvent::task_completed("eng-1", None), 150),
                 at(TeamEvent::daemon_stopped(), 160),
             ],
         );
@@ -1041,11 +1041,11 @@ Task body.
             &[
                 at(TeamEvent::daemon_started(), 100),
                 at(TeamEvent::task_assigned("eng-1", "51"), 110),
-                at(TeamEvent::task_completed("eng-1"), 200),
+                at(TeamEvent::task_completed("eng-1", None), 200),
                 at(TeamEvent::task_assigned("eng-1", "52"), 210),
-                at(TeamEvent::task_completed("eng-1"), 300),
+                at(TeamEvent::task_completed("eng-1", None), 300),
                 at(TeamEvent::task_assigned("eng-1", "53"), 310),
-                at(TeamEvent::task_completed("eng-1"), 380),
+                at(TeamEvent::task_completed("eng-1", None), 380),
                 at(TeamEvent::daemon_stopped(), 400),
             ],
         );
@@ -1066,9 +1066,9 @@ Task body.
             &[
                 at(TeamEvent::daemon_started(), 100),
                 at(TeamEvent::task_assigned("eng-1", "55"), 105),
-                at(TeamEvent::task_completed("eng-1"), 115),
+                at(TeamEvent::task_completed("eng-1", None), 115),
                 at(TeamEvent::task_assigned("eng-1", "56"), 118),
-                at(TeamEvent::task_completed("eng-1"), 125),
+                at(TeamEvent::task_completed("eng-1", None), 125),
                 at(TeamEvent::daemon_stopped(), 130),
             ],
         );
