@@ -599,6 +599,104 @@ fn rename_branch(project_root: &Path, old_branch: &str, new_branch: &str) -> Res
     )
 }
 
+/// Recycle done cron tasks back to todo when their next occurrence is due.
+///
+/// Returns a list of (task_id, cron_expression) for each recycled task.
+pub(crate) fn recycle_cron_tasks(board_dir: &Path) -> Result<Vec<(u32, String)>> {
+    use chrono::Utc;
+    use cron::Schedule;
+    use serde_yaml::Value;
+    use std::str::FromStr;
+
+    use super::task_cmd::{find_task_path, set_optional_string, update_task_frontmatter, yaml_key};
+
+    let tasks_dir = board_dir.join("tasks");
+    let tasks = crate::task::load_tasks_from_dir(&tasks_dir)
+        .with_context(|| format!("failed to load tasks from {}", tasks_dir.display()))?;
+
+    let now = Utc::now();
+    let mut recycled = Vec::new();
+
+    for task in &tasks {
+        // Skip non-done tasks
+        if task.status != "done" {
+            continue;
+        }
+
+        // Skip tasks without a cron schedule
+        let cron_expr = match &task.cron_schedule {
+            Some(expr) => expr.clone(),
+            None => continue,
+        };
+
+        // Skip archived tasks
+        if task.tags.iter().any(|t| t == "archived") {
+            continue;
+        }
+
+        // Parse the cron expression
+        let schedule = match Schedule::from_str(&cron_expr) {
+            Ok(s) => s,
+            Err(err) => {
+                warn!(task_id = task.id, cron = %cron_expr, error = %err, "invalid cron expression, skipping");
+                continue;
+            }
+        };
+
+        // Determine the reference point: cron_last_run or now - 1 day
+        let reference = task
+            .cron_last_run
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|| now - chrono::Duration::days(1));
+
+        // Find next occurrence after reference
+        let next = match schedule.after(&reference).next() {
+            Some(dt) => dt,
+            None => continue,
+        };
+
+        // If next occurrence is in the future, skip
+        if next > now {
+            continue;
+        }
+
+        // Compute next FUTURE occurrence for scheduled_for
+        let next_future = schedule.after(&now).next().map(|dt| dt.to_rfc3339());
+
+        let now_str = now.to_rfc3339();
+        let task_id = task.id;
+        let task_path = find_task_path(board_dir, task_id)?;
+
+        update_task_frontmatter(&task_path, |mapping| {
+            // Set status to todo
+            mapping.insert(yaml_key("status"), Value::String("todo".to_string()));
+
+            // Update scheduled_for to next future occurrence
+            set_optional_string(mapping, "scheduled_for", next_future.as_deref());
+
+            // Update cron_last_run to now
+            set_optional_string(mapping, "cron_last_run", Some(&now_str));
+
+            // Clear transient fields
+            mapping.remove(yaml_key("claimed_by"));
+            mapping.remove(yaml_key("branch"));
+            mapping.remove(yaml_key("commit"));
+            mapping.remove(yaml_key("artifacts"));
+            mapping.remove(yaml_key("next_action"));
+            mapping.remove(yaml_key("review_owner"));
+            mapping.remove(yaml_key("blocked_on"));
+            mapping.remove(yaml_key("worktree_path"));
+        })?;
+
+        info!(task_id, cron = %cron_expr, "recycled cron task back to todo");
+        recycled.push((task_id, cron_expr));
+    }
+
+    Ok(recycled)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
