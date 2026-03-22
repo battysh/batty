@@ -1171,4 +1171,146 @@ mod tests {
             "production task_loop.rs should avoid unwrap/expect"
         );
     }
+
+    // -- Cron recycling tests --
+
+    fn write_cron_task(board_dir: &Path, id: u32, status: &str, cron: &str, extra: &str) {
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let path = tasks_dir.join(format!("{id:03}-cron-task.md"));
+        let content = format!(
+            "---\nid: {id}\ntitle: Cron Task {id}\nstatus: {status}\npriority: medium\ncron_schedule: \"{cron}\"\n{extra}---\n\nCron task body.\n"
+        );
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn cron_recycle_resets_done_task_to_todo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        write_cron_task(
+            board_dir,
+            1,
+            "done",
+            "0 * * * * *",
+            "cron_last_run: \"2020-01-01T00:00:00+00:00\"\n",
+        );
+
+        let recycled = recycle_cron_tasks(board_dir).unwrap();
+        assert_eq!(recycled.len(), 1);
+        assert_eq!(recycled[0].0, 1);
+
+        let task = crate::task::Task::from_file(&board_dir.join("tasks").join("001-cron-task.md"))
+            .unwrap();
+        assert_eq!(task.status, "todo");
+        assert!(task.cron_last_run.is_some(), "cron_last_run should be set");
+        assert!(task.scheduled_for.is_some(), "scheduled_for should be set");
+        assert!(task.claimed_by.is_none(), "claimed_by should be cleared");
+    }
+
+    #[test]
+    fn cron_recycle_skips_archived_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        write_cron_task(
+            board_dir,
+            2,
+            "done",
+            "0 * * * * *",
+            "cron_last_run: \"2020-01-01T00:00:00+00:00\"\ntags:\n  - archived\n",
+        );
+
+        let recycled = recycle_cron_tasks(board_dir).unwrap();
+        assert!(recycled.is_empty(), "archived tasks should be skipped");
+    }
+
+    #[test]
+    fn cron_recycle_skips_in_progress_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        write_cron_task(
+            board_dir,
+            3,
+            "in-progress",
+            "0 * * * * *",
+            "cron_last_run: \"2020-01-01T00:00:00+00:00\"\n",
+        );
+
+        let recycled = recycle_cron_tasks(board_dir).unwrap();
+        assert!(recycled.is_empty(), "in-progress tasks should be skipped");
+    }
+
+    #[test]
+    fn cron_recycle_missed_trigger_skips_to_next_future() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        write_cron_task(
+            board_dir,
+            4,
+            "done",
+            "0 * * * * *",
+            "cron_last_run: \"2020-01-01T00:00:00+00:00\"\n",
+        );
+
+        let recycled = recycle_cron_tasks(board_dir).unwrap();
+        assert_eq!(recycled.len(), 1);
+
+        let task = crate::task::Task::from_file(&board_dir.join("tasks").join("004-cron-task.md"))
+            .unwrap();
+        assert_eq!(task.status, "todo");
+
+        let scheduled = task.scheduled_for.as_deref().unwrap();
+        let scheduled_dt = chrono::DateTime::parse_from_rfc3339(scheduled).unwrap();
+        assert!(
+            scheduled_dt > chrono::Utc::now(),
+            "scheduled_for should be in the future, got: {scheduled}"
+        );
+    }
+
+    #[test]
+    fn cron_recycle_clears_transient_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        write_cron_task(
+            board_dir,
+            5,
+            "done",
+            "0 * * * * *",
+            "cron_last_run: \"2020-01-01T00:00:00+00:00\"\nclaimed_by: eng-1-1\nbranch: eng-1-1/5\ncommit: abc123\nnext_action: review\nreview_owner: manager\nblocked_on: other\nworktree_path: /tmp/wt\n",
+        );
+
+        let recycled = recycle_cron_tasks(board_dir).unwrap();
+        assert_eq!(recycled.len(), 1);
+
+        let task = crate::task::Task::from_file(&board_dir.join("tasks").join("005-cron-task.md"))
+            .unwrap();
+        assert!(task.claimed_by.is_none());
+        assert!(task.branch.is_none());
+        assert!(task.commit.is_none());
+        assert!(task.next_action.is_none());
+        assert!(task.review_owner.is_none());
+        assert!(task.blocked_on.is_none());
+        assert!(task.worktree_path.is_none());
+    }
+
+    #[test]
+    fn cron_recycle_emits_event() {
+        use crate::team::events::TeamEvent;
+
+        let event = TeamEvent::task_recycled(42, "0 9 * * 1");
+        assert_eq!(event.event, "task_recycled");
+        assert_eq!(event.task.as_deref(), Some("#42"));
+        assert_eq!(event.reason.as_deref(), Some("0 9 * * 1"));
+    }
+
+    #[test]
+    fn task_recycled_event_format() {
+        use crate::team::events::TeamEvent;
+
+        let event = TeamEvent::task_recycled(7, "30 8 * * *");
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event\":\"task_recycled\""));
+        assert!(json.contains("\"task\":\"#7\""));
+        assert!(json.contains("\"reason\":\"30 8 * * *\""));
+    }
 }
