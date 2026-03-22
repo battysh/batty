@@ -151,9 +151,9 @@ mod tests {
         write_events(
             &events_path,
             &[
-                TeamEvent::task_auto_merged("1"),
-                TeamEvent::task_auto_merged("2"),
-                TeamEvent::task_auto_merged("3"),
+                TeamEvent::task_auto_merged("eng-1", "1", 0.9, 2, 30),
+                TeamEvent::task_auto_merged("eng-1", "2", 0.9, 2, 30),
+                TeamEvent::task_auto_merged("eng-1", "3", 0.9, 2, 30),
                 TeamEvent::task_manual_merged("4"),
                 TeamEvent::task_manual_merged("5"),
                 TeamEvent::task_reworked("eng-1", "6"),
@@ -193,7 +193,7 @@ mod tests {
         let mut e1 = TeamEvent::task_completed("eng-1");
         e1.task = Some("10".to_string());
         e1.ts = 1000;
-        let mut e2 = TeamEvent::task_auto_merged("10");
+        let mut e2 = TeamEvent::task_auto_merged("eng-1", "10", 0.9, 2, 30);
         e2.ts = 1100; // 100s latency
 
         let mut e3 = TeamEvent::task_completed("eng-2");

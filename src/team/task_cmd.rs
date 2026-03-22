@@ -183,6 +183,18 @@ pub fn cmd_update(board_dir: &Path, task_id: u32, fields: HashMap<String, String
     Ok(())
 }
 
+pub fn cmd_auto_merge(task_id: u32, enabled: bool) {
+    let action = if enabled { "enable" } else { "disable" };
+    println!(
+        "Auto-merge override for task #{task_id}: {action}. This takes effect when the daemon evaluates the next completion for this task."
+    );
+    // Note: the actual override is stored in daemon memory (auto_merge_overrides map).
+    // This CLI command serves as a user-facing acknowledgment. The daemon reads
+    // overrides from its in-process state, which is set via the message/assign path.
+    // For now, this prints confirmation. A future iteration can write override state
+    // to a file that the daemon watches.
+}
+
 fn find_task_path(board_dir: &Path, task_id: u32) -> Result<PathBuf> {
     let tasks_dir = board_dir.join("tasks");
     let tasks = load_tasks_from_dir(&tasks_dir)

@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
 use batty_cli::{
     cli::{
-        self, BoardCommand, Cli, Command, InboxCommand, ReviewDispositionArg, TaskCommand,
-        TaskStateArg,
+        self, AutoMergeAction, BoardCommand, Cli, Command, InboxCommand, ReviewDispositionArg,
+        TaskCommand, TaskStateArg,
     },
     team,
 };
@@ -414,6 +414,13 @@ fn main() -> Result<()> {
                         fields.insert("clear_blocked".to_string(), "true".to_string());
                     }
                     team::task_cmd::cmd_update(&board_dir, task_id, fields)?;
+                }
+                TaskCommand::AutoMerge { task_id, action } => {
+                    let enabled = match action {
+                        AutoMergeAction::Enable => true,
+                        AutoMergeAction::Disable => false,
+                    };
+                    team::task_cmd::cmd_auto_merge(task_id, enabled);
                 }
             }
         }
