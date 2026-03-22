@@ -297,6 +297,19 @@ When a task completes, the daemon scores the diff. If all thresholds are met and
 no sensitive files are touched, the branch merges automatically. Otherwise it
 routes to manual review.
 
+## Review CLI
+
+Record a review disposition from the command line:
+
+```sh
+batty review 42 approve
+batty review 42 request-changes "Fix the error handling in parse_config"
+batty review 42 reject "Wrong approach, see the architecture doc"
+```
+
+The `--reviewer` flag defaults to `human`. Use it when a manager or architect is
+recording the review programmatically.
+
 ## Review Timeout Escalation
 
 Stale reviews are nudged and eventually escalated. Configure the thresholds in
@@ -310,6 +323,24 @@ workflow_policy:
 
 After the nudge threshold, the reviewer gets a reminder. After the timeout, the
 task is escalated so it does not block the pipeline.
+
+Per-priority overrides let you shorten timeouts for critical work:
+
+```yaml
+workflow_policy:
+  review_nudge_threshold_secs: 1800
+  review_timeout_secs: 7200
+  review_timeout_overrides:
+    critical:
+      review_nudge_threshold_secs: 300
+      review_timeout_secs: 600
+    high:
+      review_timeout_secs: 3600
+```
+
+When a task's priority matches a key in `review_timeout_overrides`, those values
+take precedence over the top-level defaults. Omitted fields fall back to the
+global values.
 
 ## External Senders
 
@@ -395,6 +426,53 @@ Available interventions: `replenish`, `triage`, `review`, `dispatch`,
 
 Disabled interventions stay off until you re-enable them or restart the daemon
 (all interventions reset to enabled on startup).
+
+## Telemetry
+
+Batty records agent and task metrics in a SQLite database at
+`.batty/telemetry.db`. Query it with the `batty telemetry` subcommands:
+
+```sh
+batty telemetry summary     # session-level summaries
+batty telemetry agents      # per-agent performance metrics
+batty telemetry tasks       # per-task lifecycle metrics
+batty telemetry reviews     # review pipeline: auto-merge rate, rework, latency
+batty telemetry events      # recent events from the telemetry database
+```
+
+Telemetry is written automatically by the daemon alongside the existing
+`events.jsonl` log. No configuration is needed.
+
+## Retrospectives
+
+After a run, generate a Markdown retrospective that analyzes task throughput,
+review stall durations, rework rates, and failure patterns:
+
+```sh
+batty retro
+```
+
+The report is written to `.batty/retro/` and printed to stdout. Use
+`--events <path>` to point at a different events file.
+
+## Team Templates
+
+Export your current team config as a reusable template:
+
+```sh
+batty export-template my-team
+```
+
+This saves the config to `~/.batty/templates/my-team/`. Restore it in another
+project:
+
+```sh
+cd new-project
+batty init --from my-team
+```
+
+Built-in templates (`solo`, `pair`, `simple`, `squad`, `large`, `research`,
+`software`, `batty`) are always available via `batty init --template <name>`.
 
 ## Next Steps
 
