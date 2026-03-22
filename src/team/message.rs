@@ -35,6 +35,11 @@ pub fn inject_message(pane_id: &str, from: &str, message: &str) -> Result<()> {
         "\n--- Message from {from} ---\n{message}\n--- end message ---\nTo reply, run: batty send {from} \"<your response>\"\n"
     );
 
+    // Send a pre-injection Enter to wake up idle agents whose prompt may be stuck
+    // (e.g., Claude Code with unsent input in the prompt buffer)
+    let _ = tmux::send_keys(pane_id, "", true);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
     paste_message_with_retry(pane_id, &formatted)?;
     // paste-buffer needs time to complete before we press Enter —
     // longer messages need more time for the terminal to process the paste
