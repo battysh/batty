@@ -33,6 +33,7 @@ Commands:
   merge            Merge an engineer's worktree branch into main
   task             Manage workflow task state and metadata
   completions      Generate shell completions
+  nudge            Per-intervention runtime toggles
   pause            Pause nudges and standups
   resume           Resume nudges and standups
   telegram         Set up Telegram bot for human communication
@@ -456,6 +457,92 @@ Options:
           Print help
 ```
 
+## `batty nudge`
+
+Per-intervention runtime toggles
+
+```text
+Per-intervention runtime toggles
+
+Usage: batty nudge [OPTIONS] <COMMAND>
+
+Commands:
+  disable  Disable an intervention at runtime
+  enable   Re-enable a disabled intervention
+  status   Show status of all interventions
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty nudge disable`
+
+Disable an intervention at runtime
+
+```text
+Disable an intervention at runtime
+
+Usage: batty nudge disable [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          Intervention name
+          
+          [possible values: replenish, triage, review, dispatch, utilization, owned-task]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty nudge enable`
+
+Re-enable a disabled intervention
+
+```text
+Re-enable a disabled intervention
+
+Usage: batty nudge enable [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          Intervention name
+          
+          [possible values: replenish, triage, review, dispatch, utilization, owned-task]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty nudge status`
+
+Show status of all interventions
+
+```text
+Show status of all interventions
+
+Usage: batty nudge status [OPTIONS]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
 ## `batty pause`
 
 Pause nudges and standups
@@ -646,6 +733,8 @@ Commands:
   assign      Assign execution and/or review ownership
   review      Record a review disposition for a task
   update      Update workflow metadata fields
+  auto-merge  Set per-task auto-merge override
+  schedule    Set scheduled_for and/or cron_schedule on a task
   help        Print this message or the help of the given subcommand(s)
 
 Options:
@@ -683,6 +772,32 @@ Options:
           Print help
 ```
 
+## `batty task auto-merge`
+
+Set per-task auto-merge override
+
+```text
+Set per-task auto-merge override
+
+Usage: batty task auto-merge [OPTIONS] <TASK_ID> <ACTION>
+
+Arguments:
+  <TASK_ID>
+          Task id
+
+  <ACTION>
+          Enable or disable auto-merge for this task
+          
+          [possible values: enable, disable]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
 ## `batty task review`
 
 Record a review disposition for a task
@@ -699,11 +814,41 @@ Arguments:
 Options:
       --disposition <DISPOSITION>
           Review disposition
-
+          
           [possible values: approved, changes_requested, rejected]
 
       --feedback <FEEDBACK>
           Feedback text (stored and delivered for changes_requested)
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty task schedule`
+
+Set scheduled_for and/or cron_schedule on a task
+
+```text
+Set scheduled_for and/or cron_schedule on a task
+
+Usage: batty task schedule [OPTIONS] <TASK_ID>
+
+Arguments:
+  <TASK_ID>
+          Task id
+
+Options:
+      --at <AT>
+          Scheduled datetime in RFC3339 format (e.g. 2026-03-25T09:00:00-04:00)
+
+      --cron <CRON>
+          Cron expression (e.g. '0 9 * * *')
+
+      --clear
+          Clear both scheduled_for and cron_schedule
 
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
