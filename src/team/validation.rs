@@ -592,6 +592,8 @@ roles:
             packet_ref: Some("review/packet-34.json".to_string()),
             disposition: MergeDisposition::MergeReady,
             notes: Some("ready for merge".to_string()),
+            reviewed_at: None,
+            nudge_sent: false,
         });
 
         apply_review(&mut meta, MergeDisposition::MergeReady, "manager").unwrap();
