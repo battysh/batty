@@ -344,6 +344,56 @@ batty doctor --fix    # interactive cleanup of orphans
 batty doctor --fix --yes  # skip confirmation prompt
 ```
 
+## Scheduled Tasks
+
+Tasks can be delayed or set to recur on a schedule using two frontmatter fields:
+
+- `scheduled_for` — an RFC 3339 timestamp. The dispatcher will not assign the task until this time has passed.
+- `cron_schedule` — a cron expression. When a task with `cron_schedule` reaches done, the daemon automatically recycles it back to todo for the next run.
+
+Use the `batty task schedule` command to set these fields:
+
+```sh
+# Delay dispatch until a specific time
+batty task schedule 42 --at '2026-03-25T09:00:00-04:00'
+
+# Make a task recur every Monday at 9 AM
+batty task schedule 42 --cron '0 9 * * MON'
+
+# Set both a first-run time and a recurring schedule
+batty task schedule 42 --at '2026-03-25T09:00:00-04:00' --cron '0 9 * * MON'
+
+# Clear all scheduling fields
+batty task schedule 42 --clear
+```
+
+The cron recycler runs as part of the daemon poll loop. When it finds a done task
+with a `cron_schedule`, it moves the task back to todo, updates `cron_last_run`,
+and emits a `task_recycled` event.
+
+## Nudge CLI
+
+The daemon runs several intervention types: replenish, triage, review, dispatch,
+utilization, and owned-task. You can disable or re-enable any of these at runtime
+without restarting the daemon:
+
+```sh
+# Disable the replenish intervention
+batty nudge disable replenish
+
+# Re-enable it
+batty nudge enable replenish
+
+# Show which interventions are currently enabled or disabled
+batty nudge status
+```
+
+Available interventions: `replenish`, `triage`, `review`, `dispatch`,
+`utilization`, `owned-task`.
+
+Disabled interventions stay off until you re-enable them or restart the daemon
+(all interventions reset to enabled on startup).
+
 ## Next Steps
 
 - [Runtime Config Reference](reference/config.md)
