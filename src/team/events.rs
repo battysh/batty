@@ -316,6 +316,14 @@ impl TeamEvent {
         }
     }
 
+    pub fn task_recycled(task_id: u32, cron_expr: &str) -> Self {
+        Self {
+            task: Some(format!("#{task_id}")),
+            reason: Some(cron_expr.into()),
+            ..Self::base("task_recycled")
+        }
+    }
+
     pub fn load_snapshot(working_members: u32, total_members: u32, session_running: bool) -> Self {
         let load = if total_members == 0 {
             0.0
