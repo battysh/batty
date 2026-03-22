@@ -39,6 +39,8 @@ pub struct TeamConfig {
     pub cost: CostConfig,
     #[serde(default = "default_event_log_max_bytes")]
     pub event_log_max_bytes: u64,
+    #[serde(default = "default_retro_min_duration_secs")]
+    pub retro_min_duration_secs: u64,
     pub roles: Vec<RoleDef>,
 }
 
@@ -372,6 +374,10 @@ fn default_intervention_cooldown_secs() -> u64 {
 
 fn default_event_log_max_bytes() -> u64 {
     DEFAULT_EVENT_LOG_MAX_BYTES
+}
+
+fn default_retro_min_duration_secs() -> u64 {
+    60
 }
 
 impl TeamConfig {
