@@ -82,6 +82,10 @@ impl AgentAdapter for KiroCliAdapter {
             Ok(format!("{prefix} '{escaped}'"))
         }
     }
+
+    fn health_check(&self) -> super::BackendHealth {
+        super::check_binary_available(&self.program)
+    }
 }
 
 #[cfg(test)]
