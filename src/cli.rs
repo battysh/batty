@@ -273,9 +273,13 @@ pub enum BoardCommand {
     },
     /// Move done tasks to archive directory
     Archive {
-        /// Only archive tasks completed before this date (YYYY-MM-DD)
+        /// Only archive tasks older than this (e.g. "7d", "24h", "2w", or ISO date)
+        #[arg(long, default_value = "0s")]
+        older_than: String,
+
+        /// Show what would be archived without moving files
         #[arg(long)]
-        older_than: Option<String>,
+        dry_run: bool,
     },
 }
 
@@ -560,20 +564,52 @@ mod tests {
         let cli = Cli::parse_from(["batty", "board", "archive"]);
         match cli.command {
             Command::Board {
-                command: Some(BoardCommand::Archive { older_than }),
-            } => assert!(older_than.is_none()),
+                command:
+                    Some(BoardCommand::Archive {
+                        older_than,
+                        dry_run,
+                    }),
+            } => {
+                assert_eq!(older_than, "0s");
+                assert!(!dry_run);
+            }
             other => panic!("expected board archive command, got {other:?}"),
         }
     }
 
     #[test]
     fn board_archive_subcommand_parses_older_than() {
-        let cli = Cli::parse_from(["batty", "board", "archive", "--older-than", "2026-03-15"]);
+        let cli = Cli::parse_from(["batty", "board", "archive", "--older-than", "7d"]);
         match cli.command {
             Command::Board {
-                command: Some(BoardCommand::Archive { older_than }),
-            } => assert_eq!(older_than.as_deref(), Some("2026-03-15")),
+                command:
+                    Some(BoardCommand::Archive {
+                        older_than,
+                        dry_run,
+                    }),
+            } => {
+                assert_eq!(older_than, "7d");
+                assert!(!dry_run);
+            }
             other => panic!("expected board archive command with older_than, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn board_archive_subcommand_parses_dry_run() {
+        let cli = Cli::parse_from(["batty", "board", "archive", "--dry-run"]);
+        match cli.command {
+            Command::Board {
+                command:
+                    Some(BoardCommand::Archive {
+                        older_than,
+                        dry_run,
+                    }),
+            } => {
+                assert_eq!(older_than, "0s");
+                assert!(dry_run);
+            }
+            other => panic!("expected board archive command with dry_run, got {other:?}"),
         }
     }
 
