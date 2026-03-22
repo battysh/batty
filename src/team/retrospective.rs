@@ -1345,4 +1345,422 @@ Task body.
         assert!(content.contains("Max review stall: -"));
         assert!(!content.contains("### Rework by Task"));
     }
+
+    // --- New tests for content generation and event analysis ---
+
+    #[test]
+    fn task_reference_extracts_id_from_task_prefix() {
+        assert_eq!(task_reference("Task #42: build feature"), "42");
+    }
+
+    #[test]
+    fn task_reference_returns_full_line_when_no_prefix() {
+        assert_eq!(task_reference("build feature"), "build feature");
+    }
+
+    #[test]
+    fn task_reference_skips_blank_lines() {
+        assert_eq!(task_reference("\n\n  Task #99: test\nbody"), "99");
+    }
+
+    #[test]
+    fn task_reference_handles_whitespace_only_input() {
+        assert_eq!(task_reference("   "), "");
+    }
+
+    #[test]
+    fn task_id_from_assignment_line_valid() {
+        assert_eq!(
+            task_id_from_assignment_line("Task #123: some task"),
+            Some("123".to_string())
+        );
+    }
+
+    #[test]
+    fn task_id_from_assignment_line_no_prefix() {
+        assert_eq!(task_id_from_assignment_line("no prefix here"), None);
+    }
+
+    #[test]
+    fn task_id_from_assignment_line_empty_digits() {
+        assert_eq!(task_id_from_assignment_line("Task #abc: letters"), None);
+    }
+
+    #[test]
+    fn cycle_time_metrics_no_completed_tasks() {
+        let tasks = vec![sample_task("T-1", None, 1)];
+        let (avg, fastest, fastest_time, longest, longest_time) = cycle_time_metrics(&tasks);
+        assert_eq!(avg, None);
+        assert_eq!(fastest, None);
+        assert_eq!(fastest_time, None);
+        assert_eq!(longest, None);
+        assert_eq!(longest_time, None);
+    }
+
+    #[test]
+    fn cycle_time_metrics_single_completed_task() {
+        let tasks = vec![sample_task("T-1", Some(60), 1)];
+        let (avg, fastest, fastest_time, longest, longest_time) = cycle_time_metrics(&tasks);
+        assert_eq!(avg, Some(60));
+        assert_eq!(fastest, Some("T-1".to_string()));
+        assert_eq!(fastest_time, Some(60));
+        assert_eq!(longest, Some("T-1".to_string()));
+        assert_eq!(longest_time, Some(60));
+    }
+
+    #[test]
+    fn cycle_time_metrics_multiple_tasks_picks_extremes() {
+        let tasks = vec![
+            sample_task("T-fast", Some(10), 1),
+            sample_task("T-mid", Some(50), 1),
+            sample_task("T-slow", Some(90), 1),
+            sample_task("T-incomplete", None, 1),
+        ];
+        let (avg, fastest, fastest_time, longest, longest_time) = cycle_time_metrics(&tasks);
+        assert_eq!(avg, Some(50)); // (10 + 50 + 90) / 3
+        assert_eq!(fastest, Some("T-fast".to_string()));
+        assert_eq!(fastest_time, Some(10));
+        assert_eq!(longest, Some("T-slow".to_string()));
+        assert_eq!(longest_time, Some(90));
+    }
+
+    #[test]
+    fn format_duration_zero() {
+        assert_eq!(format_duration(0), "0s");
+    }
+
+    #[test]
+    fn format_duration_exact_minute() {
+        assert_eq!(format_duration(60), "1m 00s");
+    }
+
+    #[test]
+    fn format_duration_exact_hour() {
+        assert_eq!(format_duration(3600), "1h 00m 00s");
+    }
+
+    #[test]
+    fn format_duration_large() {
+        assert_eq!(format_duration(7322), "2h 02m 02s");
+    }
+
+    #[test]
+    fn render_task_cycle_rows_empty() {
+        let rows = render_task_cycle_rows(&[]);
+        assert!(rows.contains("No tasks recorded"));
+    }
+
+    #[test]
+    fn render_task_cycle_rows_completed_and_incomplete() {
+        let tasks = vec![
+            sample_task("T-1", Some(120), 1),
+            sample_task("T-2", None, 2),
+        ];
+        let rows = render_task_cycle_rows(&tasks);
+        assert!(rows.contains("| T-1 | eng-1 | completed | 2m 00s | 1 | no |"));
+        assert!(rows.contains("| T-2 | eng-1 | incomplete | - | 2 | no |"));
+    }
+
+    #[test]
+    fn render_task_cycle_rows_escalated_task() {
+        let tasks = vec![sample_task("T-esc", Some(200), 4)]; // retry > 2 → escalated
+        let rows = render_task_cycle_rows(&tasks);
+        assert!(rows.contains("| T-esc | eng-1 | completed | 3m 20s | 4 | yes |"));
+    }
+
+    #[test]
+    fn render_bottlenecks_no_completed_tasks() {
+        let tasks = vec![sample_task("T-1", None, 1)];
+        let output = render_bottlenecks(&tasks);
+        assert!(output.contains("no completed tasks recorded"));
+        assert!(output.contains("no task needed multiple attempts"));
+    }
+
+    #[test]
+    fn render_bottlenecks_with_retries() {
+        let tasks = vec![
+            sample_task("T-1", Some(100), 1),
+            sample_task("T-2", Some(200), 3),
+        ];
+        let output = render_bottlenecks(&tasks);
+        assert!(output.contains("Longest task: `T-2`"));
+        assert!(output.contains("Most retried: `T-2` retried 3 times"));
+    }
+
+    #[test]
+    fn render_bottlenecks_single_retry_shows_no_retries_message() {
+        let tasks = vec![sample_task("T-1", Some(60), 1)];
+        let output = render_bottlenecks(&tasks);
+        assert!(output.contains("no task needed multiple attempts"));
+    }
+
+    #[test]
+    fn render_recommendations_low_idle_low_retries() {
+        let stats = RunStats {
+            run_start: 0,
+            run_end: 100,
+            total_duration_secs: 100,
+            task_stats: vec![sample_task("T-1", Some(50), 1)],
+            average_cycle_time_secs: Some(50),
+            fastest_task_id: Some("T-1".to_string()),
+            fastest_cycle_time_secs: Some(50),
+            longest_task_id: Some("T-1".to_string()),
+            longest_cycle_time_secs: Some(50),
+            idle_time_pct: 0.1,
+            escalation_count: 0,
+            message_count: 1,
+            auto_merge_count: 0,
+            manual_merge_count: 0,
+            rework_count: 0,
+            review_nudge_count: 0,
+            review_escalation_count: 0,
+            avg_review_stall_secs: None,
+            max_review_stall_secs: None,
+            max_review_stall_task: None,
+            task_rework_counts: Vec::new(),
+        };
+        let output = render_recommendations(&stats);
+        assert!(output.contains("No major bottlenecks"));
+    }
+
+    #[test]
+    fn render_recommendations_both_high_idle_and_high_retries() {
+        let stats = RunStats {
+            run_start: 0,
+            run_end: 100,
+            total_duration_secs: 100,
+            task_stats: vec![sample_task("T-1", Some(50), 5)],
+            average_cycle_time_secs: Some(50),
+            fastest_task_id: Some("T-1".to_string()),
+            fastest_cycle_time_secs: Some(50),
+            longest_task_id: Some("T-1".to_string()),
+            longest_cycle_time_secs: Some(50),
+            idle_time_pct: 0.8,
+            escalation_count: 0,
+            message_count: 1,
+            auto_merge_count: 0,
+            manual_merge_count: 0,
+            rework_count: 0,
+            review_nudge_count: 0,
+            review_escalation_count: 0,
+            avg_review_stall_secs: None,
+            max_review_stall_secs: None,
+            max_review_stall_task: None,
+            task_rework_counts: Vec::new(),
+        };
+        let output = render_recommendations(&stats);
+        assert!(output.contains("Idle time stayed high"));
+        assert!(output.contains("Several retries were needed"));
+    }
+
+    #[test]
+    fn render_review_performance_empty_when_no_merges() {
+        let stats = RunStats {
+            run_start: 0,
+            run_end: 100,
+            total_duration_secs: 100,
+            task_stats: Vec::new(),
+            average_cycle_time_secs: None,
+            fastest_task_id: None,
+            fastest_cycle_time_secs: None,
+            longest_task_id: None,
+            longest_cycle_time_secs: None,
+            idle_time_pct: 0.0,
+            escalation_count: 0,
+            message_count: 0,
+            auto_merge_count: 0,
+            manual_merge_count: 0,
+            rework_count: 0,
+            review_nudge_count: 0,
+            review_escalation_count: 0,
+            avg_review_stall_secs: None,
+            max_review_stall_secs: None,
+            max_review_stall_task: None,
+            task_rework_counts: Vec::new(),
+        };
+        let section = render_review_performance(&stats);
+        assert!(section.is_empty());
+    }
+
+    #[test]
+    fn render_review_performance_100_percent_auto_merge_rate() {
+        let stats = RunStats {
+            run_start: 0,
+            run_end: 100,
+            total_duration_secs: 100,
+            task_stats: Vec::new(),
+            average_cycle_time_secs: None,
+            fastest_task_id: None,
+            fastest_cycle_time_secs: None,
+            longest_task_id: None,
+            longest_cycle_time_secs: None,
+            idle_time_pct: 0.0,
+            escalation_count: 0,
+            message_count: 0,
+            auto_merge_count: 5,
+            manual_merge_count: 0,
+            rework_count: 0,
+            review_nudge_count: 0,
+            review_escalation_count: 0,
+            avg_review_stall_secs: None,
+            max_review_stall_secs: None,
+            max_review_stall_task: None,
+            task_rework_counts: Vec::new(),
+        };
+        let section = render_review_performance(&stats);
+        assert!(section.contains("Auto-merge rate: 100%"));
+        assert!(section.contains("Auto-merged: 5"));
+        assert!(section.contains("Manually merged: 0"));
+    }
+
+    #[test]
+    fn analyze_events_multiple_tasks_different_engineers() {
+        let events = vec![
+            at(TeamEvent::daemon_started(), 100),
+            at(TeamEvent::task_assigned("eng-1", "Task #10: task-a"), 110),
+            at(TeamEvent::task_assigned("eng-2", "Task #20: task-b"), 115),
+            at(TeamEvent::task_completed("eng-1", None), 160),
+            at(TeamEvent::task_completed("eng-2", None), 200),
+            at(TeamEvent::daemon_stopped_with_reason("signal", 110), 210),
+        ];
+
+        let stats = analyze_events(&events).unwrap();
+        assert_eq!(stats.task_stats.len(), 2);
+
+        let t10 = stats.task_stats.iter().find(|t| t.task_id == "10").unwrap();
+        assert_eq!(t10.assigned_to, "eng-1");
+        assert_eq!(t10.cycle_time_secs, Some(50));
+
+        let t20 = stats.task_stats.iter().find(|t| t.task_id == "20").unwrap();
+        assert_eq!(t20.assigned_to, "eng-2");
+        assert_eq!(t20.cycle_time_secs, Some(85));
+    }
+
+    #[test]
+    fn analyze_events_tracks_review_nudges_and_escalations() {
+        let events = vec![
+            at(TeamEvent::daemon_started(), 100),
+            at(
+                TeamEvent::review_nudge_sent("manager", "Task #5: reviewed"),
+                120,
+            ),
+            at(
+                TeamEvent::review_nudge_sent("manager", "Task #5: reviewed"),
+                140,
+            ),
+            at(
+                TeamEvent::review_escalated("Task #5: reviewed", "stale"),
+                160,
+            ),
+            at(TeamEvent::daemon_stopped_with_reason("signal", 80), 180),
+        ];
+
+        let stats = analyze_events(&events).unwrap();
+        assert_eq!(stats.review_nudge_count, 2);
+        assert_eq!(stats.review_escalation_count, 1);
+    }
+
+    #[test]
+    fn analyze_events_completion_without_assignment_is_ignored() {
+        let events = vec![
+            at(TeamEvent::daemon_started(), 100),
+            // Completion without prior assignment
+            at(TeamEvent::task_completed("eng-1", None), 150),
+            at(TeamEvent::daemon_stopped_with_reason("signal", 60), 160),
+        ];
+
+        let stats = analyze_events(&events).unwrap();
+        assert!(stats.task_stats.is_empty());
+        assert_eq!(stats.average_cycle_time_secs, None);
+    }
+
+    #[test]
+    fn analyze_events_escalation_without_prior_assignment_creates_task() {
+        let events = vec![
+            at(TeamEvent::daemon_started(), 100),
+            at(
+                TeamEvent::task_escalated("eng-1", "Task #99: escalated-only", None),
+                120,
+            ),
+            at(TeamEvent::daemon_stopped_with_reason("signal", 30), 130),
+        ];
+
+        let stats = analyze_events(&events).unwrap();
+        assert_eq!(stats.escalation_count, 1);
+        assert_eq!(stats.task_stats.len(), 1);
+        assert!(stats.task_stats[0].was_escalated);
+        // task_escalated stores the raw task string, not parsed through task_reference
+        assert_eq!(stats.task_stats[0].task_id, "Task #99: escalated-only");
+    }
+
+    #[test]
+    fn analyze_events_daemon_started_only() {
+        let events = vec![at(TeamEvent::daemon_started(), 100)];
+        let stats = analyze_events(&events).unwrap();
+        assert_eq!(stats.run_start, 100);
+        assert_eq!(stats.run_end, 100);
+        assert_eq!(stats.total_duration_secs, 0);
+        assert!(stats.task_stats.is_empty());
+    }
+
+    #[test]
+    fn analyze_events_load_snapshot_all_working() {
+        let events = vec![
+            at(TeamEvent::daemon_started(), 100),
+            at(TeamEvent::load_snapshot(4, 4, true), 110),
+            at(TeamEvent::load_snapshot(4, 4, true), 120),
+            at(TeamEvent::daemon_stopped_with_reason("signal", 30), 130),
+        ];
+
+        let stats = analyze_events(&events).unwrap();
+        assert!((stats.idle_time_pct - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn analyze_events_load_snapshot_all_idle() {
+        let events = vec![
+            at(TeamEvent::daemon_started(), 100),
+            at(TeamEvent::load_snapshot(0, 4, true), 110),
+            at(TeamEvent::load_snapshot(0, 4, true), 120),
+            at(TeamEvent::daemon_stopped_with_reason("signal", 30), 130),
+        ];
+
+        let stats = analyze_events(&events).unwrap();
+        assert!((stats.idle_time_pct - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn analyze_events_load_snapshot_zero_members() {
+        let events = vec![
+            at(TeamEvent::daemon_started(), 100),
+            at(TeamEvent::load_snapshot(0, 0, true), 110),
+            at(TeamEvent::daemon_stopped_with_reason("signal", 20), 120),
+        ];
+
+        let stats = analyze_events(&events).unwrap();
+        assert!((stats.idle_time_pct - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn should_generate_retro_no_board_dir_returns_none() {
+        let tmp = tempdir().unwrap();
+        // No board dir at all
+        let result = should_generate_retro(tmp.path(), false, 60).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn should_generate_retro_empty_board_returns_none() {
+        let tmp = tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        // tasks dir exists but is empty
+        let result = should_generate_retro(tmp.path(), false, 60).unwrap();
+        assert_eq!(result, None);
+    }
 }
