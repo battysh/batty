@@ -1135,4 +1135,649 @@ mod tests {
             "standup should not mention backend when healthy: {report}"
         );
     }
+
+    // --- New tests for content generation edge cases ---
+
+    #[test]
+    fn standup_shows_degraded_backend_health() {
+        let manager = make_member("manager", RoleType::Manager, None);
+        let eng = make_member("eng-1", RoleType::Engineer, Some("manager"));
+        let members = vec![manager.clone(), eng];
+        let mut backend_health = HashMap::new();
+        backend_health.insert("eng-1".to_string(), crate::agent::BackendHealth::Degraded);
+
+        let report = generate_board_aware_standup_for(
+            &manager,
+            &members,
+            &HashMap::new(),
+            &HashMap::new(),
+            5,
+            None,
+            &backend_health,
+        );
+
+        assert!(
+            report.contains("backend: degraded"),
+            "standup should warn about degraded backend: {report}"
+        );
+    }
+
+    #[test]
+    fn standup_default_state_is_idle() {
+        let manager = make_member("manager", RoleType::Manager, None);
+        let eng = make_member("eng-1", RoleType::Engineer, Some("manager"));
+        let members = vec![manager.clone(), eng];
+        // No state entry for eng-1 → defaults to Idle
+        let report = generate_standup_for(&manager, &members, &HashMap::new(), &HashMap::new(), 5);
+        assert!(report.contains("[eng-1] status: idle"));
+    }
+
+    #[test]
+    fn board_aware_standup_all_done_tasks_shows_none_assigned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        // Only a "done" task — should not show in assigned list
+        write_task(&board_dir, 10, "finished", "done", Some("eng-1"), None);
+
+        let members = vec![
+            make_member("manager", RoleType::Manager, None),
+            make_member("eng-1", RoleType::Engineer, Some("manager")),
+        ];
+        let states = HashMap::from([("eng-1".to_string(), MemberState::Working)]);
+
+        let report = generate_board_aware_standup_for(
+            &members[0],
+            &members,
+            &HashMap::new(),
+            &states,
+            5,
+            Some(&board_dir),
+            &HashMap::new(),
+        );
+
+        assert!(report.contains("assigned tasks: none"));
+    }
+
+    #[test]
+    fn board_aware_standup_multiple_tasks_sorted_ascending() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        write_task(&board_dir, 5, "second", "in-progress", Some("eng-1"), None);
+        write_task(&board_dir, 2, "first", "in-progress", Some("eng-1"), None);
+        write_task(&board_dir, 9, "third", "review", Some("eng-1"), None);
+
+        let members = vec![
+            make_member("manager", RoleType::Manager, None),
+            make_member("eng-1", RoleType::Engineer, Some("manager")),
+        ];
+
+        let report = generate_board_aware_standup_for(
+            &members[0],
+            &members,
+            &HashMap::new(),
+            &HashMap::new(),
+            5,
+            Some(&board_dir),
+            &HashMap::new(),
+        );
+
+        assert!(report.contains("assigned tasks: #2, #5, #9"));
+    }
+
+    #[test]
+    fn board_aware_standup_no_idle_warning_when_no_runnable_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        // All tasks done or in-progress — nothing runnable
+        write_task(&board_dir, 1, "active", "in-progress", Some("eng-1"), None);
+        write_task(&board_dir, 2, "done-task", "done", Some("eng-2"), None);
+
+        let members = vec![
+            make_member("manager", RoleType::Manager, None),
+            make_member("eng-1", RoleType::Engineer, Some("manager")),
+            make_member("eng-2", RoleType::Engineer, Some("manager")),
+        ];
+        let states = HashMap::from([("eng-2".to_string(), MemberState::Idle)]);
+
+        let report = generate_board_aware_standup_for(
+            &members[0],
+            &members,
+            &HashMap::new(),
+            &states,
+            5,
+            Some(&board_dir),
+            &HashMap::new(),
+        );
+
+        assert!(!report.contains("warning: idle while runnable work exists"));
+    }
+
+    #[test]
+    fn board_aware_standup_review_pipeline_metrics_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        // One review task triggers oldest review age
+        write_task(&board_dir, 1, "in-review", "review", Some("eng-1"), None);
+        // One runnable task
+        write_task(&board_dir, 2, "ready", "todo", None, None);
+
+        let members = vec![
+            make_member("manager", RoleType::Manager, None),
+            make_member("eng-1", RoleType::Engineer, Some("manager")),
+        ];
+
+        let report = generate_board_aware_standup_for(
+            &members[0],
+            &members,
+            &HashMap::new(),
+            &HashMap::new(),
+            5,
+            Some(&board_dir),
+            &HashMap::new(),
+        );
+
+        assert!(report.contains("Workflow signals:"));
+        assert!(report.contains("blocked tasks: 0"));
+        assert!(report.contains("oldest review age:"));
+    }
+
+    #[test]
+    fn format_assigned_task_ids_empty_vec() {
+        let ids: Vec<u32> = vec![];
+        assert_eq!(format_assigned_task_ids(Some(&ids)), "none");
+    }
+
+    #[test]
+    fn format_assigned_task_ids_none() {
+        assert_eq!(format_assigned_task_ids(None), "none");
+    }
+
+    #[test]
+    fn format_assigned_task_ids_single() {
+        let ids = vec![42];
+        assert_eq!(format_assigned_task_ids(Some(&ids)), "#42");
+    }
+
+    #[test]
+    fn format_age_with_value() {
+        assert_eq!(format_age(Some(120)), "120s");
+    }
+
+    #[test]
+    fn format_age_none() {
+        assert_eq!(format_age(None), "n/a");
+    }
+
+    #[test]
+    fn project_root_from_board_dir_valid_path() {
+        let root = Path::new("/project");
+        let board_dir = root.join(".batty").join("team_config").join("board");
+        assert_eq!(project_root_from_board_dir(Some(&board_dir)), Some(root));
+    }
+
+    #[test]
+    fn project_root_from_board_dir_invalid_structure() {
+        let bad_path = Path::new("/some/random/path");
+        assert_eq!(project_root_from_board_dir(Some(bad_path)), None);
+    }
+
+    #[test]
+    fn project_root_from_board_dir_none() {
+        assert_eq!(project_root_from_board_dir(None), None);
+    }
+
+    // --- Timer state tests ---
+
+    #[test]
+    fn snapshot_and_restore_timer_roundtrip() {
+        let mut timers = HashMap::new();
+        timers.insert(
+            "manager".to_string(),
+            Instant::now() - Duration::from_secs(30),
+        );
+        timers.insert(
+            "architect".to_string(),
+            Instant::now() - Duration::from_secs(120),
+        );
+
+        let snapshot = snapshot_timer_state(&timers);
+        assert!(snapshot["manager"] >= 30);
+        assert!(snapshot["architect"] >= 120);
+
+        let restored = restore_timer_state(snapshot);
+        // Restored timers should show elapsed >= the original elapsed
+        assert!(restored["manager"].elapsed().as_secs() >= 30);
+        assert!(restored["architect"].elapsed().as_secs() >= 120);
+    }
+
+    #[test]
+    fn update_timer_for_non_standup_member_clears_state() {
+        let eng = make_member("eng-1", RoleType::Engineer, None);
+        let role = RoleDef {
+            name: "eng-1".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            instances: 1,
+            prompt: None,
+            talks_to: vec![],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: Some(false),
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            use_worktrees: false,
+        };
+        let team_config = TeamConfig {
+            name: "test".to_string(),
+            agent: None,
+            workflow_mode: WorkflowMode::Legacy,
+            workflow_policy: WorkflowPolicy::default(),
+            board: BoardConfig::default(),
+            standup: StandupConfig::default(),
+            automation: AutomationConfig::default(),
+            automation_sender: None,
+            external_senders: Vec::new(),
+            orchestrator_pane: false,
+            orchestrator_position: OrchestratorPosition::Bottom,
+            layout: None,
+            cost: Default::default(),
+            event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+            retro_min_duration_secs: 60,
+            roles: vec![role],
+        };
+        let members = vec![eng];
+        let mut paused = HashSet::from(["eng-1".to_string()]);
+        let mut last = HashMap::from([("eng-1".to_string(), Instant::now())]);
+
+        update_timer_for_state(
+            &team_config,
+            &members,
+            &mut paused,
+            &mut last,
+            "eng-1",
+            MemberState::Idle,
+        );
+
+        assert!(!paused.contains("eng-1"));
+        assert!(!last.contains_key("eng-1"));
+    }
+
+    #[test]
+    fn standup_interval_for_manager_uses_role_override() {
+        let member = make_member("manager", RoleType::Manager, None);
+        let role = RoleDef {
+            name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            instances: 1,
+            prompt: None,
+            talks_to: vec![],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: Some(true),
+            standup_interval_secs: Some(300),
+            owns: Vec::new(),
+            use_worktrees: false,
+        };
+        let team_config = TeamConfig {
+            name: "test".to_string(),
+            agent: None,
+            workflow_mode: WorkflowMode::Legacy,
+            workflow_policy: WorkflowPolicy::default(),
+            board: BoardConfig::default(),
+            standup: StandupConfig {
+                interval_secs: 600,
+                output_lines: 30,
+            },
+            automation: AutomationConfig::default(),
+            automation_sender: None,
+            external_senders: Vec::new(),
+            orchestrator_pane: false,
+            orchestrator_position: OrchestratorPosition::Bottom,
+            layout: None,
+            cost: Default::default(),
+            event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+            retro_min_duration_secs: 60,
+            roles: vec![role],
+        };
+        let members = vec![member];
+
+        let interval = standup_interval_for_member_name(&team_config, &members, "manager");
+        assert_eq!(interval, Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn standup_interval_for_manager_falls_back_to_global() {
+        let member = make_member("manager", RoleType::Manager, None);
+        let role = RoleDef {
+            name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            instances: 1,
+            prompt: None,
+            talks_to: vec![],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: None,      // defaults to true for Manager
+            standup_interval_secs: None, // falls back to global
+            owns: Vec::new(),
+            use_worktrees: false,
+        };
+        let team_config = TeamConfig {
+            name: "test".to_string(),
+            agent: None,
+            workflow_mode: WorkflowMode::Legacy,
+            workflow_policy: WorkflowPolicy::default(),
+            board: BoardConfig::default(),
+            standup: StandupConfig {
+                interval_secs: 900,
+                output_lines: 30,
+            },
+            automation: AutomationConfig::default(),
+            automation_sender: None,
+            external_senders: Vec::new(),
+            orchestrator_pane: false,
+            orchestrator_position: OrchestratorPosition::Bottom,
+            layout: None,
+            cost: Default::default(),
+            event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+            retro_min_duration_secs: 60,
+            roles: vec![role],
+        };
+        let members = vec![member];
+
+        let interval = standup_interval_for_member_name(&team_config, &members, "manager");
+        assert_eq!(interval, Some(Duration::from_secs(900)));
+    }
+
+    #[test]
+    fn standup_interval_for_engineer_returns_none() {
+        let member = make_member("eng-1", RoleType::Engineer, Some("manager"));
+        let role = RoleDef {
+            name: "eng-1".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            instances: 1,
+            prompt: None,
+            talks_to: vec![],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: None, // defaults to false for Engineer
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            use_worktrees: false,
+        };
+        let team_config = TeamConfig {
+            name: "test".to_string(),
+            agent: None,
+            workflow_mode: WorkflowMode::Legacy,
+            workflow_policy: WorkflowPolicy::default(),
+            board: BoardConfig::default(),
+            standup: StandupConfig::default(),
+            automation: AutomationConfig::default(),
+            automation_sender: None,
+            external_senders: Vec::new(),
+            orchestrator_pane: false,
+            orchestrator_position: OrchestratorPosition::Bottom,
+            layout: None,
+            cost: Default::default(),
+            event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+            retro_min_duration_secs: 60,
+            roles: vec![role],
+        };
+        let members = vec![member];
+
+        let interval = standup_interval_for_member_name(&team_config, &members, "eng-1");
+        assert_eq!(interval, None);
+    }
+
+    #[test]
+    fn standup_interval_for_unknown_member_returns_none() {
+        let team_config = TeamConfig {
+            name: "test".to_string(),
+            agent: None,
+            workflow_mode: WorkflowMode::Legacy,
+            workflow_policy: WorkflowPolicy::default(),
+            board: BoardConfig::default(),
+            standup: StandupConfig::default(),
+            automation: AutomationConfig::default(),
+            automation_sender: None,
+            external_senders: Vec::new(),
+            orchestrator_pane: false,
+            orchestrator_position: OrchestratorPosition::Bottom,
+            layout: None,
+            cost: Default::default(),
+            event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+            retro_min_duration_secs: 60,
+            roles: vec![],
+        };
+
+        let interval = standup_interval_for_member_name(&team_config, &[], "nobody");
+        assert_eq!(interval, None);
+    }
+
+    #[test]
+    fn maybe_generate_standup_skips_when_standups_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member = make_member("manager", RoleType::Manager, None);
+        let role = RoleDef {
+            name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            instances: 1,
+            prompt: None,
+            talks_to: vec![],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: Some(true),
+            standup_interval_secs: Some(60),
+            owns: Vec::new(),
+            use_worktrees: false,
+        };
+        let team_config = TeamConfig {
+            name: "test".to_string(),
+            agent: None,
+            workflow_mode: WorkflowMode::Legacy,
+            workflow_policy: WorkflowPolicy::default(),
+            board: BoardConfig::default(),
+            standup: StandupConfig {
+                interval_secs: 60,
+                output_lines: 30,
+            },
+            automation: AutomationConfig {
+                standups: false,
+                ..AutomationConfig::default()
+            },
+            automation_sender: None,
+            external_senders: Vec::new(),
+            orchestrator_pane: false,
+            orchestrator_position: OrchestratorPosition::Bottom,
+            layout: None,
+            cost: Default::default(),
+            event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+            retro_min_duration_secs: 60,
+            roles: vec![role],
+        };
+        let members = vec![member];
+        let mut last_standup = HashMap::new();
+
+        let generated = maybe_generate_standup(StandupGenerationContext {
+            project_root: tmp.path(),
+            team_config: &team_config,
+            members: &members,
+            watchers: &HashMap::new(),
+            states: &HashMap::new(),
+            pane_map: &HashMap::new(),
+            telegram_bot: None,
+            paused_standups: &HashSet::new(),
+            last_standup: &mut last_standup,
+            backend_health: &HashMap::new(),
+        })
+        .unwrap();
+
+        assert!(generated.is_empty());
+    }
+
+    #[test]
+    fn maybe_generate_standup_skips_paused_recipients() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member = make_member("manager", RoleType::Manager, None);
+        let eng = make_member("eng-1", RoleType::Engineer, Some("manager"));
+        let role = RoleDef {
+            name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            instances: 1,
+            prompt: None,
+            talks_to: vec![],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: Some(true),
+            standup_interval_secs: Some(1),
+            owns: Vec::new(),
+            use_worktrees: false,
+        };
+        let eng_role = RoleDef {
+            name: "eng-1".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            instances: 1,
+            prompt: None,
+            talks_to: vec![],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: Some(false),
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            use_worktrees: false,
+        };
+        let team_config = TeamConfig {
+            name: "test".to_string(),
+            agent: None,
+            workflow_mode: WorkflowMode::Legacy,
+            workflow_policy: WorkflowPolicy::default(),
+            board: BoardConfig::default(),
+            standup: StandupConfig {
+                interval_secs: 1,
+                output_lines: 30,
+            },
+            automation: AutomationConfig::default(),
+            automation_sender: None,
+            external_senders: Vec::new(),
+            orchestrator_pane: false,
+            orchestrator_position: OrchestratorPosition::Bottom,
+            layout: None,
+            cost: Default::default(),
+            event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+            retro_min_duration_secs: 60,
+            roles: vec![role, eng_role],
+        };
+        let members = vec![member, eng];
+        let paused = HashSet::from(["manager".to_string()]);
+        let mut last_standup = HashMap::from([(
+            "manager".to_string(),
+            Instant::now() - Duration::from_secs(100),
+        )]);
+
+        let generated = maybe_generate_standup(StandupGenerationContext {
+            project_root: tmp.path(),
+            team_config: &team_config,
+            members: &members,
+            watchers: &HashMap::new(),
+            states: &HashMap::new(),
+            pane_map: &HashMap::new(),
+            telegram_bot: None,
+            paused_standups: &paused,
+            last_standup: &mut last_standup,
+            backend_health: &HashMap::new(),
+        })
+        .unwrap();
+
+        assert!(generated.is_empty());
+    }
+
+    #[test]
+    fn maybe_generate_standup_first_call_seeds_timer_without_generating() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member = make_member("manager", RoleType::Manager, None);
+        let eng = make_member("eng-1", RoleType::Engineer, Some("manager"));
+        let role = RoleDef {
+            name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            instances: 1,
+            prompt: None,
+            talks_to: vec![],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: Some(true),
+            standup_interval_secs: Some(1),
+            owns: Vec::new(),
+            use_worktrees: false,
+        };
+        let eng_role = RoleDef {
+            name: "eng-1".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            instances: 1,
+            prompt: None,
+            talks_to: vec![],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: Some(false),
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            use_worktrees: false,
+        };
+        let team_config = TeamConfig {
+            name: "test".to_string(),
+            agent: None,
+            workflow_mode: WorkflowMode::Legacy,
+            workflow_policy: WorkflowPolicy::default(),
+            board: BoardConfig::default(),
+            standup: StandupConfig {
+                interval_secs: 1,
+                output_lines: 30,
+            },
+            automation: AutomationConfig::default(),
+            automation_sender: None,
+            external_senders: Vec::new(),
+            orchestrator_pane: false,
+            orchestrator_position: OrchestratorPosition::Bottom,
+            layout: None,
+            cost: Default::default(),
+            event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+            retro_min_duration_secs: 60,
+            roles: vec![role, eng_role],
+        };
+        let members = vec![member, eng];
+        let mut last_standup = HashMap::new(); // empty — first call
+
+        let generated = maybe_generate_standup(StandupGenerationContext {
+            project_root: tmp.path(),
+            team_config: &team_config,
+            members: &members,
+            watchers: &HashMap::new(),
+            states: &HashMap::new(),
+            pane_map: &HashMap::new(),
+            telegram_bot: None,
+            paused_standups: &HashSet::new(),
+            last_standup: &mut last_standup,
+            backend_health: &HashMap::new(),
+        })
+        .unwrap();
+
+        // First call seeds the timer but does not generate
+        assert!(generated.is_empty());
+        assert!(last_standup.contains_key("manager"));
+    }
 }
