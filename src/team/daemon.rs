@@ -1195,7 +1195,11 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let nudge_threshold = self.config.team_config.workflow_policy.review_nudge_threshold_secs;
+        let nudge_threshold = self
+            .config
+            .team_config
+            .workflow_policy
+            .review_nudge_threshold_secs;
         let timeout_threshold = self.config.team_config.workflow_policy.review_timeout_secs;
 
         // Collect IDs of tasks currently in review
@@ -1206,18 +1210,17 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             .collect();
 
         // Prune tracking maps for tasks no longer in review
-        self.review_first_seen.retain(|id, _| review_task_ids.contains(id));
-        self.review_nudge_sent.retain(|id| review_task_ids.contains(id));
+        self.review_first_seen
+            .retain(|id, _| review_task_ids.contains(id));
+        self.review_nudge_sent
+            .retain(|id| review_task_ids.contains(id));
 
         for task in &tasks {
             if task.status != "review" {
                 continue;
             }
 
-            let first_seen = *self
-                .review_first_seen
-                .entry(task.id)
-                .or_insert(now);
+            let first_seen = *self.review_first_seen.entry(task.id).or_insert(now);
             let age = now.saturating_sub(first_seen);
 
             // Check escalation first (higher threshold)
@@ -1251,11 +1254,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
                 }
 
                 // Transition to blocked
-                let _ = super::task_cmd::transition_task(
-                    &board_dir,
-                    task.id,
-                    "blocked",
-                );
+                let _ = super::task_cmd::transition_task(&board_dir, task.id, "blocked");
                 let _ = super::task_cmd::cmd_update(
                     &board_dir,
                     task.id,
@@ -1272,9 +1271,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             }
 
             // Check nudge threshold
-            if age >= nudge_threshold
-                && !self.review_nudge_sent.contains(&task.id)
-            {
+            if age >= nudge_threshold && !self.review_nudge_sent.contains(&task.id) {
                 let reviewer = task.review_owner.as_deref().unwrap_or("manager");
                 let msg = format!(
                     "Review nudge: task #{} has been in review for {}s (nudge threshold: {}s). \
@@ -1287,10 +1284,10 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
                     task.id,
                 ));
 
-                if let Err(error) = self.event_sink.emit(TeamEvent::review_nudge_sent(
-                    reviewer,
-                    &task.id.to_string(),
-                )) {
+                if let Err(error) = self
+                    .event_sink
+                    .emit(TeamEvent::review_nudge_sent(reviewer, &task.id.to_string()))
+                {
                     warn!(error = %error, "failed to emit review_nudge_sent event");
                 }
 
@@ -6041,5 +6038,154 @@ exit 1
             daemon.member_uses_worktrees("eng-1"),
             "worktrees should be enabled when project is a git repo and member has use_worktrees=true"
         );
+    }
+
+    // --- Stale review escalation tests ---
+
+    fn write_review_task(project_root: &Path, id: u32, review_owner: &str) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join(format!("{id:03}-review-task-{id}.md")),
+            format!(
+                "---\nid: {id}\ntitle: review-task-{id}\nstatus: review\npriority: high\nclass: standard\nclaimed_by: eng-1\nreview_owner: {review_owner}\n---\n\nTask description.\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn stale_review_daemon(tmp: &tempfile::TempDir) -> TeamDaemon {
+        TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("manager", Some("architect")),
+                engineer_member("eng-1", Some("manager"), false),
+            ])
+            .workflow_policy(WorkflowPolicy {
+                review_nudge_threshold_secs: 1800,
+                review_timeout_secs: 7200,
+                ..WorkflowPolicy::default()
+            })
+            .build()
+    }
+
+    #[test]
+    fn stale_review_sends_nudge_at_threshold() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_review_task(tmp.path(), 42, "manager");
+        let mut daemon = stale_review_daemon(&tmp);
+
+        // Seed the first_seen time to 1801 seconds ago
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        daemon.review_first_seen.insert(42, now - 1801);
+
+        daemon.maybe_escalate_stale_reviews().unwrap();
+
+        // Nudge should have been sent
+        assert!(daemon.review_nudge_sent.contains(&42));
+
+        // Event should be emitted (check event sink wrote something)
+        let events_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let events = std::fs::read_to_string(&events_path).unwrap_or_default();
+        assert!(events.contains("review_nudge_sent"));
+    }
+
+    #[test]
+    fn stale_review_escalates_at_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_review_task(tmp.path(), 42, "manager");
+        let mut daemon = stale_review_daemon(&tmp);
+
+        // Seed the first_seen time to 7201 seconds ago
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        daemon.review_first_seen.insert(42, now - 7201);
+
+        daemon.maybe_escalate_stale_reviews().unwrap();
+
+        // Task should no longer be tracked (it was escalated)
+        assert!(!daemon.review_first_seen.contains_key(&42));
+        assert!(!daemon.review_nudge_sent.contains(&42));
+
+        // Task should be transitioned to blocked
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        let tasks = crate::task::load_tasks_from_dir(&tasks_dir).unwrap();
+        let task = tasks.iter().find(|t| t.id == 42).unwrap();
+        assert_eq!(task.status, "blocked");
+        assert_eq!(
+            task.blocked_on.as_deref(),
+            Some("review timeout escalated to architect")
+        );
+
+        // Event should be emitted
+        let events_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let events = std::fs::read_to_string(&events_path).unwrap_or_default();
+        assert!(events.contains("review_escalated"));
+    }
+
+    #[test]
+    fn nudge_only_sent_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_review_task(tmp.path(), 42, "manager");
+        let mut daemon = stale_review_daemon(&tmp);
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        daemon.review_first_seen.insert(42, now - 1801);
+
+        // First call: nudge sent
+        daemon.maybe_escalate_stale_reviews().unwrap();
+        assert!(daemon.review_nudge_sent.contains(&42));
+
+        // Count events
+        let events_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let events_before = std::fs::read_to_string(&events_path)
+            .unwrap_or_default()
+            .matches("review_nudge_sent")
+            .count();
+
+        // Second call: nudge should NOT fire again
+        daemon.maybe_escalate_stale_reviews().unwrap();
+        let events_after = std::fs::read_to_string(&events_path)
+            .unwrap_or_default()
+            .matches("review_nudge_sent")
+            .count();
+
+        assert_eq!(events_before, events_after, "nudge should not fire twice");
+    }
+
+    #[test]
+    fn config_nudge_threshold_defaults() {
+        let policy = WorkflowPolicy::default();
+        assert_eq!(policy.review_nudge_threshold_secs, 1800);
+        assert_eq!(policy.review_timeout_secs, 7200);
     }
 }
