@@ -183,6 +183,62 @@ pub fn cmd_update(board_dir: &Path, task_id: u32, fields: HashMap<String, String
     Ok(())
 }
 
+pub fn cmd_schedule(
+    board_dir: &Path,
+    task_id: u32,
+    at: Option<&str>,
+    cron_expr: Option<&str>,
+    clear: bool,
+) -> Result<()> {
+    if !clear && at.is_none() && cron_expr.is_none() {
+        bail!("at least one of --at, --cron, or --clear is required");
+    }
+
+    // Validate --at as RFC3339
+    if let Some(ts) = at {
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .with_context(|| format!("invalid RFC3339 timestamp: {ts}"))?;
+    }
+
+    // Validate --cron expression (the cron crate requires 6-7 fields with seconds;
+    // auto-prepend "0 " for standard 5-field cron expressions)
+    if let Some(expr) = cron_expr {
+        use std::str::FromStr;
+        let normalized = normalize_cron(expr);
+        cron::Schedule::from_str(&normalized)
+            .map_err(|e| anyhow::anyhow!("invalid cron expression: {e}"))?;
+    }
+
+    let task_path = find_task_path(board_dir, task_id)?;
+    update_task_frontmatter(&task_path, |mapping| {
+        if clear {
+            mapping.remove(yaml_key("scheduled_for"));
+            mapping.remove(yaml_key("cron_schedule"));
+        } else {
+            if let Some(ts) = at {
+                mapping.insert(yaml_key("scheduled_for"), Value::String(ts.to_string()));
+            }
+            if let Some(expr) = cron_expr {
+                mapping.insert(yaml_key("cron_schedule"), Value::String(expr.to_string()));
+            }
+        }
+    })?;
+
+    if clear {
+        println!("Task #{task_id} schedule cleared.");
+    } else {
+        let mut parts = Vec::new();
+        if let Some(ts) = at {
+            parts.push(format!("scheduled_for={ts}"));
+        }
+        if let Some(expr) = cron_expr {
+            parts.push(format!("cron_schedule={expr}"));
+        }
+        println!("Task #{task_id} schedule updated: {}", parts.join(", "));
+    }
+    Ok(())
+}
+
 pub fn cmd_auto_merge(task_id: u32, enabled: bool) {
     let action = if enabled { "enable" } else { "disable" };
     println!(
@@ -321,6 +377,18 @@ fn set_optional_string(mapping: &mut Mapping, key: &str, value: Option<&str>) {
 
 fn yaml_key(name: &str) -> Value {
     Value::String(name.to_string())
+}
+
+/// Normalize a cron expression for the `cron` crate which requires 6-7 fields
+/// (sec min hour dom month dow [year]). If the user provides a standard 5-field
+/// expression, prepend "0 " to add a seconds field.
+fn normalize_cron(expr: &str) -> String {
+    let fields: Vec<&str> = expr.split_whitespace().collect();
+    if fields.len() == 5 {
+        format!("0 {expr}")
+    } else {
+        expr.to_string()
+    }
 }
 
 fn normalize_optional(value: &str) -> Option<&str> {
@@ -550,5 +618,123 @@ mod tests {
             "feedback message should be delivered to engineer inbox"
         );
         assert!(pending[0].body.contains("#42"));
+    }
+
+    #[test]
+    fn schedule_task_sets_scheduled_for() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        let task_path = write_task_file(board_dir, 60, "todo");
+
+        cmd_schedule(
+            board_dir,
+            60,
+            Some("2026-03-25T09:00:00-04:00"),
+            None,
+            false,
+        )
+        .unwrap();
+
+        let task = Task::from_file(&task_path).unwrap();
+        assert_eq!(
+            task.scheduled_for.as_deref(),
+            Some("2026-03-25T09:00:00-04:00")
+        );
+        assert!(task.cron_schedule.is_none());
+    }
+
+    #[test]
+    fn schedule_task_sets_cron_schedule() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        let task_path = write_task_file(board_dir, 61, "todo");
+
+        cmd_schedule(board_dir, 61, None, Some("0 9 * * *"), false).unwrap();
+
+        let task = Task::from_file(&task_path).unwrap();
+        assert!(task.scheduled_for.is_none());
+        assert_eq!(task.cron_schedule.as_deref(), Some("0 9 * * *"));
+    }
+
+    #[test]
+    fn schedule_task_clear_removes_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        let task_path = write_task_file(board_dir, 62, "todo");
+
+        // Set both fields first
+        cmd_schedule(
+            board_dir,
+            62,
+            Some("2026-04-01T00:00:00Z"),
+            Some("0 9 * * 1"),
+            false,
+        )
+        .unwrap();
+        let task = Task::from_file(&task_path).unwrap();
+        assert!(task.scheduled_for.is_some());
+        assert!(task.cron_schedule.is_some());
+
+        // Clear
+        cmd_schedule(board_dir, 62, None, None, true).unwrap();
+        let task = Task::from_file(&task_path).unwrap();
+        assert!(task.scheduled_for.is_none());
+        assert!(task.cron_schedule.is_none());
+    }
+
+    #[test]
+    fn schedule_task_sets_both() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        let task_path = write_task_file(board_dir, 63, "todo");
+
+        cmd_schedule(
+            board_dir,
+            63,
+            Some("2026-04-01T00:00:00Z"),
+            Some("0 9 * * 1"),
+            false,
+        )
+        .unwrap();
+
+        let task = Task::from_file(&task_path).unwrap();
+        assert_eq!(task.scheduled_for.as_deref(), Some("2026-04-01T00:00:00Z"));
+        assert_eq!(task.cron_schedule.as_deref(), Some("0 9 * * 1"));
+    }
+
+    #[test]
+    fn schedule_rejects_invalid_timestamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        write_task_file(board_dir, 64, "todo");
+
+        let err = cmd_schedule(board_dir, 64, Some("not-a-date"), None, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid RFC3339 timestamp"));
+    }
+
+    #[test]
+    fn schedule_rejects_invalid_cron() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        write_task_file(board_dir, 65, "todo");
+
+        let err = cmd_schedule(board_dir, 65, None, Some("not-a-cron"), false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid cron expression"));
+    }
+
+    #[test]
+    fn schedule_requires_at_least_one_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        write_task_file(board_dir, 66, "todo");
+
+        let err = cmd_schedule(board_dir, 66, None, None, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("at least one of --at, --cron, or --clear"));
     }
 }

@@ -291,6 +291,21 @@ pub enum TaskCommand {
         #[arg(value_enum)]
         action: AutoMergeAction,
     },
+
+    /// Set scheduled_for and/or cron_schedule on a task
+    Schedule {
+        /// Task id
+        task_id: u32,
+        /// Scheduled datetime in RFC3339 format (e.g. 2026-03-25T09:00:00-04:00)
+        #[arg(long = "at")]
+        at: Option<String>,
+        /// Cron expression (e.g. '0 9 * * *')
+        #[arg(long = "cron")]
+        cron: Option<String>,
+        /// Clear both scheduled_for and cron_schedule
+        #[arg(long, default_value_t = false)]
+        clear: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1007,5 +1022,109 @@ mod tests {
         assert_eq!(NudgeIntervention::Dispatch.marker_name(), "dispatch");
         assert_eq!(NudgeIntervention::Utilization.marker_name(), "utilization");
         assert_eq!(NudgeIntervention::OwnedTask.marker_name(), "owned-task");
+    }
+
+    #[test]
+    fn parse_task_schedule_at() {
+        let cli = Cli::parse_from([
+            "batty",
+            "task",
+            "schedule",
+            "50",
+            "--at",
+            "2026-03-25T09:00:00-04:00",
+        ]);
+        match cli.command {
+            Command::Task {
+                command:
+                    TaskCommand::Schedule {
+                        task_id,
+                        at,
+                        cron,
+                        clear,
+                    },
+            } => {
+                assert_eq!(task_id, 50);
+                assert_eq!(at.as_deref(), Some("2026-03-25T09:00:00-04:00"));
+                assert!(cron.is_none());
+                assert!(!clear);
+            }
+            other => panic!("expected task schedule command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_task_schedule_cron() {
+        let cli = Cli::parse_from(["batty", "task", "schedule", "51", "--cron", "0 9 * * *"]);
+        match cli.command {
+            Command::Task {
+                command:
+                    TaskCommand::Schedule {
+                        task_id,
+                        at,
+                        cron,
+                        clear,
+                    },
+            } => {
+                assert_eq!(task_id, 51);
+                assert!(at.is_none());
+                assert_eq!(cron.as_deref(), Some("0 9 * * *"));
+                assert!(!clear);
+            }
+            other => panic!("expected task schedule command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_task_schedule_clear() {
+        let cli = Cli::parse_from(["batty", "task", "schedule", "52", "--clear"]);
+        match cli.command {
+            Command::Task {
+                command:
+                    TaskCommand::Schedule {
+                        task_id,
+                        at,
+                        cron,
+                        clear,
+                    },
+            } => {
+                assert_eq!(task_id, 52);
+                assert!(at.is_none());
+                assert!(cron.is_none());
+                assert!(clear);
+            }
+            other => panic!("expected task schedule command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_task_schedule_both() {
+        let cli = Cli::parse_from([
+            "batty",
+            "task",
+            "schedule",
+            "53",
+            "--at",
+            "2026-04-01T00:00:00Z",
+            "--cron",
+            "0 9 * * 1",
+        ]);
+        match cli.command {
+            Command::Task {
+                command:
+                    TaskCommand::Schedule {
+                        task_id,
+                        at,
+                        cron,
+                        clear,
+                    },
+            } => {
+                assert_eq!(task_id, 53);
+                assert_eq!(at.as_deref(), Some("2026-04-01T00:00:00Z"));
+                assert_eq!(cron.as_deref(), Some("0 9 * * 1"));
+                assert!(!clear);
+            }
+            other => panic!("expected task schedule command, got {other:?}"),
+        }
     }
 }
