@@ -78,6 +78,8 @@ impl TeamDaemon {
             );
         }
         let task_branch = use_worktrees.then(|| engineer_task_branch_name(engineer, task, task_id));
+        let engineer_is_working = self.states.get(engineer) == Some(&MemberState::Working)
+            && self.active_tasks.contains_key(engineer);
         let work_dir = if let Some(task_branch) = task_branch.as_deref() {
             let work_dir = self
                 .config
@@ -85,13 +87,21 @@ impl TeamDaemon {
                 .join(".batty")
                 .join("worktrees")
                 .join(engineer);
-            prepare_engineer_assignment_worktree(
-                &self.config.project_root,
-                &work_dir,
-                engineer,
-                task_branch,
-                &team_config_dir,
-            )?
+            if engineer_is_working {
+                info!(
+                    engineer,
+                    "skipping worktree prep — engineer is working with active task, protecting uncommitted changes"
+                );
+                work_dir
+            } else {
+                prepare_engineer_assignment_worktree(
+                    &self.config.project_root,
+                    &work_dir,
+                    engineer,
+                    task_branch,
+                    &team_config_dir,
+                )?
+            }
         } else {
             self.config.project_root.clone()
         };
