@@ -49,6 +49,7 @@ impl TestHarness {
                 layout: None,
                 cost: Default::default(),
                 event_log_max_bytes: super::DEFAULT_EVENT_LOG_MAX_BYTES,
+                retro_min_duration_secs: 60,
                 roles: Vec::new(),
             },
             session: "test".to_string(),

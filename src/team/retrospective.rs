@@ -279,6 +279,7 @@ pub fn analyze_event_log(path: &Path) -> Result<Option<RunStats>> {
 pub fn should_generate_retro(
     project_root: &Path,
     retro_generated: bool,
+    min_duration_secs: u64,
 ) -> Result<Option<RunStats>> {
     if retro_generated {
         return Ok(None);
@@ -306,7 +307,30 @@ pub fn should_generate_retro(
         .join(".batty")
         .join("team_config")
         .join("events.jsonl");
-    analyze_event_log(&events_path)
+    let stats = analyze_event_log(&events_path)?;
+
+    // Suppress trivial retrospectives: short runs with zero completions.
+    // Completions override the duration check — a short run that finished
+    // tasks is still worth reporting.
+    if let Some(ref stats) = stats {
+        let completed = stats
+            .task_stats
+            .iter()
+            .filter(|t| t.completed_at.is_some())
+            .count();
+        if stats.total_duration_secs < min_duration_secs && completed == 0 {
+            tracing::debug!(
+                duration_secs = stats.total_duration_secs,
+                completed_tasks = completed,
+                "Skipping trivial retrospective: {}s, {} tasks",
+                stats.total_duration_secs,
+                completed,
+            );
+            return Ok(None);
+        }
+    }
+
+    Ok(stats)
 }
 
 pub fn generate_retrospective(project_root: &Path, stats: &RunStats) -> Result<PathBuf> {
@@ -858,7 +882,9 @@ Task body.
             ],
         );
 
-        let stats = should_generate_retro(tmp.path(), false).unwrap().unwrap();
+        let stats = should_generate_retro(tmp.path(), false, 60)
+            .unwrap()
+            .unwrap();
         assert_eq!(stats.run_start, 100);
         assert_eq!(stats.run_end, 160);
         assert_eq!(stats.task_stats.len(), 1);
@@ -871,7 +897,7 @@ Task body.
         write_owned_task_file(tmp.path(), 45, "retro-task", "in-progress", "eng-1");
         write_event_log(tmp.path(), &[at(TeamEvent::daemon_started(), 100)]);
 
-        let stats = should_generate_retro(tmp.path(), false).unwrap();
+        let stats = should_generate_retro(tmp.path(), false, 60).unwrap();
         assert_eq!(stats, None);
     }
 
@@ -889,7 +915,72 @@ Task body.
             ],
         );
 
-        let stats = should_generate_retro(tmp.path(), true).unwrap();
+        let stats = should_generate_retro(tmp.path(), true, 60).unwrap();
         assert_eq!(stats, None);
+    }
+
+    #[test]
+    fn skip_retro_for_short_run() {
+        let tmp = tempdir().unwrap();
+        write_owned_task_file(tmp.path(), 50, "short-task", "done", "eng-1");
+        write_event_log(
+            tmp.path(),
+            &[
+                at(TeamEvent::daemon_started(), 100),
+                at(TeamEvent::daemon_stopped(), 104),
+            ],
+        );
+
+        // 4-second run, 0 completions -> suppressed
+        let stats = should_generate_retro(tmp.path(), false, 60).unwrap();
+        assert_eq!(stats, None);
+    }
+
+    #[test]
+    fn generate_retro_for_long_run() {
+        let tmp = tempdir().unwrap();
+        write_owned_task_file(tmp.path(), 51, "long-task", "done", "eng-1");
+        write_event_log(
+            tmp.path(),
+            &[
+                at(TeamEvent::daemon_started(), 100),
+                at(TeamEvent::task_assigned("eng-1", "51"), 110),
+                at(TeamEvent::task_completed("eng-1"), 200),
+                at(TeamEvent::task_assigned("eng-1", "52"), 210),
+                at(TeamEvent::task_completed("eng-1"), 300),
+                at(TeamEvent::task_assigned("eng-1", "53"), 310),
+                at(TeamEvent::task_completed("eng-1"), 380),
+                at(TeamEvent::daemon_stopped(), 400),
+            ],
+        );
+
+        // 300-second run, 3 completions -> generates
+        let stats = should_generate_retro(tmp.path(), false, 60).unwrap();
+        assert!(stats.is_some());
+        let stats = stats.unwrap();
+        assert_eq!(stats.total_duration_secs, 300);
+    }
+
+    #[test]
+    fn skip_retro_for_short_run_with_completions() {
+        let tmp = tempdir().unwrap();
+        write_owned_task_file(tmp.path(), 55, "quick-task", "done", "eng-1");
+        write_event_log(
+            tmp.path(),
+            &[
+                at(TeamEvent::daemon_started(), 100),
+                at(TeamEvent::task_assigned("eng-1", "55"), 105),
+                at(TeamEvent::task_completed("eng-1"), 115),
+                at(TeamEvent::task_assigned("eng-1", "56"), 118),
+                at(TeamEvent::task_completed("eng-1"), 125),
+                at(TeamEvent::daemon_stopped(), 130),
+            ],
+        );
+
+        // 30-second run but 2 completions -> generates (completions override)
+        let stats = should_generate_retro(tmp.path(), false, 60).unwrap();
+        assert!(stats.is_some());
+        let stats = stats.unwrap();
+        assert_eq!(stats.total_duration_secs, 30);
     }
 }

@@ -837,6 +837,7 @@ mod tests {
             layout: None,
             cost: Default::default(),
             event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+            retro_min_duration_secs: 60,
             roles: vec![role],
         };
         let members = vec![member];
@@ -907,6 +908,7 @@ mod tests {
             layout: None,
             cost: Default::default(),
             event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+            retro_min_duration_secs: 60,
             roles: vec![role],
         };
         let members = vec![member];
@@ -997,6 +999,7 @@ mod tests {
             layout: None,
             cost: Default::default(),
             event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+            retro_min_duration_secs: 60,
             roles: vec![user_role, architect_role],
         };
         let members = vec![user.clone(), architect];
