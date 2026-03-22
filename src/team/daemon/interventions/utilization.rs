@@ -317,3 +317,49 @@ pub(super) fn architect_utilization_intervention_signature(
     parts.sort();
     parts.join("|")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn utilization_key_uses_utilization_prefix() {
+        assert_eq!(
+            architect_utilization_intervention_key("architect"),
+            "utilization::architect"
+        );
+    }
+
+    #[test]
+    fn utilization_signature_empty_inputs() {
+        assert_eq!(
+            architect_utilization_intervention_signature(&[], &[], &[], &[]),
+            ""
+        );
+    }
+
+    #[test]
+    fn utilization_signature_working_only() {
+        let sig =
+            architect_utilization_intervention_signature(&["eng-1".to_string()], &[], &[], &[]);
+        assert_eq!(sig, "working:eng-1");
+    }
+
+    #[test]
+    fn utilization_signature_idle_active_includes_task_ids() {
+        let sig = architect_utilization_intervention_signature(
+            &[],
+            &[("eng-1".to_string(), vec![10, 20])],
+            &[],
+            &[],
+        );
+        assert_eq!(sig, "idle-active:eng-1:10,20");
+    }
+
+    #[test]
+    fn utilization_signature_idle_free() {
+        let sig =
+            architect_utilization_intervention_signature(&[], &[], &["eng-3".to_string()], &[]);
+        assert_eq!(sig, "idle-free:eng-3");
+    }
+}
