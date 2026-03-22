@@ -708,16 +708,19 @@ fn maybe_intervene_architect_utilization_respects_cooldown_until_signature_refir
         .with_board_task(192, "open-task", "backlog", None);
     let mut daemon = harness.build_daemon().unwrap();
 
+    // First call fires the intervention
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_architect_utilization().unwrap();
     mark_pending_delivered(&harness, "architect");
 
+    // Add a new task to change the signature
     std::fs::write(
         harness.board_tasks_dir().join("193-open-task.md"),
         "---\nid: 193\ntitle: open-task-2\nstatus: todo\npriority: high\nclass: standard\n---\n\nTask description.\n",
     )
     .unwrap();
 
+    // Second call should be blocked by cooldown despite new signature
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_architect_utilization().unwrap();
     assert!(
@@ -727,7 +730,9 @@ fn maybe_intervene_architect_utilization_respects_cooldown_until_signature_refir
             .is_empty()
     );
 
+    // Expire cooldown and re-enter idle (first intervention marked architect working)
     expire_utilization_cooldown(&mut daemon, "utilization::architect");
+    enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_architect_utilization().unwrap();
 
     let pending = harness.pending_inbox_messages("architect").unwrap();
