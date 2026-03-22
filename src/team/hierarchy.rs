@@ -76,6 +76,7 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
         .iter()
         .filter(|r| r.role_type == RoleType::Architect)
     {
+        let resolved_agent = config.resolve_agent(role);
         for i in 1..=role.instances {
             let name = if role.instances == 1 {
                 role.name.clone()
@@ -86,7 +87,7 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
                 name,
                 role_name: role.name.clone(),
                 role_type: RoleType::Architect,
-                agent: role.agent.clone(),
+                agent: resolved_agent.clone(),
                 prompt: role.prompt.clone(),
                 reports_to: None,
                 use_worktrees: role.use_worktrees,
@@ -97,6 +98,7 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
     // Phase 3: Add manager instances
     let mut manager_instances = Vec::new();
     for role in &managers {
+        let resolved_agent = config.resolve_agent(role);
         for i in 1..=role.instances {
             let name = if role.instances == 1 {
                 role.name.clone()
@@ -122,7 +124,7 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
                 name,
                 role_name: role.name.clone(),
                 role_type: RoleType::Manager,
-                agent: role.agent.clone(),
+                agent: resolved_agent.clone(),
                 prompt: role.prompt.clone(),
                 reports_to,
                 use_worktrees: role.use_worktrees,
@@ -134,6 +136,7 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
 
     // Phase 4: Add engineer instances, partitioned across compatible managers
     for role in &engineers {
+        let resolved_agent = config.resolve_agent(role);
         let compatible_managers: Vec<_> = if manager_instances.is_empty() {
             Vec::new()
         } else if role.talks_to.is_empty() {
@@ -161,7 +164,7 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
                     name,
                     role_name: role.name.clone(),
                     role_type: RoleType::Engineer,
-                    agent: role.agent.clone(),
+                    agent: resolved_agent.clone(),
                     prompt: role.prompt.clone(),
                     reports_to: None,
                     use_worktrees: role.use_worktrees,
@@ -181,7 +184,7 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
                         name,
                         role_name: role.name.clone(),
                         role_type: RoleType::Engineer,
-                        agent: role.agent.clone(),
+                        agent: resolved_agent.clone(),
                         prompt: role.prompt.clone(),
                         reports_to: Some(mgr_name.clone()),
                         use_worktrees: role.use_worktrees,
@@ -516,5 +519,128 @@ roles:
         assert!(engineers.iter().all(|m| m.reports_to.is_none()));
         assert_eq!(engineers[0].name, "specialist-1");
         assert_eq!(engineers[1].name, "specialist-2");
+    }
+
+    #[test]
+    fn team_level_agent_propagates_to_members() {
+        let config = make_config(
+            r#"
+name: team-default
+agent: codex
+roles:
+  - name: architect
+    role_type: architect
+  - name: manager
+    role_type: manager
+  - name: engineer
+    role_type: engineer
+    instances: 2
+"#,
+        );
+        let members = resolve_hierarchy(&config).unwrap();
+        // All non-user members should have the team default agent
+        for m in &members {
+            assert_eq!(
+                m.agent.as_deref(),
+                Some("codex"),
+                "member {} should have team default agent 'codex'",
+                m.name
+            );
+        }
+    }
+
+    #[test]
+    fn role_agent_overrides_team_default() {
+        let config = make_config(
+            r#"
+name: mixed
+agent: codex
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: manager
+    role_type: manager
+  - name: engineer
+    role_type: engineer
+    instances: 2
+"#,
+        );
+        let members = resolve_hierarchy(&config).unwrap();
+        let architect = members.iter().find(|m| m.name == "architect").unwrap();
+        assert_eq!(
+            architect.agent.as_deref(),
+            Some("claude"),
+            "architect should use role-level override"
+        );
+        let manager = members.iter().find(|m| m.name == "manager").unwrap();
+        assert_eq!(
+            manager.agent.as_deref(),
+            Some("codex"),
+            "manager should use team default"
+        );
+    }
+
+    #[test]
+    fn mixed_backend_engineers_under_same_manager() {
+        let config = make_config(
+            r#"
+name: mixed-eng
+agent: codex
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: manager
+    role_type: manager
+    agent: claude
+  - name: claude-eng
+    role_type: engineer
+    agent: claude
+    instances: 2
+    talks_to: [manager]
+  - name: codex-eng
+    role_type: engineer
+    instances: 2
+    talks_to: [manager]
+"#,
+        );
+        let members = resolve_hierarchy(&config).unwrap();
+        let claude_engs: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_name == "claude-eng")
+            .collect();
+        let codex_engs: Vec<_> = members
+            .iter()
+            .filter(|m| m.role_name == "codex-eng")
+            .collect();
+
+        assert_eq!(claude_engs.len(), 2);
+        assert_eq!(codex_engs.len(), 2);
+
+        for m in &claude_engs {
+            assert_eq!(m.agent.as_deref(), Some("claude"));
+            assert_eq!(m.reports_to.as_deref(), Some("manager"));
+        }
+        for m in &codex_engs {
+            assert_eq!(m.agent.as_deref(), Some("codex"));
+            assert_eq!(m.reports_to.as_deref(), Some("manager"));
+        }
+    }
+
+    #[test]
+    fn no_team_agent_defaults_to_claude() {
+        let config = make_config(
+            r#"
+name: default-fallback
+roles:
+  - name: worker
+    role_type: engineer
+    agent: claude
+    instances: 1
+"#,
+        );
+        let members = resolve_hierarchy(&config).unwrap();
+        assert_eq!(members[0].agent.as_deref(), Some("claude"));
     }
 }

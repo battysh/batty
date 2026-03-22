@@ -664,6 +664,7 @@ mod tests {
     fn test_team_config(models: HashMap<String, ModelPricing>) -> TeamConfig {
         TeamConfig {
             name: "batty".to_string(),
+            agent: None,
             workflow_mode: WorkflowMode::Legacy,
             board: Default::default(),
             standup: Default::default(),
