@@ -113,6 +113,7 @@ pub struct TeamDaemon {
     pub(super) retro_generated: bool,
     pub(super) failed_deliveries: Vec<FailedDelivery>,
     pub(super) poll_interval: Duration,
+    pub(super) is_git_repo: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +234,11 @@ impl TeamDaemon {
 
     /// Create a new daemon from resolved config and layout.
     pub fn new(config: DaemonConfig) -> Result<Self> {
+        let is_git_repo = super::git_cmd::is_git_repo(&config.project_root);
+        if !is_git_repo {
+            info!("Project is not a git repository \u{2014} git operations disabled");
+        }
+
         let team_config_dir = config.project_root.join(".batty").join("team_config");
         let events_path = team_config_dir.join("events.jsonl");
         let event_sink =
@@ -333,6 +339,7 @@ impl TeamDaemon {
             retro_generated: false,
             failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
+            is_git_repo,
         })
     }
 
@@ -1019,6 +1026,9 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
     }
 
     pub(super) fn member_uses_worktrees(&self, engineer: &str) -> bool {
+        if !self.is_git_repo {
+            return false;
+        }
         self.config
             .members
             .iter()
@@ -5869,5 +5879,43 @@ exit 1
     fn production_daemon_has_no_unwrap_or_expect_calls() {
         let count = production_unwrap_expect_count(Path::new(file!()));
         assert_eq!(count, 0, "production daemon.rs should avoid unwrap/expect");
+    }
+
+    #[test]
+    fn non_git_repo_disables_worktrees() {
+        use crate::team::harness::TestHarness;
+        use crate::team::test_support::engineer_member;
+
+        let harness = TestHarness::new()
+            .with_member(engineer_member("eng-1", Some("manager"), true))
+            .with_member_state("eng-1", MemberState::Idle);
+        let daemon = harness.build_daemon().unwrap();
+
+        // Test harness temp dir is not a git repo
+        assert!(!daemon.is_git_repo);
+        // member_uses_worktrees should return false even though the member config has use_worktrees=true
+        assert!(
+            !daemon.member_uses_worktrees("eng-1"),
+            "worktrees should be disabled when project is not a git repo"
+        );
+    }
+
+    #[test]
+    fn git_repo_enables_worktrees() {
+        use crate::team::harness::TestHarness;
+        use crate::team::test_support::engineer_member;
+
+        let harness = TestHarness::new()
+            .with_member(engineer_member("eng-1", Some("manager"), true))
+            .with_member_state("eng-1", MemberState::Idle);
+        let mut daemon = harness.build_daemon().unwrap();
+
+        // Simulate being in a git repo
+        daemon.is_git_repo = true;
+
+        assert!(
+            daemon.member_uses_worktrees("eng-1"),
+            "worktrees should be enabled when project is a git repo and member has use_worktrees=true"
+        );
     }
 }

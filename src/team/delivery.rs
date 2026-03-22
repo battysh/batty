@@ -785,6 +785,7 @@ mod tests {
             retro_generated: false,
             failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
+            is_git_repo: false,
         }
     }
 

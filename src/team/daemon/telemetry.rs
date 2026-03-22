@@ -432,6 +432,7 @@ mod tests {
             retro_generated: false,
             failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
+            is_git_repo: false,
         };
 
         let sent = Arc::new(Mutex::new(Vec::new()));
@@ -800,6 +801,7 @@ mod tests {
             retro_generated: false,
             failed_deliveries: Vec::new(),
             poll_interval: Duration::from_secs(5),
+            is_git_repo: false,
         };
 
         daemon.poll_watchers().unwrap();
