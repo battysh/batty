@@ -66,6 +66,22 @@ impl AgentAdapter for KiroCliAdapter {
     fn reset_context_keys(&self) -> Vec<(String, bool)> {
         vec![("C-c".to_string(), false)]
     }
+
+    fn launch_command(
+        &self,
+        prompt: &str,
+        idle: bool,
+        _resume: bool,
+        _session_id: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let escaped = prompt.replace('\'', "'\\''");
+        let prefix = "exec kiro chat --mode agent";
+        if idle {
+            Ok(prefix.to_string())
+        } else {
+            Ok(format!("{prefix} '{escaped}'"))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -110,5 +126,46 @@ mod tests {
         let wrapped = adapter.wrap_launch_prompt("Launch body");
         assert!(wrapped.contains("Kiro under Batty supervision"));
         assert!(wrapped.contains("Launch body"));
+    }
+
+    // --- Backend trait method tests ---
+
+    #[test]
+    fn launch_command_active_includes_prompt() {
+        let adapter = KiroCliAdapter::new(None);
+        let cmd = adapter
+            .launch_command("do the thing", false, false, None)
+            .unwrap();
+        assert_eq!(cmd, "exec kiro chat --mode agent 'do the thing'");
+    }
+
+    #[test]
+    fn launch_command_idle_omits_prompt() {
+        let adapter = KiroCliAdapter::new(None);
+        let cmd = adapter
+            .launch_command("ignored", true, false, None)
+            .unwrap();
+        assert_eq!(cmd, "exec kiro chat --mode agent");
+    }
+
+    #[test]
+    fn launch_command_escapes_single_quotes() {
+        let adapter = KiroCliAdapter::new(None);
+        let cmd = adapter
+            .launch_command("fix user's bug", false, false, None)
+            .unwrap();
+        assert!(cmd.contains("user'\\''s"));
+    }
+
+    #[test]
+    fn new_session_id_returns_none() {
+        let adapter = KiroCliAdapter::new(None);
+        assert!(adapter.new_session_id().is_none());
+    }
+
+    #[test]
+    fn supports_resume_is_false() {
+        let adapter = KiroCliAdapter::new(None);
+        assert!(!adapter.supports_resume());
     }
 }
