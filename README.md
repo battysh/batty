@@ -12,6 +12,7 @@
   <a href="https://crates.io/crates/batty-cli"><img src="https://img.shields.io/crates/v/batty-cli?style=for-the-badge" alt="crates.io"></a>
   <a href="https://github.com/battysh/batty/releases"><img src="https://img.shields.io/github/v/release/battysh/batty?style=for-the-badge" alt="Release"></a>
   <a href="https://github.com/battysh/batty/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="MIT License"></a>
+  <a href="https://star-history.com/#battysh/batty"><img src="https://img.shields.io/github/stars/battysh/batty?style=for-the-badge" alt="GitHub Stars"></a>
 </p>
 
 <p align="center">
@@ -247,6 +248,15 @@ This session shows Batty coordinating a live team in `~/mafia_solver`: the `arch
 - [Troubleshooting](docs/troubleshooting.md)
 - [Full docs site](https://battysh.github.io/batty/)
 - [GitHub](https://github.com/battysh/batty)
+
+## Contributing
+
+Batty is early-stage and evolving fast. Here's how to help:
+
+- **Try it** — `cargo install batty-cli` and [open an issue](https://github.com/battysh/batty/issues) if something breaks
+- **Star it** — helps other developers discover the project
+- **Share it** — if you know someone running multiple AI agents, point them here
+- **Build with it** — PRs welcome. Check the [open issues](https://github.com/battysh/batty/issues) for ideas
 
 ## License
 
