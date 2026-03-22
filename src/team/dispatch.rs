@@ -1249,4 +1249,109 @@ mod tests {
         assert_eq!(daemon.dispatch_queue.len(), 1);
         assert_eq!(daemon.dispatch_queue[0].task_id, 101);
     }
+
+    #[test]
+    fn dispatch_skips_worktree_prep_for_working_engineer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "skip-prep");
+        write_open_task_file(&repo, 201, "new-task", "todo");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            &engineer_base_branch_name("eng-1"),
+            &team_config_dir,
+        )
+        .unwrap();
+        // Create dirty (uncommitted) file in the worktree
+        std::fs::write(
+            worktree_dir.join("uncommitted-work.txt"),
+            "important work\n",
+        )
+        .unwrap();
+
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ];
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(members)
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 0,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Working)]))
+            .build();
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon.active_tasks.insert("eng-1".to_string(), 100);
+        daemon.idle_started_at.insert(
+            "eng-1".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+
+        daemon.maybe_auto_dispatch().unwrap();
+
+        // Working engineer should NOT have dispatch entries processed
+        assert!(
+            daemon.dispatch_queue.is_empty()
+                || daemon
+                    .dispatch_queue
+                    .iter()
+                    .all(|e| e.validation_failures == 0),
+            "working engineer's dispatch entry should be retained without validation failure"
+        );
+        // Critical invariant: uncommitted work preserved
+        assert!(
+            worktree_dir.join("uncommitted-work.txt").exists(),
+            "uncommitted work must survive — worktree prep should not have run"
+        );
+    }
+
+    #[test]
+    fn dispatch_preps_worktree_for_idle_engineer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "idle-prep");
+        write_open_task_file(&repo, 301, "idle-task", "todo");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            &engineer_base_branch_name("eng-1"),
+            &team_config_dir,
+        )
+        .unwrap();
+
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ];
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(members)
+            .pane_map(HashMap::from([("eng-1".to_string(), "%99".to_string())]))
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 0,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon.idle_started_at.insert(
+            "eng-1".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+
+        daemon.maybe_auto_dispatch().unwrap();
+
+        // Task branch should have been created by prepare_engineer_assignment_worktree
+        let task_branch = "eng-1/301";
+        let branches = crate::team::test_support::git_stdout(&repo, &["branch", "--list"]);
+        assert!(
+            branches.contains(task_branch),
+            "idle engineer should have task branch created by worktree prep; branches: {branches}"
+        );
+    }
 }
