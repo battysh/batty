@@ -239,16 +239,13 @@ pub fn cmd_schedule(
     Ok(())
 }
 
-pub fn cmd_auto_merge(task_id: u32, enabled: bool) {
-    let action = if enabled { "enable" } else { "disable" };
+pub fn cmd_auto_merge(task_id: u32, enabled: bool, project_root: &Path) -> Result<()> {
+    super::auto_merge::save_override(project_root, task_id, enabled)?;
+    let action = if enabled { "enabled" } else { "disabled" };
     println!(
-        "Auto-merge override for task #{task_id}: {action}. This takes effect when the daemon evaluates the next completion for this task."
+        "Auto-merge {action} for task #{task_id}. The daemon will pick this up on its next completion evaluation."
     );
-    // Note: the actual override is stored in daemon memory (auto_merge_overrides map).
-    // This CLI command serves as a user-facing acknowledgment. The daemon reads
-    // overrides from its in-process state, which is set via the message/assign path.
-    // For now, this prints confirmation. A future iteration can write override state
-    // to a file that the daemon watches.
+    Ok(())
 }
 
 pub(crate) fn find_task_path(board_dir: &Path, task_id: u32) -> Result<PathBuf> {

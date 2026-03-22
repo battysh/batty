@@ -24,8 +24,8 @@ use super::auto_merge::{self, AutoMergeDecision};
 use super::daemon::TeamDaemon;
 use super::task_loop::{
     auto_commit_before_reset, branch_is_merged_into, checkout_worktree_branch_from_main,
-    current_worktree_branch, delete_branch, engineer_base_branch_name,
-    is_worktree_safe_to_mutate, read_task_title, run_tests_in_worktree,
+    current_worktree_branch, delete_branch, engineer_base_branch_name, is_worktree_safe_to_mutate,
+    read_task_title, run_tests_in_worktree,
 };
 
 fn run_git_with_context(
@@ -159,7 +159,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                             confidence: auto_merge::compute_merge_confidence(&summary, policy),
                         }
                     } else {
-                        auto_merge::should_auto_merge(&summary, policy)
+                        auto_merge::should_auto_merge(&summary, policy, true)
                     };
 
                     match decision {
