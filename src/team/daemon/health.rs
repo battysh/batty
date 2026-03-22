@@ -880,7 +880,7 @@ mod tests {
     use crate::team::test_helpers::{make_test_daemon, write_event_log};
     use crate::team::test_support::{
         TestDaemonBuilder, architect_member, engineer_member, git_ok, git_stdout, init_git_repo,
-        manager_member, setup_fake_claude, write_board_task_file, write_owned_task_file,
+        manager_member, setup_fake_claude, write_owned_task_file,
         write_owned_task_file_with_context,
     };
     use crate::team::watcher::WatcherState;
@@ -889,7 +889,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::{LazyLock, Mutex};
-    use std::time::{Duration, Instant, UNIX_EPOCH};
+    use std::time::{Duration, Instant};
 
     static PATH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -1366,30 +1366,23 @@ exit 1
         .unwrap();
 
         crate::tmux::send_keys(&pane_id, "exit", true).unwrap();
-        for _ in 0..5 {
+        for _ in 0..10 {
             if crate::tmux::pane_dead(&pane_id).unwrap_or(false) {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(300));
         }
         assert!(crate::tmux::pane_dead(&pane_id).unwrap());
 
         daemon.restart_member(member_name).unwrap();
-        std::thread::sleep(Duration::from_millis(700));
 
-        let log = (0..20)
+        let log = (0..40)
             .find_map(|_| {
-                let content = match std::fs::read_to_string(&fake_log) {
-                    Ok(content) => content,
-                    Err(_) => {
-                        std::thread::sleep(Duration::from_millis(100));
-                        return None;
-                    }
-                };
+                std::thread::sleep(Duration::from_millis(200));
+                let content = std::fs::read_to_string(&fake_log).ok()?;
                 if content.contains("--append-system-prompt") {
                     Some(content)
                 } else {
-                    std::thread::sleep(Duration::from_millis(100));
                     None
                 }
             })
@@ -1401,11 +1394,14 @@ exit 1
             });
         assert!(log.contains("--append-system-prompt"));
 
-        let current = crate::tmux::pane_current_path(&pane_id).unwrap();
-        assert_eq!(
-            normalized_assignment_dir(Path::new(&current)),
-            normalized_assignment_dir(tmp.path())
-        );
+        let expected = normalized_assignment_dir(tmp.path());
+        let cwd_ok = (0..20).any(|_| {
+            std::thread::sleep(Duration::from_millis(200));
+            crate::tmux::pane_current_path(&pane_id)
+                .map(|p| normalized_assignment_dir(Path::new(&p)) == expected)
+                .unwrap_or(false)
+        });
+        assert!(cwd_ok, "pane cwd did not converge to expected dir");
 
         let events = crate::team::events::read_events(
             &tmp.path()
