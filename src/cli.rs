@@ -145,6 +145,20 @@ pub enum Command {
         command: TaskCommand,
     },
 
+    /// Record a structured review disposition for a task
+    Review {
+        /// Task id
+        task_id: u32,
+        /// Review disposition
+        #[arg(value_enum)]
+        disposition: ReviewAction,
+        /// Feedback text
+        feedback: Option<String>,
+        /// Reviewer name (default: human)
+        #[arg(long, default_value = "human")]
+        reviewer: String,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completion script for
@@ -375,6 +389,14 @@ pub enum ReviewDispositionArg {
     #[value(name = "changes_requested")]
     ChangesRequested,
     Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReviewAction {
+    Approve,
+    #[value(name = "request-changes")]
+    RequestChanges,
+    Reject,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1150,5 +1172,82 @@ mod tests {
             }
             other => panic!("expected task schedule command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn review_approve_parses() {
+        let cli = Cli::parse_from(["batty", "review", "42", "approve"]);
+        match cli.command {
+            Command::Review {
+                task_id,
+                disposition,
+                feedback,
+                reviewer,
+            } => {
+                assert_eq!(task_id, 42);
+                assert_eq!(disposition, ReviewAction::Approve);
+                assert!(feedback.is_none());
+                assert_eq!(reviewer, "human");
+            }
+            other => panic!("expected review command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn review_request_changes_with_feedback_parses() {
+        let cli = Cli::parse_from([
+            "batty",
+            "review",
+            "99",
+            "request-changes",
+            "fix the error handling",
+        ]);
+        match cli.command {
+            Command::Review {
+                task_id,
+                disposition,
+                feedback,
+                reviewer,
+            } => {
+                assert_eq!(task_id, 99);
+                assert_eq!(disposition, ReviewAction::RequestChanges);
+                assert_eq!(feedback.as_deref(), Some("fix the error handling"));
+                assert_eq!(reviewer, "human");
+            }
+            other => panic!("expected review command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn review_reject_with_reviewer_flag_parses() {
+        let cli = Cli::parse_from([
+            "batty",
+            "review",
+            "7",
+            "reject",
+            "does not meet requirements",
+            "--reviewer",
+            "manager-1",
+        ]);
+        match cli.command {
+            Command::Review {
+                task_id,
+                disposition,
+                feedback,
+                reviewer,
+            } => {
+                assert_eq!(task_id, 7);
+                assert_eq!(disposition, ReviewAction::Reject);
+                assert_eq!(feedback.as_deref(), Some("does not meet requirements"));
+                assert_eq!(reviewer, "manager-1");
+            }
+            other => panic!("expected review command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn review_rejects_invalid_disposition() {
+        let result = Cli::try_parse_from(["batty", "review", "42", "maybe"]);
+        assert!(result.is_err());
     }
 }
