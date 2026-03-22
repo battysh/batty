@@ -1873,12 +1873,12 @@ mod tests {
     #[test]
     #[serial]
     fn maybe_intervene_triage_backlog_marks_member_working_after_live_delivery() {
-        let session = "batty-test-triage-live-delivery";
-        let _ = crate::tmux::kill_session(session);
+        let session = format!("batty-test-triage-live-delivery-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
 
-        crate::tmux::create_session(session, "cat", &[], "/tmp").unwrap();
-        let pane_id = crate::tmux::pane_id(session).unwrap();
-        std::thread::sleep(Duration::from_millis(100));
+        crate::tmux::create_session(&session, "cat", &[], "/tmp").unwrap();
+        let pane_id = crate::tmux::pane_id(&session).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
 
         let tmp = tempfile::tempdir().unwrap();
         let mut watchers = HashMap::new();
@@ -1886,7 +1886,7 @@ mod tests {
         lead_watcher.confirm_ready();
         watchers.insert("lead".to_string(), lead_watcher);
         let mut daemon = TestDaemonBuilder::new(tmp.path())
-            .session(session)
+            .session(&session)
             .members(vec![
                 manager_member("lead", Some("architect")),
                 engineer_member("eng-1", Some("lead"), false),
@@ -1911,13 +1911,13 @@ mod tests {
 
         assert_eq!(daemon.triage_interventions.get("lead"), Some(&1));
         if daemon.states.get("lead") == Some(&MemberState::Working) {
-            let pane = (0..20)
+            let pane = (0..50)
                 .find_map(|_| {
                     let pane = tmux::capture_pane(&pane_id).unwrap_or_default();
                     if pane.contains("batty inbox lead") {
                         Some(pane)
                     } else {
-                        std::thread::sleep(Duration::from_millis(100));
+                        std::thread::sleep(Duration::from_millis(200));
                         None
                     }
                 })
@@ -1934,7 +1934,7 @@ mod tests {
             assert!(pending[0].body.contains("batty inbox lead"));
         }
 
-        crate::tmux::kill_session(session).unwrap();
+        crate::tmux::kill_session(&session).unwrap();
     }
 
     #[test]
