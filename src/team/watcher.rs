@@ -19,6 +19,9 @@ use crate::tmux;
 pub enum WatcherState {
     /// Agent is actively producing output.
     Active,
+    /// Agent CLI has started and is showing its input prompt, ready for messages.
+    /// Transitional state between pane creation and first Idle classification.
+    Ready,
     /// No agent running in pane (idle / waiting for assignment).
     Idle,
     /// The tmux pane no longer exists or its process has exited.
@@ -38,6 +41,9 @@ pub struct SessionWatcher {
     /// Timestamp of the last time pane output changed (hash differed from previous poll).
     last_output_changed_at: Instant,
     tracker: Option<SessionTracker>,
+    /// Whether the agent prompt has been observed at least once since creation
+    /// or last `activate()`. False means the pane may not be ready for messages.
+    ready_confirmed: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -110,6 +116,7 @@ impl SessionWatcher {
             last_output_hash: 0,
             last_capture: String::new(),
             last_output_changed_at: Instant::now(),
+            ready_confirmed: false,
             tracker: tracker.map(|tracker| match tracker {
                 SessionTrackerConfig::Codex { cwd } => SessionTracker::Codex(CodexSessionTracker {
                     sessions_root: default_codex_sessions_root(),
@@ -148,10 +155,10 @@ impl SessionWatcher {
             return Ok(self.state);
         }
 
-        // If idle, peek at the pane to detect if the agent started working.
+        // If idle or ready, peek at the pane to detect if the agent started working.
         // This lets the watcher self-heal without requiring explicit activation
         // from the daemon whenever a nudge, standup, or external input arrives.
-        if self.state == WatcherState::Idle {
+        if matches!(self.state, WatcherState::Idle | WatcherState::Ready) {
             let capture = match tmux::capture_pane(&self.pane_id) {
                 Ok(capture) => capture,
                 Err(_) => {
@@ -165,6 +172,13 @@ impl SessionWatcher {
                 return Ok(self.state);
             }
             let screen_state = classify_capture_state(&capture);
+            // When we first see the agent prompt, confirm readiness.
+            if screen_state == ScreenState::Idle && !self.ready_confirmed {
+                self.ready_confirmed = true;
+                self.last_capture = capture;
+                self.state = WatcherState::Ready;
+                return Ok(self.state);
+            }
             let tracker_state = self.poll_tracker().unwrap_or(TrackerState::Unknown);
             self.completion_observed = tracker_state == TrackerState::Completed;
             let tracker_kind = self.tracker_kind();
@@ -172,7 +186,7 @@ impl SessionWatcher {
                 self.last_capture = capture;
                 let next_state =
                     next_state_after_capture(tracker_kind, screen_state, tracker_state, self.state);
-                if next_state != WatcherState::Idle {
+                if next_state != WatcherState::Idle || self.ready_confirmed {
                     self.last_output_hash = simple_hash(&self.last_capture);
                     self.last_output_changed_at = Instant::now();
                     self.state = next_state;
@@ -215,12 +229,34 @@ impl SessionWatcher {
         Ok(self.state)
     }
 
+    /// Whether this agent's pane has been confirmed ready for message delivery.
+    ///
+    /// Returns `true` once the agent prompt has been observed at least once since
+    /// the watcher was created or last activated. This prevents injecting messages
+    /// into panes where the agent CLI hasn't finished starting.
+    pub fn is_ready_for_delivery(&self) -> bool {
+        self.ready_confirmed
+    }
+
+    /// Externally confirm that the agent pane is ready (e.g. from a delivery
+    /// readiness check that observed the prompt). Updates state to Ready if it
+    /// was still in the initial Idle state before first readiness confirmation.
+    pub fn confirm_ready(&mut self) {
+        let was_unconfirmed = !self.ready_confirmed;
+        self.ready_confirmed = true;
+        if was_unconfirmed && self.state == WatcherState::Idle {
+            self.state = WatcherState::Ready;
+        }
+    }
+
     /// Mark this watcher as actively working.
     pub fn activate(&mut self) {
         self.state = WatcherState::Active;
         self.completion_observed = false;
         self.last_output_hash = 0;
         self.last_output_changed_at = Instant::now();
+        // A message was just injected so the pane was confirmed ready.
+        self.ready_confirmed = true;
         if let Some(tracker) = self.tracker.as_mut() {
             match tracker {
                 SessionTracker::Codex(codex) => {
@@ -364,7 +400,9 @@ impl SessionWatcher {
                 // When idle with no new events, check if a newer session file
                 // appeared (agent started a new task). Re-discover so the
                 // tracker picks up the latest session.
-                if state == TrackerState::Unknown && current_state == WatcherState::Idle {
+                if state == TrackerState::Unknown
+                    && matches!(current_state, WatcherState::Idle | WatcherState::Ready)
+                {
                     if let Some(latest) = discover_codex_session_file(
                         &codex.sessions_root,
                         &codex.cwd,
@@ -2253,5 +2291,90 @@ mod tests {
 
         w.activate();
         assert!(w.secs_since_last_output_change() < 2);
+    }
+
+    // --- Readiness gate tests ---
+
+    #[test]
+    fn new_watcher_is_not_ready_for_delivery() {
+        let w = SessionWatcher::new("%0", "eng-1-1", 300, None);
+        assert!(!w.is_ready_for_delivery());
+        assert_eq!(w.state, WatcherState::Idle);
+    }
+
+    #[test]
+    fn confirm_ready_sets_ready_state() {
+        let mut w = SessionWatcher::new("%0", "eng-1-1", 300, None);
+        w.confirm_ready();
+        assert!(w.is_ready_for_delivery());
+        assert_eq!(w.state, WatcherState::Ready);
+    }
+
+    #[test]
+    fn activate_sets_ready_confirmed() {
+        let mut w = SessionWatcher::new("%0", "eng-1-1", 300, None);
+        assert!(!w.is_ready_for_delivery());
+        w.activate();
+        assert!(w.is_ready_for_delivery());
+        assert_eq!(w.state, WatcherState::Active);
+    }
+
+    #[test]
+    fn deactivate_preserves_readiness() {
+        let mut w = SessionWatcher::new("%0", "eng-1-1", 300, None);
+        w.activate();
+        assert!(w.is_ready_for_delivery());
+        w.deactivate();
+        assert!(w.is_ready_for_delivery());
+        assert_eq!(w.state, WatcherState::Idle);
+    }
+
+    #[test]
+    fn ready_state_transitions_to_active_on_work() {
+        assert_eq!(
+            next_state_after_capture(
+                TrackerKind::None,
+                ScreenState::Active,
+                TrackerState::Unknown,
+                WatcherState::Ready,
+            ),
+            WatcherState::Active
+        );
+    }
+
+    #[test]
+    fn ready_state_transitions_to_idle_on_idle_screen() {
+        assert_eq!(
+            next_state_after_capture(
+                TrackerKind::None,
+                ScreenState::Idle,
+                TrackerState::Unknown,
+                WatcherState::Ready,
+            ),
+            WatcherState::Idle
+        );
+    }
+
+    #[test]
+    fn ready_state_stays_on_unknown_screen() {
+        assert_eq!(
+            next_state_after_capture(
+                TrackerKind::None,
+                ScreenState::Unknown,
+                TrackerState::Unknown,
+                WatcherState::Ready,
+            ),
+            WatcherState::Ready
+        );
+    }
+
+    #[test]
+    fn confirm_ready_on_already_idle_with_completion_does_not_override() {
+        let mut w = SessionWatcher::new("%0", "eng-1-1", 300, None);
+        w.activate();
+        w.deactivate();
+        w.confirm_ready();
+        assert_eq!(w.state, WatcherState::Idle);
+        assert!(w.is_ready_for_delivery());
     }
 }

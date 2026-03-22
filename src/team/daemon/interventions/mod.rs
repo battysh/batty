@@ -159,7 +159,7 @@ impl TeamDaemon {
     fn is_member_idle(&self, member_name: &str) -> bool {
         self.watchers
             .get(member_name)
-            .map(|watcher| matches!(watcher.state, WatcherState::Idle))
+            .map(|watcher| matches!(watcher.state, WatcherState::Ready | WatcherState::Idle))
             .unwrap_or(matches!(
                 self.states.get(member_name),
                 Some(MemberState::Idle) | None
