@@ -833,6 +833,16 @@ impl TeamDaemon {
             task_id = task.id,
             "context exhausted; restarting agent with task context"
         );
+
+        // Write progress checkpoint before restarting.
+        let checkpoint =
+            super::checkpoint::gather_checkpoint(&self.config.project_root, member_name, &task);
+        if let Err(error) =
+            super::checkpoint::write_checkpoint(&self.config.project_root, &checkpoint)
+        {
+            warn!(member = %member_name, error = %error, "failed to write progress checkpoint");
+        }
+
         tmux::respawn_pane(&pane_id, "bash")?;
         std::thread::sleep(Duration::from_millis(200));
 
@@ -847,6 +857,13 @@ impl TeamDaemon {
             restart_notice.push_str(&format!("\nBranch: {branch}"));
         }
         restart_notice.push_str(&format!("\nWorktree: {}", launch.work_dir.display()));
+        // Include checkpoint content in restart notice.
+        if let Some(cp_content) =
+            super::checkpoint::read_checkpoint(&self.config.project_root, member_name)
+        {
+            restart_notice.push_str("\n\n--- Progress Checkpoint ---\n");
+            restart_notice.push_str(&cp_content);
+        }
         if let Err(error) = self.queue_message("daemon", member_name, &restart_notice) {
             warn!(member = %member_name, error = %error, "failed to inject restart notice");
         }
@@ -961,6 +978,15 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             return Ok(());
         }
 
+        // Write progress checkpoint before restarting.
+        let checkpoint =
+            super::checkpoint::gather_checkpoint(&self.config.project_root, member_name, &task);
+        if let Err(error) =
+            super::checkpoint::write_checkpoint(&self.config.project_root, &checkpoint)
+        {
+            warn!(member = %member_name, error = %error, "failed to write progress checkpoint");
+        }
+
         // Restart the stalled agent with task context.
         tmux::respawn_pane(&pane_id, "bash")?;
         std::thread::sleep(Duration::from_millis(200));
@@ -976,6 +1002,13 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             restart_notice.push_str(&format!("\nBranch: {branch}"));
         }
         restart_notice.push_str(&format!("\nWorktree: {}", launch.work_dir.display()));
+        // Include checkpoint content in restart notice.
+        if let Some(cp_content) =
+            super::checkpoint::read_checkpoint(&self.config.project_root, member_name)
+        {
+            restart_notice.push_str("\n\n--- Progress Checkpoint ---\n");
+            restart_notice.push_str(&cp_content);
+        }
         if let Err(error) = self.queue_message("daemon", member_name, &restart_notice) {
             warn!(member = %member_name, error = %error, "failed to inject stall restart notice");
         }
@@ -1420,6 +1453,8 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
     pub(super) fn clear_active_task(&mut self, engineer: &str) {
         self.active_tasks.remove(engineer);
         self.retry_counts.remove(engineer);
+        // Clean up any progress checkpoint left from a prior restart.
+        super::checkpoint::remove_checkpoint(&self.config.project_root, engineer);
     }
 
     /// Remove active_task entries for tasks that are done, archived, or no longer on the board.
