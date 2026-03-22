@@ -561,6 +561,45 @@ fn main() -> Result<()> {
                         }
                     }
                 }
+                cli::TelemetryCommand::Reviews => {
+                    let row = team::telemetry_db::query_review_metrics(&conn)?;
+                    let total_merges = row.auto_merge_count + row.manual_merge_count;
+                    let auto_rate = if total_merges > 0 {
+                        format!(
+                            "{:.0}%",
+                            row.auto_merge_count as f64 / total_merges as f64 * 100.0
+                        )
+                    } else {
+                        "-".to_string()
+                    };
+                    let total_reviewed = total_merges + row.rework_count;
+                    let rework_rate = if total_reviewed > 0 {
+                        format!(
+                            "{:.0}%",
+                            row.rework_count as f64 / total_reviewed as f64 * 100.0
+                        )
+                    } else {
+                        "-".to_string()
+                    };
+                    let avg_latency = row
+                        .avg_review_latency_secs
+                        .map(|s| format!("{:.0}s", s))
+                        .unwrap_or_else(|| "-".to_string());
+                    println!("Review Pipeline (all sessions)");
+                    println!(
+                        "Auto-merge Rate: {} | Rework Rate: {}",
+                        auto_rate, rework_rate
+                    );
+                    println!(
+                        "Auto: {} | Manual: {} | Rework: {} | Nudges: {} | Escalations: {}",
+                        row.auto_merge_count,
+                        row.manual_merge_count,
+                        row.rework_count,
+                        row.review_nudge_count,
+                        row.review_escalation_count
+                    );
+                    println!("Avg Review Latency: {}", avg_latency);
+                }
                 cli::TelemetryCommand::Events { limit } => {
                     let rows = team::telemetry_db::query_recent_events(&conn, limit)?;
                     if rows.is_empty() {

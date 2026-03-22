@@ -310,6 +310,60 @@ pub fn query_recent_events(conn: &Connection, limit: usize) -> Result<Vec<EventR
     Ok(rows)
 }
 
+/// Review pipeline metrics aggregated from the events table.
+#[derive(Debug, Clone)]
+pub struct ReviewMetricsRow {
+    pub auto_merge_count: i64,
+    pub manual_merge_count: i64,
+    pub rework_count: i64,
+    pub review_nudge_count: i64,
+    pub review_escalation_count: i64,
+    pub avg_review_latency_secs: Option<f64>,
+}
+
+/// Query aggregated review pipeline metrics from the events table.
+pub fn query_review_metrics(conn: &Connection) -> Result<ReviewMetricsRow> {
+    let count_event = |event_type: &str| -> Result<i64> {
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM events WHERE event_type = ?1",
+            params![event_type],
+            |row| row.get(0),
+        )?;
+        Ok(n)
+    };
+
+    let auto_merge_count = count_event("task_auto_merged")?;
+    let manual_merge_count = count_event("task_manual_merged")?;
+    let rework_count = count_event("task_reworked")?;
+    let review_nudge_count = count_event("review_nudge_sent")?;
+    let review_escalation_count = count_event("review_escalated")?;
+
+    // Compute average review latency: time between task_completed and its
+    // corresponding merge event for each task.
+    let avg_review_latency_secs: Option<f64> = conn
+        .query_row(
+            "SELECT AVG(m.timestamp - c.timestamp)
+             FROM events c
+             JOIN events m ON c.task_id = m.task_id
+               AND m.event_type IN ('task_auto_merged', 'task_manual_merged')
+             WHERE c.event_type = 'task_completed'
+               AND c.task_id IS NOT NULL
+               AND m.timestamp >= c.timestamp",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(None);
+
+    Ok(ReviewMetricsRow {
+        auto_merge_count,
+        manual_merge_count,
+        rework_count,
+        review_nudge_count,
+        review_escalation_count,
+        avg_review_latency_secs,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,5 +504,70 @@ mod tests {
         }
         let events = query_recent_events(&conn, 100).unwrap();
         assert_eq!(events.len(), 50);
+    }
+
+    #[test]
+    fn review_metrics_empty_db() {
+        let conn = open_in_memory().unwrap();
+        let row = query_review_metrics(&conn).unwrap();
+        assert_eq!(row.auto_merge_count, 0);
+        assert_eq!(row.manual_merge_count, 0);
+        assert_eq!(row.rework_count, 0);
+        assert_eq!(row.review_nudge_count, 0);
+        assert_eq!(row.review_escalation_count, 0);
+        assert!(row.avg_review_latency_secs.is_none());
+    }
+
+    #[test]
+    fn review_metrics_counts_all_event_types() {
+        let conn = open_in_memory().unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::task_auto_merged("eng-1", "1", 0.9, 2, 30),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::task_auto_merged("eng-1", "2", 0.9, 2, 30),
+        )
+        .unwrap();
+        insert_event(&conn, &TeamEvent::task_manual_merged("3")).unwrap();
+        insert_event(&conn, &TeamEvent::task_reworked("eng-1", "4")).unwrap();
+        insert_event(&conn, &TeamEvent::review_nudge_sent("manager", "5")).unwrap();
+        insert_event(&conn, &TeamEvent::review_nudge_sent("manager", "6")).unwrap();
+        insert_event(&conn, &TeamEvent::review_escalated_by_role("manager", "7")).unwrap();
+
+        let row = query_review_metrics(&conn).unwrap();
+        assert_eq!(row.auto_merge_count, 2);
+        assert_eq!(row.manual_merge_count, 1);
+        assert_eq!(row.rework_count, 1);
+        assert_eq!(row.review_nudge_count, 2);
+        assert_eq!(row.review_escalation_count, 1);
+    }
+
+    #[test]
+    fn review_metrics_computes_avg_latency() {
+        let conn = open_in_memory().unwrap();
+
+        // Task 10: completed at ts=1000, merged at ts=1100 → 100s latency
+        let mut c1 = TeamEvent::task_completed("eng-1", Some("10"));
+        c1.ts = 1000;
+        insert_event(&conn, &c1).unwrap();
+        let mut m1 = TeamEvent::task_auto_merged("eng-1", "10", 0.9, 2, 30);
+        m1.ts = 1100;
+        insert_event(&conn, &m1).unwrap();
+
+        // Task 20: completed at ts=2000, merged at ts=2300 → 300s latency
+        let mut c2 = TeamEvent::task_completed("eng-2", Some("20"));
+        c2.ts = 2000;
+        insert_event(&conn, &c2).unwrap();
+        let mut m2 = TeamEvent::task_manual_merged("20");
+        m2.ts = 2300;
+        insert_event(&conn, &m2).unwrap();
+
+        let row = query_review_metrics(&conn).unwrap();
+        // avg = (100 + 300) / 2 = 200
+        let avg = row.avg_review_latency_secs.unwrap();
+        assert!((avg - 200.0).abs() < 0.01);
     }
 }
