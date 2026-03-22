@@ -420,6 +420,12 @@ impl TeamDaemon {
             .filter(|task| task.claimed_by.is_none())
             .filter(|task| task.blocked.is_none())
             .filter(|task| task.blocked_on.is_none())
+            .filter(|task| {
+                task.scheduled_for.as_ref().map_or(true, |scheduled| {
+                    chrono::DateTime::parse_from_rfc3339(scheduled)
+                        .map_or(true, |ts| ts <= chrono::Utc::now())
+                })
+            })
             .filter(|task| !queued_task_ids.contains(&task.id))
             .filter(|task| {
                 task.depends_on.iter().all(|dep_id| {
@@ -497,6 +503,10 @@ impl TeamDaemon {
                 && task.claimed_by.is_none()
                 && task.blocked.is_none()
                 && task.blocked_on.is_none()
+                && task.scheduled_for.as_ref().map_or(true, |scheduled| {
+                    chrono::DateTime::parse_from_rfc3339(scheduled)
+                        .map_or(true, |ts| ts <= chrono::Utc::now())
+                })
                 && task.depends_on.iter().all(|dep_id| {
                     task_status_by_id
                         .get(dep_id)
@@ -1152,5 +1162,89 @@ mod tests {
         let codex_normalized = normalized_assignment_dir(&codex_dir);
         // Codex dir should NOT equal the expected root — it's a separate valid path
         assert_ne!(codex_normalized, normalized_expected);
+    }
+
+    fn write_scheduled_task_file(
+        project_root: &Path,
+        id: u32,
+        title: &str,
+        status: &str,
+        scheduled_for: &str,
+    ) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join(format!("{id:03}-{title}.md")),
+            format!(
+                "---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: high\nscheduled_for: \"{scheduled_for}\"\nclass: standard\n---\n\nTask description.\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn dispatch_skips_future_scheduled_task() {
+        let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let tmp = tempfile::tempdir().unwrap();
+        write_scheduled_task_file(tmp.path(), 101, "future-task", "todo", &future);
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), false),
+        ];
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(members)
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 0,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon.idle_started_at.insert(
+            "eng-1".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+
+        daemon.maybe_auto_dispatch().unwrap();
+
+        assert!(
+            daemon.dispatch_queue.is_empty(),
+            "future-scheduled task should not be dispatched"
+        );
+    }
+
+    #[test]
+    fn dispatch_includes_past_scheduled_task() {
+        let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        let tmp = tempfile::tempdir().unwrap();
+        write_scheduled_task_file(tmp.path(), 101, "past-task", "todo", &past);
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), false),
+        ];
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(members)
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 0,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon.idle_started_at.insert(
+            "eng-1".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+
+        daemon.maybe_auto_dispatch().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].task_id, 101);
     }
 }

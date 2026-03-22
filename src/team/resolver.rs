@@ -146,6 +146,13 @@ fn blocking_reason(
     if let Some(reason) = metadata.blocked_on.as_ref() {
         return Some(reason.clone());
     }
+    if let Some(scheduled) = &task.scheduled_for {
+        if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(scheduled) {
+            if ts > chrono::Utc::now() {
+                return Some(format!("scheduled for {scheduled}"));
+            }
+        }
+    }
     task.depends_on
         .iter()
         .find(|dep_id| !done.contains(dep_id))
@@ -357,5 +364,80 @@ roles:
         let runnable = runnable_tasks(&resolutions);
         assert_eq!(runnable.len(), 1);
         assert_eq!(runnable[0].task_id, 1);
+    }
+
+    fn solo_members() -> Vec<MemberInstance> {
+        members(
+            "name: solo\nroles:\n  - name: builder\n    role_type: engineer\n    agent: codex\n",
+        )
+    }
+
+    #[test]
+    fn scheduled_future_is_blocked() {
+        let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(
+            &tasks_dir,
+            1,
+            &format!("status: todo\nscheduled_for: \"{future}\"\n"),
+        );
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        assert_eq!(resolutions[0].status, ResolutionStatus::Blocked);
+        assert!(
+            resolutions[0]
+                .blocking_reason
+                .as_ref()
+                .unwrap()
+                .contains("scheduled for")
+        );
+    }
+
+    #[test]
+    fn scheduled_past_is_runnable() {
+        let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(
+            &tasks_dir,
+            1,
+            &format!("status: todo\nscheduled_for: \"{past}\"\n"),
+        );
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        assert_eq!(resolutions[0].status, ResolutionStatus::Runnable);
+        assert!(resolutions[0].blocking_reason.is_none());
+    }
+
+    #[test]
+    fn no_scheduled_for_is_runnable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: todo\n");
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        assert_eq!(resolutions[0].status, ResolutionStatus::Runnable);
+        assert!(resolutions[0].blocking_reason.is_none());
+    }
+
+    #[test]
+    fn scheduled_just_passed_is_runnable() {
+        let just_passed = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(
+            &tasks_dir,
+            1,
+            &format!("status: todo\nscheduled_for: \"{just_passed}\"\n"),
+        );
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        assert_eq!(resolutions[0].status, ResolutionStatus::Runnable);
+        assert!(resolutions[0].blocking_reason.is_none());
     }
 }
