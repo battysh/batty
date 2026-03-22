@@ -679,7 +679,9 @@ mod tests {
 
     #[test]
     fn migration_file_detection() {
-        assert!(is_migration_file(&"db/migrate/001_add_users.sql".to_string()));
+        assert!(is_migration_file(
+            &"db/migrate/001_add_users.sql".to_string()
+        ));
         assert!(is_migration_file(&"src/migrations/v2.rs".to_string()));
         assert!(is_migration_file(&"schema.sql".to_string()));
         assert!(!is_migration_file(&"src/team/mod.rs".to_string()));
