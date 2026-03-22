@@ -2,12 +2,27 @@
 
 The intervention system is an automated recovery mechanism in the Batty daemon that detects idle or stalled agents and nudges them back into productive work. It runs inside the daemon poll loop and covers six intervention types plus a baseline idle nudge.
 
+## Quick Reference
+
+| Intervention | Trigger | Cooldown | Escalation | Config Key |
+| --- | --- | --- | --- | --- |
+| Idle Timeout Nudge | Member idle past `nudge_interval_secs` | Once per idle period | None | `timeout_nudges` |
+| Triage | Manager idle with unreviewed direct-report results | `intervention_cooldown_secs` (120s) | None | `triage_interventions` |
+| Owned-Task | Member idle but owns active tasks | `intervention_cooldown_secs` (120s) | To `reports_to` parent after `escalation_threshold_secs` (3600s) | `owned_task_interventions` |
+| Review | Member idle with review-status tasks pending | `intervention_cooldown_secs` (120s) | None | `review_interventions` |
+| Manager Dispatch-Gap | Manager idle, all reports idle, dispatchable work exists | `intervention_cooldown_secs` (120s) | None | `manager_dispatch_interventions` |
+| Architect Utilization | <50% engineers working, utilization gap, architect idle | `utilization_recovery_interval_secs` (1200s) | None | `architect_utilization_interventions` |
+| Board Replenishment | Unblocked todo below threshold, idle unassigned engineers | `intervention_cooldown_secs` (120s) | None | (always on) |
+
+## Common Behavior
+
 All interventions share common behavior:
 
 - **Pause marker** — interventions are suppressed when `.batty/pause` exists
+- **Per-intervention disable marker** — each intervention checks for `.batty/nudge_<type>_disabled` (e.g., `.batty/nudge_triage_disabled`). Create the file to suppress that intervention; remove it to re-enable. Marker names: `triage`, `review`, `dispatch`, `owned-task`, `utilization`, `replenish`
 - **Idle grace** — no intervention fires until the member has been idle for at least `intervention_idle_grace_secs` (default: 60s)
 - **Pending inbox check** — interventions wait until the member's inbox has no unread messages (the agent may already be about to resume)
-- **Cooldown** — after firing, the same intervention key is suppressed for `intervention_cooldown_secs` (default: 120s)
+- **Cooldown** — after firing, the same intervention key is suppressed for `intervention_cooldown_secs` (default: 120s). Exception: utilization uses `utilization_recovery_interval_secs` (default: 1200s)
 - **Signature dedup** — interventions compute a signature from the current state (task IDs, statuses, etc.) and suppress repeat fires while the signature is unchanged
 - **Live delivery** — if the message is injected into a live pane, the member is marked working immediately
 
@@ -30,9 +45,9 @@ The simplest intervention: if a member has been idle past their configured timeo
 ### State Machine
 
 ```
-Working → Idle (start timer, reset fired_this_idle)
-Idle + timer elapsed + inbox empty → fire nudge → mark fired_this_idle
-Idle → Working (clear timer, reset fired_this_idle, pause schedule)
+Working -> Idle (start timer, reset fired_this_idle)
+Idle + timer elapsed + inbox empty -> fire nudge -> mark fired_this_idle
+Idle -> Working (clear timer, reset fired_this_idle, pause schedule)
 ```
 
 ### Configuration
@@ -58,7 +73,7 @@ Detects managers or architects who have unprocessed direct-report result packets
 - Member is idle and past the idle grace period
 - Member has direct reports (is a manager or architect with reports)
 - There are delivered but unacknowledged result packets from direct reports
-- The member's idle epoch has advanced (they transitioned Working → Idle at least once)
+- The member's idle epoch has advanced (they transitioned Working -> Idle at least once)
 - The triage intervention has not already fired for this idle epoch
 - The `triage::<member_name>` cooldown key is not active
 
@@ -72,10 +87,10 @@ Detects managers or architects who have unprocessed direct-report result packets
 
 ```
 Member idle + direct-report results pending + new idle epoch
-  → fire triage intervention
-  → record idle epoch as handled
-  → start cooldown timer
-Member resumes working → idle epoch increments on next idle transition
+  -> fire triage intervention
+  -> record idle epoch as handled
+  -> start cooldown timer
+Member resumes working -> idle epoch increments on next idle transition
 ```
 
 ### Configuration
@@ -94,7 +109,7 @@ Member resumes working → idle epoch increments on next idle transition
 
 ## 3. Owned-Task Intervention
 
-Detects members who are idle but still own active board tasks (in-progress, todo, or backlog — excluding review, done, and archived).
+Detects members who are idle but still own active board tasks (in-progress, todo, or backlog -- excluding review, done, and archived).
 
 ### Trigger Conditions
 
@@ -125,16 +140,16 @@ Detects members who are idle but still own active board tasks (in-progress, todo
 
 ```
 Member idle + owns active tasks + new signature
-  → fire owned-task nudge to member
-  → record signature + detection timestamp
-  → start cooldown timer
+  -> fire owned-task nudge to member
+  -> record signature + detection timestamp
+  -> start cooldown timer
 
 Same signature persists for escalation_threshold_secs
-  → escalate to reports_to parent
-  → mark escalation_sent
+  -> escalate to reports_to parent
+  -> mark escalation_sent
 
 Task set changes (new signature)
-  → reset and fire new nudge
+  -> reset and fire new nudge
 ```
 
 ### Configuration
@@ -149,7 +164,7 @@ Task set changes (new signature)
 ### Cooldown / Dedup
 
 - Keyed by member name
-- Signature = sorted `task_id:status` pairs — changes when tasks are added, removed, or change status
+- Signature = sorted `task_id:status` pairs -- changes when tasks are added, removed, or change status
 - Escalation is a one-shot per signature (resets when signature changes)
 
 ## 4. Review Intervention
@@ -161,7 +176,7 @@ Detects members who have tasks waiting in the review queue and nudges them to pr
 - `automation.review_interventions` is `true` (default: `true`)
 - Member is idle and past the idle grace period
 - Member has no pending inbox messages
-- Member owns review tasks (determined by `review_backlog_owner_for_task` — prefers the `reports_to` manager of the task's claimed engineer; falls back to `claimed_by` if engineer not found in members)
+- Member owns review tasks (determined by `review_backlog_owner_for_task` -- prefers the `reports_to` manager of the task's claimed engineer; falls back to `claimed_by` if engineer not found in members)
 - The idle epoch has advanced at least once
 - The intervention has not already fired for this exact review task set (signature check)
 - The `review::<member_name>` cooldown key is not active
@@ -177,12 +192,12 @@ Detects members who have tasks waiting in the review queue and nudges them to pr
 
 ```
 Member idle + review tasks pending + new signature
-  → fire review intervention
-  → record signature
-  → start cooldown timer
+  -> fire review intervention
+  -> record signature
+  -> start cooldown timer
 
 Signature changes (tasks added/removed/status changed)
-  → reset and fire new intervention
+  -> reset and fire new intervention
 ```
 
 ### Configuration
@@ -232,12 +247,12 @@ Detects managers whose direct-report engineers are all idle, with either active 
 
 ```
 Manager idle + all engineers idle + dispatch gap detected + triage/review clear
-  → fire dispatch-gap intervention
-  → record signature
-  → start cooldown timer
+  -> fire dispatch-gap intervention
+  -> record signature
+  -> start cooldown timer
 
 Dispatch state changes (engineer starts working, task assigned)
-  → reset and fire new intervention
+  -> reset and fire new intervention
 ```
 
 ### Configuration
@@ -280,12 +295,12 @@ Detects pipeline-wide starvation where less than half of engineers are working, 
 
 ```
 Less than half engineers working + utilization gap + architect idle
-  → fire utilization intervention to architect
-  → record signature
-  → start cooldown timer
+  -> fire utilization intervention to architect
+  -> record signature
+  -> start cooldown timer
 
 Utilization state changes (engineer starts working, tasks assigned)
-  → reset and fire new intervention
+  -> reset and fire new intervention
 ```
 
 ### Configuration
@@ -293,13 +308,14 @@ Utilization state changes (engineer starts working, tasks assigned)
 | Field                                 | Location          | Default | Description                                                      |
 | ------------------------------------- | ----------------- | ------- | ---------------------------------------------------------------- |
 | `architect_utilization_interventions` | `automation`      | `true`  | Enable/disable utilization interventions                         |
+| `utilization_recovery_interval_secs`  | `automation`      | `1200`  | Cooldown between utilization intervention fires (20 minutes)     |
 | `pipeline_starvation_threshold`       | `workflow_policy` | `1`     | Minimum pipeline depth (used elsewhere for starvation detection) |
 | `intervention_idle_grace_secs`        | `automation`      | `60`    | Grace period before firing                                       |
-| `intervention_cooldown_secs`          | `automation`      | `120`   | Cooldown between fires                                           |
 
 ### Cooldown / Dedup
 
 - Keyed by `utilization::<architect_name>`
+- Uses `utilization_recovery_interval_secs` (1200s / 20min) instead of the standard `intervention_cooldown_secs`
 - Signature = sorted combination of working engineers, idle-active engineers + task IDs, idle-unassigned engineers, and unassigned task IDs
 - Suppressed while utilization state unchanged
 
@@ -330,12 +346,12 @@ Detects when the board is running low on actionable work and nudges the architec
 
 ```
 Unblocked todo tasks < threshold + idle unassigned engineers + architect idle
-  → fire replenishment intervention to architect
-  → record signature
-  → start cooldown timer
+  -> fire replenishment intervention to architect
+  -> record signature
+  -> start cooldown timer
 
 Board state changes (tasks added, completed, unblocked)
-  → reset and fire new intervention
+  -> reset and fire new intervention
 ```
 
 ### Configuration
@@ -369,6 +385,7 @@ All intervention settings live in `team.yaml` under the `automation` and `workfl
 | `replenishment_threshold`             | int or null | number of engineers | Unblocked todo threshold for replenishment                  |
 | `intervention_idle_grace_secs`        | int         | `60`                | Seconds a member must be idle before any intervention fires |
 | `intervention_cooldown_secs`          | int         | `120`               | Seconds between repeated fires of the same intervention key |
+| `utilization_recovery_interval_secs`  | int         | `1200`              | Seconds between utilization intervention fires (longer cooldown) |
 
 ### `workflow_policy` section
 
@@ -418,10 +435,22 @@ All intervention settings live in `team.yaml` under the `automation` and `workfl
 
 ## Source Code
 
-The intervention system is implemented in `src/team/daemon/interventions.rs`. Supporting types:
+The intervention system is implemented in the `src/team/daemon/interventions/` module:
 
-- `NudgeSchedule` — tracks per-member idle nudge state
-- `OwnedTaskInterventionState` — tracks signature, detection time, and escalation status
-- `TeamEvent` variants — `task_escalated`, `review_nudge_sent`, `review_escalated` (in `src/team/events.rs`)
-- `AutomationConfig` — all toggle and timing fields (in `src/team/config.rs`)
-- `WorkflowPolicy` — escalation and review thresholds (in `src/team/config.rs`)
+- `mod.rs` -- shared types (`NudgeSchedule`, `OwnedTaskInterventionState`), idle grace, cooldown, and state update logic
+- `nudge.rs` -- idle timeout nudge
+- `triage.rs` -- triage backlog intervention
+- `owned_tasks.rs` -- owned-task intervention and stuck-task escalation
+- `review.rs` -- review backlog intervention
+- `dispatch.rs` -- manager dispatch-gap intervention
+- `utilization.rs` -- architect utilization intervention
+- `board_replenishment.rs` -- board replenishment intervention
+- `tests.rs` -- integration-style unit tests
+
+Supporting types:
+
+- `NudgeSchedule` -- tracks per-member idle nudge state
+- `OwnedTaskInterventionState` -- tracks signature, detection time, and escalation status
+- `TeamEvent` variants -- `task_escalated`, `review_nudge_sent`, `review_escalated` (in `src/team/events.rs`)
+- `AutomationConfig` -- all toggle and timing fields (in `src/team/config.rs`)
+- `WorkflowPolicy` -- escalation and review thresholds (in `src/team/config.rs`)
