@@ -386,10 +386,12 @@ fn main() -> Result<()> {
                 TaskCommand::Review {
                     task_id,
                     disposition,
+                    feedback,
                 } => team::task_cmd::cmd_review(
                     &board_dir,
                     task_id,
                     review_disposition_arg_name(disposition),
+                    feedback.as_deref(),
                 )?,
                 TaskCommand::Update {
                     task_id,

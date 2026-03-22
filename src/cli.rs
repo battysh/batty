@@ -253,6 +253,9 @@ pub enum TaskCommand {
         /// Review disposition
         #[arg(long, value_enum)]
         disposition: ReviewDispositionArg,
+        /// Feedback text (stored and delivered for changes_requested)
+        #[arg(long)]
+        feedback: Option<String>,
     },
 
     /// Update workflow metadata fields
@@ -824,10 +827,12 @@ mod tests {
                     TaskCommand::Review {
                         task_id,
                         disposition,
+                        feedback,
                     },
             } => {
                 assert_eq!(task_id, 24);
                 assert_eq!(disposition, ReviewDispositionArg::ChangesRequested);
+                assert!(feedback.is_none());
             }
             other => panic!("expected task review command, got {other:?}"),
         }

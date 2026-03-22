@@ -209,6 +209,8 @@ mod tests {
                 packet_ref: Some("review/packet-7.json".to_string()),
                 disposition: MergeDisposition::ReworkRequired,
                 notes: Some("needs another pass".to_string()),
+                reviewed_at: None,
+                nudge_sent: false,
             }),
             next_action: Some("address review feedback".to_string()),
         };

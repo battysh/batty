@@ -431,6 +431,8 @@ mod tests {
             pipeline_starvation_last_fired: None,
             retro_generated: false,
             failed_deliveries: Vec::new(),
+            review_first_seen: HashMap::new(),
+            review_nudge_sent: HashSet::new(),
             poll_interval: Duration::from_secs(5),
             is_git_repo: false,
         };
@@ -800,6 +802,8 @@ mod tests {
             pipeline_starvation_last_fired: None,
             retro_generated: false,
             failed_deliveries: Vec::new(),
+            review_first_seen: HashMap::new(),
+            review_nudge_sent: HashSet::new(),
             poll_interval: Duration::from_secs(5),
             is_git_repo: false,
         };

@@ -18,7 +18,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -112,6 +112,8 @@ pub struct TeamDaemon {
     pub(super) pipeline_starvation_last_fired: Option<Instant>,
     pub(super) retro_generated: bool,
     pub(super) failed_deliveries: Vec<FailedDelivery>,
+    pub(super) review_first_seen: HashMap<u32, u64>,
+    pub(super) review_nudge_sent: HashSet<u32>,
     pub(super) poll_interval: Duration,
     pub(super) is_git_repo: bool,
 }
@@ -338,6 +340,8 @@ impl TeamDaemon {
             pipeline_starvation_last_fired: None,
             retro_generated: false,
             failed_deliveries: Vec::new(),
+            review_first_seen: HashMap::new(),
+            review_nudge_sent: HashSet::new(),
             poll_interval: Duration::from_secs(5),
             is_git_repo,
         })
@@ -446,6 +450,9 @@ impl TeamDaemon {
             });
             self.run_loop_step("maybe_intervene_review_backlog", |daemon| {
                 daemon.maybe_intervene_review_backlog()
+            });
+            self.run_loop_step("maybe_escalate_stale_reviews", |daemon| {
+                daemon.maybe_escalate_stale_reviews()
             });
             self.run_loop_step("maybe_auto_unblock_blocked_tasks", |daemon| {
                 daemon.maybe_auto_unblock_blocked_tasks()
@@ -1174,6 +1181,123 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         };
         self.queue_message(from_role, &parent_name, msg)?;
         self.mark_member_working(&parent_name);
+        Ok(())
+    }
+
+    fn maybe_escalate_stale_reviews(&mut self) -> Result<()> {
+        let board_dir = self.board_dir();
+        let tasks_dir = board_dir.join("tasks");
+        if !tasks_dir.exists() {
+            return Ok(());
+        }
+        let tasks = crate::task::load_tasks_from_dir(&tasks_dir)?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let nudge_threshold = self.config.team_config.workflow_policy.review_nudge_threshold_secs;
+        let timeout_threshold = self.config.team_config.workflow_policy.review_timeout_secs;
+
+        // Collect IDs of tasks currently in review
+        let review_task_ids: HashSet<u32> = tasks
+            .iter()
+            .filter(|t| t.status == "review")
+            .map(|t| t.id)
+            .collect();
+
+        // Prune tracking maps for tasks no longer in review
+        self.review_first_seen.retain(|id, _| review_task_ids.contains(id));
+        self.review_nudge_sent.retain(|id| review_task_ids.contains(id));
+
+        for task in &tasks {
+            if task.status != "review" {
+                continue;
+            }
+
+            let first_seen = *self
+                .review_first_seen
+                .entry(task.id)
+                .or_insert(now);
+            let age = now.saturating_sub(first_seen);
+
+            // Check escalation first (higher threshold)
+            if age >= timeout_threshold {
+                // Escalate to architect
+                let architect = self
+                    .config
+                    .members
+                    .iter()
+                    .find(|m| m.role_type == RoleType::Architect)
+                    .map(|m| m.name.clone());
+
+                if let Some(architect_name) = architect {
+                    let msg = format!(
+                        "Review timeout: task #{} has been in review for {}s (threshold: {}s). \
+                         Escalating for resolution.",
+                        task.id, age, timeout_threshold,
+                    );
+                    let _ = self.queue_daemon_message(&architect_name, &msg);
+                    self.record_orchestrator_action(format!(
+                        "review_escalated: task #{} -> {architect_name}",
+                        task.id,
+                    ));
+                }
+
+                if let Err(error) = self.event_sink.emit(TeamEvent::review_escalated(
+                    &task.id.to_string(),
+                    &format!("review timeout after {age}s"),
+                )) {
+                    warn!(error = %error, "failed to emit review_escalated event");
+                }
+
+                // Transition to blocked
+                let _ = super::task_cmd::transition_task(
+                    &board_dir,
+                    task.id,
+                    "blocked",
+                );
+                let _ = super::task_cmd::cmd_update(
+                    &board_dir,
+                    task.id,
+                    std::collections::HashMap::from([(
+                        "blocked_on".to_string(),
+                        "review timeout escalated to architect".to_string(),
+                    )]),
+                );
+
+                // Remove from tracking since it's no longer in review
+                self.review_first_seen.remove(&task.id);
+                self.review_nudge_sent.remove(&task.id);
+                continue;
+            }
+
+            // Check nudge threshold
+            if age >= nudge_threshold
+                && !self.review_nudge_sent.contains(&task.id)
+            {
+                let reviewer = task.review_owner.as_deref().unwrap_or("manager");
+                let msg = format!(
+                    "Review nudge: task #{} has been in review for {}s (nudge threshold: {}s). \
+                     Please review or escalate.",
+                    task.id, age, nudge_threshold,
+                );
+                let _ = self.queue_daemon_message(reviewer, &msg);
+                self.record_orchestrator_action(format!(
+                    "review_nudge_sent: task #{} -> {reviewer}",
+                    task.id,
+                ));
+
+                if let Err(error) = self.event_sink.emit(TeamEvent::review_nudge_sent(
+                    reviewer,
+                    &task.id.to_string(),
+                )) {
+                    warn!(error = %error, "failed to emit review_nudge_sent event");
+                }
+
+                self.review_nudge_sent.insert(task.id);
+            }
+        }
+
         Ok(())
     }
 

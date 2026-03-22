@@ -79,6 +79,8 @@ pub struct WorkflowPolicy {
     pub pipeline_starvation_threshold: Option<usize>,
     #[serde(default = "default_escalation_threshold_secs")]
     pub escalation_threshold_secs: u64,
+    #[serde(default = "default_review_nudge_threshold_secs")]
+    pub review_nudge_threshold_secs: u64,
     #[serde(default = "default_review_timeout_secs")]
     pub review_timeout_secs: u64,
     #[serde(default)]
@@ -96,6 +98,7 @@ impl Default for WorkflowPolicy {
             wip_limit_per_reviewer: None,
             pipeline_starvation_threshold: default_pipeline_starvation_threshold(),
             escalation_threshold_secs: default_escalation_threshold_secs(),
+            review_nudge_threshold_secs: default_review_nudge_threshold_secs(),
             review_timeout_secs: default_review_timeout_secs(),
             auto_archive_done_after_secs: None,
             capability_overrides: HashMap::new(),
@@ -409,6 +412,10 @@ fn default_instances() -> u32 {
 
 fn default_escalation_threshold_secs() -> u64 {
     3600
+}
+
+fn default_review_nudge_threshold_secs() -> u64 {
+    1800
 }
 
 fn default_review_timeout_secs() -> u64 {
