@@ -10,6 +10,7 @@ use serde_json::Value;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::tmux;
 
@@ -34,6 +35,8 @@ pub struct SessionWatcher {
     completion_observed: bool,
     last_output_hash: u64,
     last_capture: String,
+    /// Timestamp of the last time pane output changed (hash differed from previous poll).
+    last_output_changed_at: Instant,
     tracker: Option<SessionTracker>,
 }
 
@@ -106,6 +109,7 @@ impl SessionWatcher {
             completion_observed: false,
             last_output_hash: 0,
             last_capture: String::new(),
+            last_output_changed_at: Instant::now(),
             tracker: tracker.map(|tracker| match tracker {
                 SessionTrackerConfig::Codex { cwd } => SessionTracker::Codex(CodexSessionTracker {
                     sessions_root: default_codex_sessions_root(),
@@ -170,6 +174,7 @@ impl SessionWatcher {
                     next_state_after_capture(tracker_kind, screen_state, tracker_state, self.state);
                 if next_state != WatcherState::Idle {
                     self.last_output_hash = simple_hash(&self.last_capture);
+                    self.last_output_changed_at = Instant::now();
                     self.state = next_state;
                 }
             }
@@ -197,6 +202,7 @@ impl SessionWatcher {
 
         if hash != self.last_output_hash {
             self.last_output_hash = hash;
+            self.last_output_changed_at = Instant::now();
             self.last_capture = capture;
             self.state =
                 next_state_after_capture(tracker_kind, screen_state, tracker_state, self.state);
@@ -214,6 +220,7 @@ impl SessionWatcher {
         self.state = WatcherState::Active;
         self.completion_observed = false;
         self.last_output_hash = 0;
+        self.last_output_changed_at = Instant::now();
         if let Some(tracker) = self.tracker.as_mut() {
             match tracker {
                 SessionTracker::Codex(codex) => {
@@ -263,6 +270,11 @@ impl SessionWatcher {
     pub fn deactivate(&mut self) {
         self.state = WatcherState::Idle;
         self.completion_observed = false;
+    }
+
+    /// Seconds since the last time pane output changed.
+    pub fn secs_since_last_output_change(&self) -> u64 {
+        self.last_output_changed_at.elapsed().as_secs()
     }
 
     /// Get the last captured pane output.
@@ -2223,5 +2235,23 @@ mod tests {
             0,
             "production watcher.rs should avoid unwrap/expect"
         );
+    }
+
+    #[test]
+    fn secs_since_last_output_change_starts_at_zero() {
+        let w = SessionWatcher::new("%0", "eng-1-1", 300, None);
+        // Freshly created watcher — elapsed should be near zero.
+        assert!(w.secs_since_last_output_change() < 2);
+    }
+
+    #[test]
+    fn activate_resets_last_output_changed_at() {
+        let mut w = SessionWatcher::new("%0", "eng-1-1", 300, None);
+        // Simulate time passing by backdating the field.
+        w.last_output_changed_at = Instant::now() - std::time::Duration::from_secs(600);
+        assert!(w.secs_since_last_output_change() >= 600);
+
+        w.activate();
+        assert!(w.secs_since_last_output_change() < 2);
     }
 }
