@@ -439,4 +439,214 @@ roles:
         assert_eq!(resolutions[0].status, ResolutionStatus::Runnable);
         assert!(resolutions[0].blocking_reason.is_none());
     }
+
+    // --- done tasks are excluded ---
+
+    #[test]
+    fn done_tasks_excluded_from_resolutions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: done\n");
+        write_task(&tasks_dir, 2, "status: todo\n");
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].task_id, 2);
+    }
+
+    #[test]
+    fn archived_tasks_excluded_from_resolutions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: archived\n");
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        assert!(resolutions.is_empty());
+    }
+
+    // --- dependency resolution ---
+
+    #[test]
+    fn all_deps_met_makes_task_runnable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: done\n");
+        write_task(&tasks_dir, 2, "status: done\n");
+        write_task(&tasks_dir, 3, "status: todo\ndepends_on:\n  - 1\n  - 2\n");
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        assert_eq!(resolutions[0].task_id, 3);
+        assert_eq!(resolutions[0].status, ResolutionStatus::Runnable);
+        assert!(resolutions[0].blocking_reason.is_none());
+    }
+
+    #[test]
+    fn partial_deps_met_is_blocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: done\n");
+        write_task(&tasks_dir, 2, "status: todo\n");
+        write_task(&tasks_dir, 3, "status: todo\ndepends_on:\n  - 1\n  - 2\n");
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        let task3 = resolutions.iter().find(|r| r.task_id == 3).unwrap();
+        assert_eq!(task3.status, ResolutionStatus::Blocked);
+        assert_eq!(
+            task3.blocking_reason.as_deref(),
+            Some("unmet dependency #2")
+        );
+    }
+
+    #[test]
+    fn diamond_dependency_graph() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        // Diamond: 4 depends on 2,3; both 2,3 depend on 1
+        write_task(&tasks_dir, 1, "status: done\n");
+        write_task(&tasks_dir, 2, "status: done\ndepends_on:\n  - 1\n");
+        write_task(&tasks_dir, 3, "status: done\ndepends_on:\n  - 1\n");
+        write_task(&tasks_dir, 4, "status: todo\ndepends_on:\n  - 2\n  - 3\n");
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        assert_eq!(resolutions[0].task_id, 4);
+        assert_eq!(resolutions[0].status, ResolutionStatus::Runnable);
+    }
+
+    // --- empty board ---
+
+    #[test]
+    fn empty_board_returns_no_resolutions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        assert!(resolutions.is_empty());
+    }
+
+    // --- execution_owner fallback ---
+
+    #[test]
+    fn execution_owner_falls_back_to_claimed_by() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: todo\nclaimed_by: eng-1-1\n");
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        assert_eq!(resolutions[0].execution_owner.as_deref(), Some("eng-1-1"));
+    }
+
+    // --- blocked field ---
+
+    #[test]
+    fn task_with_blocked_field_is_blocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: todo\nblocked: waiting-for-api\n");
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        assert_eq!(resolutions[0].status, ResolutionStatus::Blocked);
+        assert_eq!(
+            resolutions[0].blocking_reason.as_deref(),
+            Some("waiting-for-api")
+        );
+    }
+
+    // --- status variations ---
+
+    #[test]
+    fn backlog_status_is_runnable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: backlog\n");
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        assert_eq!(resolutions[0].status, ResolutionStatus::Runnable);
+    }
+
+    #[test]
+    fn in_progress_is_runnable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: in-progress\n");
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        assert_eq!(resolutions[0].status, ResolutionStatus::Runnable);
+    }
+
+    #[test]
+    fn unknown_status_is_needs_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: custom-status\n");
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        assert_eq!(resolutions[0].status, ResolutionStatus::NeedsAction);
+    }
+
+    // --- capability resolution ---
+
+    #[test]
+    fn runnable_with_owner_gets_executor_capability() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: todo\nclaimed_by: builder-1-1\n");
+
+        let resolutions = resolve_board(
+            tmp.path(),
+            &members(
+                "name: team\nroles:\n  - name: lead\n    role_type: manager\n    agent: claude\n  - name: builder\n    role_type: engineer\n    agent: codex\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            resolutions[0].acting_capability,
+            Some(WorkflowCapability::Executor)
+        );
+    }
+
+    #[test]
+    fn resolutions_sorted_by_task_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 5, "status: todo\n");
+        write_task(&tasks_dir, 2, "status: todo\n");
+        write_task(&tasks_dir, 8, "status: todo\n");
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        let ids: Vec<u32> = resolutions.iter().map(|r| r.task_id).collect();
+        assert_eq!(ids, vec![2, 5, 8]);
+    }
+
+    // --- blocked takes priority over deps ---
+
+    #[test]
+    fn blocked_field_takes_priority_over_dependency_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: done\n");
+        write_task(
+            &tasks_dir,
+            2,
+            "status: todo\nblocked: manual-hold\ndepends_on:\n  - 1\n",
+        );
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        let task2 = resolutions.iter().find(|r| r.task_id == 2).unwrap();
+        assert_eq!(task2.status, ResolutionStatus::Blocked);
+        assert_eq!(task2.blocking_reason.as_deref(), Some("manual-hold"));
+    }
 }

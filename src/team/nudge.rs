@@ -682,4 +682,167 @@ roles:
             ]
         );
     }
+
+    // --- resolve_member_reference ---
+
+    #[test]
+    fn resolve_member_reference_exact_name_match() {
+        let members = members(
+            "name: team\nroles:\n  - name: lead\n    role_type: manager\n    agent: claude\n  - name: builder\n    role_type: engineer\n    agent: codex\n",
+        );
+        assert_eq!(resolve_member_reference("lead", &members), "lead");
+        assert_eq!(
+            resolve_member_reference("builder-1-1", &members),
+            "builder-1-1"
+        );
+    }
+
+    #[test]
+    fn resolve_member_reference_role_name_fallback() {
+        // With a manager present, engineer gets multiplicative name "builder-1-1"
+        // while role_name stays "builder". But with instances:1, flat team (no manager)
+        // gives name == role_name. So we need a manager to create the suffix.
+        let members = members(
+            "name: team\nroles:\n  - name: lead\n    role_type: manager\n    agent: claude\n  - name: builder\n    role_type: engineer\n    agent: codex\n",
+        );
+        // "builder" is the role_name, "builder-1-1" is the instance name
+        // Since there's only one instance with that role_name, it resolves to the instance
+        assert_eq!(resolve_member_reference("builder", &members), "builder-1-1");
+    }
+
+    #[test]
+    fn resolve_member_reference_unknown_returns_as_is() {
+        let members = members(
+            "name: team\nroles:\n  - name: lead\n    role_type: manager\n    agent: claude\n",
+        );
+        assert_eq!(
+            resolve_member_reference("unknown-member", &members),
+            "unknown-member"
+        );
+    }
+
+    // --- empty board ---
+
+    #[test]
+    fn empty_board_produces_no_nudges() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("tasks")).unwrap();
+        let members = members(
+            "name: team\nroles:\n  - name: lead\n    role_type: manager\n    agent: claude\n",
+        );
+        let states = HashMap::from([("lead".to_string(), MemberState::Idle)]);
+
+        let nudges = compute_nudges(tmp.path(), &members, &states, &HashMap::new()).unwrap();
+        assert!(nudges.is_empty());
+    }
+
+    // --- review without owner nudges all eligible ---
+
+    #[test]
+    fn review_without_owner_nudges_all_eligible_reviewers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: review\n"); // no review_owner
+        // Use two managers so both have reviewer capability
+        let members = members(
+            r#"
+name: team
+roles:
+  - name: lead
+    role_type: manager
+    agent: claude
+    instances: 2
+"#,
+        );
+        let states = HashMap::from([
+            ("lead-1".to_string(), MemberState::Idle),
+            ("lead-2".to_string(), MemberState::Idle),
+        ]);
+
+        let nudges = compute_nudges(tmp.path(), &members, &states, &HashMap::new()).unwrap();
+        let reviewer_names: Vec<&str> = nudges.iter().map(|n| n.member.as_str()).collect();
+        assert!(reviewer_names.contains(&"lead-1"));
+        assert!(reviewer_names.contains(&"lead-2"));
+        assert!(
+            nudges
+                .iter()
+                .all(|n| n.capability == WorkflowCapability::Reviewer)
+        );
+    }
+
+    // --- mixed blocked and runnable suppresses planner ---
+
+    #[test]
+    fn mixed_blocked_and_runnable_no_planner_nudge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: todo\nblocked_on: waiting\n");
+        write_task(&tasks_dir, 2, "status: todo\n"); // runnable
+
+        let members = members(
+            r#"
+name: team
+roles:
+  - name: lead
+    role_type: manager
+    agent: claude
+  - name: builder
+    role_type: engineer
+    agent: codex
+"#,
+        );
+        let states = HashMap::from([
+            ("lead".to_string(), MemberState::Idle),
+            ("builder-1-1".to_string(), MemberState::Idle),
+        ]);
+
+        let nudges = compute_nudges(tmp.path(), &members, &states, &HashMap::new()).unwrap();
+        // Planner nudge only fires when ALL tasks are blocked and none are runnable
+        assert!(
+            !nudges
+                .iter()
+                .any(|n| n.capability == WorkflowCapability::Planner)
+        );
+    }
+
+    // --- unknown member state ---
+
+    #[test]
+    fn unknown_member_state_not_nudged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(
+            &tasks_dir,
+            1,
+            "status: todo\nexecution_owner: builder-1-1\nclaimed_by: builder-1-1\n",
+        );
+        let members = members(
+            "name: team\nroles:\n  - name: builder\n    role_type: engineer\n    agent: codex\n",
+        );
+        // No state entry for builder-1-1 at all
+        let states = HashMap::new();
+
+        let nudges = compute_nudges(tmp.path(), &members, &states, &HashMap::new()).unwrap();
+        assert!(nudges.is_empty());
+    }
+
+    // --- working member not nudged ---
+
+    #[test]
+    fn working_member_not_nudged_for_dispatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: todo\n"); // unassigned
+        let members = members(
+            "name: team\nroles:\n  - name: lead\n    role_type: manager\n    agent: claude\n",
+        );
+        let states = HashMap::from([("lead".to_string(), MemberState::Working)]);
+
+        let nudges = compute_nudges(tmp.path(), &members, &states, &HashMap::new()).unwrap();
+        assert!(nudges.is_empty());
+    }
 }
