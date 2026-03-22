@@ -63,6 +63,7 @@ pub(crate) struct AgentHealthSummary {
     pub(crate) context_exhaustion_count: u32,
     pub(crate) delivery_failure_count: u32,
     pub(crate) task_elapsed_secs: Option<u64>,
+    pub(crate) backend_health: crate::agent::BackendHealth,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -395,6 +396,25 @@ pub(crate) fn agent_health_by_member(
                                 .insert((role.to_string(), task_id), event.ts);
                         }
                     }
+                    "health_changed" => {
+                        // Parse the latest backend health from the transition reason.
+                        // Format is "prev→new", e.g. "healthy→unreachable".
+                        if let Some(reason) = event.reason.as_deref() {
+                            let new_state = reason
+                                .split('→')
+                                .last()
+                                .unwrap_or("healthy");
+                            let health_val = match new_state {
+                                "degraded" => crate::agent::BackendHealth::Degraded,
+                                "unreachable" => crate::agent::BackendHealth::Unreachable,
+                                _ => crate::agent::BackendHealth::Healthy,
+                            };
+                            health_by_member
+                                .entry(role.to_string())
+                                .or_default()
+                                .backend_health = health_val;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -467,6 +487,9 @@ fn parse_leading_task_id(value: &str) -> Option<u32> {
 
 pub(crate) fn format_agent_health_summary(health: &AgentHealthSummary) -> String {
     let mut parts = Vec::new();
+    if !health.backend_health.is_healthy() {
+        parts.push(format!("B:{}", health.backend_health.as_str()));
+    }
     if health.restart_count > 0 {
         parts.push(format!("r{}", health.restart_count));
     }
@@ -765,6 +788,7 @@ pub(crate) fn build_team_status_health(
             row.health.restart_count > 0
                 || row.health.context_exhaustion_count > 0
                 || row.health.delivery_failure_count > 0
+                || !row.health.backend_health.is_healthy()
         })
         .map(|row| row.name.clone())
         .collect::<Vec<_>>();
@@ -1569,6 +1593,7 @@ mod tests {
                     context_exhaustion_count: 0,
                     delivery_failure_count: 0,
                     task_elapsed_secs: None,
+                    backend_health: crate::agent::BackendHealth::default(),
                 },
                 health_summary: "r1".to_string(),
             },
@@ -1590,6 +1615,7 @@ mod tests {
                     context_exhaustion_count: 1,
                     delivery_failure_count: 1,
                     task_elapsed_secs: None,
+                    backend_health: crate::agent::BackendHealth::default(),
                 },
                 health_summary: "c1 d1".to_string(),
             },
@@ -1972,6 +1998,7 @@ mod tests {
                         context_exhaustion_count: 0,
                         delivery_failure_count: 0,
                         task_elapsed_secs: Some(30),
+                        backend_health: crate::agent::BackendHealth::default(),
                     },
                     health_summary: "r1 t30s".to_string(),
                 },
@@ -2074,6 +2101,7 @@ mod tests {
             context_exhaustion_count: 1,
             delivery_failure_count: 3,
             task_elapsed_secs: Some(750),
+            backend_health: crate::agent::BackendHealth::default(),
         });
 
         assert_eq!(summary, "r2 c1 d3 t12m");
