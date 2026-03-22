@@ -699,8 +699,11 @@ Arguments:
 Options:
       --disposition <DISPOSITION>
           Review disposition
-          
+
           [possible values: approved, changes_requested, rejected]
+
+      --feedback <FEEDBACK>
+          Feedback text (stored and delivered for changes_requested)
 
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)

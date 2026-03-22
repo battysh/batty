@@ -300,15 +300,7 @@ impl TeamEvent {
         }
     }
 
-    pub fn review_nudge_sent(role: &str, task: &str) -> Self {
-        Self {
-            role: Some(role.into()),
-            task: Some(task.into()),
-            ..Self::base("review_nudge_sent")
-        }
-    }
-
-    pub fn review_escalated(role: &str, task: &str) -> Self {
+    pub fn review_escalated_by_role(role: &str, task: &str) -> Self {
         Self {
             role: Some(role.into()),
             task: Some(task.into()),

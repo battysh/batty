@@ -127,6 +127,11 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 - Stable per-engineer worktrees with fresh task branches on each assignment
 - Kanban-driven task loop with auto-dispatch, retry tracking, and test gating
 - Orchestrator automation for triage, review, owned-task recovery, dispatch-gap recovery, utilization recovery, standups, nudges, and retrospectives
+- Auto-merge policy engine with confidence scoring and configurable thresholds for safe unattended merges
+- Review timeout escalation: stale reviews are nudged and auto-escalated after configurable thresholds
+- External senders: allow non-team sources (email routers, Slack bridges) to message any role
+- Graceful non-git-repo handling: git-dependent operations degrade cleanly when the project is not a repository
+- `batty doctor --fix`: detect and clean up orphan worktrees and branches left by previous runs
 - YAML config, Markdown boards, JSON/JSONL logs: everything stays file-based
 
 ## CLI Quick Reference
@@ -142,7 +147,9 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 | `batty board` / `board list` / `board summary` | Open the kanban board or inspect it without a TTY |
 | `batty status [--json]` | Show current team state |
 | `batty merge <engineer>` | Merge an engineer worktree branch |
+| `batty task review <id> --disposition <d>` | Record a review disposition (approved, changes_requested, rejected) |
 | `batty retro` / `load` / `cost` / `doctor` | Inspect run history, team load, session cost, and diagnostic state |
+| `batty doctor --fix` | Clean up orphan worktrees and branches |
 | `batty pause` / `resume` / `queue` | Control automation and inspect queued dispatch work |
 | `batty validate` / `config` / `export-run` | Validate config and export runtime state |
 | `batty telegram` | Configure Telegram for human communication |

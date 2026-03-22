@@ -276,6 +276,74 @@ batty stop
 batty start
 ```
 
+## Auto-Merge Policy
+
+Batty can auto-merge small, low-risk engineer branches without waiting for manual
+review. Enable it in `team.yaml`:
+
+```yaml
+workflow_policy:
+  auto_merge:
+    enabled: true
+    max_diff_lines: 200
+    max_files_changed: 5
+    max_modules_touched: 2
+    sensitive_paths: [Cargo.toml, team.yaml, .env]
+    confidence_threshold: 0.8
+    require_tests_pass: true
+```
+
+When a task completes, the daemon scores the diff. If all thresholds are met and
+no sensitive files are touched, the branch merges automatically. Otherwise it
+routes to manual review.
+
+## Review Timeout Escalation
+
+Stale reviews are nudged and eventually escalated. Configure the thresholds in
+`workflow_policy`:
+
+```yaml
+workflow_policy:
+  review_nudge_threshold_secs: 1800   # nudge reviewer after 30 min
+  review_timeout_secs: 7200           # escalate after 2 hours
+```
+
+After the nudge threshold, the reviewer gets a reminder. After the timeout, the
+task is escalated so it does not block the pipeline.
+
+## External Senders
+
+Non-team sources (email routers, Slack bridges, CI bots) can deliver messages to
+any role by listing them in `external_senders`:
+
+```yaml
+external_senders:
+  - email-router
+  - slack-bridge
+```
+
+Messages from listed senders bypass the `talks_to` graph and land in the target
+role's inbox.
+
+## Non-Git-Repo Support
+
+Batty runs in directories that are not git repositories. Git-dependent operations
+(branch creation, worktree management, merge) degrade gracefully with clear
+warnings instead of crashing. This is useful for planning-only teams or
+documentation projects.
+
+## Diagnostics
+
+`batty doctor` dumps launch state, board health, worktree status, and daemon
+checks. Add `--fix` to clean up orphan worktrees and branches left by previous
+runs:
+
+```sh
+batty doctor          # read-only diagnostic dump
+batty doctor --fix    # interactive cleanup of orphans
+batty doctor --fix --yes  # skip confirmation prompt
+```
+
 ## Next Steps
 
 - [Runtime Config Reference](reference/config.md)
