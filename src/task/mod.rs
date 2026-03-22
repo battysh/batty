@@ -87,9 +87,9 @@ fn default_status() -> String {
 impl Task {
     /// Returns true if this task has a `scheduled_for` timestamp in the future.
     pub fn is_schedule_blocked(&self) -> bool {
-        self.scheduled_for.as_ref().map_or(false, |scheduled| {
+        self.scheduled_for.as_ref().is_some_and(|scheduled| {
             chrono::DateTime::parse_from_rfc3339(scheduled)
-                .map_or(false, |ts| ts > chrono::Utc::now())
+                .is_ok_and(|ts| ts > chrono::Utc::now())
         })
     }
 
