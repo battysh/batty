@@ -158,8 +158,8 @@ mod tests {
                 TeamEvent::task_manual_merged("5"),
                 TeamEvent::task_reworked("eng-1", "6"),
                 TeamEvent::review_nudge_sent("manager", "7"),
-                TeamEvent::review_escalated("manager", "8"),
-                TeamEvent::review_escalated("manager", "9"),
+                TeamEvent::review_escalated_by_role("manager", "8"),
+                TeamEvent::review_escalated_by_role("manager", "9"),
             ],
         );
 
