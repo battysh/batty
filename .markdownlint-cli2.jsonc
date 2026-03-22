@@ -1,6 +1,8 @@
 {
   "config": {
     "MD013": false,
-    "MD033": false
+    "MD024": { "siblings_only": true, "allow_different_nesting": true },
+    "MD033": false,
+    "MD040": false
   }
 }
