@@ -129,6 +129,21 @@ fn expire_intervention_key_cooldown(daemon: &mut TeamDaemon, key: &str) {
     );
 }
 
+fn expire_utilization_cooldown(daemon: &mut TeamDaemon, key: &str) {
+    daemon.intervention_cooldowns.insert(
+        key.to_string(),
+        Instant::now()
+            - Duration::from_secs(
+                daemon
+                    .config
+                    .team_config
+                    .automation
+                    .utilization_recovery_interval_secs
+                    + 1,
+            ),
+    );
+}
+
 fn set_exact_cooldown_boundary(daemon: &mut TeamDaemon, key: &str) {
     daemon.intervention_cooldowns.insert(
         key.to_string(),
@@ -714,7 +729,7 @@ fn maybe_intervene_architect_utilization_respects_cooldown_until_signature_refir
             .is_empty()
     );
 
-    expire_intervention_key_cooldown(&mut daemon, "utilization::architect");
+    expire_utilization_cooldown(&mut daemon, "utilization::architect");
     daemon.maybe_intervene_architect_utilization().unwrap();
 
     let pending = harness.pending_inbox_messages("architect").unwrap();
