@@ -104,3 +104,72 @@ pub(in super::super) fn normalized_assignment_dir(path: &Path) -> PathBuf {
 fn shell_single_quote(value: &str) -> String {
     value.replace('\'', "'\"'\"'")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn shell_single_quote_no_quotes() {
+        assert_eq!(shell_single_quote("hello world"), "hello world");
+    }
+
+    #[test]
+    fn shell_single_quote_with_single_quote() {
+        assert_eq!(shell_single_quote("it's"), "it'\"'\"'s");
+    }
+
+    #[test]
+    fn shell_single_quote_multiple_quotes() {
+        assert_eq!(shell_single_quote("a'b'c"), "a'\"'\"'b'\"'\"'c");
+    }
+
+    #[test]
+    fn shell_single_quote_empty() {
+        assert_eq!(shell_single_quote(""), "");
+    }
+
+    #[test]
+    fn shell_single_quote_only_quote() {
+        assert_eq!(shell_single_quote("'"), "'\"'\"'");
+    }
+
+    #[test]
+    fn normalized_dir_resolves_existing_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().canonicalize().unwrap();
+        let result = normalized_assignment_dir(tmp.path());
+        assert_eq!(result, canonical);
+    }
+
+    #[test]
+    fn normalized_dir_falls_back_for_nonexistent() {
+        let bogus = PathBuf::from("/nonexistent/does/not/exist");
+        assert_eq!(normalized_assignment_dir(&bogus), bogus);
+    }
+
+    #[test]
+    fn normalized_dir_consistent_for_same_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = normalized_assignment_dir(tmp.path());
+        let b = normalized_assignment_dir(tmp.path());
+        assert_eq!(a, b);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn normalized_dir_resolves_symlink_on_macos() {
+        // /tmp -> /private/tmp on macOS; both should resolve identically.
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().canonicalize().unwrap();
+        let path_str = canonical.to_string_lossy();
+        if path_str.starts_with("/private/") {
+            let without_private = PathBuf::from(&path_str["/private".len()..]);
+            assert_eq!(
+                normalized_assignment_dir(&without_private),
+                normalized_assignment_dir(&canonical)
+            );
+        }
+    }
+}

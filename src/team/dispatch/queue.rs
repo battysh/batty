@@ -55,6 +55,15 @@ impl TeamDaemon {
         Ok(available.into_iter().next())
     }
 
+    #[cfg(test)]
+    pub(super) fn test_next_dispatch_task(
+        &self,
+        board_dir: &std::path::Path,
+        queued: &HashSet<u32>,
+    ) -> Result<Option<crate::task::Task>> {
+        self.next_dispatch_task(board_dir, queued)
+    }
+
     pub(in super::super) fn enqueue_dispatch_candidates(&mut self) -> Result<()> {
         let board_dir = self.board_dir();
         let dedup_window =
@@ -278,5 +287,262 @@ impl TeamDaemon {
 
         self.dispatch_queue = retained;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+    use std::path::Path;
+
+    use crate::team::config::BoardConfig;
+    use crate::team::standup::MemberState;
+    use crate::team::test_support::{
+        TestDaemonBuilder, engineer_member, manager_member, write_open_task_file,
+        write_owned_task_file,
+    };
+
+    fn write_task_with_priority(project_root: &Path, id: u32, title: &str, priority: &str) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join(format!("{id:03}-{title}.md")),
+            format!(
+                "---\nid: {id}\ntitle: {title}\nstatus: todo\npriority: {priority}\nclass: standard\n---\n\nTask.\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn write_task_with_deps(project_root: &Path, id: u32, title: &str, depends_on: &[u32]) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let mut content = format!("---\nid: {id}\ntitle: {title}\nstatus: todo\npriority: high\n");
+        if !depends_on.is_empty() {
+            content.push_str("depends_on:\n");
+            for dep in depends_on {
+                content.push_str(&format!("  - {dep}\n"));
+            }
+        }
+        content.push_str("class: standard\n---\n\nTask.\n");
+        std::fs::write(tasks_dir.join(format!("{id:03}-{title}.md")), content).unwrap();
+    }
+
+    // -- idle_engineer_names tests --
+
+    #[test]
+    fn idle_engineers_returns_only_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+                engineer_member("eng-2", Some("mgr"), false),
+                engineer_member("eng-3", Some("mgr"), false),
+            ])
+            .states(HashMap::from([
+                ("eng-1".to_string(), MemberState::Idle),
+                ("eng-2".to_string(), MemberState::Working),
+                ("eng-3".to_string(), MemberState::Idle),
+            ]))
+            .build();
+
+        let idle = daemon.idle_engineer_names();
+        assert_eq!(idle, vec!["eng-1", "eng-3"]);
+    }
+
+    #[test]
+    fn idle_engineers_empty_when_all_working() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+            ])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Working)]))
+            .build();
+
+        assert!(daemon.idle_engineer_names().is_empty());
+    }
+
+    #[test]
+    fn idle_engineers_excludes_managers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+            ])
+            .states(HashMap::from([
+                ("mgr".to_string(), MemberState::Idle),
+                ("eng-1".to_string(), MemberState::Idle),
+            ]))
+            .build();
+
+        let idle = daemon.idle_engineer_names();
+        assert_eq!(idle, vec!["eng-1"]);
+    }
+
+    // -- next_dispatch_task tests --
+
+    #[test]
+    fn next_task_picks_highest_priority() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_priority(tmp.path(), 10, "low-pri", "low");
+        write_task_with_priority(tmp.path(), 11, "critical-pri", "critical");
+        write_task_with_priority(tmp.path(), 12, "medium-pri", "medium");
+
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+
+        let task = daemon
+            .test_next_dispatch_task(&board_dir, &HashSet::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.id, 11, "should pick the critical-priority task");
+    }
+
+    #[test]
+    fn next_task_breaks_ties_by_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_priority(tmp.path(), 20, "second", "high");
+        write_task_with_priority(tmp.path(), 10, "first", "high");
+
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+
+        let task = daemon
+            .test_next_dispatch_task(&board_dir, &HashSet::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.id, 10, "should pick lower id when priority is equal");
+    }
+
+    #[test]
+    fn next_task_skips_claimed_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_owned_task_file(tmp.path(), 10, "claimed-task", "todo", "eng-2");
+        write_open_task_file(tmp.path(), 11, "open-task", "todo");
+
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+
+        let task = daemon
+            .test_next_dispatch_task(&board_dir, &HashSet::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.id, 11, "should skip claimed task");
+    }
+
+    #[test]
+    fn next_task_skips_done_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 10, "done-task", "done");
+        write_open_task_file(tmp.path(), 11, "open-task", "todo");
+
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+
+        let task = daemon
+            .test_next_dispatch_task(&board_dir, &HashSet::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.id, 11);
+    }
+
+    #[test]
+    fn next_task_skips_already_queued() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 10, "queued", "todo");
+        write_open_task_file(tmp.path(), 11, "available", "todo");
+
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+
+        let queued: HashSet<u32> = [10].into();
+        let task = daemon
+            .test_next_dispatch_task(&board_dir, &queued)
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.id, 11, "should skip task already in queue set");
+    }
+
+    #[test]
+    fn next_task_skips_blocked_dependencies() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Task 10 depends on task 9, which is in-progress (not done)
+        write_open_task_file(tmp.path(), 9, "dep-task", "in-progress");
+        write_task_with_deps(tmp.path(), 10, "blocked-task", &[9]);
+        write_open_task_file(tmp.path(), 11, "free-task", "todo");
+
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+
+        let task = daemon
+            .test_next_dispatch_task(&board_dir, &HashSet::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.id, 11, "should skip task with unmet dependency");
+    }
+
+    #[test]
+    fn next_task_allows_met_dependencies() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 9, "dep-done", "done");
+        write_task_with_deps(tmp.path(), 10, "unblocked", &[9]);
+
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+
+        let task = daemon
+            .test_next_dispatch_task(&board_dir, &HashSet::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.id, 10, "should pick task with satisfied dependency");
+    }
+
+    #[test]
+    fn next_task_returns_none_when_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+
+        assert!(
+            daemon
+                .test_next_dispatch_task(&board_dir, &HashSet::new())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn next_task_accepts_backlog_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 10, "backlog-task", "backlog");
+
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+
+        let task = daemon
+            .test_next_dispatch_task(&board_dir, &HashSet::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.id, 10, "backlog status should be dispatchable");
     }
 }
