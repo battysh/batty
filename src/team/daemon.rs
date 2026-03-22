@@ -52,6 +52,8 @@ use dispatch::DispatchQueueEntry;
 
 #[path = "dispatch/mod.rs"]
 mod dispatch;
+#[path = "daemon/error_handling.rs"]
+mod error_handling;
 #[path = "daemon/interventions/mod.rs"]
 mod interventions;
 #[path = "launcher.rs"]
