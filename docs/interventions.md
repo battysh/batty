@@ -37,11 +37,11 @@ Idle → Working (clear timer, reset fired_this_idle, pause schedule)
 
 ### Configuration
 
-| Field | Location | Default | Description |
-|-------|----------|---------|-------------|
-| `timeout_nudges` | `automation` | `true` | Enable/disable idle nudges |
-| `nudge_interval_secs` | per-role `roles[].nudge_interval_secs` | `1800` | Seconds before nudge fires |
-| `intervention_idle_grace_secs` | `automation` | `60` | Minimum idle duration before any intervention |
+| Field                          | Location                               | Default | Description                                   |
+| ------------------------------ | -------------------------------------- | ------- | --------------------------------------------- |
+| `timeout_nudges`               | `automation`                           | `true`  | Enable/disable idle nudges                    |
+| `nudge_interval_secs`          | per-role `roles[].nudge_interval_secs` | `1800`  | Seconds before nudge fires                    |
+| `intervention_idle_grace_secs` | `automation`                           | `60`    | Minimum idle duration before any intervention |
 
 ### Cooldown / Dedup
 
@@ -80,11 +80,11 @@ Member resumes working → idle epoch increments on next idle transition
 
 ### Configuration
 
-| Field | Location | Default | Description |
-|-------|----------|---------|-------------|
-| `triage_interventions` | `automation` | `true` | Enable/disable triage interventions |
-| `intervention_idle_grace_secs` | `automation` | `60` | Grace period before firing |
-| `intervention_cooldown_secs` | `automation` | `120` | Cooldown between fires |
+| Field                          | Location     | Default | Description                         |
+| ------------------------------ | ------------ | ------- | ----------------------------------- |
+| `triage_interventions`         | `automation` | `true`  | Enable/disable triage interventions |
+| `intervention_idle_grace_secs` | `automation` | `60`    | Grace period before firing          |
+| `intervention_cooldown_secs`   | `automation` | `120`   | Cooldown between fires              |
 
 ### Cooldown / Dedup
 
@@ -108,12 +108,14 @@ Detects members who are idle but still own active board tasks (in-progress, todo
 ### Actions
 
 **Initial nudge (to the idle member):**
+
 - Lists all owned active tasks with IDs, statuses, and titles
 - Provides commands to retrieve task context (`kanban-md show`, `sed`)
 - Suggests next actions: assign subtask, delegate, escalate blocker, or move to review/done
 - Records orchestrator action: `recovery: owned-task intervention for <member> covering N active task(s)`
 
 **Escalation (to the member's manager):**
+
 - If the member remains stuck on the same tasks for `escalation_threshold_secs` (default: 3600s / 1 hour), escalates to their `reports_to` parent
 - Sends a structured escalation message to the parent with task details and stuck duration
 - Emits `TeamEvent::task_escalated` for each escalated task
@@ -137,12 +139,12 @@ Task set changes (new signature)
 
 ### Configuration
 
-| Field | Location | Default | Description |
-|-------|----------|---------|-------------|
-| `owned_task_interventions` | `automation` | `true` | Enable/disable owned-task interventions |
-| `escalation_threshold_secs` | `workflow_policy` | `3600` | Seconds before escalating to parent |
-| `intervention_idle_grace_secs` | `automation` | `60` | Grace period before firing |
-| `intervention_cooldown_secs` | `automation` | `120` | Cooldown between fires |
+| Field                          | Location          | Default | Description                             |
+| ------------------------------ | ----------------- | ------- | --------------------------------------- |
+| `owned_task_interventions`     | `automation`      | `true`  | Enable/disable owned-task interventions |
+| `escalation_threshold_secs`    | `workflow_policy` | `3600`  | Seconds before escalating to parent     |
+| `intervention_idle_grace_secs` | `automation`      | `60`    | Grace period before firing              |
+| `intervention_cooldown_secs`   | `automation`      | `120`   | Cooldown between fires                  |
 
 ### Cooldown / Dedup
 
@@ -185,13 +187,13 @@ Signature changes (tasks added/removed/status changed)
 
 ### Configuration
 
-| Field | Location | Default | Description |
-|-------|----------|---------|-------------|
-| `review_interventions` | `automation` | `true` | Enable/disable review interventions |
-| `review_nudge_threshold_secs` | `workflow_policy` | `1800` | Time before review nudge (used by daemon review loop) |
-| `review_timeout_secs` | `workflow_policy` | `7200` | Time before review escalation (used by daemon review loop) |
-| `intervention_idle_grace_secs` | `automation` | `60` | Grace period before firing |
-| `intervention_cooldown_secs` | `automation` | `120` | Cooldown between fires |
+| Field                          | Location          | Default | Description                                                |
+| ------------------------------ | ----------------- | ------- | ---------------------------------------------------------- |
+| `review_interventions`         | `automation`      | `true`  | Enable/disable review interventions                        |
+| `review_nudge_threshold_secs`  | `workflow_policy` | `1800`  | Time before review nudge (used by daemon review loop)      |
+| `review_timeout_secs`          | `workflow_policy` | `7200`  | Time before review escalation (used by daemon review loop) |
+| `intervention_idle_grace_secs` | `automation`      | `60`    | Grace period before firing                                 |
+| `intervention_cooldown_secs`   | `automation`      | `120`   | Cooldown between fires                                     |
 
 ### Cooldown / Dedup
 
@@ -240,11 +242,11 @@ Dispatch state changes (engineer starts working, task assigned)
 
 ### Configuration
 
-| Field | Location | Default | Description |
-|-------|----------|---------|-------------|
-| `manager_dispatch_interventions` | `automation` | `true` | Enable/disable dispatch-gap interventions |
-| `intervention_idle_grace_secs` | `automation` | `60` | Grace period before firing |
-| `intervention_cooldown_secs` | `automation` | `120` | Cooldown between fires |
+| Field                            | Location     | Default | Description                               |
+| -------------------------------- | ------------ | ------- | ----------------------------------------- |
+| `manager_dispatch_interventions` | `automation` | `true`  | Enable/disable dispatch-gap interventions |
+| `intervention_idle_grace_secs`   | `automation` | `60`    | Grace period before firing                |
+| `intervention_cooldown_secs`     | `automation` | `120`   | Cooldown between fires                    |
 
 ### Cooldown / Dedup
 
@@ -288,12 +290,12 @@ Utilization state changes (engineer starts working, tasks assigned)
 
 ### Configuration
 
-| Field | Location | Default | Description |
-|-------|----------|---------|-------------|
-| `architect_utilization_interventions` | `automation` | `true` | Enable/disable utilization interventions |
-| `pipeline_starvation_threshold` | `workflow_policy` | `1` | Minimum pipeline depth (used elsewhere for starvation detection) |
-| `intervention_idle_grace_secs` | `automation` | `60` | Grace period before firing |
-| `intervention_cooldown_secs` | `automation` | `120` | Cooldown between fires |
+| Field                                 | Location          | Default | Description                                                      |
+| ------------------------------------- | ----------------- | ------- | ---------------------------------------------------------------- |
+| `architect_utilization_interventions` | `automation`      | `true`  | Enable/disable utilization interventions                         |
+| `pipeline_starvation_threshold`       | `workflow_policy` | `1`     | Minimum pipeline depth (used elsewhere for starvation detection) |
+| `intervention_idle_grace_secs`        | `automation`      | `60`    | Grace period before firing                                       |
+| `intervention_cooldown_secs`          | `automation`      | `120`   | Cooldown between fires                                           |
 
 ### Cooldown / Dedup
 
@@ -338,11 +340,11 @@ Board state changes (tasks added, completed, unblocked)
 
 ### Configuration
 
-| Field | Location | Default | Description |
-|-------|----------|---------|-------------|
-| `replenishment_threshold` | `automation` | number of engineers | Minimum unblocked todo tasks before intervention fires |
-| `intervention_idle_grace_secs` | `automation` | `60` | Grace period before firing |
-| `intervention_cooldown_secs` | `automation` | `120` | Cooldown between fires |
+| Field                          | Location     | Default             | Description                                            |
+| ------------------------------ | ------------ | ------------------- | ------------------------------------------------------ |
+| `replenishment_threshold`      | `automation` | number of engineers | Minimum unblocked todo tasks before intervention fires |
+| `intervention_idle_grace_secs` | `automation` | `60`                | Grace period before firing                             |
+| `intervention_cooldown_secs`   | `automation` | `120`               | Cooldown between fires                                 |
 
 ### Cooldown / Dedup
 
@@ -356,63 +358,63 @@ All intervention settings live in `team.yaml` under the `automation` and `workfl
 
 ### `automation` section
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `timeout_nudges` | bool | `true` | Enable idle timeout nudges |
-| `triage_interventions` | bool | `true` | Enable triage backlog interventions |
-| `review_interventions` | bool | `true` | Enable review queue interventions |
-| `owned_task_interventions` | bool | `true` | Enable owned-task interventions |
-| `manager_dispatch_interventions` | bool | `true` | Enable dispatch-gap interventions |
-| `architect_utilization_interventions` | bool | `true` | Enable utilization interventions |
-| `replenishment_threshold` | int or null | number of engineers | Unblocked todo threshold for replenishment |
-| `intervention_idle_grace_secs` | int | `60` | Seconds a member must be idle before any intervention fires |
-| `intervention_cooldown_secs` | int | `120` | Seconds between repeated fires of the same intervention key |
+| Field                                 | Type        | Default             | Description                                                 |
+| ------------------------------------- | ----------- | ------------------- | ----------------------------------------------------------- |
+| `timeout_nudges`                      | bool        | `true`              | Enable idle timeout nudges                                  |
+| `triage_interventions`                | bool        | `true`              | Enable triage backlog interventions                         |
+| `review_interventions`                | bool        | `true`              | Enable review queue interventions                           |
+| `owned_task_interventions`            | bool        | `true`              | Enable owned-task interventions                             |
+| `manager_dispatch_interventions`      | bool        | `true`              | Enable dispatch-gap interventions                           |
+| `architect_utilization_interventions` | bool        | `true`              | Enable utilization interventions                            |
+| `replenishment_threshold`             | int or null | number of engineers | Unblocked todo threshold for replenishment                  |
+| `intervention_idle_grace_secs`        | int         | `60`                | Seconds a member must be idle before any intervention fires |
+| `intervention_cooldown_secs`          | int         | `120`               | Seconds between repeated fires of the same intervention key |
 
 ### `workflow_policy` section
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `escalation_threshold_secs` | int | `3600` | Seconds before owned-task escalation to parent |
-| `review_nudge_threshold_secs` | int | `1800` | Seconds before review nudge |
-| `review_timeout_secs` | int | `7200` | Seconds before review escalation |
-| `pipeline_starvation_threshold` | int or null | `1` | Minimum pipeline depth for starvation detection |
+| Field                           | Type        | Default | Description                                     |
+| ------------------------------- | ----------- | ------- | ----------------------------------------------- |
+| `escalation_threshold_secs`     | int         | `3600`  | Seconds before owned-task escalation to parent  |
+| `review_nudge_threshold_secs`   | int         | `1800`  | Seconds before review nudge                     |
+| `review_timeout_secs`           | int         | `7200`  | Seconds before review escalation                |
+| `pipeline_starvation_threshold` | int or null | `1`     | Minimum pipeline depth for starvation detection |
 
 ### Per-role settings
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `nudge_interval_secs` | int | `1800` | Seconds before idle nudge fires for this role |
+| Field                 | Type | Default | Description                                   |
+| --------------------- | ---- | ------- | --------------------------------------------- |
+| `nudge_interval_secs` | int  | `1800`  | Seconds before idle nudge fires for this role |
 
 ## Example Scenarios
 
 ### Scenario 1: Engineer finishes work but doesn't move the task
 
 1. Engineer completes coding and goes idle
-2. After 60s idle grace, daemon detects engineer is idle with an in-progress task
-3. Owned-task intervention fires: "You are idle but still own task #42 (in-progress). Move it forward or report the blocker."
-4. If engineer remains stuck for 3600s on the same task, daemon escalates to their manager
+1. After 60s idle grace, daemon detects engineer is idle with an in-progress task
+1. Owned-task intervention fires: "You are idle but still own task #42 (in-progress). Move it forward or report the blocker."
+1. If engineer remains stuck for 3600s on the same task, daemon escalates to their manager
 
 ### Scenario 2: Manager ignores review queue
 
 1. Engineer moves task #15 to review status
-2. Manager is idle with no other work
-3. After 60s grace, review intervention fires: "You have 1 queued review task: #15 by eng-1"
-4. Provides commands to inspect the worktree and review the changes
+1. Manager is idle with no other work
+1. After 60s grace, review intervention fires: "You have 1 queued review task: #15 by eng-1"
+1. Provides commands to inspect the worktree and review the changes
 
 ### Scenario 3: Pipeline starvation
 
 1. Team has 4 engineers, only 1 is working
-2. 2 idle engineers have active tasks they're not progressing
-3. 1 idle engineer has no assignments but open tasks exist on the board
-4. Daemon detects < 50% utilization and fires architect utilization intervention
-5. Architect receives a breakdown of who is idle, what tasks are stuck, and what's available
+1. 2 idle engineers have active tasks they're not progressing
+1. 1 idle engineer has no assignments but open tasks exist on the board
+1. Daemon detects < 50% utilization and fires architect utilization intervention
+1. Architect receives a breakdown of who is idle, what tasks are stuck, and what's available
 
 ### Scenario 4: Board running dry
 
 1. Only 1 unblocked todo task remains, but 3 engineers are idle and unassigned
-2. Replenishment threshold (defaults to 3, the number of engineers) is not met
-3. Daemon fires board replenishment intervention to the architect
-4. If `replenishment_context.md` exists, its content is included as planning guidance
+1. Replenishment threshold (defaults to 3, the number of engineers) is not met
+1. Daemon fires board replenishment intervention to the architect
+1. If `replenishment_context.md` exists, its content is included as planning guidance
 
 ## Source Code
 
