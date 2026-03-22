@@ -1180,10 +1180,10 @@ pub fn attach_team(project_root: &Path) -> Result<()> {
         format!("batty-{}", team_config.name)
     } else {
         // No local config — find any running batty session
-        let sessions = tmux::list_sessions_with_prefix("batty-");
+        let mut sessions = tmux::list_sessions_with_prefix("batty-");
         match sessions.len() {
             0 => bail!("no team config found and no batty sessions running"),
-            1 => sessions.into_iter().next().unwrap(),
+            1 => sessions.swap_remove(0),
             _ => {
                 let list = sessions.join(", ");
                 bail!(
@@ -3546,5 +3546,33 @@ roles:
         let graph = render_load_graph(&samples, now);
         assert_eq!(graph.len(), LOAD_GRAPH_WIDTH);
         assert!(graph.chars().all(|c| " .:=#@".contains(c)));
+    }
+
+    /// Count unwrap()/expect() calls in production code (before `#[cfg(test)] mod tests`).
+    fn production_unwrap_expect_count(source: &str) -> usize {
+        // Split at the test module boundary, not individual #[cfg(test)] items
+        let prod = if let Some(pos) = source.find("\n#[cfg(test)]\nmod tests") {
+            &source[..pos]
+        } else {
+            source
+        };
+        prod.lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                // Skip lines that are themselves cfg(test)-gated items
+                !trimmed.starts_with("#[cfg(test)]")
+                    && (trimmed.contains(".unwrap(") || trimmed.contains(".expect("))
+            })
+            .count()
+    }
+
+    #[test]
+    fn production_mod_has_no_unwrap_or_expect_calls() {
+        let src = include_str!("mod.rs");
+        assert_eq!(
+            production_unwrap_expect_count(src),
+            0,
+            "production mod.rs should avoid unwrap/expect"
+        );
     }
 }
