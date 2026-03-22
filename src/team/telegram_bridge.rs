@@ -350,6 +350,7 @@ mod tests {
                 subsystem_error_counts: HashMap::new(),
                 auto_merge_overrides: HashMap::new(),
                 recent_dispatches: HashMap::new(),
+                telemetry_db: None,
             };
 
             backdate_idle_grace(&mut daemon, "scientist");
@@ -463,6 +464,7 @@ mod tests {
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
+            telemetry_db: None,
         };
 
         let root = inbox::inboxes_root(tmp.path());
@@ -590,6 +592,7 @@ mod tests {
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
+            telemetry_db: None,
         };
 
         assert_eq!(daemon.automation_sender_for("eng-1"), "lead");
