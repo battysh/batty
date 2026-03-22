@@ -365,6 +365,27 @@ fn main() -> Result<()> {
             println!("Message {id} acknowledged for {member}.");
         }
 
+        Command::Review {
+            task_id,
+            disposition,
+            feedback,
+            reviewer,
+        } => {
+            let board_dir = team::team_config_dir(&root).join("board");
+            let disposition_str = match disposition {
+                cli::ReviewAction::Approve => "approve",
+                cli::ReviewAction::RequestChanges => "request-changes",
+                cli::ReviewAction::Reject => "reject",
+            };
+            team::task_cmd::cmd_review_structured(
+                &board_dir,
+                task_id,
+                disposition_str,
+                feedback.as_deref(),
+                &reviewer,
+            )?;
+        }
+
         Command::Merge { engineer } => {
             team::merge_worktree(&root, &engineer)?;
         }
