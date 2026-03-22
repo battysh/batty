@@ -29,7 +29,15 @@ pub fn generate_standup_for(
     states: &HashMap<String, MemberState>,
     output_lines: usize,
 ) -> String {
-    generate_board_aware_standup_for(recipient, members, watchers, states, output_lines, None)
+    generate_board_aware_standup_for(
+        recipient,
+        members,
+        watchers,
+        states,
+        output_lines,
+        None,
+        &HashMap::new(),
+    )
 }
 
 /// Generate a standup report for a specific recipient, optionally enriching the
@@ -41,6 +49,7 @@ pub fn generate_board_aware_standup_for(
     states: &HashMap<String, MemberState>,
     output_lines: usize,
     board_dir: Option<&Path>,
+    backend_health: &HashMap<String, crate::agent::BackendHealth>,
 ) -> String {
     let board_context = load_board_context(board_dir, members);
     let mut report = String::new();
@@ -66,6 +75,15 @@ pub fn generate_board_aware_standup_for(
             };
 
             report.push_str(&format!("\n[{}] status: {}\n", member.name, state_str));
+
+            if let Some(health) = backend_health.get(&member.name) {
+                if !health.is_healthy() {
+                    report.push_str(&format!(
+                        "  backend: {} (agent may be unable to work)\n",
+                        health.as_str()
+                    ));
+                }
+            }
 
             if let Some(board_context) = &board_context {
                 let assigned_ids = board_context.assigned_task_ids.get(&member.name);
@@ -183,6 +201,7 @@ pub(crate) struct StandupGenerationContext<'a> {
     pub(crate) telegram_bot: Option<&'a TelegramBot>,
     pub(crate) paused_standups: &'a HashSet<String>,
     pub(crate) last_standup: &'a mut HashMap<String, Instant>,
+    pub(crate) backend_health: &'a HashMap<String, crate::agent::BackendHealth>,
 }
 
 pub(crate) fn maybe_generate_standup(context: StandupGenerationContext<'_>) -> Result<Vec<String>> {
@@ -196,6 +215,7 @@ pub(crate) fn maybe_generate_standup(context: StandupGenerationContext<'_>) -> R
         telegram_bot,
         paused_standups,
         last_standup,
+        backend_health,
     } = context;
     if !team_config.automation.standups {
         return Ok(Vec::new());
@@ -254,6 +274,7 @@ pub(crate) fn maybe_generate_standup(context: StandupGenerationContext<'_>) -> R
             states,
             team_config.standup.output_lines as usize,
             Some(&board_dir),
+            backend_health,
         );
 
         match recipient.role_type {
@@ -700,6 +721,7 @@ mod tests {
             &states,
             5,
             Some(&board_dir),
+            &HashMap::new(),
         );
 
         assert!(report.contains("assigned tasks: #1"));
@@ -731,6 +753,7 @@ mod tests {
             &states,
             5,
             Some(&missing_board_dir),
+            &HashMap::new(),
         );
 
         assert!(report.contains("[eng-1] status: idle"));
@@ -764,6 +787,7 @@ mod tests {
             &states,
             5,
             Some(&board_dir),
+            &HashMap::new(),
         );
 
         assert!(report.starts_with("Review policy context:\nApprove only after tests pass."));
@@ -792,6 +816,7 @@ mod tests {
             &states,
             5,
             Some(&board_dir),
+            &HashMap::new(),
         );
         std::fs::write(&policy_path, "Updated policy").unwrap();
         let second = generate_board_aware_standup_for(
@@ -801,6 +826,7 @@ mod tests {
             &states,
             5,
             Some(&board_dir),
+            &HashMap::new(),
         );
 
         assert!(first.contains("Initial policy"));
@@ -940,6 +966,7 @@ mod tests {
             telegram_bot: None,
             paused_standups: &HashSet::new(),
             last_standup: &mut last_standup,
+            backend_health: &HashMap::new(),
         })
         .unwrap();
 
@@ -1033,6 +1060,7 @@ mod tests {
             telegram_bot: None,
             paused_standups: &HashSet::new(),
             last_standup: &mut last_standup,
+            backend_health: &HashMap::new(),
         })
         .unwrap();
 
