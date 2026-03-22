@@ -2,6 +2,84 @@
 
 All notable changes to Batty are documented here.
 
+## 0.4.0 — 2026-03-22
+
+Major release introducing agent backend abstraction, backend health monitoring,
+session resilience features, telemetry infrastructure, and significant internal
+decomposition. 39 commits across 20+ tasks since v0.3.2.
+
+### Agent Backend Abstraction
+
+- **AgentAdapter trait** (#230) — unified `launch()`, `session()`, and `resume()`
+  behind a single trait, replacing scattered per-backend dispatch logic.
+- **Mixed-backend teams** (#231) — team-level `agent_default` config allows
+  heterogeneous teams where individual roles can override the team default backend.
+- **Backend health monitoring** (#232) — `BackendHealth` enum and `health_check()`
+  trait method detect backend failures; health status surfaces in `batty status`,
+  daemon polling, and periodic standups.
+
+### Session Resilience
+
+- **Agent stall detection and auto-restart** (#235) — watcher detects
+  context-exhausted and stalled agents, triggers automatic restart with backoff.
+- **Agent readiness gate** (#233) — prevents message injection into panes that
+  haven't finished initializing, eliminating dropped-message failures on startup.
+- **Progress checkpoint** (#239) — writes a context file before stall/context
+  restart so the restarted agent can resume with prior task context.
+- **Daemon restart budget** (#214) — caps total daemon restarts with a rolling
+  window, adds exponential backoff, and recovers from pane death gracefully.
+- **Commit-before-reset** (#216) — replaces stash-based worktree cleanup with
+  auto-commit so engineer work is never silently lost during resets.
+
+### Telemetry
+
+- **SQLite telemetry database** (#220) — persistent storage for agent, task, and
+  event metrics with dual-write from the daemon event emitter.
+- **`batty telemetry` CLI** — `summary`, `agents`, `tasks`, `events`, and
+  `reviews` subcommands surface pipeline metrics from the telemetry DB.
+- **DB counter wiring** (#238) — six missing telemetry counters connected to the
+  database layer.
+
+### Review Automation
+
+- **Per-priority review timeout overrides** (#218) — configurable timeout
+  thresholds per priority level, with YAML parsing and daemon enforcement.
+- **Merge confidence scoring** (#221) — risk-based auto-merge gating evaluates
+  diff size, module count, sensitive files, and unsafe blocks.
+- **Review metrics in retrospectives** (#224) — review stall duration and per-task
+  rework counts included in generated retrospective reports.
+
+### Board Tooling
+
+- **Dependency graph** (#236) — `batty board deps` command visualizes task
+  dependency relationships.
+
+### Module Decomposition
+
+- **dispatch.rs decomposition** (#234) — split monolithic dispatch module into
+  focused submodules under `src/team/dispatch/`.
+- **daemon.rs decomposition** (#237) — extracted subsystems from the daemon
+  polling loop for maintainability.
+
+### Error Resilience
+
+- **Unwrap cleanup** (#225) — replaced panicking `unwrap()`/`expect()` calls in
+  daemon.rs and task_loop.rs with proper `Result` propagation.
+- **Dead code audit** (#229) — removed unused code, achieving zero clippy
+  warnings across the codebase.
+
+### Workflow Improvements
+
+- **Assignment dedup window** (#213) — prevents duplicate task dispatches within
+  a configurable time window.
+- **Completion event tracking** (#215) — `task_id` added to `task_completed`
+  events and `reason` field added to `task_escalated` events for traceability.
+
+### Documentation
+
+- **README and docs refresh** (#228) — updated README, getting-started guide, CLI
+  reference, and config reference for all post-v0.3.0 features.
+
 ## 0.3.2 — 2026-03-22
 
 Scheduled tasks, cron recycling, nudge CLI, and intervention module decomposition.
