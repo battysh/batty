@@ -679,19 +679,19 @@ mod tests {
 
     #[test]
     fn migration_file_detection() {
-        assert!(is_migration_file("db/migrate/001_add_users.sql"));
-        assert!(is_migration_file("src/migrations/v2.rs"));
-        assert!(is_migration_file("schema.sql"));
-        assert!(!is_migration_file("src/team/mod.rs"));
+        assert!(is_migration_file(&"db/migrate/001_add_users.sql".to_string()));
+        assert!(is_migration_file(&"src/migrations/v2.rs".to_string()));
+        assert!(is_migration_file(&"schema.sql".to_string()));
+        assert!(!is_migration_file(&"src/team/mod.rs".to_string()));
     }
 
     #[test]
     fn config_file_detection() {
-        assert!(is_config_file("team.yaml"));
-        assert!(is_config_file("Cargo.toml"));
-        assert!(is_config_file("package.json"));
-        assert!(is_config_file(".env"));
-        assert!(!is_config_file("src/team/config.rs"));
+        assert!(is_config_file(&"team.yaml".to_string()));
+        assert!(is_config_file(&"Cargo.toml".to_string()));
+        assert!(is_config_file(&"package.json".to_string()));
+        assert!(is_config_file(&".env".to_string()));
+        assert!(!is_config_file(&"src/team/config.rs".to_string()));
     }
 
     #[test]
