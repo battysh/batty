@@ -392,6 +392,7 @@ pub enum NudgeIntervention {
 
 impl NudgeIntervention {
     /// Return the marker file suffix for this intervention.
+    #[allow(dead_code)]
     pub fn marker_name(self) -> &'static str {
         match self {
             Self::Replenish => "replenish",
@@ -404,6 +405,7 @@ impl NudgeIntervention {
     }
 
     /// All known interventions.
+    #[allow(dead_code)]
     pub const ALL: [NudgeIntervention; 6] = [
         Self::Replenish,
         Self::Triage,
