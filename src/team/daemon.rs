@@ -1271,8 +1271,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             let age = now.saturating_sub(first_seen);
 
             // Resolve per-priority thresholds (falls back to global defaults)
-            let nudge_threshold =
-                super::policy::effective_nudge_threshold(&policy, &task.priority);
+            let nudge_threshold = super::policy::effective_nudge_threshold(&policy, &task.priority);
             let timeout_threshold =
                 super::policy::effective_escalation_threshold(&policy, &task.priority);
 
@@ -6265,9 +6264,7 @@ exit 1
 
     // --- Per-priority review timeout override tests ---
 
-    fn stale_review_daemon_with_overrides(
-        tmp: &tempfile::TempDir,
-    ) -> TeamDaemon {
+    fn stale_review_daemon_with_overrides(tmp: &tempfile::TempDir) -> TeamDaemon {
         use crate::team::config::ReviewTimeoutOverride;
         let mut overrides = std::collections::HashMap::new();
         overrides.insert(
