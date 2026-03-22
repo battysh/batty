@@ -18,9 +18,9 @@ use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use super::artifact::append_test_timing_record;
-use super::auto_merge::{self, AutoMergeDecision};
 #[cfg(test)]
 use super::artifact::read_test_timing_log;
+use super::auto_merge::{self, AutoMergeDecision};
 use super::daemon::TeamDaemon;
 use super::task_loop::{
     branch_is_merged_into, checkout_worktree_branch_from_main, current_worktree_branch,
@@ -133,7 +133,10 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
 
         // If override explicitly disables auto-merge, route to manual review
         if auto_merge_override == Some(false) {
-            info!(engineer, task_id, "auto-merge disabled by per-task override, routing to manual review");
+            info!(
+                engineer,
+                task_id, "auto-merge disabled by per-task override, routing to manual review"
+            );
             if let Some(ref manager_name) = manager_name {
                 let msg = format!(
                     "[{engineer}] Task #{task_id} passed tests. Auto-merge disabled by override — awaiting manual review.\nTitle: {task_title}"
@@ -177,7 +180,10 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                             );
                             // Fall through to normal merge path below
                         }
-                        AutoMergeDecision::ManualReview { confidence, reasons } => {
+                        AutoMergeDecision::ManualReview {
+                            confidence,
+                            reasons,
+                        } => {
                             info!(
                                 engineer,
                                 task_id,
@@ -1760,6 +1766,222 @@ mod tests {
             production_unwrap_expect_count(src),
             0,
             "production merge.rs should avoid unwrap/expect"
+        );
+    }
+
+    // --- Auto-merge integration tests ---
+
+    use crate::team::config::AutoMergePolicy;
+    use crate::team::events::read_events;
+
+    /// Helper: set up a repo + worktree with a small clean diff (one .txt file).
+    fn setup_auto_merge_repo(
+        engineer: &str,
+    ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-auto-merge-test");
+        write_task_file(&repo, 42, "auto-merge-task");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join(engineer);
+        setup_engineer_worktree(&repo, &worktree_dir, engineer, &team_config_dir).unwrap();
+
+        // Create a small change in the worktree
+        std::fs::write(worktree_dir.join("note.txt"), "done\n").unwrap();
+        git_ok(&worktree_dir, &["add", "note.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "add note"]);
+
+        (tmp, repo, worktree_dir)
+    }
+
+    fn auto_merge_daemon(repo: &Path, policy: AutoMergePolicy) -> super::super::daemon::TeamDaemon {
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ];
+        let mut daemon = make_test_daemon(repo, members);
+        daemon.config.team_config.workflow_policy.auto_merge = policy;
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+        daemon
+    }
+
+    #[test]
+    fn completion_auto_merges_small_clean_diff() {
+        let (_tmp, repo, _worktree_dir) = setup_auto_merge_repo("eng-1");
+
+        let policy = AutoMergePolicy {
+            enabled: true,
+            ..AutoMergePolicy::default()
+        };
+        let mut daemon = auto_merge_daemon(&repo, policy);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        // Task should be completed and cleared
+        assert_eq!(daemon.active_task_id("eng-1"), None);
+        assert_eq!(
+            daemon.member_state_for_test("eng-1"),
+            Some(MemberState::Idle)
+        );
+
+        // note.txt should be merged into main
+        assert_eq!(
+            std::fs::read_to_string(repo.join("note.txt")).unwrap(),
+            "done\n"
+        );
+
+        // Verify auto-merge event was emitted
+        let events_path = repo.join(".batty").join("team_config").join("events.jsonl");
+        let events = read_events(&events_path).unwrap();
+        let auto_merge_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.event == "task_auto_merged")
+            .collect();
+        assert_eq!(auto_merge_events.len(), 1);
+        assert_eq!(auto_merge_events[0].role.as_deref(), Some("eng-1"));
+        assert_eq!(auto_merge_events[0].task.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn completion_routes_large_diff_to_review() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-auto-merge-test");
+        write_task_file(&repo, 42, "large-diff-task");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        // Create a large diff: many files across multiple modules
+        for i in 0..10 {
+            let dir = worktree_dir.join(format!("module_{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let content: String = (0..50).map(|j| format!("line {j}\n")).collect();
+            std::fs::write(dir.join("file.rs"), content).unwrap();
+        }
+        git_ok(&worktree_dir, &["add", "."]);
+        git_ok(&worktree_dir, &["commit", "-m", "large change"]);
+
+        let policy = AutoMergePolicy {
+            enabled: true,
+            max_files_changed: 5,
+            max_diff_lines: 200,
+            ..AutoMergePolicy::default()
+        };
+        let mut daemon = auto_merge_daemon(&repo, policy);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        // Task should NOT be merged — routed to manual review.
+        // The active task stays set (we only clear on merge success or rejection).
+        // Manager should have received a review message.
+        let manager_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
+        assert!(
+            manager_messages
+                .iter()
+                .any(|m| m.body.contains("manual review")),
+            "manager should receive manual review message: {:?}",
+            manager_messages
+        );
+    }
+
+    #[test]
+    fn completion_respects_disabled_policy() {
+        let (_tmp, repo, _worktree_dir) = setup_auto_merge_repo("eng-1");
+
+        // Default policy has enabled: false
+        let policy = AutoMergePolicy::default();
+        assert!(!policy.enabled);
+
+        let mut daemon = auto_merge_daemon(&repo, policy);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        // With auto-merge disabled, should fall through to normal merge (no review gate)
+        assert_eq!(daemon.active_task_id("eng-1"), None);
+        assert_eq!(
+            daemon.member_state_for_test("eng-1"),
+            Some(MemberState::Idle)
+        );
+        // note.txt merged into main
+        assert_eq!(
+            std::fs::read_to_string(repo.join("note.txt")).unwrap(),
+            "done\n"
+        );
+
+        // No auto-merge event should be emitted
+        let events_path = repo.join(".batty").join("team_config").join("events.jsonl");
+        let events = read_events(&events_path).unwrap();
+        assert!(
+            !events.iter().any(|e| e.event == "task_auto_merged"),
+            "no auto-merge event should be emitted when policy is disabled"
+        );
+    }
+
+    #[test]
+    fn completion_respects_per_task_override() {
+        let (_tmp, repo, _worktree_dir) = setup_auto_merge_repo("eng-1");
+
+        let policy = AutoMergePolicy {
+            enabled: true,
+            ..AutoMergePolicy::default()
+        };
+        let mut daemon = auto_merge_daemon(&repo, policy);
+        daemon.set_auto_merge_override(42, false); // Force manual review
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        // Manager should have received a message about override
+        let manager_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
+        assert!(
+            manager_messages
+                .iter()
+                .any(|m| m.body.contains("Auto-merge disabled by override")),
+            "manager should receive override message: {:?}",
+            manager_messages
+        );
+    }
+
+    #[test]
+    fn auto_merge_emits_event() {
+        let (_tmp, repo, _worktree_dir) = setup_auto_merge_repo("eng-1");
+
+        let policy = AutoMergePolicy {
+            enabled: true,
+            ..AutoMergePolicy::default()
+        };
+        let mut daemon = auto_merge_daemon(&repo, policy);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        let events_path = repo.join(".batty").join("team_config").join("events.jsonl");
+        let events = read_events(&events_path).unwrap();
+        let auto_event = events
+            .iter()
+            .find(|e| e.event == "task_auto_merged")
+            .expect("should have task_auto_merged event");
+
+        assert_eq!(auto_event.role.as_deref(), Some("eng-1"));
+        assert_eq!(auto_event.task.as_deref(), Some("42"));
+        // Confidence should be stored in load field
+        assert!(auto_event.load.is_some());
+        let confidence = auto_event.load.unwrap();
+        assert!(
+            confidence > 0.0 && confidence <= 1.0,
+            "confidence should be between 0 and 1, got {}",
+            confidence
+        );
+        // Reason should contain files and lines info
+        assert!(
+            auto_event
+                .reason
+                .as_ref()
+                .map_or(false, |r| r.contains("files=") && r.contains("lines=")),
+            "reason should contain diff stats: {:?}",
+            auto_event.reason
         );
     }
 }
