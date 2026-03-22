@@ -1044,7 +1044,12 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
     }
 
     pub(super) fn auto_merge_override(&self, task_id: u32) -> Option<bool> {
-        self.auto_merge_overrides.get(&task_id).copied()
+        // In-memory overrides take priority, then check disk
+        if let Some(&value) = self.auto_merge_overrides.get(&task_id) {
+            return Some(value);
+        }
+        let disk_overrides = super::auto_merge::load_overrides(&self.config.project_root);
+        disk_overrides.get(&task_id).copied()
     }
 
     pub(super) fn worktree_dir(&self, engineer: &str) -> PathBuf {

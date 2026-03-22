@@ -420,7 +420,7 @@ fn main() -> Result<()> {
                         AutoMergeAction::Enable => true,
                         AutoMergeAction::Disable => false,
                     };
-                    team::task_cmd::cmd_auto_merge(task_id, enabled);
+                    team::task_cmd::cmd_auto_merge(task_id, enabled, &root)?;
                 }
                 TaskCommand::Schedule {
                     task_id,
