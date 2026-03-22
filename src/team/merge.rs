@@ -1659,4 +1659,29 @@ mod tests {
             engineer_base_branch_name("eng-detach")
         );
     }
+
+    fn production_unwrap_expect_count(source: &str) -> usize {
+        let prod = if let Some(pos) = source.find("\n#[cfg(test)]\nmod tests") {
+            &source[..pos]
+        } else {
+            source
+        };
+        prod.lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                !trimmed.starts_with("#[cfg(test)]")
+                    && (trimmed.contains(".unwrap(") || trimmed.contains(".expect("))
+            })
+            .count()
+    }
+
+    #[test]
+    fn production_merge_has_no_unwrap_or_expect_calls() {
+        let src = include_str!("merge.rs");
+        assert_eq!(
+            production_unwrap_expect_count(src),
+            0,
+            "production merge.rs should avoid unwrap/expect"
+        );
+    }
 }

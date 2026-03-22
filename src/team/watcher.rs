@@ -2199,4 +2199,29 @@ mod tests {
             Some("1e94dc68-6004-402a-9a7b-1bfca674806e")
         );
     }
+
+    fn production_unwrap_expect_count(source: &str) -> usize {
+        let prod = if let Some(pos) = source.find("\n#[cfg(test)]\nmod tests") {
+            &source[..pos]
+        } else {
+            source
+        };
+        prod.lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                !trimmed.starts_with("#[cfg(test)]")
+                    && (trimmed.contains(".unwrap(") || trimmed.contains(".expect("))
+            })
+            .count()
+    }
+
+    #[test]
+    fn production_watcher_has_no_unwrap_or_expect_calls() {
+        let src = include_str!("watcher.rs");
+        assert_eq!(
+            production_unwrap_expect_count(src),
+            0,
+            "production watcher.rs should avoid unwrap/expect"
+        );
+    }
 }
