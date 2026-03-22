@@ -443,6 +443,9 @@ impl TeamDaemon {
             self.run_loop_step("maybe_auto_unblock_blocked_tasks", |daemon| {
                 daemon.maybe_auto_unblock_blocked_tasks()
             });
+            self.run_loop_step("reconcile_active_tasks", |daemon| {
+                daemon.reconcile_active_tasks()
+            });
             self.run_loop_step("maybe_auto_dispatch", |daemon| daemon.maybe_auto_dispatch());
             self.run_loop_step("maybe_intervene_manager_dispatch_gap", |daemon| {
                 daemon.maybe_intervene_manager_dispatch_gap()
@@ -1113,6 +1116,40 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
     pub(super) fn clear_active_task(&mut self, engineer: &str) {
         self.active_tasks.remove(engineer);
         self.retry_counts.remove(engineer);
+    }
+
+    /// Remove active_task entries for tasks that are done, archived, or no longer on the board.
+    fn reconcile_active_tasks(&mut self) -> Result<()> {
+        if self.active_tasks.is_empty() {
+            return Ok(());
+        }
+        let tasks_dir = self.board_dir().join("tasks");
+        let board_tasks = if tasks_dir.exists() {
+            crate::task::load_tasks_from_dir(&tasks_dir)?
+        } else {
+            Vec::new()
+        };
+        let stale: Vec<(String, u32)> = self
+            .active_tasks
+            .iter()
+            .filter(|(_engineer, task_id)| {
+                let task_id = **task_id;
+                match board_tasks.iter().find(|t| t.id == task_id) {
+                    Some(task) => task.status == "done" || task.status == "archived",
+                    None => true, // task no longer exists
+                }
+            })
+            .map(|(engineer, task_id)| (engineer.clone(), *task_id))
+            .collect();
+        for (engineer, task_id) in stale {
+            info!(
+                engineer = %engineer,
+                task_id,
+                "Reconciled stale active_task: {engineer} was tracking done task #{task_id}"
+            );
+            self.clear_active_task(&engineer);
+        }
+        Ok(())
     }
 
     pub(super) fn notify_reports_to(&mut self, from_role: &str, msg: &str) -> Result<()> {
@@ -5738,6 +5775,60 @@ exit 1
         let content =
             fs::read_to_string(tmp.path().join(".batty").join("orchestrator.log")).unwrap();
         assert!(content.contains("resume: architect=no (resume disabled)"));
+    }
+
+    #[test]
+    fn reconcile_clears_done_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+        write_owned_task_file(tmp.path(), 42, "finished-work", "done", "eng-1");
+        let mut daemon = make_test_daemon(
+            tmp.path(),
+            vec![engineer_member("eng-1", Some("manager"), false)],
+        );
+        daemon.active_tasks.insert("eng-1".to_string(), 42);
+
+        daemon.reconcile_active_tasks().unwrap();
+
+        assert_eq!(daemon.active_task_id("eng-1"), None);
+    }
+
+    #[test]
+    fn reconcile_keeps_in_progress_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+        write_owned_task_file(tmp.path(), 42, "active-work", "in-progress", "eng-1");
+        let mut daemon = make_test_daemon(
+            tmp.path(),
+            vec![engineer_member("eng-1", Some("manager"), false)],
+        );
+        daemon.active_tasks.insert("eng-1".to_string(), 42);
+
+        daemon.reconcile_active_tasks().unwrap();
+
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+    }
+
+    #[test]
+    fn reconcile_clears_missing_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        // No task file for ID 99 — it doesn't exist on the board
+        let mut daemon = make_test_daemon(
+            tmp.path(),
+            vec![engineer_member("eng-1", Some("manager"), false)],
+        );
+        daemon.active_tasks.insert("eng-1".to_string(), 99);
+
+        daemon.reconcile_active_tasks().unwrap();
+
+        assert_eq!(daemon.active_task_id("eng-1"), None);
     }
 
     #[test]
