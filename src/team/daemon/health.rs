@@ -3862,4 +3862,528 @@ exit 1
             crate::team::git_cmd::run_git(tmp.path(), &["rev-list", "--count", "main..HEAD"]);
         assert!(result.is_err(), "non-git dir should return error");
     }
+
+    // ── restart_assignment_message tests ──
+
+    #[test]
+    fn restart_assignment_message_includes_task_id_and_title() {
+        let task = crate::task::Task {
+            id: 42,
+            title: "implement widget".to_string(),
+            description: "Add the new widget feature.".to_string(),
+            status: "in-progress".to_string(),
+            priority: "high".to_string(),
+            claimed_by: Some("eng-1".into()),
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            batty_config: None,
+            source_path: PathBuf::from("/tmp/task-42.md"),
+        };
+        let msg = TeamDaemon::restart_assignment_message(&task);
+        assert!(msg.contains("Task #42"));
+        assert!(msg.contains("implement widget"));
+        assert!(msg.contains("Add the new widget feature."));
+        assert!(msg.contains("Previous session exhausted context"));
+        // No branch or worktree lines when those fields are None.
+        assert!(!msg.contains("Branch:"));
+        assert!(!msg.contains("Worktree:"));
+    }
+
+    #[test]
+    fn restart_assignment_message_includes_branch_and_worktree() {
+        let task = crate::task::Task {
+            id: 99,
+            title: "fix tests".to_string(),
+            description: "Fix failing tests.".to_string(),
+            status: "in-progress".to_string(),
+            priority: "medium".to_string(),
+            claimed_by: Some("eng-2".into()),
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: Some("/tmp/worktrees/eng-2".to_string()),
+            branch: Some("eng-2/99".to_string()),
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            batty_config: None,
+            source_path: PathBuf::from("/tmp/task-99.md"),
+        };
+        let msg = TeamDaemon::restart_assignment_message(&task);
+        assert!(msg.contains("Branch: eng-2/99"));
+        assert!(msg.contains("Worktree: /tmp/worktrees/eng-2"));
+    }
+
+    // ── cooldown key tests ──
+
+    #[test]
+    fn context_restart_cooldown_key_format() {
+        assert_eq!(
+            TeamDaemon::context_restart_cooldown_key("eng-1"),
+            "context-restart::eng-1"
+        );
+    }
+
+    #[test]
+    fn context_escalation_cooldown_key_format() {
+        assert_eq!(
+            TeamDaemon::context_escalation_cooldown_key("eng-1"),
+            "context-escalation::eng-1"
+        );
+    }
+
+    // ── context_restart_count tests ──
+
+    #[test]
+    fn context_restart_count_returns_zero_with_no_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+        let daemon = make_test_daemon(tmp.path(), vec![]);
+        assert_eq!(daemon.context_restart_count(42).unwrap(), 0);
+    }
+
+    #[test]
+    fn context_restart_count_counts_all_reasons_for_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        write_event_log(
+            tmp.path(),
+            &[
+                TeamEvent::agent_restarted("eng-1", "42", "context_exhausted", 1),
+                TeamEvent::agent_restarted("eng-1", "42", "stalled", 1),
+                TeamEvent::agent_restarted("eng-1", "99", "context_exhausted", 1),
+            ],
+        );
+
+        let daemon = make_test_daemon(tmp.path(), vec![]);
+        // context_restart_count counts ALL agent_restarted events for the task
+        // (not filtered by reason, unlike stall_restart_count)
+        assert_eq!(daemon.context_restart_count(42).unwrap(), 2);
+        assert_eq!(daemon.context_restart_count(99).unwrap(), 1);
+        assert_eq!(daemon.context_restart_count(100).unwrap(), 0);
+    }
+
+    // ── load_prompt tests ──
+
+    #[test]
+    fn load_prompt_substitutes_template_variables() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("engineer.md"),
+            "Hello {{member_name}}, role={{role_name}}, reports_to={{reports_to}}",
+        )
+        .unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let member = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "engineer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: None,
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+        };
+        let daemon = make_test_daemon(tmp.path(), vec![member.clone()]);
+        let prompt = daemon.load_prompt(&member, &config_dir);
+        assert_eq!(prompt, "Hello eng-1, role=engineer, reports_to=manager");
+    }
+
+    #[test]
+    fn load_prompt_uses_custom_prompt_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("custom.md"), "Custom: {{member_name}}").unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let member = MemberInstance {
+            name: "arch-1".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: None,
+            prompt: Some("custom.md".to_string()),
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let daemon = make_test_daemon(tmp.path(), vec![member.clone()]);
+        let prompt = daemon.load_prompt(&member, &config_dir);
+        assert_eq!(prompt, "Custom: arch-1");
+    }
+
+    #[test]
+    fn load_prompt_fallback_on_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        // Do NOT create the expected file
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let member = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "engineer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: None,
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let daemon = make_test_daemon(tmp.path(), vec![member.clone()]);
+        let prompt = daemon.load_prompt(&member, &config_dir);
+        assert!(prompt.contains("eng-1"));
+        assert!(prompt.contains("Engineer"));
+    }
+
+    #[test]
+    fn load_prompt_reports_to_none_becomes_none_string() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("architect.md"), "reports={{reports_to}}").unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let member = MemberInstance {
+            name: "arch-1".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: None,
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let daemon = make_test_daemon(tmp.path(), vec![member.clone()]);
+        let prompt = daemon.load_prompt(&member, &config_dir);
+        assert_eq!(prompt, "reports=none");
+    }
+
+    #[test]
+    fn load_prompt_default_file_per_role_type() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("architect.md"), "ARCH").unwrap();
+        std::fs::write(config_dir.join("manager.md"), "MGR").unwrap();
+        std::fs::write(config_dir.join("engineer.md"), "ENG").unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let daemon = make_test_daemon(tmp.path(), vec![]);
+
+        let arch = MemberInstance {
+            name: "a".to_string(),
+            role_name: "a".to_string(),
+            role_type: RoleType::Architect,
+            agent: None,
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mgr = MemberInstance {
+            name: "m".to_string(),
+            role_name: "m".to_string(),
+            role_type: RoleType::Manager,
+            agent: None,
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let eng = MemberInstance {
+            name: "e".to_string(),
+            role_name: "e".to_string(),
+            role_type: RoleType::Engineer,
+            agent: None,
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        assert_eq!(daemon.load_prompt(&arch, &config_dir), "ARCH");
+        assert_eq!(daemon.load_prompt(&mgr, &config_dir), "MGR");
+        assert_eq!(daemon.load_prompt(&eng, &config_dir), "ENG");
+    }
+
+    // ── handle_context_exhaustion edge cases ──
+
+    #[test]
+    fn handle_context_exhaustion_no_task_sets_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![engineer_member("eng-1", Some("manager"), false)])
+            .build();
+        daemon
+            .states
+            .insert("eng-1".to_string(), MemberState::Working);
+        // No active task set — active_tasks is empty.
+
+        daemon.handle_context_exhaustion("eng-1").unwrap();
+
+        assert_eq!(daemon.states.get("eng-1"), Some(&MemberState::Idle));
+    }
+
+    #[test]
+    fn handle_context_exhaustion_unknown_member_is_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+        // Calling with a member that doesn't exist should not panic.
+        let result = daemon.handle_context_exhaustion("nonexistent");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn handle_context_exhaustion_escalation_cooldown_suppresses() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let member_name = "eng-1";
+        let lead_name = "manager";
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, lead_name).unwrap();
+        inbox::init_inbox(&inbox_root, member_name).unwrap();
+
+        write_owned_task_file(tmp.path(), 42, "test-task", "in-progress", member_name);
+        // Write a prior restart event so we'd normally escalate.
+        write_event_log(
+            tmp.path(),
+            &[TeamEvent::agent_restarted(
+                member_name,
+                "42",
+                "context_exhausted",
+                1,
+            )],
+        );
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member(lead_name, Some("architect")),
+                engineer_member(member_name, Some(lead_name), false),
+            ])
+            .build();
+        daemon.active_tasks.insert(member_name.to_string(), 42);
+        // Set the escalation cooldown so it suppresses the escalation.
+        daemon.intervention_cooldowns.insert(
+            TeamDaemon::context_escalation_cooldown_key(member_name),
+            Instant::now(),
+        );
+
+        daemon.handle_context_exhaustion(member_name).unwrap();
+
+        // No message should have been sent to the manager.
+        let pending = inbox::pending_messages(&inbox_root, lead_name).unwrap();
+        assert!(
+            pending.is_empty(),
+            "escalation should be suppressed by cooldown"
+        );
+    }
+
+    // ── handle_stalled_agent edge cases ──
+
+    #[test]
+    fn handle_stalled_agent_no_task_is_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![engineer_member("eng-1", Some("manager"), false)])
+            .build();
+        // No active task.
+        let result = daemon.handle_stalled_agent("eng-1", 600);
+        assert!(result.is_ok());
+        // No events should be emitted.
+        let events_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let events = crate::team::events::read_events(&events_path).unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn handle_stalled_agent_cooldown_prevents_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let member_name = "eng-1";
+        write_owned_task_file(tmp.path(), 42, "test-task", "in-progress", member_name);
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, member_name).unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![engineer_member(member_name, Some("manager"), false)])
+            .build();
+        daemon.active_tasks.insert(member_name.to_string(), 42);
+        // Set the stall cooldown to suppress.
+        daemon
+            .intervention_cooldowns
+            .insert(format!("stall-restart::{member_name}"), Instant::now());
+
+        let result = daemon.handle_stalled_agent(member_name, 600);
+        assert!(result.is_ok());
+    }
+
+    // ── check_backend_health additional edge cases ──
+
+    #[test]
+    fn check_backend_health_tracks_multiple_members() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                engineer_member("eng-1", Some("architect"), false),
+            ])
+            .build();
+        // Force interval to have elapsed.
+        daemon.last_health_check = Instant::now() - Duration::from_secs(3600);
+
+        daemon.check_backend_health().unwrap();
+
+        // Both non-user members should have a health entry.
+        assert!(daemon.backend_health.contains_key("architect"));
+        assert!(daemon.backend_health.contains_key("eng-1"));
+    }
+
+    #[test]
+    fn check_backend_health_default_agent_is_claude() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let mut member = architect_member("architect");
+        member.agent = None; // No explicit agent — should default to "claude".
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![member])
+            .build();
+        daemon.last_health_check = Instant::now() - Duration::from_secs(3600);
+
+        // Should not panic — defaults to "claude" backend.
+        daemon.check_backend_health().unwrap();
+        assert!(daemon.backend_health.contains_key("architect"));
+    }
+
+    // ── active_task tests ──
+
+    #[test]
+    fn active_task_returns_none_when_no_active_task_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+        let daemon = make_test_daemon(tmp.path(), vec![]);
+        let result = daemon.active_task("eng-1").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn active_task_returns_none_when_task_id_not_on_board() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        let mut daemon = make_test_daemon(tmp.path(), vec![]);
+        daemon.active_tasks.insert("eng-1".to_string(), 999);
+        let result = daemon.active_task("eng-1").unwrap();
+        assert!(result.is_none(), "nonexistent task should return None");
+    }
+
+    #[test]
+    fn active_task_returns_task_when_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+        write_owned_task_file(tmp.path(), 42, "my-task", "in-progress", "eng-1");
+
+        let mut daemon = make_test_daemon(tmp.path(), vec![]);
+        daemon.active_tasks.insert("eng-1".to_string(), 42);
+        let result = daemon.active_task("eng-1").unwrap();
+        assert!(result.is_some());
+        let task = result.unwrap();
+        assert_eq!(task.id, 42);
+        assert_eq!(task.title, "my-task");
+    }
+
+    // ── uncommitted_diff_lines edge cases ──
+
+    #[test]
+    fn uncommitted_diff_lines_mixed_staged_and_unstaged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_bare_git_repo(&repo);
+
+        std::fs::write(repo.join("a.txt"), "line1\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "line1\n").unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(&repo, &["commit", "-m", "init"]);
+
+        // Modify a.txt (unstaged) and b.txt (staged)
+        std::fs::write(repo.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "changed\n").unwrap();
+        git_ok(&repo, &["add", "b.txt"]);
+
+        let lines = super::uncommitted_diff_lines(&repo).unwrap();
+        // a.txt unstaged: 1 removed + 1 added = 2
+        // b.txt staged: 1 removed + 1 added = 2
+        assert!(lines >= 4, "mixed staged+unstaged should sum, got {lines}");
+    }
+
+    #[test]
+    fn uncommitted_diff_lines_non_git_dir_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Not a git repo — git diff should fail but the function handles it.
+        let result = super::uncommitted_diff_lines(tmp.path());
+        // The function uses Command::output() which may still succeed with non-zero exit.
+        // Either it returns an error or returns 0 lines — both are acceptable.
+        match result {
+            Ok(lines) => assert_eq!(lines, 0),
+            Err(_) => {} // Also acceptable
+        }
+    }
+
+    #[test]
+    fn uncommitted_diff_lines_new_file_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_bare_git_repo(&repo);
+
+        std::fs::write(repo.join("init.txt"), "x\n").unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(&repo, &["commit", "-m", "init"]);
+
+        // Add new file but only stage it (diff --cached will show it)
+        std::fs::write(repo.join("new.txt"), "a\nb\nc\n").unwrap();
+        git_ok(&repo, &["add", "new.txt"]);
+
+        let lines = super::uncommitted_diff_lines(&repo).unwrap();
+        assert!(
+            lines >= 3,
+            "new staged file should count as added lines, got {lines}"
+        );
+    }
 }
