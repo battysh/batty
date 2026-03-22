@@ -258,4 +258,123 @@ mod tests {
             Some(&1)
         );
     }
+
+    // ── Required task #279 tests ──
+
+    #[test]
+    fn subsystem_error_count_increments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = daemon_config_with_roles(tmp.path(), Vec::new());
+        let mut daemon = TeamDaemon::new(config).unwrap();
+
+        assert!(daemon.subsystem_error_counts.is_empty());
+
+        // Each failure should increment the count by 1.
+        daemon.increment_subsystem_error("poll_watchers");
+        assert_eq!(daemon.subsystem_error_counts.get("poll_watchers"), Some(&1));
+
+        daemon.increment_subsystem_error("poll_watchers");
+        assert_eq!(daemon.subsystem_error_counts.get("poll_watchers"), Some(&2));
+
+        // Independent subsystems are tracked separately.
+        daemon.increment_subsystem_error("maybe_fire_nudges");
+        assert_eq!(
+            daemon.subsystem_error_counts.get("maybe_fire_nudges"),
+            Some(&1)
+        );
+        assert_eq!(daemon.subsystem_error_counts.get("poll_watchers"), Some(&2));
+    }
+
+    #[test]
+    fn consecutive_failures_trigger_threshold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = daemon_config_with_roles(tmp.path(), Vec::new());
+        let mut daemon = TeamDaemon::new(config).unwrap();
+
+        // Below the threshold (3) — no escalation warning yet.
+        daemon.increment_subsystem_error("telegram_queue");
+        daemon.increment_subsystem_error("telegram_queue");
+        assert_eq!(
+            daemon.subsystem_error_counts.get("telegram_queue"),
+            Some(&2)
+        );
+
+        // Hitting the threshold at exactly 3.
+        daemon.increment_subsystem_error("telegram_queue");
+        assert_eq!(
+            daemon.subsystem_error_counts.get("telegram_queue"),
+            Some(&3)
+        );
+
+        // Continues incrementing past the threshold.
+        daemon.increment_subsystem_error("telegram_queue");
+        assert_eq!(
+            daemon.subsystem_error_counts.get("telegram_queue"),
+            Some(&4)
+        );
+    }
+
+    #[test]
+    fn error_count_resets_on_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = daemon_config_with_roles(tmp.path(), Vec::new());
+        let mut daemon = TeamDaemon::new(config).unwrap();
+
+        // Accumulate errors via run_recoverable_step.
+        for _ in 0..4 {
+            daemon.run_recoverable_step("check_backend_health", |_d| {
+                anyhow::bail!("backend unreachable")
+            });
+        }
+        assert_eq!(
+            daemon.subsystem_error_counts.get("check_backend_health"),
+            Some(&4)
+        );
+
+        // A single success resets to zero (entry removed).
+        daemon.run_recoverable_step("check_backend_health", |_d| Ok(()));
+        assert_eq!(
+            daemon.subsystem_error_counts.get("check_backend_health"),
+            None
+        );
+    }
+
+    #[test]
+    fn criticality_classification() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = daemon_config_with_roles(tmp.path(), Vec::new());
+        let mut daemon = TeamDaemon::new(config).unwrap();
+
+        // Critical step (run_loop_step): error is logged but NOT tracked.
+        daemon.run_loop_step("deliver_inbox_messages", |_d| {
+            anyhow::bail!("delivery timeout")
+        });
+        assert!(
+            daemon
+                .subsystem_error_counts
+                .get("deliver_inbox_messages")
+                .is_none(),
+            "critical steps should not track consecutive failures"
+        );
+
+        // Recoverable step (run_recoverable_step): error IS tracked.
+        daemon.run_recoverable_step("maybe_rotate_board", |_d| {
+            anyhow::bail!("board file locked")
+        });
+        assert_eq!(
+            daemon.subsystem_error_counts.get("maybe_rotate_board"),
+            Some(&1),
+            "recoverable steps should track consecutive failures"
+        );
+
+        // Recoverable with catch_unwind: panic IS tracked same as error.
+        daemon.run_recoverable_step_with_catch_unwind("process_telegram_queue", |_d| {
+            panic!("unexpected panic")
+        });
+        assert_eq!(
+            daemon.subsystem_error_counts.get("process_telegram_queue"),
+            Some(&1),
+            "catch_unwind steps should track panics as failures"
+        );
+    }
 }
