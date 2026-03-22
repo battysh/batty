@@ -128,7 +128,7 @@ impl TeamDaemon {
             {
                 continue;
             }
-            if self.intervention_on_cooldown(&utilization_key) {
+            if self.utilization_intervention_on_cooldown(&utilization_key) {
                 continue;
             }
 
