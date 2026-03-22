@@ -347,6 +347,7 @@ mod tests {
                 review_nudge_sent: HashSet::new(),
                 poll_interval: Duration::from_secs(5),
                 is_git_repo: false,
+                subsystem_error_counts: HashMap::new(),
             };
 
             backdate_idle_grace(&mut daemon, "scientist");
@@ -457,6 +458,7 @@ mod tests {
             review_nudge_sent: HashSet::new(),
             poll_interval: Duration::from_secs(5),
             is_git_repo: false,
+            subsystem_error_counts: HashMap::new(),
         };
 
         let root = inbox::inboxes_root(tmp.path());
@@ -581,6 +583,7 @@ mod tests {
             review_nudge_sent: HashSet::new(),
             poll_interval: Duration::from_secs(5),
             is_git_repo: false,
+            subsystem_error_counts: HashMap::new(),
         };
 
         assert_eq!(daemon.automation_sender_for("eng-1"), "lead");
