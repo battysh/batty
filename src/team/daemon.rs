@@ -473,6 +473,9 @@ impl TeamDaemon {
                 daemon.reconcile_active_tasks()
             });
             self.run_loop_step("maybe_auto_dispatch", |daemon| daemon.maybe_auto_dispatch());
+            self.run_recoverable_step("maybe_recycle_cron_tasks", |daemon| {
+                daemon.maybe_recycle_cron_tasks()
+            });
 
             // -- Recoverable subsystems --
             self.run_recoverable_step("maybe_intervene_manager_dispatch_gap", |daemon| {
@@ -1696,6 +1699,18 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             }
         }
 
+        Ok(())
+    }
+
+    fn maybe_recycle_cron_tasks(&mut self) -> Result<()> {
+        let board_dir = self.board_dir();
+        let recycled = super::task_loop::recycle_cron_tasks(&board_dir)?;
+        for (task_id, cron_expr) in recycled {
+            self.emit_event(TeamEvent::task_recycled(task_id, &cron_expr));
+            self.record_orchestrator_action(format!(
+                "cron: recycled task #{task_id} (schedule: {cron_expr}) back to todo"
+            ));
+        }
         Ok(())
     }
 
