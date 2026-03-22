@@ -134,6 +134,8 @@ pub struct TeamDaemon {
     pub(super) backend_health: HashMap<String, BackendHealth>,
     /// When the last periodic health check was run.
     pub(super) last_health_check: Instant,
+    /// Rate-limiting: last time each engineer received an uncommitted-work warning.
+    pub(super) last_uncommitted_warn: HashMap<String, Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,6 +384,7 @@ impl TeamDaemon {
             backend_health: HashMap::new(),
             // Start far enough in the past to trigger an immediate check.
             last_health_check: Instant::now() - Duration::from_secs(3600),
+            last_uncommitted_warn: HashMap::new(),
         })
     }
 
@@ -534,6 +537,9 @@ impl TeamDaemon {
             });
             self.run_recoverable_step("maybe_reconcile_stale_worktrees", |daemon| {
                 daemon.maybe_reconcile_stale_worktrees()
+            });
+            self.run_recoverable_step("maybe_warn_uncommitted_work", |daemon| {
+                daemon.maybe_warn_uncommitted_work()
             });
             self.run_recoverable_step_with_catch_unwind("maybe_generate_standup", |daemon| {
                 let generated =
