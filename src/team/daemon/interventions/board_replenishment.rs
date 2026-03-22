@@ -26,11 +26,8 @@ impl TeamDaemon {
         if super::super::super::pause_marker_path(&self.config.project_root).exists() {
             return Ok(());
         }
-        if super::super::super::nudge_disabled_marker_path(
-            &self.config.project_root,
-            "replenish",
-        )
-        .exists()
+        if super::super::super::nudge_disabled_marker_path(&self.config.project_root, "replenish")
+            .exists()
         {
             return Ok(());
         }

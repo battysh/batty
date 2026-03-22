@@ -52,7 +52,7 @@ use dispatch::DispatchQueueEntry;
 
 #[path = "dispatch.rs"]
 mod dispatch;
-#[path = "daemon/interventions.rs"]
+#[path = "daemon/interventions/mod.rs"]
 mod interventions;
 #[path = "launcher.rs"]
 mod launcher;

@@ -17,7 +17,6 @@ mod utilization;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
 use tracing::warn;
 
 use super::*;

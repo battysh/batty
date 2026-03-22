@@ -24,11 +24,8 @@ impl TeamDaemon {
         if super::super::super::pause_marker_path(&self.config.project_root).exists() {
             return Ok(());
         }
-        if super::super::super::nudge_disabled_marker_path(
-            &self.config.project_root,
-            "utilization",
-        )
-        .exists()
+        if super::super::super::nudge_disabled_marker_path(&self.config.project_root, "utilization")
+            .exists()
         {
             return Ok(());
         }
@@ -104,8 +101,7 @@ impl TeamDaemon {
             .members
             .iter()
             .filter(|member| {
-                member.role_type == RoleType::Architect
-                    && direct_reports.contains_key(&member.name)
+                member.role_type == RoleType::Architect && direct_reports.contains_key(&member.name)
             })
             .cloned()
             .collect();
@@ -191,7 +187,7 @@ impl TeamDaemon {
         Ok(())
     }
 
-    fn build_architect_utilization_message(
+    pub(super) fn build_architect_utilization_message(
         &self,
         member: &MemberInstance,
         working_engineers: &[String],
