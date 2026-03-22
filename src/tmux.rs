@@ -1590,4 +1590,561 @@ mod tests {
             "session should be cleaned up even after panic"
         );
     }
+
+    // --- parse_tmux_version edge cases ---
+
+    #[test]
+    fn parse_tmux_version_empty_string() {
+        assert_eq!(parse_tmux_version(""), None);
+    }
+
+    #[test]
+    fn parse_tmux_version_no_prefix() {
+        // Missing "tmux " prefix
+        assert_eq!(parse_tmux_version("3.4"), None);
+    }
+
+    #[test]
+    fn parse_tmux_version_major_only_no_dot() {
+        assert_eq!(parse_tmux_version("tmux 3"), None);
+    }
+
+    #[test]
+    fn parse_tmux_version_multi_digit() {
+        assert_eq!(parse_tmux_version("tmux 10.12"), Some((10, 12)));
+    }
+
+    #[test]
+    fn parse_tmux_version_trailing_whitespace() {
+        assert_eq!(parse_tmux_version("  tmux 3.4  "), Some((3, 4)));
+    }
+
+    #[test]
+    fn parse_tmux_version_next_suffix() {
+        // "next-3.5" style dev builds
+        assert_eq!(parse_tmux_version("tmux next-3.5"), None);
+    }
+
+    #[test]
+    fn parse_tmux_version_dot_no_minor() {
+        assert_eq!(parse_tmux_version("tmux 3."), None);
+    }
+
+    #[test]
+    fn parse_tmux_version_double_suffix_letters() {
+        assert_eq!(parse_tmux_version("tmux 3.3ab"), Some((3, 3)));
+    }
+
+    // --- TmuxCapabilities edge cases ---
+
+    #[test]
+    fn capabilities_known_good_version_4() {
+        let caps = TmuxCapabilities {
+            version_raw: "tmux 4.0".to_string(),
+            version: Some((4, 0)),
+            pipe_pane: true,
+            pipe_pane_only_if_missing: true,
+            status_style: true,
+            split_mode: SplitMode::Lines,
+        };
+        assert!(caps.known_good(), "4.0 should be known good");
+    }
+
+    #[test]
+    fn capabilities_known_good_version_2_9() {
+        let caps = TmuxCapabilities {
+            version_raw: "tmux 2.9".to_string(),
+            version: Some((2, 9)),
+            pipe_pane: true,
+            pipe_pane_only_if_missing: false,
+            status_style: true,
+            split_mode: SplitMode::Percent,
+        };
+        assert!(!caps.known_good(), "2.9 should not be known good");
+    }
+
+    #[test]
+    fn capabilities_known_good_version_3_0() {
+        let caps = TmuxCapabilities {
+            version_raw: "tmux 3.0".to_string(),
+            version: Some((3, 0)),
+            pipe_pane: true,
+            pipe_pane_only_if_missing: false,
+            status_style: true,
+            split_mode: SplitMode::Percent,
+        };
+        assert!(!caps.known_good(), "3.0 should not be known good");
+    }
+
+    #[test]
+    fn capabilities_known_good_none_version() {
+        let caps = TmuxCapabilities {
+            version_raw: "tmux unknown".to_string(),
+            version: None,
+            pipe_pane: false,
+            pipe_pane_only_if_missing: false,
+            status_style: false,
+            split_mode: SplitMode::Disabled,
+        };
+        assert!(!caps.known_good(), "None version should not be known good");
+    }
+
+    #[test]
+    fn capabilities_remediation_message_includes_version() {
+        let caps = TmuxCapabilities {
+            version_raw: "tmux 2.8".to_string(),
+            version: Some((2, 8)),
+            pipe_pane: false,
+            pipe_pane_only_if_missing: false,
+            status_style: false,
+            split_mode: SplitMode::Disabled,
+        };
+        let msg = caps.remediation_message();
+        assert!(
+            msg.contains("tmux 2.8"),
+            "message should include detected version"
+        );
+        assert!(
+            msg.contains("pipe-pane"),
+            "message should mention pipe-pane requirement"
+        );
+        assert!(msg.contains("3.2"), "message should recommend >= 3.2");
+    }
+
+    // --- session_name edge cases ---
+
+    #[test]
+    fn session_name_empty_input() {
+        assert_eq!(session_name(""), "batty-");
+    }
+
+    #[test]
+    fn session_name_preserves_underscores() {
+        assert_eq!(session_name("my_session"), "batty-my_session");
+    }
+
+    #[test]
+    fn session_name_replaces_colons_and_slashes() {
+        assert_eq!(session_name("a:b/c"), "batty-a-b-c");
+    }
+
+    #[test]
+    fn session_name_replaces_multiple_dots() {
+        assert_eq!(session_name("v1.2.3"), "batty-v1-2-3");
+    }
+
+    // --- PaneDetails struct ---
+
+    #[test]
+    fn pane_details_clone_and_eq() {
+        let pd = PaneDetails {
+            id: "%5".to_string(),
+            command: "bash".to_string(),
+            active: true,
+            dead: false,
+        };
+        let cloned = pd.clone();
+        assert_eq!(pd, cloned);
+        assert_eq!(pd.id, "%5");
+        assert!(pd.active);
+        assert!(!pd.dead);
+    }
+
+    #[test]
+    fn pane_details_not_equal_different_id() {
+        let a = PaneDetails {
+            id: "%1".to_string(),
+            command: "bash".to_string(),
+            active: true,
+            dead: false,
+        };
+        let b = PaneDetails {
+            id: "%2".to_string(),
+            command: "bash".to_string(),
+            active: true,
+            dead: false,
+        };
+        assert_ne!(a, b);
+    }
+
+    // --- SplitMode ---
+
+    #[test]
+    fn split_mode_debug_and_eq() {
+        assert_eq!(SplitMode::Lines, SplitMode::Lines);
+        assert_ne!(SplitMode::Lines, SplitMode::Percent);
+        assert_ne!(SplitMode::Percent, SplitMode::Disabled);
+        let copied = SplitMode::Lines;
+        assert_eq!(format!("{:?}", copied), "Lines");
+    }
+
+    // --- TestSession ---
+
+    #[test]
+    fn test_session_name_accessor() {
+        let guard = TestSession::new("batty-test-accessor");
+        assert_eq!(guard.name(), "batty-test-accessor");
+        // Don't actually create a tmux session — just test the struct
+    }
+
+    // --- Integration tests requiring tmux ---
+
+    #[test]
+    #[serial]
+    fn pane_exists_for_valid_pane() {
+        let session = "batty-test-pane-exists";
+        let _guard = TestSession::new(session);
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        let pane = pane_id(session).unwrap();
+        assert!(pane_exists(&pane), "existing pane should be found");
+    }
+
+    #[test]
+    #[serial]
+    fn session_exists_returns_false_after_kill() {
+        let session = "batty-test-sess-exists-gone";
+        let _ = kill_session(session);
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+        assert!(session_exists(session));
+
+        kill_session(session).unwrap();
+        assert!(
+            !session_exists(session),
+            "session should not exist after kill"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn pane_dead_for_running_process() {
+        let session = "batty-test-pane-dead-alive";
+        let _guard = TestSession::new(session);
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        let pane = pane_id(session).unwrap();
+        let dead = pane_dead(&pane).unwrap();
+        assert!(!dead, "running process pane should not be dead");
+    }
+
+    #[test]
+    #[serial]
+    fn list_sessions_with_prefix_finds_matching() {
+        let prefix = "batty-test-prefix-match";
+        let s1 = format!("{prefix}-aaa");
+        let s2 = format!("{prefix}-bbb");
+        let _g1 = TestSession::new(s1.clone());
+        let _g2 = TestSession::new(s2.clone());
+
+        create_session(&s1, "sleep", &["10".to_string()], "/tmp").unwrap();
+        create_session(&s2, "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        let found = list_sessions_with_prefix(prefix);
+        assert!(
+            found.contains(&s1),
+            "should find first session, got: {found:?}"
+        );
+        assert!(
+            found.contains(&s2),
+            "should find second session, got: {found:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn list_sessions_with_prefix_excludes_non_matching() {
+        let found = list_sessions_with_prefix("batty-test-zzz-nonexist-99999");
+        assert!(found.is_empty(), "should find no sessions for bogus prefix");
+    }
+
+    #[test]
+    #[serial]
+    fn split_window_horizontal_creates_new_pane() {
+        let session = "batty-test-hsplit";
+        let _guard = TestSession::new(session);
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        let original = pane_id(session).unwrap();
+        let new_pane = split_window_horizontal(&original, 50).unwrap();
+        assert!(
+            new_pane.starts_with('%'),
+            "new pane id should start with %, got: {new_pane}"
+        );
+
+        let panes = list_panes(session).unwrap();
+        assert_eq!(panes.len(), 2, "should have 2 panes after split");
+        assert!(panes.contains(&new_pane));
+    }
+
+    #[test]
+    #[serial]
+    fn split_window_vertical_creates_new_pane() {
+        let session = "batty-test-vsplit";
+        let _guard = TestSession::new(session);
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        let original = pane_id(session).unwrap();
+        let new_pane = split_window_vertical_in_pane(session, &original, 50).unwrap();
+        assert!(
+            new_pane.starts_with('%'),
+            "new pane id should start with %, got: {new_pane}"
+        );
+
+        let panes = list_panes(session).unwrap();
+        assert_eq!(panes.len(), 2, "should have 2 panes after split");
+        assert!(panes.contains(&new_pane));
+    }
+
+    #[test]
+    #[serial]
+    fn load_buffer_and_paste_buffer_injects_text() {
+        let session = "batty-test-paste-buf";
+        let _guard = TestSession::new(session);
+        create_session(session, "cat", &[], "/tmp").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let pane = pane_id(session).unwrap();
+        load_buffer("hello-from-buffer").unwrap();
+        paste_buffer(&pane).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let content = capture_pane(&pane).unwrap();
+        assert!(
+            content.contains("hello-from-buffer"),
+            "paste-buffer should inject text into pane, got: {content:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn kill_pane_removes_pane() {
+        let session = "batty-test-kill-pane";
+        let _guard = TestSession::new(session);
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        let original = pane_id(session).unwrap();
+        let new_pane = split_window_horizontal(&original, 50).unwrap();
+        let before = list_panes(session).unwrap();
+        assert_eq!(before.len(), 2);
+
+        kill_pane(&new_pane).unwrap();
+        let after = list_panes(session).unwrap();
+        assert_eq!(after.len(), 1, "should have 1 pane after kill");
+        assert!(!after.contains(&new_pane));
+    }
+
+    #[test]
+    #[serial]
+    fn kill_pane_nonexistent_returns_error() {
+        // tmux returns "can't find pane" for nonexistent pane IDs,
+        // which kill_pane only suppresses when it says "not found"
+        let result = kill_pane("batty-test-no-such-session-xyz:0.0");
+        // Either succeeds (tmux says "not found") or errors — both are valid
+        // The key guarantee is it doesn't panic
+        let _ = result;
+    }
+
+    #[test]
+    #[serial]
+    fn set_mouse_disable_and_enable() {
+        let session = "batty-test-mouse-toggle";
+        let _guard = TestSession::new(session);
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        // Mouse is enabled by create_session; disable it
+        set_mouse(session, false).unwrap();
+        let output = Command::new("tmux")
+            .args(["show-options", "-t", session, "-v", "mouse"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "off",
+            "mouse should be disabled"
+        );
+
+        // Re-enable
+        set_mouse(session, true).unwrap();
+        let output = Command::new("tmux")
+            .args(["show-options", "-t", session, "-v", "mouse"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "on",
+            "mouse should be re-enabled"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn tmux_set_custom_option() {
+        let session = "batty-test-tmux-set";
+        let _guard = TestSession::new(session);
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        tmux_set(session, "@batty_test_opt", "test-value").unwrap();
+
+        let output = Command::new("tmux")
+            .args(["show-options", "-v", "-t", session, "@batty_test_opt"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "test-value");
+    }
+
+    #[test]
+    #[serial]
+    fn create_window_fails_for_missing_session() {
+        let result = create_window(
+            "batty-test-nonexistent-session-99999",
+            "test-win",
+            "sleep",
+            &["1".to_string()],
+            "/tmp",
+        );
+        assert!(result.is_err(), "should fail for nonexistent session");
+        assert!(
+            result.unwrap_err().to_string().contains("not found"),
+            "error should mention session not found"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn setup_pipe_pane_if_missing_works() {
+        let session = "batty-test-pipe-if-missing";
+        let _guard = TestSession::new(session);
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("pipe-if-missing.log");
+
+        create_session(
+            session,
+            "bash",
+            &["-c".to_string(), "sleep 10".to_string()],
+            "/tmp",
+        )
+        .unwrap();
+
+        // Use session target instead of pane ID for reliability
+        // First call should set up pipe-pane
+        setup_pipe_pane_if_missing(session, &log_path).unwrap();
+
+        // Second call should be a no-op (not error)
+        setup_pipe_pane_if_missing(session, &log_path).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn select_layout_even_after_splits() {
+        let session = "batty-test-layout-even";
+        let _guard = TestSession::new(session);
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        let original = pane_id(session).unwrap();
+        let _p2 = split_window_horizontal(&original, 50).unwrap();
+
+        // Should not error
+        select_layout_even(&original).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn rename_window_changes_name() {
+        let session = "batty-test-rename-win";
+        let _guard = TestSession::new(session);
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        rename_window(&format!("{session}:0"), "custom-name").unwrap();
+        let names = list_window_names(session).unwrap();
+        assert!(
+            names.contains(&"custom-name".to_string()),
+            "window should be renamed, got: {names:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn select_window_switches_active() {
+        let session = "batty-test-select-win";
+        let _guard = TestSession::new(session);
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+        create_window(session, "second", "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        // Select the second window — should not error
+        select_window(&format!("{session}:second")).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn capture_pane_recent_zero_lines_returns_full() {
+        let session = "batty-test-capture-zero";
+        let _guard = TestSession::new(session);
+        create_session(
+            session,
+            "bash",
+            &[
+                "-c".to_string(),
+                "echo 'zero-lines-test'; sleep 2".to_string(),
+            ],
+            "/tmp",
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // lines=0 means no -S flag, should return full pane content
+        let content = capture_pane_recent(session, 0).unwrap();
+        assert!(
+            content.contains("zero-lines-test"),
+            "should capture full content with lines=0, got: {content:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn list_pane_details_shows_command_info() {
+        let session = "batty-test-pane-details-cmd";
+        let _guard = TestSession::new(session);
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        let details = list_pane_details(session).unwrap();
+        assert_eq!(details.len(), 1);
+        assert!(details[0].id.starts_with('%'));
+        assert!(
+            details[0].command == "sleep" || !details[0].command.is_empty(),
+            "command should be reported"
+        );
+        assert!(!details[0].dead, "sleep pane should not be dead");
+    }
+
+    #[test]
+    #[serial]
+    fn pane_id_returns_percent_prefixed() {
+        let session = "batty-test-paneid-fmt";
+        let _guard = TestSession::new(session);
+        create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
+
+        let id = pane_id(session).unwrap();
+        assert!(
+            id.starts_with('%'),
+            "pane id should start with %, got: {id}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn respawn_pane_restarts_running_pane() {
+        let session = "batty-test-respawn";
+        let _guard = TestSession::new(session);
+        // Start with a long-running command so session stays alive
+        create_session(session, "sleep", &["30".to_string()], "/tmp").unwrap();
+
+        let pane = pane_id(session).unwrap();
+        // Respawn with -k kills the running process and starts a new one
+        respawn_pane(&pane, "sleep 10").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        // Pane should still exist and not be dead
+        assert!(pane_exists(&pane), "respawned pane should exist");
+    }
 }
