@@ -10,6 +10,18 @@ use serde::{Deserialize, Serialize};
 
 use super::DEFAULT_EVENT_LOG_MAX_BYTES;
 
+/// Bundled parameters for merge-confidence scoring events.
+pub struct MergeConfidenceInfo<'a> {
+    pub engineer: &'a str,
+    pub task: &'a str,
+    pub confidence: f64,
+    pub files_changed: usize,
+    pub lines_changed: usize,
+    pub has_migrations: bool,
+    pub has_config_changes: bool,
+    pub rename_count: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
 pub struct TeamEvent {
@@ -303,24 +315,19 @@ impl TeamEvent {
     }
 
     /// Emitted for every completed task to record its merge confidence score.
-    pub fn merge_confidence_scored(
-        engineer: &str,
-        task: &str,
-        confidence: f64,
-        files_changed: usize,
-        lines_changed: usize,
-        has_migrations: bool,
-        has_config_changes: bool,
-        rename_count: usize,
-    ) -> Self {
+    pub fn merge_confidence_scored(info: &MergeConfidenceInfo<'_>) -> Self {
         let detail = format!(
             "files={} lines={} migrations={} config={} renames={}",
-            files_changed, lines_changed, has_migrations, has_config_changes, rename_count
+            info.files_changed,
+            info.lines_changed,
+            info.has_migrations,
+            info.has_config_changes,
+            info.rename_count
         );
         Self {
-            role: Some(engineer.into()),
-            task: Some(task.into()),
-            load: Some(confidence),
+            role: Some(info.engineer.into()),
+            task: Some(info.task.into()),
+            load: Some(info.confidence),
             reason: Some(detail),
             ..Self::base("merge_confidence_scored")
         }
@@ -601,7 +608,16 @@ mod tests {
             ("task_manual_merged", TeamEvent::task_manual_merged("42")),
             (
                 "merge_confidence_scored",
-                TeamEvent::merge_confidence_scored("eng-1", "42", 0.85, 3, 50, false, false, 0),
+                TeamEvent::merge_confidence_scored(&MergeConfidenceInfo {
+                    engineer: "eng-1",
+                    task: "42",
+                    confidence: 0.85,
+                    files_changed: 3,
+                    lines_changed: 50,
+                    has_migrations: false,
+                    has_config_changes: false,
+                    rename_count: 0,
+                }),
             ),
             (
                 "review_nudge_sent",
@@ -756,8 +772,16 @@ mod tests {
 
     #[test]
     fn merge_confidence_scored_includes_all_fields() {
-        let event =
-            TeamEvent::merge_confidence_scored("eng-1-1", "42", 0.85, 3, 50, true, false, 1);
+        let event = TeamEvent::merge_confidence_scored(&MergeConfidenceInfo {
+            engineer: "eng-1-1",
+            task: "42",
+            confidence: 0.85,
+            files_changed: 3,
+            lines_changed: 50,
+            has_migrations: true,
+            has_config_changes: false,
+            rename_count: 1,
+        });
         let json = serde_json::to_string(&event).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["event"].as_str().unwrap(), "merge_confidence_scored");

@@ -136,16 +136,18 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         let diff_analysis = auto_merge::analyze_diff(daemon.project_root(), "main", &task_branch);
         if let Ok(ref summary) = diff_analysis {
             let confidence = auto_merge::compute_merge_confidence(summary, &policy);
-            daemon.record_merge_confidence_scored(
+            let task_str = task_id.to_string();
+            let info = super::events::MergeConfidenceInfo {
                 engineer,
-                task_id,
+                task: &task_str,
                 confidence,
-                summary.files_changed,
-                summary.total_lines(),
-                summary.has_migrations,
-                summary.has_config_changes,
-                summary.rename_count,
-            );
+                files_changed: summary.files_changed,
+                lines_changed: summary.total_lines(),
+                has_migrations: summary.has_migrations,
+                has_config_changes: summary.has_config_changes,
+                rename_count: summary.rename_count,
+            };
+            daemon.record_merge_confidence_scored(&info);
         }
 
         // If override explicitly disables auto-merge, route to manual review
