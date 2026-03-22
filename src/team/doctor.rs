@@ -80,6 +80,7 @@ struct CleanupSummary {
     branches_removed: usize,
     worktrees_removed: usize,
     stale_state_removed: usize,
+    test_sessions_removed: usize,
     actions: Vec<String>,
 }
 
@@ -87,6 +88,7 @@ struct CleanupSummary {
 struct CleanupPlan {
     orphan_status: OrphanStatus,
     stale_state: Vec<PathBuf>,
+    orphan_test_sessions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +102,7 @@ impl CleanupPlan {
         self.orphan_status.branches.is_empty()
             && self.orphan_status.worktrees.is_empty()
             && self.stale_state.is_empty()
+            && self.orphan_test_sessions.is_empty()
     }
 }
 
@@ -148,6 +151,7 @@ pub fn build_report(project_root: &Path) -> Result<String> {
     let board_git_checks = build_board_git_checks(project_root);
     let board_dependency_graph = build_board_dependency_graph(project_root);
     let performance_checks = build_performance_checks(project_root);
+    let orphan_test_sessions = crate::tmux::list_sessions_with_prefix("batty-test-");
     let log_sizes = vec![
         LogSize {
             name: "daemon.log",
@@ -177,6 +181,7 @@ pub fn build_report(project_root: &Path) -> Result<String> {
         board_git_checks: &board_git_checks,
         board_dependency_graph: &board_dependency_graph,
         performance_checks: &performance_checks,
+        orphan_test_sessions: &orphan_test_sessions,
         log_sizes: &log_sizes,
     }))
 }
@@ -190,6 +195,7 @@ struct DoctorReportData<'a> {
     board_git_checks: &'a [CheckLine],
     board_dependency_graph: &'a [String],
     performance_checks: &'a [CheckLine],
+    orphan_test_sessions: &'a [String],
     log_sizes: &'a [LogSize],
 }
 
@@ -203,6 +209,7 @@ fn render_report(report: DoctorReportData<'_>) -> String {
         board_git_checks,
         board_dependency_graph,
         performance_checks,
+        orphan_test_sessions,
         log_sizes,
     } = report;
     let mut out = String::new();
@@ -332,6 +339,20 @@ fn render_report(report: DoctorReportData<'_>) -> String {
             },
             line.message
         ));
+    }
+    out.push('\n');
+
+    out.push_str("== Orphaned Test Sessions ==\n");
+    if orphan_test_sessions.is_empty() {
+        out.push_str("PASS: no orphaned test sessions found\n");
+    } else {
+        out.push_str(&format!(
+            "WARN: found {} orphaned test sessions (run with --fix to clean)\n",
+            orphan_test_sessions.len()
+        ));
+        for session in orphan_test_sessions {
+            out.push_str(&format!("  {session}\n"));
+        }
     }
     out.push('\n');
 
@@ -1027,10 +1048,12 @@ fn detect_cleanup_plan(project_root: &Path) -> Result<CleanupPlan> {
     let team_config = load_team_config(project_root)?;
     let mut stale_state = detect_stale_state(project_root, team_config.as_ref());
     stale_state.sort();
+    let orphan_test_sessions = crate::tmux::list_sessions_with_prefix("batty-test-");
 
     Ok(CleanupPlan {
         orphan_status,
         stale_state,
+        orphan_test_sessions,
     })
 }
 
@@ -1114,6 +1137,7 @@ fn cleanup_orphans(project_root: &Path, orphan_status: &OrphanStatus) -> Result<
         branches_removed,
         worktrees_removed,
         stale_state_removed: 0,
+        test_sessions_removed: 0,
         actions,
     })
 }
@@ -1137,22 +1161,45 @@ fn cleanup_stale_state(project_root: &Path, stale_state: &[PathBuf]) -> Result<C
         branches_removed: 0,
         worktrees_removed: 0,
         stale_state_removed,
+        test_sessions_removed: 0,
         actions,
     })
+}
+
+fn cleanup_test_sessions(sessions: &[String]) -> CleanupSummary {
+    let mut removed = 0usize;
+    let mut actions = Vec::new();
+    for session in sessions {
+        if crate::tmux::kill_session(session).is_ok() {
+            info!(session, "doctor killed orphaned test session");
+            actions.push(format!("killed orphaned test session '{session}'"));
+            removed += 1;
+        }
+    }
+    CleanupSummary {
+        branches_removed: 0,
+        worktrees_removed: 0,
+        stale_state_removed: 0,
+        test_sessions_removed: removed,
+        actions,
+    }
 }
 
 fn apply_cleanup_plan(project_root: &Path, cleanup_plan: &CleanupPlan) -> Result<CleanupSummary> {
     let orphan_summary = cleanup_orphans(project_root, &cleanup_plan.orphan_status)?;
     let stale_state_summary = cleanup_stale_state(project_root, &cleanup_plan.stale_state)?;
+    let test_session_summary = cleanup_test_sessions(&cleanup_plan.orphan_test_sessions);
 
     let mut actions = orphan_summary.actions;
     actions.extend(stale_state_summary.actions);
+    actions.extend(test_session_summary.actions);
 
     Ok(CleanupSummary {
         branches_removed: orphan_summary.branches_removed + stale_state_summary.branches_removed,
         worktrees_removed: orphan_summary.worktrees_removed + stale_state_summary.worktrees_removed,
         stale_state_removed: orphan_summary.stale_state_removed
             + stale_state_summary.stale_state_removed,
+        test_sessions_removed: test_session_summary.test_sessions_removed,
         actions,
     })
 }
@@ -1161,7 +1208,7 @@ fn render_cleanup_plan(project_root: &Path, cleanup_plan: &CleanupPlan) -> Strin
     let mut out = String::new();
     out.push_str("== Cleanup Plan ==\n");
     if cleanup_plan.is_empty() {
-        out.push_str("No orphan branches, worktrees, or stale state to clean up.\n");
+        out.push_str("No orphan branches, worktrees, stale state, or test sessions to clean up.\n");
         return out;
     }
 
@@ -1180,6 +1227,9 @@ fn render_cleanup_plan(project_root: &Path, cleanup_plan: &CleanupPlan) -> Strin
             display_cleanup_path(project_root, path)
         ));
     }
+    for session in &cleanup_plan.orphan_test_sessions {
+        out.push_str(&format!("kill_test_session: {session}\n"));
+    }
 
     out
 }
@@ -1188,8 +1238,9 @@ fn render_cleanup_summary(summary: &CleanupSummary) -> String {
     let mut out = String::new();
     out.push_str("== Cleanup ==\n");
     out.push_str(&format!(
-        "removed_branches: {}\nremoved_worktrees: {}\nremoved_stale_state: {}\n",
-        summary.branches_removed, summary.worktrees_removed, summary.stale_state_removed
+        "removed_branches: {}\nremoved_worktrees: {}\nremoved_stale_state: {}\nremoved_test_sessions: {}\n",
+        summary.branches_removed, summary.worktrees_removed, summary.stale_state_removed,
+        summary.test_sessions_removed,
     ));
     for action in &summary.actions {
         out.push_str(&format!("action: {action}\n"));
@@ -2190,12 +2241,17 @@ roles:
                 worktrees: Vec::new(),
             },
             stale_state: Vec::new(),
+            orphan_test_sessions: Vec::new(),
         };
 
         let rendered = render_cleanup_plan(tmp.path(), &plan);
 
         assert!(rendered.contains("== Cleanup Plan =="));
-        assert!(rendered.contains("No orphan branches, worktrees, or stale state to clean up."));
+        assert!(
+            rendered.contains(
+                "No orphan branches, worktrees, stale state, or test sessions to clean up."
+            )
+        );
     }
 
     #[test]
@@ -2204,6 +2260,7 @@ roles:
             branches_removed: 1,
             worktrees_removed: 2,
             stale_state_removed: 3,
+            test_sessions_removed: 0,
             actions: vec!["deleted orphan branch 'eng-1/task-1'".to_string()],
         };
 
@@ -2358,5 +2415,65 @@ roles:
         for path in stale_paths {
             assert!(!path.exists(), "{} should be removed", path.display());
         }
+    }
+
+    #[test]
+    fn doctor_detects_orphaned_test_sessions() {
+        let session1 = format!("batty-test-doctor-orphan-{}-a", std::process::id());
+        let session2 = format!("batty-test-doctor-orphan-{}-b", std::process::id());
+        let _ = crate::tmux::kill_session(&session1);
+        let _ = crate::tmux::kill_session(&session2);
+
+        crate::tmux::create_session(&session1, "sleep", &["30".to_string()], "/tmp").unwrap();
+        crate::tmux::create_session(&session2, "sleep", &["30".to_string()], "/tmp").unwrap();
+
+        let sessions = crate::tmux::list_sessions_with_prefix("batty-test-");
+        assert!(
+            sessions.contains(&session1),
+            "should detect orphaned test session 1"
+        );
+        assert!(
+            sessions.contains(&session2),
+            "should detect orphaned test session 2"
+        );
+
+        // Verify cleanup_test_sessions kills them
+        let summary = cleanup_test_sessions(&[session1.clone(), session2.clone()]);
+        assert_eq!(summary.test_sessions_removed, 2);
+        assert!(!crate::tmux::session_exists(&session1));
+        assert!(!crate::tmux::session_exists(&session2));
+    }
+
+    #[test]
+    fn render_cleanup_plan_includes_test_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = CleanupPlan {
+            orphan_status: OrphanStatus {
+                branches: Vec::new(),
+                worktrees: Vec::new(),
+            },
+            stale_state: Vec::new(),
+            orphan_test_sessions: vec!["batty-test-stale-1".to_string()],
+        };
+
+        let rendered = render_cleanup_plan(tmp.path(), &plan);
+
+        assert!(rendered.contains("kill_test_session: batty-test-stale-1"));
+    }
+
+    #[test]
+    fn render_cleanup_summary_includes_test_session_count() {
+        let summary = CleanupSummary {
+            branches_removed: 0,
+            worktrees_removed: 0,
+            stale_state_removed: 0,
+            test_sessions_removed: 3,
+            actions: vec!["killed orphaned test session 'batty-test-x'".to_string()],
+        };
+
+        let rendered = render_cleanup_summary(&summary);
+
+        assert!(rendered.contains("removed_test_sessions: 3"));
+        assert!(rendered.contains("killed orphaned test session 'batty-test-x'"));
     }
 }
