@@ -85,6 +85,14 @@ fn default_status() -> String {
 }
 
 impl Task {
+    /// Returns true if this task has a `scheduled_for` timestamp in the future.
+    pub fn is_schedule_blocked(&self) -> bool {
+        self.scheduled_for.as_ref().map_or(false, |scheduled| {
+            chrono::DateTime::parse_from_rfc3339(scheduled)
+                .map_or(false, |ts| ts > chrono::Utc::now())
+        })
+    }
+
     /// Parse a kanban-md task file from a path.
     pub fn from_file(path: &Path) -> Result<Self> {
         let contents = std::fs::read_to_string(path)
@@ -599,5 +607,40 @@ Second task description.
         // Task #1 should exist and be done
         let task1 = tasks.iter().find(|t| t.id == 1).unwrap();
         assert_eq!(task1.title, "Rust project scaffolding");
+    }
+
+    #[test]
+    fn is_schedule_blocked_future_returns_true() {
+        let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let content = format!(
+            "---\nid: 300\ntitle: future task\nstatus: todo\nscheduled_for: \"{future}\"\n---\n\nDesc.\n"
+        );
+        let task = Task::parse(&content).unwrap();
+        assert!(task.is_schedule_blocked());
+    }
+
+    #[test]
+    fn is_schedule_blocked_past_returns_false() {
+        let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        let content = format!(
+            "---\nid: 301\ntitle: past task\nstatus: todo\nscheduled_for: \"{past}\"\n---\n\nDesc.\n"
+        );
+        let task = Task::parse(&content).unwrap();
+        assert!(!task.is_schedule_blocked());
+    }
+
+    #[test]
+    fn is_schedule_blocked_absent_returns_false() {
+        let content = "---\nid: 302\ntitle: no schedule\nstatus: todo\n---\n\nDesc.\n";
+        let task = Task::parse(content).unwrap();
+        assert!(!task.is_schedule_blocked());
+    }
+
+    #[test]
+    fn is_schedule_blocked_malformed_returns_false() {
+        let content =
+            "---\nid: 303\ntitle: bad date\nstatus: todo\nscheduled_for: \"not-a-date\"\n---\n\nDesc.\n";
+        let task = Task::parse(content).unwrap();
+        assert!(!task.is_schedule_blocked());
     }
 }
