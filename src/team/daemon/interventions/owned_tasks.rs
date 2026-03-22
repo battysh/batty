@@ -105,7 +105,11 @@ impl TeamDaemon {
                                 owned_tasks.len()
                             ));
                             for task in &owned_tasks {
-                                self.record_task_escalated(&name, task.id.to_string());
+                                self.record_task_escalated(
+                                    &name,
+                                    task.id.to_string(),
+                                    Some("stuck_task"),
+                                );
                             }
                             if let Some(state) = self.owned_task_interventions.get_mut(&name) {
                                 state.escalation_sent = true;

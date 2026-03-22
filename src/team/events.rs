@@ -172,10 +172,11 @@ impl TeamEvent {
         }
     }
 
-    pub fn task_escalated(role: &str, task: &str) -> Self {
+    pub fn task_escalated(role: &str, task: &str, reason: Option<&str>) -> Self {
         Self {
             role: Some(role.into()),
             task: Some(task.into()),
+            reason: reason.map(|r| r.into()),
             ..Self::base("task_escalated")
         }
     }
@@ -196,9 +197,10 @@ impl TeamEvent {
         }
     }
 
-    pub fn task_completed(role: &str) -> Self {
+    pub fn task_completed(role: &str, task: Option<&str>) -> Self {
         Self {
             role: Some(role.into()),
+            task: task.map(|t| t.into()),
             ..Self::base("task_completed")
         }
     }
@@ -536,13 +538,13 @@ mod tests {
                 "cwd_corrected",
                 TeamEvent::cwd_corrected("eng-1", "/tmp/worktree"),
             ),
-            ("task_escalated", TeamEvent::task_escalated("eng-1", "task")),
+            ("task_escalated", TeamEvent::task_escalated("eng-1", "task", None)),
             ("task_unblocked", TeamEvent::task_unblocked("eng-1", "task")),
             (
                 "performance_regression",
                 TeamEvent::performance_regression("42", "runtime_ms=1300 avg_ms=1000 pct=30"),
             ),
-            ("task_completed", TeamEvent::task_completed("eng-1")),
+            ("task_completed", TeamEvent::task_completed("eng-1", Some("42"))),
             ("standup_generated", TeamEvent::standup_generated("manager")),
             ("retro_generated", TeamEvent::retro_generated()),
             (
@@ -650,11 +652,12 @@ mod tests {
 
     #[test]
     fn task_escalated_serializes_role_and_task() {
-        let event = TeamEvent::task_escalated("eng-1-1", "42");
+        let event = TeamEvent::task_escalated("eng-1-1", "42", Some("tests_failed"));
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"event\":\"task_escalated\""));
         assert!(json.contains("\"role\":\"eng-1-1\""));
         assert!(json.contains("\"task\":\"42\""));
+        assert!(json.contains("\"reason\":\"tests_failed\""));
     }
 
     #[test]
