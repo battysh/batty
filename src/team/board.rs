@@ -1,9 +1,10 @@
 //! Board management — kanban.md rotation of done items to archive.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, FixedOffset, NaiveDate};
+use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 use tracing::info;
@@ -110,6 +111,137 @@ pub(crate) fn write_workflow_metadata(task_path: &Path, metadata: &WorkflowMetad
     std::fs::write(task_path, updated)
         .with_context(|| format!("failed to write {}", task_path.display()))?;
     Ok(())
+}
+
+/// Summary returned by [`archive_tasks`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveSummary {
+    pub archived_count: usize,
+    pub skipped_count: usize,
+    pub archive_dir: PathBuf,
+}
+
+/// Parse an age threshold string ("7d", "24h", "2w", "0s") into a [`Duration`].
+pub fn parse_age_threshold(threshold: &str) -> Result<Duration> {
+    let threshold = threshold.trim();
+    if threshold.is_empty() {
+        bail!("empty age threshold");
+    }
+
+    let split_pos = threshold
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(threshold.len());
+    let (digits, suffix) = threshold.split_at(split_pos);
+
+    if digits.is_empty() {
+        bail!("invalid age threshold: {threshold}");
+    }
+
+    let value: u64 = digits
+        .parse()
+        .with_context(|| format!("invalid age threshold: {threshold}"))?;
+
+    let seconds = match suffix {
+        "s" => value,
+        "m" => value * 60,
+        "h" => value * 3600,
+        "d" => value * 86400,
+        "w" => value * 86400 * 7,
+        _ => bail!("invalid age threshold suffix: {threshold} (expected s, m, h, d, or w)"),
+    };
+
+    Ok(Duration::from_secs(seconds))
+}
+
+/// List done tasks older than the given age threshold.
+pub fn done_tasks_older_than(board_dir: &Path, max_age: Duration) -> Result<Vec<Task>> {
+    let tasks_dir = board_dir.join("tasks");
+    if !tasks_dir.is_dir() {
+        bail!("no tasks directory found at {}", tasks_dir.display());
+    }
+
+    let tasks = load_tasks_from_dir(&tasks_dir)?;
+    let now = Utc::now();
+    let cutoff = now - chrono::Duration::from_std(max_age).unwrap_or(chrono::Duration::zero());
+
+    let matching: Vec<Task> = tasks
+        .into_iter()
+        .filter(|t| t.status == "done")
+        .filter(|t| {
+            if max_age.is_zero() {
+                return true;
+            }
+            match &t.completed {
+                Some(completed_str) => parse_completed_date(completed_str)
+                    .map(|completed| completed < cutoff)
+                    .unwrap_or(false),
+                None => {
+                    // Fall back to filesystem mtime
+                    std::fs::metadata(&t.source_path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .map(|mtime| {
+                            let mtime_dt: DateTime<Utc> = mtime.into();
+                            mtime_dt < cutoff
+                        })
+                        .unwrap_or(false)
+                }
+            }
+        })
+        .collect();
+
+    Ok(matching)
+}
+
+/// Move task files to archive subdirectory, preserving content unchanged.
+pub fn archive_tasks(board_dir: &Path, tasks: &[Task], dry_run: bool) -> Result<ArchiveSummary> {
+    let archive_dir = board_dir.join("archive");
+
+    if tasks.is_empty() {
+        return Ok(ArchiveSummary {
+            archived_count: 0,
+            skipped_count: 0,
+            archive_dir,
+        });
+    }
+
+    if !dry_run {
+        std::fs::create_dir_all(&archive_dir)
+            .with_context(|| format!("failed to create archive dir: {}", archive_dir.display()))?;
+    }
+
+    let mut archived = 0usize;
+    let skipped = 0usize;
+
+    for task in tasks {
+        let source = &task.source_path;
+        let file_name = source.file_name().context("task file has no file name")?;
+        let dest = archive_dir.join(file_name);
+
+        if dry_run {
+            let completed_display = task.completed.as_deref().unwrap_or("unknown date");
+            println!(
+                "  - {} (done {})",
+                file_name.to_string_lossy(),
+                completed_display
+            );
+            archived += 1;
+            continue;
+        }
+
+        std::fs::rename(source, &dest).with_context(|| {
+            format!("failed to move {} to {}", source.display(), dest.display())
+        })?;
+        archived += 1;
+        info!(task_id = task.id, "archived task");
+    }
+
+    info!(archived, "archived done tasks");
+    Ok(ArchiveSummary {
+        archived_count: archived,
+        skipped_count: skipped,
+        archive_dir,
+    })
 }
 
 /// Archive done tasks by moving their files from `tasks/` to `archive/`.
@@ -775,5 +907,165 @@ mod tests {
         assert!(content.contains("status: archived"));
         assert!(!content.contains("status: done"));
         assert!(content.contains("Body."));
+    }
+
+    // --- parse_age_threshold tests ---
+
+    #[test]
+    fn parse_age_threshold_days() {
+        let dur = parse_age_threshold("7d").unwrap();
+        assert_eq!(dur, Duration::from_secs(7 * 86400));
+    }
+
+    #[test]
+    fn parse_age_threshold_hours() {
+        let dur = parse_age_threshold("24h").unwrap();
+        assert_eq!(dur, Duration::from_secs(24 * 3600));
+    }
+
+    #[test]
+    fn parse_age_threshold_weeks() {
+        let dur = parse_age_threshold("2w").unwrap();
+        assert_eq!(dur, Duration::from_secs(14 * 86400));
+    }
+
+    #[test]
+    fn parse_age_threshold_zero() {
+        let dur = parse_age_threshold("0s").unwrap();
+        assert_eq!(dur, Duration::from_secs(0));
+    }
+
+    #[test]
+    fn parse_age_threshold_invalid() {
+        assert!(parse_age_threshold("abc").is_err());
+    }
+
+    // --- done_tasks_older_than tests ---
+
+    #[test]
+    fn done_tasks_older_than_filters_correctly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        // Task completed long ago — should be included
+        write_task_file(
+            &tasks_dir,
+            "001-old.md",
+            1,
+            "done",
+            Some("2020-01-01T00:00:00+00:00"),
+        );
+        // Task completed very recently — should be excluded with 7d threshold
+        let now = Utc::now();
+        let recent = now.format("%Y-%m-%dT%H:%M:%S+00:00").to_string();
+        write_task_file(&tasks_dir, "002-recent.md", 2, "done", Some(&recent));
+
+        let tasks = done_tasks_older_than(&board_dir, Duration::from_secs(7 * 86400)).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, 1);
+    }
+
+    // --- archive_tasks tests ---
+
+    #[test]
+    fn archive_tasks_moves_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        write_task_file(
+            &tasks_dir,
+            "001-done.md",
+            1,
+            "done",
+            Some("2026-03-20T10:00:00+00:00"),
+        );
+
+        let tasks = load_tasks_from_dir(&tasks_dir).unwrap();
+        let summary = archive_tasks(&board_dir, &tasks, false).unwrap();
+
+        assert_eq!(summary.archived_count, 1);
+        assert_eq!(summary.skipped_count, 0);
+
+        // File moved to archive
+        let archive_dir = board_dir.join("archive");
+        assert!(archive_dir.join("001-done.md").exists());
+        assert!(!tasks_dir.join("001-done.md").exists());
+
+        // Content preserved unchanged
+        let content = std::fs::read_to_string(archive_dir.join("001-done.md")).unwrap();
+        assert!(content.contains("status: done"));
+        assert!(content.contains("Task body."));
+    }
+
+    #[test]
+    fn archive_tasks_creates_archive_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        write_task_file(
+            &tasks_dir,
+            "001-done.md",
+            1,
+            "done",
+            Some("2026-03-20T10:00:00+00:00"),
+        );
+
+        let archive_dir = board_dir.join("archive");
+        assert!(!archive_dir.exists());
+
+        let tasks = load_tasks_from_dir(&tasks_dir).unwrap();
+        archive_tasks(&board_dir, &tasks, false).unwrap();
+
+        assert!(archive_dir.is_dir());
+    }
+
+    #[test]
+    fn archive_tasks_dry_run_does_not_move() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        write_task_file(
+            &tasks_dir,
+            "001-done.md",
+            1,
+            "done",
+            Some("2026-03-20T10:00:00+00:00"),
+        );
+
+        let tasks = load_tasks_from_dir(&tasks_dir).unwrap();
+        let summary = archive_tasks(&board_dir, &tasks, true).unwrap();
+
+        assert_eq!(summary.archived_count, 1);
+        // File still in original location
+        assert!(tasks_dir.join("001-done.md").exists());
+        // Archive dir not created
+        assert!(!board_dir.join("archive").exists());
+    }
+
+    #[test]
+    fn archive_tasks_skips_non_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        write_task_file(&tasks_dir, "001-progress.md", 1, "in-progress", None);
+        write_task_file(&tasks_dir, "002-todo.md", 2, "todo", None);
+
+        // done_tasks_older_than filters to done only
+        let tasks = done_tasks_older_than(&board_dir, Duration::from_secs(0)).unwrap();
+        assert!(tasks.is_empty());
+
+        let summary = archive_tasks(&board_dir, &tasks, false).unwrap();
+        assert_eq!(summary.archived_count, 0);
+        assert!(!board_dir.join("archive").exists());
     }
 }

@@ -318,9 +318,23 @@ fn main() -> Result<()> {
                     };
                     print!("{}", team::deps::render_deps(&board_dir, fmt)?);
                 }
-                Some(BoardCommand::Archive { older_than }) => {
-                    let count = team::board::archive_done_tasks(&board_dir, older_than.as_deref())?;
-                    println!("Archived {count} task(s)");
+                Some(BoardCommand::Archive {
+                    older_than,
+                    dry_run,
+                }) => {
+                    let max_age = team::board::parse_age_threshold(&older_than)?;
+                    let tasks = team::board::done_tasks_older_than(&board_dir, max_age)?;
+                    if dry_run {
+                        println!("[dry-run] Would archive {} task(s):", tasks.len());
+                    }
+                    let summary = team::board::archive_tasks(&board_dir, &tasks, dry_run)?;
+                    if !dry_run {
+                        println!(
+                            "Archived {} task(s) to {}",
+                            summary.archived_count,
+                            summary.archive_dir.display()
+                        );
+                    }
                 }
                 None => {
                     let status = std::process::Command::new("kanban-md")
