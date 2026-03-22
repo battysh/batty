@@ -1162,7 +1162,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
 
             let member_state = match new_state {
                 WatcherState::Active => MemberState::Working,
-                WatcherState::Idle => MemberState::Idle,
+                WatcherState::Ready | WatcherState::Idle => MemberState::Idle,
                 WatcherState::PaneDead => MemberState::Idle,
                 WatcherState::ContextExhausted => MemberState::Working,
             };
@@ -4386,10 +4386,9 @@ exit 1
 
             let tmp = tempfile::tempdir().unwrap();
             let mut watchers = HashMap::new();
-            watchers.insert(
-                "scientist".to_string(),
-                SessionWatcher::new(&pane_id, "scientist", 300, None),
-            );
+            let mut scientist_watcher = SessionWatcher::new(&pane_id, "scientist", 300, None);
+            scientist_watcher.confirm_ready();
+            watchers.insert("scientist".to_string(), scientist_watcher);
             let mut daemon = TestDaemonBuilder::new(tmp.path())
                 .session(session)
                 .members(vec![architect_member("scientist")])
@@ -4446,10 +4445,9 @@ exit 1
 
         let tmp = tempfile::tempdir().unwrap();
         let mut watchers = HashMap::new();
-        watchers.insert(
-            "lead".to_string(),
-            SessionWatcher::new(&pane_id, "lead", 300, None),
-        );
+        let mut lead_watcher = SessionWatcher::new(&pane_id, "lead", 300, None);
+        lead_watcher.confirm_ready();
+        watchers.insert("lead".to_string(), lead_watcher);
         let mut daemon = TestDaemonBuilder::new(tmp.path())
             .session(session)
             .members(vec![

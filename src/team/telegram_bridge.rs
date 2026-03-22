@@ -284,10 +284,9 @@ mod tests {
                 use_worktrees: false,
             };
             let mut watchers = HashMap::new();
-            watchers.insert(
-                "scientist".to_string(),
-                SessionWatcher::new(&pane_id, "scientist", 300, None),
-            );
+            let mut scientist_watcher = SessionWatcher::new(&pane_id, "scientist", 300, None);
+            scientist_watcher.confirm_ready();
+            watchers.insert("scientist".to_string(), scientist_watcher);
             let mut daemon = TeamDaemon {
                 config: DaemonConfig {
                     project_root: tmp.path().to_path_buf(),
@@ -410,10 +409,9 @@ mod tests {
             use_worktrees: false,
         };
         let mut watchers = HashMap::new();
-        watchers.insert(
-            "lead".to_string(),
-            SessionWatcher::new(&pane_id, "lead", 300, None),
-        );
+        let mut lead_watcher = SessionWatcher::new(&pane_id, "lead", 300, None);
+        lead_watcher.confirm_ready();
+        watchers.insert("lead".to_string(), lead_watcher);
         let mut daemon = TeamDaemon {
             config: DaemonConfig {
                 project_root: tmp.path().to_path_buf(),
