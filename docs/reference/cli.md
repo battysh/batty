@@ -32,6 +32,7 @@ Commands:
   ack              Acknowledge (mark delivered) a message in a member's inbox
   merge            Merge an engineer's worktree branch into main
   task             Manage workflow task state and metadata
+  review           Record a structured review disposition for a task
   completions      Generate shell completions
   nudge            Per-intervention runtime toggles
   pause            Pause nudges and standups
@@ -41,6 +42,7 @@ Commands:
   queue            Show pending dispatch queue entries
   cost             Estimate current run cost from agent session files
   doctor           Dump diagnostic state from Batty state files
+  telemetry        Query the telemetry database for agent and task metrics
   help             Print this message or the help of the given subcommand(s)
 
 Options:
@@ -601,6 +603,26 @@ Options:
           Print help
 ```
 
+## `batty review`
+
+Record a structured review disposition for a task
+
+```text
+Record a structured review disposition for a task
+
+Usage: batty review [OPTIONS] <TASK_ID> <DISPOSITION> [FEEDBACK]
+
+Arguments:
+  <TASK_ID>      Task id
+  <DISPOSITION>  Review disposition [possible values: approve, request-changes, reject]
+  [FEEDBACK]     Feedback text
+
+Options:
+      --reviewer <REVIEWER>  Reviewer name (default: human) [default: human]
+  -v, --verbose...           Verbosity level (-v, -vv, -vvv)
+  -h, --help                 Print help
+```
+
 ## `batty resume`
 
 Resume nudges and standups
@@ -914,6 +936,99 @@ Options:
 
   -h, --help
           Print help
+```
+
+## `batty telemetry`
+
+Query the telemetry database for agent and task metrics
+
+```text
+Query the telemetry database for agent and task metrics
+
+Usage: batty telemetry [OPTIONS] <COMMAND>
+
+Commands:
+  summary  Show session summaries
+  agents   Show per-agent performance metrics
+  tasks    Show per-task lifecycle metrics
+  reviews  Show review pipeline metrics (auto-merge rate, rework, latency)
+  events   Show recent events from the telemetry database
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose...  Verbosity level (-v, -vv, -vvv)
+  -h, --help        Print help
+```
+
+## `batty telemetry summary`
+
+Show session summaries
+
+```text
+Show session summaries
+
+Usage: batty telemetry summary [OPTIONS]
+
+Options:
+  -v, --verbose...  Verbosity level (-v, -vv, -vvv)
+  -h, --help        Print help
+```
+
+## `batty telemetry agents`
+
+Show per-agent performance metrics
+
+```text
+Show per-agent performance metrics
+
+Usage: batty telemetry agents [OPTIONS]
+
+Options:
+  -v, --verbose...  Verbosity level (-v, -vv, -vvv)
+  -h, --help        Print help
+```
+
+## `batty telemetry tasks`
+
+Show per-task lifecycle metrics
+
+```text
+Show per-task lifecycle metrics
+
+Usage: batty telemetry tasks [OPTIONS]
+
+Options:
+  -v, --verbose...  Verbosity level (-v, -vv, -vvv)
+  -h, --help        Print help
+```
+
+## `batty telemetry reviews`
+
+Show review pipeline metrics (auto-merge rate, rework, latency)
+
+```text
+Show review pipeline metrics (auto-merge rate, rework, latency)
+
+Usage: batty telemetry reviews [OPTIONS]
+
+Options:
+  -v, --verbose...  Verbosity level (-v, -vv, -vvv)
+  -h, --help        Print help
+```
+
+## `batty telemetry events`
+
+Show recent events from the telemetry database
+
+```text
+Show recent events from the telemetry database
+
+Usage: batty telemetry events [OPTIONS]
+
+Options:
+  -n, --limit <LIMIT>  Maximum number of events to show [default: 50]
+  -v, --verbose...     Verbosity level (-v, -vv, -vvv)
+  -h, --help           Print help
 ```
 
 ## `batty telegram`

@@ -130,11 +130,15 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 - Per-intervention runtime toggles via `batty nudge` to disable or re-enable specific daemon behaviors without restarting
 - Orchestrator automation for triage, review, owned-task recovery, dispatch-gap recovery, utilization recovery, standups, nudges, and retrospectives
 - Auto-merge policy engine with confidence scoring and configurable thresholds for safe unattended merges
-- Review timeout escalation: stale reviews are nudged and auto-escalated after configurable thresholds
+- Review timeout escalation: stale reviews are nudged and auto-escalated after configurable thresholds, with per-priority overrides
+- SQLite telemetry database: `batty telemetry` queries agent performance, task lifecycle, review pipeline metrics, and event history
+- Run retrospectives: `batty retro` generates Markdown reports analyzing task throughput, review stall durations, rework rates, and failure patterns
+- Team template export/import: `batty export-template` saves your team config, `batty init --from` restores it
+- Daemon restart recovery: dead agent panes are automatically respawned with task context and backoff
 - External senders: allow non-team sources (email routers, Slack bridges) to message any role
 - Graceful non-git-repo handling: git-dependent operations degrade cleanly when the project is not a repository
 - `batty doctor --fix`: detect and clean up orphan worktrees and branches left by previous runs
-- YAML config, Markdown boards, JSON/JSONL logs: everything stays file-based
+- YAML config, Markdown boards, JSON/JSONL + SQLite logs: everything stays file-based
 
 ## CLI Quick Reference
 
@@ -149,9 +153,11 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 | `batty board` / `board list` / `board summary` | Open the kanban board or inspect it without a TTY |
 | `batty status [--json]` | Show current team state |
 | `batty merge <engineer>` | Merge an engineer worktree branch |
-| `batty task review <id> --disposition <d>` | Record a review disposition (approved, changes_requested, rejected) |
+| `batty review <id> <disposition> [feedback]` | Record a review disposition (approve, request-changes, reject) |
+| `batty task review <id> --disposition <d>` | Record a review disposition (workflow-level variant) |
 | `batty task schedule <id> [--at T] [--cron E] [--clear]` | Set or clear scheduled dispatch time and cron recurrence |
 | `batty nudge disable/enable/status` | Toggle specific daemon interventions at runtime |
+| `batty telemetry summary/agents/tasks/reviews/events` | Query SQLite telemetry for agent, task, and review metrics |
 | `batty retro` / `load` / `cost` / `doctor` | Inspect run history, team load, session cost, and diagnostic state |
 | `batty doctor --fix` | Clean up orphan worktrees and branches |
 | `batty pause` / `resume` / `queue` | Control automation and inspect queued dispatch work |
