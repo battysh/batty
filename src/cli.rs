@@ -275,6 +275,16 @@ pub enum TaskCommand {
         #[arg(long = "clear-blocked", default_value_t = false)]
         clear_blocked: bool,
     },
+
+    /// Set per-task auto-merge override
+    #[command(name = "auto-merge")]
+    AutoMerge {
+        /// Task id
+        task_id: u32,
+        /// Enable or disable auto-merge for this task
+        #[arg(value_enum)]
+        action: AutoMergeAction,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -322,6 +332,12 @@ pub enum ReviewDispositionArg {
     #[value(name = "changes_requested")]
     ChangesRequested,
     Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AutoMergeAction {
+    Enable,
+    Disable,
 }
 
 #[cfg(test)]

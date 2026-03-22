@@ -277,9 +277,21 @@ impl TeamEvent {
         }
     }
 
-    pub fn task_auto_merged(task: &str) -> Self {
+    pub fn task_auto_merged(
+        engineer: &str,
+        task: &str,
+        confidence: f64,
+        files_changed: usize,
+        lines_changed: usize,
+    ) -> Self {
         Self {
+            role: Some(engineer.into()),
             task: Some(task.into()),
+            load: Some(confidence),
+            reason: Some(format!(
+                "files={} lines={}",
+                files_changed, lines_changed
+            )),
             ..Self::base("task_auto_merged")
         }
     }
@@ -553,7 +565,7 @@ mod tests {
                 "delivery_failed",
                 TeamEvent::delivery_failed("eng-1", "manager", "message marker missing"),
             ),
-            ("task_auto_merged", TeamEvent::task_auto_merged("42")),
+            ("task_auto_merged", TeamEvent::task_auto_merged("eng-1", "42", 0.95, 2, 30)),
             ("task_manual_merged", TeamEvent::task_manual_merged("42")),
             (
                 "review_nudge_sent",

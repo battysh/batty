@@ -789,6 +789,7 @@ mod tests {
             poll_interval: Duration::from_secs(5),
             is_git_repo: false,
             subsystem_error_counts: HashMap::new(),
+            auto_merge_overrides: HashMap::new(),
         }
     }
 

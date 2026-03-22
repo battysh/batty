@@ -18,6 +18,7 @@ use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use super::artifact::append_test_timing_record;
+use super::auto_merge::{self, AutoMergeDecision};
 #[cfg(test)]
 use super::artifact::read_test_timing_log;
 use super::daemon::TeamDaemon;
@@ -125,6 +126,83 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     let test_duration_ms = test_started.elapsed().as_millis() as u64;
     if tests_passed {
         let task_title = read_task_title(&board_dir, task_id);
+
+        // --- Auto-merge decision point ---
+        let policy = &daemon.config.team_config.workflow_policy.auto_merge;
+        let auto_merge_override = daemon.auto_merge_override(task_id);
+
+        // If override explicitly disables auto-merge, route to manual review
+        if auto_merge_override == Some(false) {
+            info!(engineer, task_id, "auto-merge disabled by per-task override, routing to manual review");
+            if let Some(ref manager_name) = manager_name {
+                let msg = format!(
+                    "[{engineer}] Task #{task_id} passed tests. Auto-merge disabled by override — awaiting manual review.\nTitle: {task_title}"
+                );
+                daemon.queue_message(engineer, manager_name, &msg)?;
+                daemon.mark_member_working(manager_name);
+            }
+            return Ok(());
+        }
+
+        // Evaluate auto-merge if policy is enabled or override forces it
+        let should_try_auto_merge = auto_merge_override == Some(true) || policy.enabled;
+        if should_try_auto_merge {
+            match auto_merge::analyze_diff(daemon.project_root(), "main", &task_branch) {
+                Ok(summary) => {
+                    let decision = if auto_merge_override == Some(true) {
+                        // Force auto-merge regardless of policy thresholds
+                        AutoMergeDecision::AutoMerge {
+                            confidence: auto_merge::compute_merge_confidence(&summary, policy),
+                        }
+                    } else {
+                        auto_merge::should_auto_merge(&summary, policy)
+                    };
+
+                    match decision {
+                        AutoMergeDecision::AutoMerge { confidence } => {
+                            info!(
+                                engineer,
+                                task_id,
+                                confidence,
+                                files = summary.files_changed,
+                                lines = summary.total_lines(),
+                                "auto-merging task"
+                            );
+                            daemon.record_task_auto_merged(
+                                engineer,
+                                task_id,
+                                confidence,
+                                summary.files_changed,
+                                summary.total_lines(),
+                            );
+                            // Fall through to normal merge path below
+                        }
+                        AutoMergeDecision::ManualReview { confidence, reasons } => {
+                            info!(
+                                engineer,
+                                task_id,
+                                confidence,
+                                ?reasons,
+                                "routing to manual review"
+                            );
+                            if let Some(ref manager_name) = manager_name {
+                                let reason_text = reasons.join("; ");
+                                let msg = format!(
+                                    "[{engineer}] Task #{task_id} passed tests but requires manual review.\nTitle: {task_title}\nConfidence: {confidence:.2}\nReasons: {reason_text}"
+                                );
+                                daemon.queue_message(engineer, manager_name, &msg)?;
+                                daemon.mark_member_working(manager_name);
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(engineer, task_id, error = %error, "auto-merge diff analysis failed, falling through to normal merge");
+                }
+            }
+        }
+
         let lock =
             MergeLock::acquire(daemon.project_root()).context("failed to acquire merge lock")?;
 
