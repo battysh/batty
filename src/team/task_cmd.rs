@@ -143,6 +143,82 @@ fn queue_review_feedback(
     Ok(())
 }
 
+/// Structured review: stores review_disposition, review_feedback, reviewed_by,
+/// reviewed_at in task frontmatter and applies the correct state transition.
+///
+/// Disposition mapping:
+///   approve         → Done
+///   request-changes → InProgress (feedback delivered to engineer inbox)
+///   reject          → Blocked (reason stored in blocked_on)
+pub fn cmd_review_structured(
+    board_dir: &Path,
+    task_id: u32,
+    disposition: &str,
+    feedback: Option<&str>,
+    reviewer: &str,
+) -> Result<()> {
+    let task_path = find_task_path(board_dir, task_id)?;
+    let task = Task::from_file(&task_path)?;
+    let current = parse_task_state(&task.status)?;
+
+    let (target_state, disposition_str) = match disposition {
+        "approve" => (TaskState::Done, "approved"),
+        "request-changes" | "request_changes" => (TaskState::InProgress, "changes_requested"),
+        "reject" => (TaskState::Blocked, "rejected"),
+        other => bail!("unknown review disposition: {other}"),
+    };
+
+    can_transition(current, target_state).map_err(anyhow::Error::msg)?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let default_reject_reason = format!("rejected by {reviewer}");
+
+    update_task_frontmatter(&task_path, |mapping| {
+        set_status(mapping, target_state);
+        set_optional_string(mapping, "review_disposition", Some(disposition_str));
+        set_optional_string(mapping, "reviewed_by", Some(reviewer));
+        set_optional_string(mapping, "reviewed_at", Some(&now));
+        if let Some(text) = feedback {
+            set_optional_string(mapping, "review_feedback", Some(text));
+        }
+        if target_state == TaskState::Blocked {
+            let reason = feedback.unwrap_or(&default_reject_reason);
+            set_optional_string(mapping, "blocked_on", Some(reason));
+        } else {
+            clear_blocked(mapping);
+        }
+    })?;
+
+    // Update workflow metadata outcome
+    let mut metadata = read_workflow_metadata(&task_path)?;
+    metadata.outcome = Some(disposition_str.to_string());
+    if disposition == "approve" {
+        metadata.review_blockers.clear();
+    }
+    write_workflow_metadata(&task_path, &metadata)?;
+
+    // Deliver feedback to engineer inbox on request-changes
+    if disposition == "request-changes" || disposition == "request_changes" {
+        if let Some(text) = feedback {
+            if let Some(engineer) = task.claimed_by.as_deref() {
+                if let Some(project_root) = board_dir
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .and_then(|p| p.parent())
+                {
+                    let inbox_root = super::inbox::inboxes_root(project_root);
+                    if let Ok(()) = queue_review_feedback(&inbox_root, engineer, task_id, text) {
+                        println!("Review feedback delivered to {engineer}'s inbox.");
+                    }
+                }
+            }
+        }
+    }
+
+    println!("Task #{task_id} review recorded as {disposition_str} by {reviewer}.");
+    Ok(())
+}
+
 pub fn cmd_update(board_dir: &Path, task_id: u32, fields: HashMap<String, String>) -> Result<()> {
     if fields.is_empty() {
         bail!("no workflow fields provided");
@@ -733,5 +809,143 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("at least one of --at, --cron, or --clear"));
+    }
+
+    // --- Structured review tests ---
+
+    #[test]
+    fn structured_review_approve_stores_frontmatter_and_moves_to_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        let task_path = write_task_file(board_dir, 70, "review");
+
+        cmd_review_structured(board_dir, 70, "approve", None, "manager-1").unwrap();
+
+        let task = Task::from_file(&task_path).unwrap();
+        assert_eq!(task.status, "done");
+
+        let content = std::fs::read_to_string(&task_path).unwrap();
+        assert!(content.contains("review_disposition: approved"));
+        assert!(content.contains("reviewed_by: manager-1"));
+        assert!(content.contains("reviewed_at:"));
+
+        let metadata = read_workflow_metadata(&task_path).unwrap();
+        assert_eq!(metadata.outcome.as_deref(), Some("approved"));
+    }
+
+    #[test]
+    fn structured_review_request_changes_stores_feedback_and_moves_to_in_progress() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        let task_path = write_task_file(board_dir, 71, "review");
+
+        cmd_review_structured(
+            board_dir,
+            71,
+            "request-changes",
+            Some("fix the error handling"),
+            "manager-1",
+        )
+        .unwrap();
+
+        let task = Task::from_file(&task_path).unwrap();
+        assert_eq!(task.status, "in-progress");
+
+        let content = std::fs::read_to_string(&task_path).unwrap();
+        assert!(content.contains("review_disposition: changes_requested"));
+        assert!(content.contains("review_feedback: fix the error handling"));
+        assert!(content.contains("reviewed_by: manager-1"));
+        assert!(content.contains("reviewed_at:"));
+    }
+
+    #[test]
+    fn structured_review_reject_moves_to_blocked_with_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        let task_path = write_task_file(board_dir, 72, "review");
+
+        cmd_review_structured(
+            board_dir,
+            72,
+            "reject",
+            Some("does not meet requirements"),
+            "manager-1",
+        )
+        .unwrap();
+
+        let task = Task::from_file(&task_path).unwrap();
+        assert_eq!(task.status, "blocked");
+
+        let content = std::fs::read_to_string(&task_path).unwrap();
+        assert!(content.contains("review_disposition: rejected"));
+        assert!(content.contains("review_feedback: does not meet requirements"));
+        assert!(content.contains("reviewed_by: manager-1"));
+        assert!(content.contains("blocked_on: does not meet requirements"));
+    }
+
+    #[test]
+    fn structured_review_reject_without_feedback_uses_default_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        let task_path = write_task_file(board_dir, 73, "review");
+
+        cmd_review_structured(board_dir, 73, "reject", None, "manager-1").unwrap();
+
+        let task = Task::from_file(&task_path).unwrap();
+        assert_eq!(task.status, "blocked");
+
+        let content = std::fs::read_to_string(&task_path).unwrap();
+        assert!(content.contains("blocked_on: rejected by manager-1"));
+    }
+
+    #[test]
+    fn structured_review_rejects_non_review_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        write_task_file(board_dir, 74, "in-progress");
+
+        let err = cmd_review_structured(board_dir, 74, "approve", None, "manager-1")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("illegal task state transition"));
+    }
+
+    #[test]
+    fn structured_review_feedback_delivered_to_engineer_inbox() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create project structure: board_dir must be at <root>/.batty/team_config/board
+        let project_root = tmp.path().join("project");
+        let actual_board_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        std::fs::create_dir_all(actual_board_dir.join("tasks")).unwrap();
+
+        // Create inbox for engineer
+        let inbox_root = crate::team::inbox::inboxes_root(&project_root);
+        crate::team::inbox::init_inbox(&inbox_root, "eng-1-2").unwrap();
+
+        // Write task in the actual board dir
+        let task_path = actual_board_dir.join("tasks").join("075-task-75.md");
+        std::fs::write(
+            &task_path,
+            "---\nid: 75\ntitle: Task 75\nstatus: review\npriority: high\nclass: standard\nclaimed_by: eng-1-2\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        cmd_review_structured(
+            &actual_board_dir,
+            75,
+            "request-changes",
+            Some("add more tests"),
+            "manager-1",
+        )
+        .unwrap();
+
+        let pending = crate::team::inbox::pending_messages(&inbox_root, "eng-1-2").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].body.contains("add more tests"));
+        assert!(pending[0].body.contains("#75"));
     }
 }
