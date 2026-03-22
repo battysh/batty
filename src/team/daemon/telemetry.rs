@@ -155,9 +155,14 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::delivery_failed(role, from, reason));
     }
 
-    pub(crate) fn record_task_escalated(&mut self, role: &str, task: impl Into<String>) {
+    pub(crate) fn record_task_escalated(
+        &mut self,
+        role: &str,
+        task: impl Into<String>,
+        reason: Option<&str>,
+    ) {
         let task = task.into();
-        self.emit_event(TeamEvent::task_escalated(role, &task));
+        self.emit_event(TeamEvent::task_escalated(role, &task, reason));
     }
 
     pub(super) fn record_task_unblocked(&mut self, role: &str, task: impl Into<String>) {
@@ -170,8 +175,11 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::performance_regression(&task, reason));
     }
 
-    pub(crate) fn record_task_completed(&mut self, role: &str) {
-        self.emit_event(TeamEvent::task_completed(role));
+    pub(crate) fn record_task_completed(&mut self, role: &str, task_id: Option<u32>) {
+        self.emit_event(TeamEvent::task_completed(
+            role,
+            task_id.map(|id| id.to_string()).as_deref(),
+        ));
     }
 
     pub(crate) fn record_task_auto_merged(
@@ -603,7 +611,7 @@ mod tests {
 
         let mut daemon = TeamDaemon::new(config).unwrap();
         for index in 0..5 {
-            let mut event = TeamEvent::task_escalated("eng-1", &format!("{}", 100 + index));
+            let mut event = TeamEvent::task_escalated("eng-1", &format!("{}", 100 + index), None);
             event.ts = index as u64 + 1;
             daemon.emit_event(event);
         }
