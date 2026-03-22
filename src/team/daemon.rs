@@ -6418,8 +6418,4 @@ exit 1
             "medium task should NOT be nudged at 400s (threshold 1800s)"
         );
     }
-
-    // NOTE: Restart budget tests removed — they referenced fields/methods
-    // from an incomplete merge of #214 that don't exist on this branch.
-    // They should be re-added when the restart budget feature lands properly.
 }
