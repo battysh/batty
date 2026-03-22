@@ -23,9 +23,9 @@ use super::artifact::read_test_timing_log;
 use super::auto_merge::{self, AutoMergeDecision};
 use super::daemon::TeamDaemon;
 use super::task_loop::{
-    branch_is_merged_into, checkout_worktree_branch_from_main, current_worktree_branch,
-    delete_branch, engineer_base_branch_name, is_worktree_safe_to_mutate, read_task_title,
-    run_tests_in_worktree,
+    auto_commit_before_reset, branch_is_merged_into, checkout_worktree_branch_from_main,
+    current_worktree_branch, delete_branch, engineer_base_branch_name,
+    is_worktree_safe_to_mutate, read_task_title, run_tests_in_worktree,
 };
 
 fn run_git_with_context(
@@ -594,9 +594,18 @@ pub(crate) fn reset_engineer_worktree(project_root: &Path, engineer_name: &str) 
     Ok(())
 }
 
-/// Discard uncommitted changes in a worktree so `checkout -B` can succeed.
+/// Preserve uncommitted changes via auto-commit, then force-clean the worktree
+/// so `checkout -B` can succeed.
 /// Best-effort: failures are logged but do not block the reset attempt.
 fn force_clean_worktree(worktree_dir: &Path, engineer_name: &str) {
+    // Try to auto-commit first to preserve work in git history.
+    if !auto_commit_before_reset(worktree_dir) {
+        info!(
+            engineer = engineer_name,
+            "auto-commit skipped or failed, proceeding with force-clean"
+        );
+    }
+
     if let Err(error) = run_git_with_context(
         worktree_dir,
         &["reset", "--hard"],
