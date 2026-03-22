@@ -350,10 +350,9 @@ mod tests {
             anyhow::bail!("delivery timeout")
         });
         assert!(
-            daemon
+            !daemon
                 .subsystem_error_counts
-                .get("deliver_inbox_messages")
-                .is_none(),
+                .contains_key("deliver_inbox_messages"),
             "critical steps should not track consecutive failures"
         );
 

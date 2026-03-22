@@ -967,7 +967,7 @@ mod tests {
         AutomationConfig, BoardConfig, OrchestratorPosition, RoleType, StandupConfig, TeamConfig,
         WorkflowMode, WorkflowPolicy,
     };
-    use crate::team::events::{EventSink, TeamEvent};
+    use crate::team::events::TeamEvent;
     use crate::team::hierarchy::MemberInstance;
     use crate::team::standup::MemberState;
     use crate::team::test_helpers::{make_test_daemon, write_event_log};
@@ -3685,7 +3685,7 @@ exit 1
             !cp_path.exists(),
             "checkpoint must be removed when task is cleared"
         );
-        assert!(daemon.active_tasks.get(member_name).is_none());
+        assert!(!daemon.active_tasks.contains_key(member_name));
     }
 
     // ---- uncommitted work warning tests ----
@@ -4468,10 +4468,10 @@ exit 1
         let result = super::uncommitted_diff_lines(tmp.path());
         // The function uses Command::output() which may still succeed with non-zero exit.
         // Either it returns an error or returns 0 lines — both are acceptable.
-        match result {
-            Ok(lines) => assert_eq!(lines, 0),
-            Err(_) => {} // Also acceptable
+        if let Ok(lines) = result {
+            assert_eq!(lines, 0);
         }
+        // Err is also acceptable — non-git dir may fail
     }
 
     #[test]

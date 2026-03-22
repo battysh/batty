@@ -28,9 +28,7 @@ impl TeamDaemon {
 mod tests {
     use std::path::Path;
 
-    use crate::team::test_support::{
-        TestDaemonBuilder, write_open_task_file, write_owned_task_file,
-    };
+    use crate::team::test_support::{TestDaemonBuilder, write_owned_task_file};
 
     fn write_review_task(project_root: &Path, id: u32, review_owner: &str) {
         let tasks_dir = project_root

@@ -188,7 +188,7 @@ fn check_has_conflicts(repo: &Path, base: &str, branch: &str) -> bool {
 }
 
 /// Returns true if the path looks like a migration file.
-fn is_migration_file(path: &String) -> bool {
+fn is_migration_file(path: &str) -> bool {
     let lower = path.to_lowercase();
     lower.contains("migration")
         || lower.contains("migrate")
@@ -198,7 +198,7 @@ fn is_migration_file(path: &String) -> bool {
 }
 
 /// Returns true if the path looks like a config file (not source code).
-fn is_config_file(path: &String) -> bool {
+fn is_config_file(path: &str) -> bool {
     let lower = path.to_lowercase();
     lower.ends_with(".yaml")
         || lower.ends_with(".yml")
@@ -679,21 +679,19 @@ mod tests {
 
     #[test]
     fn migration_file_detection() {
-        assert!(is_migration_file(
-            &"db/migrate/001_add_users.sql".to_string()
-        ));
-        assert!(is_migration_file(&"src/migrations/v2.rs".to_string()));
-        assert!(is_migration_file(&"schema.sql".to_string()));
-        assert!(!is_migration_file(&"src/team/mod.rs".to_string()));
+        assert!(is_migration_file("db/migrate/001_add_users.sql"));
+        assert!(is_migration_file("src/migrations/v2.rs"));
+        assert!(is_migration_file("schema.sql"));
+        assert!(!is_migration_file("src/team/mod.rs"));
     }
 
     #[test]
     fn config_file_detection() {
-        assert!(is_config_file(&"team.yaml".to_string()));
-        assert!(is_config_file(&"Cargo.toml".to_string()));
-        assert!(is_config_file(&"package.json".to_string()));
-        assert!(is_config_file(&".env".to_string()));
-        assert!(!is_config_file(&"src/team/config.rs".to_string()));
+        assert!(is_config_file("team.yaml"));
+        assert!(is_config_file("Cargo.toml"));
+        assert!(is_config_file("package.json"));
+        assert!(is_config_file(".env"));
+        assert!(!is_config_file("src/team/config.rs"));
     }
 
     #[test]
