@@ -116,6 +116,8 @@ pub struct TeamDaemon {
     pub(super) review_nudge_sent: HashSet<u32>,
     pub(super) poll_interval: Duration,
     pub(super) is_git_repo: bool,
+    /// Consecutive error counts per recoverable subsystem name.
+    pub(super) subsystem_error_counts: HashMap<String, u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,6 +346,7 @@ impl TeamDaemon {
             review_nudge_sent: HashSet::new(),
             poll_interval: Duration::from_secs(5),
             is_git_repo,
+            subsystem_error_counts: HashMap::new(),
         })
     }
 
@@ -426,58 +429,69 @@ impl TeamDaemon {
                 break;
             }
 
-            self.run_loop_step("poll_watchers", |daemon| daemon.poll_watchers());
-            self.run_loop_step("restart_dead_members", |daemon| {
+            // -- Recoverable subsystems: log-and-skip with consecutive-failure tracking --
+            self.run_recoverable_step("poll_watchers", |daemon| daemon.poll_watchers());
+            self.run_recoverable_step("restart_dead_members", |daemon| {
                 daemon.restart_dead_members()
             });
-            self.run_loop_step("sync_launch_state_session_ids", |daemon| {
+            self.run_recoverable_step("sync_launch_state_session_ids", |daemon| {
                 daemon.sync_launch_state_session_ids()
             });
-            self.run_loop_step("drain_legacy_command_queue", |daemon| {
+            self.run_recoverable_step("drain_legacy_command_queue", |daemon| {
                 daemon.drain_legacy_command_queue()
             });
+
+            // -- Critical subsystems: errors logged but no consecutive-failure tracking --
             self.run_loop_step("deliver_inbox_messages", |daemon| {
                 daemon.deliver_inbox_messages()
             });
             self.run_loop_step("retry_failed_deliveries", |daemon| {
                 daemon.retry_failed_deliveries()
             });
-            self.run_loop_step("maybe_intervene_triage_backlog", |daemon| {
+
+            // -- Recoverable subsystems --
+            self.run_recoverable_step("maybe_intervene_triage_backlog", |daemon| {
                 daemon.maybe_intervene_triage_backlog()
             });
-            self.run_loop_step("maybe_intervene_owned_tasks", |daemon| {
+            self.run_recoverable_step("maybe_intervene_owned_tasks", |daemon| {
                 daemon.maybe_intervene_owned_tasks()
             });
-            self.run_loop_step("maybe_intervene_review_backlog", |daemon| {
+            self.run_recoverable_step("maybe_intervene_review_backlog", |daemon| {
                 daemon.maybe_intervene_review_backlog()
             });
-            self.run_loop_step("maybe_escalate_stale_reviews", |daemon| {
+            self.run_recoverable_step("maybe_escalate_stale_reviews", |daemon| {
                 daemon.maybe_escalate_stale_reviews()
             });
-            self.run_loop_step("maybe_auto_unblock_blocked_tasks", |daemon| {
+            self.run_recoverable_step("maybe_auto_unblock_blocked_tasks", |daemon| {
                 daemon.maybe_auto_unblock_blocked_tasks()
             });
+
+            // -- Critical subsystems --
             self.run_loop_step("reconcile_active_tasks", |daemon| {
                 daemon.reconcile_active_tasks()
             });
             self.run_loop_step("maybe_auto_dispatch", |daemon| daemon.maybe_auto_dispatch());
-            self.run_loop_step("maybe_intervene_manager_dispatch_gap", |daemon| {
+
+            // -- Recoverable subsystems --
+            self.run_recoverable_step("maybe_intervene_manager_dispatch_gap", |daemon| {
                 daemon.maybe_intervene_manager_dispatch_gap()
             });
-            self.run_loop_step("maybe_intervene_architect_utilization", |daemon| {
+            self.run_recoverable_step("maybe_intervene_architect_utilization", |daemon| {
                 daemon.maybe_intervene_architect_utilization()
             });
-            self.run_loop_step("maybe_intervene_board_replenishment", |daemon| {
+            self.run_recoverable_step("maybe_intervene_board_replenishment", |daemon| {
                 daemon.maybe_intervene_board_replenishment()
             });
-            self.run_loop_step("maybe_detect_pipeline_starvation", |daemon| {
+            self.run_recoverable_step("maybe_detect_pipeline_starvation", |daemon| {
                 daemon.maybe_detect_pipeline_starvation()
             });
-            self.run_loop_step("process_telegram_queue", |daemon| {
+
+            // -- Recoverable with catch_unwind (panic-safe) --
+            self.run_recoverable_step_with_catch_unwind("process_telegram_queue", |daemon| {
                 daemon.process_telegram_queue()
             });
-            self.run_loop_step("maybe_fire_nudges", |daemon| daemon.maybe_fire_nudges());
-            self.run_loop_step("maybe_generate_standup", |daemon| {
+            self.run_recoverable_step("maybe_fire_nudges", |daemon| daemon.maybe_fire_nudges());
+            self.run_recoverable_step_with_catch_unwind("maybe_generate_standup", |daemon| {
                 let generated =
                     standup::maybe_generate_standup(standup::StandupGenerationContext {
                         project_root: &daemon.config.project_root,
@@ -495,14 +509,14 @@ impl TeamDaemon {
                 }
                 Ok(())
             });
-            self.run_loop_step("maybe_rotate_board", |daemon| daemon.maybe_rotate_board());
-            self.run_loop_step("maybe_generate_retrospective", |daemon| {
+            self.run_recoverable_step("maybe_rotate_board", |daemon| daemon.maybe_rotate_board());
+            self.run_recoverable_step_with_catch_unwind("maybe_generate_retrospective", |daemon| {
                 daemon.maybe_generate_retrospective()
             });
-            self.run_loop_step("maybe_notify_failure_patterns", |daemon| {
+            self.run_recoverable_step("maybe_notify_failure_patterns", |daemon| {
                 daemon.maybe_notify_failure_patterns()
             });
-            self.run_loop_step("maybe_reload_binary", |daemon| {
+            self.run_recoverable_step("maybe_reload_binary", |daemon| {
                 daemon.maybe_hot_reload_binary(hot_reload.as_mut())
             });
             status::update_pane_status_labels(status::PaneStatusLabelUpdateContext {
