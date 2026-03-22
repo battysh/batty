@@ -270,6 +270,8 @@ pub struct AutomationConfig {
     pub intervention_cooldown_secs: u64,
     #[serde(default = "default_utilization_recovery_interval_secs")]
     pub utilization_recovery_interval_secs: u64,
+    #[serde(default = "default_enabled")]
+    pub commit_before_reset: bool,
 }
 
 impl Default for AutomationConfig {
@@ -287,6 +289,7 @@ impl Default for AutomationConfig {
             intervention_idle_grace_secs: default_intervention_idle_grace_secs(),
             intervention_cooldown_secs: default_intervention_cooldown_secs(),
             utilization_recovery_interval_secs: default_utilization_recovery_interval_secs(),
+            commit_before_reset: default_enabled(),
         }
     }
 }
