@@ -19,6 +19,7 @@ pub mod delivery;
 pub mod deps;
 pub mod doctor;
 pub mod errors;
+pub mod estimation;
 pub mod events;
 pub mod failure_patterns;
 pub mod git_cmd;
@@ -1337,7 +1338,7 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
     let owned_task_buckets = status::owned_task_buckets(project_root, &members);
     let agent_health = status::agent_health_by_member(project_root, &members);
     let paused = pause_marker_path(project_root).exists();
-    let rows = status::build_team_status_rows(
+    let mut rows = status::build_team_status_rows(
         &members,
         session_running,
         &runtime_statuses,
@@ -1346,6 +1347,27 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
         &owned_task_buckets,
         &agent_health,
     );
+
+    // Populate ETA estimates for members with active tasks.
+    let active_task_elapsed: Vec<(u32, u64)> = rows
+        .iter()
+        .filter(|row| !row.active_owned_tasks.is_empty())
+        .flat_map(|row| {
+            let elapsed = row.health.task_elapsed_secs.unwrap_or(0);
+            row.active_owned_tasks
+                .iter()
+                .map(move |&task_id| (task_id, elapsed))
+        })
+        .collect();
+    let etas = estimation::compute_etas(project_root, &active_task_elapsed);
+    for row in &mut rows {
+        if let Some(&task_id) = row.active_owned_tasks.first() {
+            if let Some(eta) = etas.get(&task_id) {
+                row.eta = eta.clone();
+            }
+        }
+    }
+
     let workflow_metrics = status::workflow_metrics_section(project_root, &members);
     let (active_tasks, review_queue) = match status::board_status_task_queues(project_root) {
         Ok(queues) => queues,
@@ -1382,7 +1404,7 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
         );
         println!();
         println!(
-            "{:<20} {:<12} {:<10} {:<12} {:>5} {:>6} {:<14} {:<14} {:<18} {:<24} {:<20}",
+            "{:<20} {:<12} {:<10} {:<12} {:>5} {:>6} {:<14} {:<14} {:<16} {:<18} {:<24} {:<20}",
             "MEMBER",
             "ROLE",
             "AGENT",
@@ -1391,14 +1413,15 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
             "TRIAGE",
             "ACTIVE",
             "REVIEW",
+            "ETA",
             "HEALTH",
             "SIGNAL",
             "REPORTS TO"
         );
-        println!("{}", "-".repeat(179));
+        println!("{}", "-".repeat(195));
         for row in &rows {
             println!(
-                "{:<20} {:<12} {:<10} {:<12} {:>5} {:>6} {:<14} {:<14} {:<18} {:<24} {:<20}",
+                "{:<20} {:<12} {:<10} {:<12} {:>5} {:>6} {:<14} {:<14} {:<16} {:<18} {:<24} {:<20}",
                 row.name,
                 row.role,
                 row.agent.as_deref().unwrap_or("-"),
@@ -1407,6 +1430,7 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
                 row.triage_backlog,
                 status::format_owned_tasks_summary(&row.active_owned_tasks),
                 status::format_owned_tasks_summary(&row.review_owned_tasks),
+                row.eta,
                 row.health_summary,
                 row.signal.as_deref().unwrap_or("-"),
                 row.reports_to.as_deref().unwrap_or("-"),
@@ -3466,6 +3490,7 @@ roles:
             runtime_label: Some("idle".to_string()),
             health: status::AgentHealthSummary::default(),
             health_summary: "-".to_string(),
+            eta: "-".to_string(),
         };
         let reviewing = status::TeamStatusRow {
             state: "reviewing".to_string(),
