@@ -1036,6 +1036,7 @@ exit 1
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn poll_watchers_respawns_pane_dead_member_and_records_events() {
         let session = format!("batty-test-restart-dead-member-{}", std::process::id());
         let _ = crate::tmux::kill_session(&session);
@@ -1186,6 +1187,7 @@ exit 1
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn spawn_all_agents_corrects_mismatched_cwd_before_launch() {
         let session = format!("batty-test-spawn-cwd-correct-{}", std::process::id());
         let _ = crate::tmux::kill_session(&session);
@@ -1302,6 +1304,7 @@ exit 1
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn restart_member_corrects_mismatched_cwd_after_respawn() {
         let session = format!("batty-test-restart-cwd-correct-{}", std::process::id());
         let _ = crate::tmux::kill_session(&session);
@@ -1425,6 +1428,7 @@ exit 1
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn agent_restart_relaunches_context_exhausted_member_with_task_context() {
         let session = format!("batty-test-agent-restart-context-{}", std::process::id());
         let _ = crate::tmux::kill_session(&session);
@@ -1573,6 +1577,7 @@ exit 1
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn context_exhaustion_relaunch_corrects_mismatched_cwd() {
         let session = "batty-test-context-cwd-correct";
         let _ = crate::tmux::kill_session(session);
@@ -1689,6 +1694,7 @@ exit 1
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn agent_restart_second_exhaustion_escalates_instead_of_restarting() {
         let session = "batty-test-agent-restart-escalate";
         let _ = crate::tmux::kill_session(session);
@@ -1814,6 +1820,7 @@ exit 1
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn agent_restart_respects_cooldown_before_first_restart() {
         let session = "batty-test-agent-restart-cooldown";
         let _ = crate::tmux::kill_session(session);
@@ -1957,6 +1964,7 @@ exit 1
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn startup_preflight_respawns_dead_pane_and_bootstraps_board() {
         let _path_guard = PATH_LOCK.lock().unwrap();
         let session = format!("batty-test-startup-preflight-{}", std::process::id());
@@ -2063,6 +2071,7 @@ exit 1
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn pre_assignment_health_check_corrects_mismatched_cwd() {
         let session = format!("batty-test-health-check-cwd-correct-{}", std::process::id());
         let _ = crate::tmux::kill_session(&session);
@@ -2145,6 +2154,7 @@ exit 1
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn pre_assignment_health_check_cwd_matching_path_passes_silently() {
         let session = format!("batty-test-health-check-cwd-match-{}", std::process::id());
         let _ = crate::tmux::kill_session(&session);
@@ -2219,6 +2229,7 @@ exit 1
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn startup_cwd_validation_corrects_all_agent_panes() {
         let session = format!("batty-test-startup-cwd-{}", std::process::id());
         let _ = crate::tmux::kill_session(&session);
@@ -2371,6 +2382,7 @@ exit 1
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn stall_restart_relaunches_stalled_agent_with_task_context() {
         let session = format!("batty-test-stall-restart-{}", std::process::id());
         let _ = crate::tmux::kill_session(&session);
@@ -2530,6 +2542,7 @@ exit 1
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn stall_escalates_after_max_restarts() {
         let session = format!("batty-test-stall-escalate-{}", std::process::id());
         let _ = crate::tmux::kill_session(&session);
@@ -3051,6 +3064,7 @@ exit 1
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn stall_checkpoint_restart_resume_full_flow() {
         // End-to-end: stall fires → checkpoint written → agent restarted →
         // restart notice includes checkpoint content.
@@ -3301,6 +3315,7 @@ exit 1
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn stall_overwrites_existing_checkpoint() {
         // If a checkpoint already exists for this role, stall handler must overwrite it.
         let session = format!("batty-test-stall-cp-overwrite-{}", std::process::id());
@@ -3435,6 +3450,7 @@ exit 1
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn stall_checkpoint_with_missing_worktree() {
         // When worktree directory doesn't exist, checkpoint should still be written
         // but branch/commit fields will be None (falls back to task.branch).

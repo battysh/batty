@@ -3629,6 +3629,7 @@ roles:
 
     #[test]
     #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     fn list_runtime_member_statuses_reads_tmux_role_and_status_options() {
         let session = "batty-test-team-status-runtime";
         let _ = crate::tmux::kill_session(session);
