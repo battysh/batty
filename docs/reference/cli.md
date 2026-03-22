@@ -133,6 +133,8 @@ Usage: batty board [OPTIONS] [COMMAND]
 Commands:
   list     List board tasks in a non-interactive table
   summary  Show per-status task counts
+  deps     Show dependency graph
+  archive  Move done tasks to archive directory
   help     Print this message or the help of the given subcommand(s)
 
 Options:
@@ -173,6 +175,49 @@ Show per-status task counts
 Usage: batty board summary [OPTIONS]
 
 Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty board deps`
+
+Show dependency graph
+
+```text
+Show dependency graph
+
+Usage: batty board deps [OPTIONS]
+
+Options:
+      --format <FORMAT>
+          Output format: tree (default), flat, or dot
+
+          [default: tree]
+          [possible values: tree, flat, dot]
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty board archive`
+
+Move done tasks to archive directory
+
+```text
+Move done tasks to archive directory
+
+Usage: batty board archive [OPTIONS]
+
+Options:
+      --older-than <OLDER_THAN>
+          Only archive tasks completed before this date (YYYY-MM-DD)
+
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 

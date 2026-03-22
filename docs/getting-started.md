@@ -474,6 +474,128 @@ batty init --from my-team
 Built-in templates (`solo`, `pair`, `simple`, `squad`, `large`, `research`,
 `software`, `batty`) are always available via `batty init --template <name>`.
 
+## Stall Detection And Auto-Restart
+
+When an agent stops producing output for longer than the configured threshold, the
+daemon treats it as stalled. Stalled agents are automatically restarted with
+exponential backoff:
+
+```yaml
+workflow_policy:
+  stall_threshold_secs: 300    # seconds of silence before an agent is stalled (default: 300)
+  max_stall_restarts: 2        # maximum restart attempts before escalation (default: 2)
+```
+
+Before restarting, the daemon writes a progress checkpoint file into the
+engineer's worktree so the restarted agent can resume with prior task context.
+
+The daemon also monitors agent backend health (e.g., whether the `claude` or
+`codex` binary is responsive). Backend health status surfaces in `batty status`
+output and periodic standups. Configure the health check interval:
+
+```yaml
+workflow_policy:
+  health_check_interval_secs: 60   # how often the daemon checks backend health (default: 60)
+```
+
+## Task Estimation
+
+Batty estimates remaining time for in-progress tasks using historical cycle
+times from the telemetry database. It groups completed tasks by their tag set
+and computes a median duration. When `batty status` runs, each active member
+shows an ETA column derived from the best-matching tag set.
+
+No additional configuration is needed — estimation works automatically once
+the telemetry database has enough completed task data.
+
+## Board Dependencies
+
+Tasks can declare dependencies using a `depends_on` list in their frontmatter:
+
+```yaml
+---
+id: 42
+title: Implement feature X
+depends_on: [40, 41]
+---
+```
+
+Visualize the dependency graph:
+
+```sh
+batty board deps               # default tree format
+batty board deps --format flat # flat list of edges
+batty board deps --format dot  # Graphviz DOT output
+```
+
+The dispatcher respects dependencies — a task will not be auto-assigned until
+all its `depends_on` tasks have reached `done`.
+
+## Board Archive
+
+Move completed tasks out of the active board into an archive directory:
+
+```sh
+batty board archive                           # archive all done tasks
+batty board archive --older-than 2026-03-01   # archive tasks completed before a date
+```
+
+Archived tasks are moved to `.batty/team_config/board/archive/` and no longer
+appear in `batty board` output. This keeps the active board focused on current
+work.
+
+## Uncommitted Work Warning
+
+The daemon monitors engineer worktrees for uncommitted changes. When an
+engineer has more uncommitted diff lines than the configured threshold, the
+manager receives a warning:
+
+```yaml
+workflow_policy:
+  uncommitted_warn_threshold: 200   # diff lines before warning (default: 200)
+```
+
+This prevents engineers from losing work on worktree resets.
+
+## Dispatch Backoff
+
+After a manual task dispatch, the auto-dispatcher pauses for a configurable
+cooldown to avoid re-dispatching work that is already being assigned:
+
+```yaml
+board:
+  dispatch_manual_cooldown_secs: 30   # cooldown after manual dispatch (default: 30)
+```
+
+## Mixed-Backend Teams
+
+Different roles can use different agent backends. Set a team-level default and
+override it per role:
+
+```yaml
+agent: claude                    # team-level default
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude                # uses team default
+    prompt: architect.md
+  - name: engineer
+    role_type: engineer
+    agent: codex                 # overrides team default
+    instances: 3
+    prompt: engineer.md
+```
+
+Resolution order: role-level `agent` > team-level `agent` > `"claude"` (hardcoded
+fallback).
+
+## False-Done Prevention
+
+When an engineer reports completion, the daemon verifies that the worktree
+branch actually has commits beyond `main`. If no new commits are found, the
+completion is rejected and the task stays in progress. This prevents empty
+branches from being merged.
+
 ## Next Steps
 
 - [Runtime Config Reference](reference/config.md)
