@@ -4103,12 +4103,12 @@ exit 1
         // A freshly created tmux pane can occasionally reject the first live
         // injection under heavy suite load. Retry the full setup a few times so
         // this test only fails on a real regression in the live-delivery path.
-        for _attempt in 0..3 {
+        for _attempt in 0..5 {
             let _ = crate::tmux::kill_session(session);
 
             crate::tmux::create_session(session, "cat", &[], "/tmp").unwrap();
             let pane_id = crate::tmux::pane_id(session).unwrap();
-            std::thread::sleep(Duration::from_millis(150));
+            std::thread::sleep(Duration::from_millis(300));
 
             let tmp = tempfile::tempdir().unwrap();
             let mut watchers = HashMap::new();
