@@ -636,6 +636,32 @@ pub fn list_sessions_with_prefix(prefix: &str) -> Vec<String> {
     }
 }
 
+/// RAII guard that kills a tmux session on drop.
+///
+/// Ensures test sessions are cleaned up even on panic/assert failure.
+/// Use in tests instead of manual `kill_session()` calls.
+pub struct TestSession {
+    name: String,
+}
+
+impl TestSession {
+    /// Create a new test session guard wrapping an existing session name.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+
+    /// The session name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Drop for TestSession {
+    fn drop(&mut self) {
+        let _ = kill_session(&self.name);
+    }
+}
+
 /// Kill a tmux session.
 pub fn kill_session(session: &str) -> Result<()> {
     if !session_exists(session) {
@@ -1606,5 +1632,44 @@ mod tests {
         // Session may or may not still exist depending on tmux remain-on-exit
         // Either way, kill should be safe
         let _ = kill_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn test_session_guard_cleanup_on_drop() {
+        let name = "batty-test-guard-drop";
+        let _ = kill_session(name);
+
+        {
+            let guard = TestSession::new(name);
+            create_session(guard.name(), "sleep", &["30".to_string()], "/tmp").unwrap();
+            assert!(session_exists(name));
+            // guard dropped here
+        }
+
+        assert!(!session_exists(name), "session should be killed on drop");
+    }
+
+    #[test]
+    #[serial]
+    fn test_session_guard_cleanup_on_panic() {
+        let name = "batty-test-guard-panic";
+        let _ = kill_session(name);
+
+        let result = std::panic::catch_unwind(|| {
+            let guard = TestSession::new(name);
+            create_session(guard.name(), "sleep", &["30".to_string()], "/tmp").unwrap();
+            assert!(session_exists(name));
+            panic!("intentional panic to test cleanup");
+            #[allow(unreachable_code)]
+            drop(guard);
+        });
+
+        assert!(result.is_err(), "should have panicked");
+        // Give drop a moment to complete (panic unwind runs destructors)
+        assert!(
+            !session_exists(name),
+            "session should be cleaned up even after panic"
+        );
     }
 }
