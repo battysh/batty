@@ -25,6 +25,7 @@ Everything is files. Config is YAML. Messages are JSON. Events are JSONL. All gi
 
 ## Go Deeper
 
+- [Scheduled Tasks & Cron](scheduled-tasks.md) -- Delayed dispatch, recurring tasks, cron recycler
 - [Orchestrator Guide](orchestrator.md) -- Runtime automation, interventions, and config
 - [Architecture](architecture.md) -- Module map, data flow, daemon design
 - [Workflow Migration](workflow-migration.md) -- Safe defaults and rollout guidance for older teams and boards
