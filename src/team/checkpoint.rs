@@ -436,4 +436,80 @@ mod tests {
         assert!(content.contains("**Task:** #2 — Second"));
         assert!(!content.contains("First"));
     }
+
+    // --- Error path and recovery tests (Task #265) ---
+
+    #[test]
+    fn write_checkpoint_to_readonly_dir_fails() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tmp = tempfile::tempdir().unwrap();
+            let readonly = tmp.path().join("readonly_root");
+            fs::create_dir(&readonly).unwrap();
+            // Create .batty dir but make it readonly
+            let batty_dir = readonly.join(".batty");
+            fs::create_dir(&batty_dir).unwrap();
+            fs::set_permissions(&batty_dir, fs::Permissions::from_mode(0o444)).unwrap();
+
+            let cp = Checkpoint {
+                role: "eng-1-1".to_string(),
+                task_id: 1,
+                task_title: "t".to_string(),
+                task_description: "d".to_string(),
+                branch: None,
+                last_commit: None,
+                test_summary: None,
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+            };
+            let result = write_checkpoint(&readonly, &cp);
+            assert!(result.is_err());
+
+            // Restore permissions for cleanup
+            fs::set_permissions(&batty_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn git_current_branch_returns_none_for_nonexistent_dir() {
+        let result = git_current_branch(Path::new("/tmp/__batty_no_dir_here__"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn git_current_branch_returns_none_for_non_git_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = git_current_branch(tmp.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn git_last_commit_returns_none_for_nonexistent_dir() {
+        let result = git_last_commit(Path::new("/tmp/__batty_no_dir_here__"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn git_last_commit_returns_none_for_non_git_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = git_last_commit(tmp.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn last_test_output_returns_none_for_empty_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let test_file = tmp.path().join(".batty_test_output");
+        fs::write(&test_file, "").unwrap();
+        assert!(last_test_output(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn chrono_timestamp_returns_valid_format() {
+        let ts = chrono_timestamp();
+        // Should match ISO-8601 pattern: YYYY-MM-DDTHH:MM:SSZ
+        assert!(ts.ends_with('Z'));
+        assert!(ts.contains('T'));
+        assert_eq!(ts.len(), 20); // "2026-03-22T10:00:00Z" is 20 chars
+    }
 }

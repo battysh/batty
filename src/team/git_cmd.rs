@@ -334,4 +334,161 @@ mod tests {
             .unwrap();
         assert!(is_git_repo(tmp.path()));
     }
+
+    // --- Error path and recovery tests (Task #265) ---
+
+    #[test]
+    fn classify_error_connection_refused_is_transient() {
+        let error = classify_error("fatal: unable to access: Connection refused");
+        assert!(matches!(error, GitError::Transient { .. }));
+    }
+
+    #[test]
+    fn classify_error_timeout_is_transient() {
+        let error = classify_error("fatal: unable to access: Timeout was reached");
+        assert!(matches!(error, GitError::Transient { .. }));
+    }
+
+    #[test]
+    fn classify_error_resource_unavailable_is_transient() {
+        let error = classify_error("error: resource temporarily unavailable");
+        assert!(matches!(error, GitError::Transient { .. }));
+    }
+
+    #[test]
+    fn classify_error_could_not_read_is_transient() {
+        let error = classify_error("fatal: could not read from remote repository");
+        assert!(matches!(error, GitError::Transient { .. }));
+    }
+
+    #[test]
+    fn run_git_on_nonexistent_dir_returns_error() {
+        let error = run_git(Path::new("/tmp/__batty_nonexistent_dir__"), &["status"]).unwrap_err();
+        // Git fails with a permanent error when the dir doesn't exist
+        assert!(!error.is_transient());
+    }
+
+    #[test]
+    fn rev_parse_branch_on_non_git_dir_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let error = rev_parse_branch(tmp.path()).unwrap_err();
+        assert!(matches!(
+            error,
+            GitError::Permanent { .. } | GitError::RevParseFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn rev_parse_toplevel_on_non_git_dir_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let error = rev_parse_toplevel(tmp.path()).unwrap_err();
+        assert!(!error.is_transient());
+    }
+
+    #[test]
+    fn status_porcelain_on_non_git_dir_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let error = status_porcelain(tmp.path()).unwrap_err();
+        assert!(!error.is_transient());
+    }
+
+    #[test]
+    fn rebase_on_nonexistent_branch_returns_error() {
+        let tmp = init_repo();
+        let error = rebase(tmp.path(), "nonexistent-branch-xyz").unwrap_err();
+        assert!(matches!(
+            error,
+            GitError::RebaseFailed { .. } | GitError::Permanent { .. }
+        ));
+    }
+
+    #[test]
+    fn merge_nonexistent_branch_returns_merge_failed() {
+        let tmp = init_repo();
+        let error = merge(tmp.path(), "nonexistent-branch-xyz").unwrap_err();
+        assert!(matches!(
+            error,
+            GitError::MergeFailed { .. } | GitError::Permanent { .. }
+        ));
+    }
+
+    #[test]
+    fn checkout_new_branch_invalid_start_returns_error() {
+        let tmp = init_repo();
+        let error = checkout_new_branch(tmp.path(), "test-branch", "nonexistent-ref").unwrap_err();
+        assert!(!error.is_transient());
+    }
+
+    #[test]
+    fn rev_list_count_invalid_range_returns_error() {
+        let tmp = init_repo();
+        let error = rev_list_count(tmp.path(), "nonexistent..also-nonexistent").unwrap_err();
+        assert!(!error.is_transient());
+    }
+
+    #[test]
+    fn worktree_add_duplicate_branch_returns_error() {
+        let tmp = init_repo();
+        let wt_path = tmp.path().join("worktree1");
+        // "main" branch already exists — worktree add with -b main should fail
+        let error = worktree_add(tmp.path(), &wt_path, "main", "HEAD").unwrap_err();
+        assert!(!error.is_transient());
+    }
+
+    #[test]
+    fn worktree_remove_nonexistent_path_returns_error() {
+        let tmp = init_repo();
+        let error =
+            worktree_remove(tmp.path(), Path::new("/tmp/__batty_no_wt__"), false).unwrap_err();
+        assert!(!error.is_transient());
+    }
+
+    #[test]
+    fn show_ref_exists_on_non_git_dir_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let error = show_ref_exists(tmp.path(), "main").unwrap_err();
+        assert!(!error.is_transient());
+    }
+
+    #[test]
+    fn branch_delete_nonexistent_returns_error() {
+        let tmp = init_repo();
+        let error = branch_delete(tmp.path(), "nonexistent-branch-xyz").unwrap_err();
+        assert!(!error.is_transient());
+    }
+
+    #[test]
+    fn for_each_ref_branches_on_non_git_dir_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let error = for_each_ref_branches(tmp.path()).unwrap_err();
+        assert!(!error.is_transient());
+    }
+
+    #[test]
+    fn rebase_abort_without_active_rebase_returns_error() {
+        let tmp = init_repo();
+        let error = rebase_abort(tmp.path()).unwrap_err();
+        assert!(!error.is_transient());
+    }
+
+    #[test]
+    fn merge_base_is_ancestor_invalid_commit_returns_error() {
+        let tmp = init_repo();
+        let error =
+            merge_base_is_ancestor(tmp.path(), "nonexistent-ref", "also-nonexistent").unwrap_err();
+        assert!(!error.is_transient());
+    }
+
+    #[test]
+    fn format_git_command_includes_repo_dir_and_args() {
+        let cmd = format_git_command(Path::new("/my/repo"), &["status", "--porcelain"]);
+        assert_eq!(cmd, "git -C /my/repo status --porcelain");
+    }
+
+    #[test]
+    fn worktree_list_on_non_git_dir_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let error = worktree_list(tmp.path()).unwrap_err();
+        assert!(!error.is_transient());
+    }
 }
