@@ -851,6 +851,8 @@ fn uncommitted_diff_lines(worktree: &Path) -> Result<usize> {
             .arg("diff")
             .args(extra_args)
             .current_dir(worktree)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
             .output()
             .with_context(|| format!("failed to run git diff in {}", worktree.display()))?;
         if !output.status.success() {
