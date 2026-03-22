@@ -2,6 +2,43 @@
 
 All notable changes to Batty are documented here.
 
+## 0.3.2 — 2026-03-22
+
+Scheduled tasks, cron recycling, nudge CLI, and intervention module decomposition.
+
+### Scheduled Tasks
+
+- **Task scheduling fields** — `scheduled_for`, `cron_schedule`, and `cron_last_run`
+  fields on the Task model enable time-gated and recurring task support.
+- **`Task::is_schedule_blocked()` helper** — centralizes future-dated schedule
+  check logic, replacing scattered date-parsing code.
+- **Schedule-aware resolver and dispatch** — resolver skips tasks with a
+  `scheduled_for` in the future; dispatch filtering respects schedule gates.
+- **Cron recycler** — daemon poll loop auto-recycles done cron tasks, resetting
+  status to todo when the next cron window arrives.
+- **`batty task schedule` CLI** — manage task schedules with `--at`, `--cron`,
+  and `--clear` flags.
+
+### Nudge CLI
+
+- **`batty nudge` subcommand** — enable, disable, and query status of individual
+  intervention types (triage, dispatch, review, utilization, replenish, owned-task).
+
+### Internal Improvements
+
+- **Interventions decomposition** — `interventions.rs` split into 9 focused
+  submodules (triage, dispatch, review, utilization, replenishment, owned_tasks,
+  telemetry, board_replenishment, mod).
+- **Worktree prep guard** — validates engineer worktree health before assignment,
+  preventing stale-worktree failures.
+- **`utilization_recovery_interval_secs` config** — separate cooldown for
+  utilization interventions, independent of general intervention cooldown.
+
+### Documentation
+
+- **README and docs refresh** — scheduled tasks guide, nudge CLI usage, and
+  getting-started updates for all v0.3.2 features.
+
 ## 0.3.1 — 2026-03-22
 
 Dogfooding-driven fixes, review automation, error resilience, and documentation
