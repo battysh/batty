@@ -302,6 +302,30 @@ impl TeamEvent {
         }
     }
 
+    /// Emitted for every completed task to record its merge confidence score.
+    pub fn merge_confidence_scored(
+        engineer: &str,
+        task: &str,
+        confidence: f64,
+        files_changed: usize,
+        lines_changed: usize,
+        has_migrations: bool,
+        has_config_changes: bool,
+        rename_count: usize,
+    ) -> Self {
+        let detail = format!(
+            "files={} lines={} migrations={} config={} renames={}",
+            files_changed, lines_changed, has_migrations, has_config_changes, rename_count
+        );
+        Self {
+            role: Some(engineer.into()),
+            task: Some(task.into()),
+            load: Some(confidence),
+            reason: Some(detail),
+            ..Self::base("merge_confidence_scored")
+        }
+    }
+
     pub fn review_escalated_by_role(role: &str, task: &str) -> Self {
         Self {
             role: Some(role.into()),
@@ -576,6 +600,10 @@ mod tests {
             ),
             ("task_manual_merged", TeamEvent::task_manual_merged("42")),
             (
+                "merge_confidence_scored",
+                TeamEvent::merge_confidence_scored("eng-1", "42", 0.85, 3, 50, false, false, 0),
+            ),
+            (
                 "review_nudge_sent",
                 TeamEvent::review_nudge_sent("manager", "42"),
             ),
@@ -724,6 +752,24 @@ mod tests {
         assert!(json.contains("\"event\":\"task_unblocked\""));
         assert!(json.contains("\"role\":\"eng-1-1\""));
         assert!(json.contains("\"task\":\"42\""));
+    }
+
+    #[test]
+    fn merge_confidence_scored_includes_all_fields() {
+        let event =
+            TeamEvent::merge_confidence_scored("eng-1-1", "42", 0.85, 3, 50, true, false, 1);
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"].as_str().unwrap(), "merge_confidence_scored");
+        assert_eq!(parsed["role"].as_str().unwrap(), "eng-1-1");
+        assert_eq!(parsed["task"].as_str().unwrap(), "42");
+        assert!((parsed["load"].as_f64().unwrap() - 0.85).abs() < 0.001);
+        let reason = parsed["reason"].as_str().unwrap();
+        assert!(reason.contains("files=3"));
+        assert!(reason.contains("lines=50"));
+        assert!(reason.contains("migrations=true"));
+        assert!(reason.contains("config=false"));
+        assert!(reason.contains("renames=1"));
     }
 
     #[test]

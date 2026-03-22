@@ -207,6 +207,29 @@ impl TeamDaemon {
         ));
     }
 
+    pub(crate) fn record_merge_confidence_scored(
+        &mut self,
+        engineer: &str,
+        task_id: u32,
+        confidence: f64,
+        files_changed: usize,
+        lines_changed: usize,
+        has_migrations: bool,
+        has_config_changes: bool,
+        rename_count: usize,
+    ) {
+        self.emit_event(TeamEvent::merge_confidence_scored(
+            engineer,
+            &task_id.to_string(),
+            confidence,
+            files_changed,
+            lines_changed,
+            has_migrations,
+            has_config_changes,
+            rename_count,
+        ));
+    }
+
     pub(super) fn record_standup_generated(&mut self, recipient: &str) {
         self.emit_event(TeamEvent::standup_generated(recipient));
     }

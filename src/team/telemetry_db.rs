@@ -62,12 +62,13 @@ fn init_schema(conn: &Connection) -> Result<()> {
         );
 
         CREATE TABLE IF NOT EXISTS task_metrics (
-            task_id         TEXT PRIMARY KEY,
-            started_at      INTEGER,
-            completed_at    INTEGER,
-            retries         INTEGER NOT NULL DEFAULT 0,
-            escalations     INTEGER NOT NULL DEFAULT 0,
-            merge_time_secs INTEGER
+            task_id          TEXT PRIMARY KEY,
+            started_at       INTEGER,
+            completed_at     INTEGER,
+            retries          INTEGER NOT NULL DEFAULT 0,
+            escalations      INTEGER NOT NULL DEFAULT 0,
+            merge_time_secs  INTEGER,
+            confidence_score REAL
         );
 
         CREATE TABLE IF NOT EXISTS session_summary (
@@ -160,6 +161,17 @@ fn update_metrics_for_event(conn: &Connection, event: &TeamEvent) -> Result<()> 
                      ON CONFLICT(task_id) DO UPDATE SET merge_time_secs = ?2 - COALESCE(task_metrics.started_at, ?2)",
                     params![task, event.ts as i64],
                 )?;
+            }
+        }
+        "merge_confidence_scored" => {
+            if let Some(task) = &event.task {
+                if let Some(confidence) = event.load {
+                    conn.execute(
+                        "INSERT INTO task_metrics (task_id, confidence_score) VALUES (?1, ?2)
+                         ON CONFLICT(task_id) DO UPDATE SET confidence_score = ?2",
+                        params![task, confidence],
+                    )?;
+                }
             }
         }
         "daemon_started" => {
@@ -261,11 +273,12 @@ pub struct TaskMetricsRow {
     pub retries: i64,
     pub escalations: i64,
     pub merge_time_secs: Option<i64>,
+    pub confidence_score: Option<f64>,
 }
 
 pub fn query_task_metrics(conn: &Connection) -> Result<Vec<TaskMetricsRow>> {
     let mut stmt = conn.prepare(
-        "SELECT task_id, started_at, completed_at, retries, escalations, merge_time_secs
+        "SELECT task_id, started_at, completed_at, retries, escalations, merge_time_secs, confidence_score
          FROM task_metrics ORDER BY started_at DESC NULLS LAST LIMIT 50",
     )?;
     let rows = stmt
@@ -277,6 +290,7 @@ pub fn query_task_metrics(conn: &Connection) -> Result<Vec<TaskMetricsRow>> {
                 retries: row.get(3)?,
                 escalations: row.get(4)?,
                 merge_time_secs: row.get(5)?,
+                confidence_score: row.get(6)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
