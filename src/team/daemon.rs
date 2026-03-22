@@ -1100,6 +1100,17 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
                 WatcherState::ContextExhausted => MemberState::Working,
             };
 
+            // Record agent poll state for telemetry (idle_polls, working_polls, total_cycle_secs).
+            if let Some(conn) = &self.telemetry_db {
+                let is_working = member_state == MemberState::Working;
+                let poll_secs = self.poll_interval.as_secs();
+                if let Err(error) = crate::team::telemetry_db::record_agent_poll_state(
+                    conn, name, is_working, poll_secs,
+                ) {
+                    debug!(error = %error, member = %name, "failed to record agent poll state");
+                }
+            }
+
             if prev_state != Some(member_state) {
                 self.states.insert(name.clone(), member_state);
 
