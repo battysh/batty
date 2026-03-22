@@ -349,6 +349,7 @@ mod tests {
                 is_git_repo: false,
                 subsystem_error_counts: HashMap::new(),
                 auto_merge_overrides: HashMap::new(),
+                recent_dispatches: HashMap::new(),
             };
 
             backdate_idle_grace(&mut daemon, "scientist");
@@ -461,6 +462,7 @@ mod tests {
             is_git_repo: false,
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
+            recent_dispatches: HashMap::new(),
         };
 
         let root = inbox::inboxes_root(tmp.path());
@@ -587,6 +589,7 @@ mod tests {
             is_git_repo: false,
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
+            recent_dispatches: HashMap::new(),
         };
 
         assert_eq!(daemon.automation_sender_for("eng-1"), "lead");

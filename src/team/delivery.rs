@@ -790,6 +790,7 @@ mod tests {
             is_git_repo: false,
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
+            recent_dispatches: HashMap::new(),
         }
     }
 
