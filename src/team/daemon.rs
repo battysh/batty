@@ -1148,7 +1148,6 @@ mod tests {
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::time::UNIX_EPOCH;
 
     fn production_unwrap_expect_count(path: &Path) -> usize {
         let content = std::fs::read_to_string(path).unwrap();
