@@ -2335,4 +2335,73 @@ mod tests {
             100
         ));
     }
+
+    // --- Error path and recovery tests (Task #265) ---
+
+    #[test]
+    fn failed_delivery_not_ready_for_immediate_retry() {
+        let fd = FailedDelivery::new("eng-1", "manager", "test message");
+        // Just created — not enough time has passed for retry
+        assert!(!fd.is_ready_for_retry(Instant::now()));
+    }
+
+    #[test]
+    fn failed_delivery_ready_after_delay() {
+        let mut fd = FailedDelivery::new("eng-1", "manager", "test message");
+        // Simulate past creation
+        fd.last_attempt = Instant::now() - FAILED_DELIVERY_RETRY_DELAY - Duration::from_secs(1);
+        assert!(fd.is_ready_for_retry(Instant::now()));
+    }
+
+    #[test]
+    fn failed_delivery_has_attempts_remaining() {
+        let mut fd = FailedDelivery::new("eng-1", "manager", "test message");
+        assert!(fd.has_attempts_remaining()); // attempts=1, max=3
+        fd.attempts = FAILED_DELIVERY_MAX_ATTEMPTS;
+        assert!(!fd.has_attempts_remaining());
+    }
+
+    #[test]
+    fn failed_delivery_message_marker_format() {
+        let fd = FailedDelivery::new("eng-1", "manager", "test message");
+        let marker = fd.message_marker();
+        assert!(marker.contains("manager"));
+    }
+
+    #[test]
+    fn failed_delivery_fields_preserved() {
+        let fd = FailedDelivery::new("eng-1", "manager", "hello world");
+        assert_eq!(fd.recipient, "eng-1");
+        assert_eq!(fd.from, "manager");
+        assert_eq!(fd.body, "hello world");
+        assert_eq!(fd.attempts, 1);
+    }
+
+    #[test]
+    fn telegram_circuit_breaker_key_format() {
+        let key = TeamDaemon::telegram_circuit_breaker_key("eng-1");
+        assert!(key.contains("eng-1"));
+        assert!(key.starts_with("telegram-delivery-breaker::"));
+    }
+
+    #[test]
+    fn telegram_failure_key_format() {
+        let key = TeamDaemon::telegram_failure_key("manager");
+        assert!(key.contains("manager"));
+        assert!(key.starts_with("telegram-delivery-failures::"));
+    }
+
+    #[test]
+    fn telegram_retry_config_has_sensible_defaults() {
+        let config = TeamDaemon::telegram_retry_config();
+        assert!(config.max_retries >= 1);
+        assert!(config.max_delay_ms > config.base_delay_ms);
+    }
+
+    #[test]
+    fn telegram_channel_not_paused_initially() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = empty_legacy_daemon(&tmp);
+        assert!(!daemon.telegram_channel_paused("eng-1"));
+    }
 }

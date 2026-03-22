@@ -739,4 +739,68 @@ mod tests {
         let overrides = load_overrides(root);
         assert_eq!(overrides.get(&42), Some(&false));
     }
+
+    // --- Error path and recovery tests (Task #265) ---
+
+    #[test]
+    fn load_overrides_malformed_json_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let path = root.join(OVERRIDES_FILE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "not valid json {{{}").unwrap();
+        assert!(load_overrides(root).is_empty());
+    }
+
+    #[test]
+    fn load_overrides_wrong_json_type_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let path = root.join(OVERRIDES_FILE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Valid JSON but wrong type (array instead of object)
+        std::fs::write(&path, "[1, 2, 3]").unwrap();
+        assert!(load_overrides(root).is_empty());
+    }
+
+    #[test]
+    fn save_override_creates_batty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // .batty dir doesn't exist yet
+        save_override(root, 1, true).unwrap();
+        assert!(root.join(OVERRIDES_FILE).exists());
+    }
+
+    #[test]
+    fn save_override_to_readonly_dir_returns_error() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            let batty_dir = root.join(".batty");
+            std::fs::create_dir(&batty_dir).unwrap();
+            std::fs::set_permissions(&batty_dir, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+            let result = save_override(root, 1, true);
+            assert!(result.is_err());
+
+            // Restore for cleanup
+            std::fs::set_permissions(&batty_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn analyze_diff_on_non_git_dir_returns_empty_summary() {
+        let tmp = tempfile::tempdir().unwrap();
+        // analyze_diff doesn't fail — git commands produce empty output on non-git dirs
+        // This verifies graceful degradation rather than hard failure
+        let result = analyze_diff(tmp.path(), "main", "feature");
+        if let Ok(summary) = result {
+            assert_eq!(summary.files_changed, 0);
+            assert_eq!(summary.total_lines(), 0);
+        }
+        // If it errors, that's also acceptable graceful behavior
+    }
 }

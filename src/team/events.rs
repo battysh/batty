@@ -1256,4 +1256,119 @@ mod tests {
         assert!(json.contains("\"health_changed\""));
         assert!(json.contains("\"eng-1-2\""));
     }
+
+    // --- Error path and recovery tests (Task #265) ---
+
+    #[test]
+    fn event_sink_on_readonly_dir_returns_error() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tmp = tempfile::tempdir().unwrap();
+            let readonly_dir = tmp.path().join("readonly");
+            fs::create_dir(&readonly_dir).unwrap();
+            fs::set_permissions(&readonly_dir, fs::Permissions::from_mode(0o444)).unwrap();
+
+            let path = readonly_dir.join("subdir").join("events.jsonl");
+            let result = EventSink::new(&path);
+            assert!(result.is_err());
+
+            // Restore permissions for cleanup
+            fs::set_permissions(&readonly_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn read_events_from_nonexistent_file_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("does_not_exist.jsonl");
+        let events = read_events(&path).unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn read_events_all_malformed_lines_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("events.jsonl");
+        fs::write(&path, "not json\nalso not json\n{invalid}\n").unwrap();
+        let events = read_events(&path).unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn event_sink_emit_with_failing_writer() {
+        struct FailWriter;
+        impl Write for FailWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "simulated write failure",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "simulated flush failure",
+                ))
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("events.jsonl");
+        let mut sink = EventSink::from_writer(&path, FailWriter);
+        let result = sink.emit(TeamEvent::daemon_started());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rotate_event_log_replaces_stale_rotated_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("events.jsonl");
+        let rotated = rotated_event_log_path(&path);
+
+        fs::write(&path, "current-data-that-is-large").unwrap();
+        fs::write(&rotated, "old-rotated-data").unwrap();
+
+        let did_rotate = rotate_event_log_if_needed(&path, 5, 0).unwrap();
+        assert!(did_rotate);
+        // Old rotated was replaced with current data
+        assert_eq!(
+            fs::read_to_string(&rotated).unwrap(),
+            "current-data-that-is-large"
+        );
+        // Current file is now gone (rotated away)
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn event_sink_handles_zero_max_bytes_rotation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("events.jsonl");
+
+        // With max_bytes=0, any existing content triggers rotation, but empty file doesn't
+        fs::write(&path, "").unwrap();
+        let did_rotate = rotate_event_log_if_needed(&path, 0, 0).unwrap();
+        assert!(!did_rotate); // empty file → no rotation
+
+        fs::write(&path, "x").unwrap();
+        let did_rotate = rotate_event_log_if_needed(&path, 0, 0).unwrap();
+        assert!(did_rotate); // non-empty file at 0-byte limit → rotation
+    }
+
+    #[test]
+    fn read_events_partial_json_with_valid_lines_mixed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("events.jsonl");
+        // Simulate a truncated write: valid JSON, then partial, then valid
+        let content = format!(
+            "{}\n{{\"event\":\"trunca\n{}\n",
+            r#"{"event":"daemon_started","ts":1}"#, r#"{"event":"daemon_stopped","ts":3}"#
+        );
+        fs::write(&path, content).unwrap();
+
+        let events = read_events(&path).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event, "daemon_started");
+        assert_eq!(events[1].event, "daemon_stopped");
+    }
 }
