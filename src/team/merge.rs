@@ -24,7 +24,8 @@ use super::auto_merge::{self, AutoMergeDecision};
 use super::daemon::TeamDaemon;
 use super::task_loop::{
     branch_is_merged_into, checkout_worktree_branch_from_main, current_worktree_branch,
-    delete_branch, engineer_base_branch_name, read_task_title, run_tests_in_worktree,
+    delete_branch, engineer_base_branch_name, is_worktree_safe_to_mutate, read_task_title,
+    run_tests_in_worktree,
 };
 
 fn run_git_with_context(
@@ -519,6 +520,16 @@ pub(crate) fn reset_engineer_worktree(project_root: &Path, engineer_name: &str) 
 
     let previous_branch = current_worktree_branch(&worktree_dir)?;
     let base_branch = engineer_base_branch_name(engineer_name);
+
+    // Guard: refuse to destroy uncommitted work on a task branch.
+    if !is_worktree_safe_to_mutate(&worktree_dir)? {
+        warn!(
+            engineer = engineer_name,
+            worktree = %worktree_dir.display(),
+            "skipping worktree reset — uncommitted changes on task branch"
+        );
+        return Ok(());
+    }
 
     // Force-clean uncommitted changes before switching branches.
     // Without this, `checkout -B` fails when the worktree is dirty.
