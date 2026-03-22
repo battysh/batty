@@ -5,6 +5,7 @@
 //! manages agent lifecycles.
 
 pub mod artifact;
+pub mod auto_merge;
 pub mod board;
 pub mod board_cmd;
 pub mod capability;
