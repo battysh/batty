@@ -736,6 +736,41 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
             }
 
             if completion_observed && self.active_task_id(name).is_some() {
+                // False-done prevention: verify the engineer's branch has commits
+                // beyond main before triggering completion. Without this check,
+                // idle engineers with no commits get marked as complete, orphaning
+                // their board task.
+                if self.member_uses_worktrees(name) {
+                    let worktree_dir = self.worktree_dir(name);
+                    match crate::team::git_cmd::run_git(
+                        &worktree_dir,
+                        &["rev-list", "--count", "main..HEAD"],
+                    ) {
+                        Ok(output) => {
+                            let count = output.stdout.trim().parse::<u32>().unwrap_or(0);
+                            if count == 0 {
+                                warn!(
+                                    member = %name,
+                                    "engineer idle but no commits on task branch — skipping completion"
+                                );
+                                self.record_orchestrator_action(format!(
+                                    "false-done prevention: {} reported completion but branch has no commits beyond main",
+                                    name
+                                ));
+                                continue;
+                            }
+                        }
+                        Err(error) => {
+                            warn!(
+                                member = %name,
+                                error = %error,
+                                "failed to check commits on task branch — skipping completion"
+                            );
+                            continue;
+                        }
+                    }
+                }
+
                 info!(member = %name, "detected task completion");
                 if let Err(error) = merge::handle_engineer_completion(self, name) {
                     warn!(
@@ -3767,5 +3802,68 @@ exit 1
     fn uncommitted_warn_threshold_config_default() {
         let policy = WorkflowPolicy::default();
         assert_eq!(policy.uncommitted_warn_threshold, 200);
+    }
+
+    #[test]
+    fn false_done_prevention_no_commits_returns_zero() {
+        // Verify that git rev-list --count main..HEAD returns 0 when
+        // the worktree branch has no commits beyond main.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-false-done");
+
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        crate::team::task_loop::setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-1",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        // No commits made on the branch — rev-list should return 0
+        let output =
+            crate::team::git_cmd::run_git(&worktree_dir, &["rev-list", "--count", "main..HEAD"])
+                .unwrap();
+        let count: u32 = output.stdout.trim().parse().unwrap();
+        assert_eq!(count, 0, "branch with no new commits should return 0");
+    }
+
+    #[test]
+    fn false_done_prevention_with_commits_returns_nonzero() {
+        // Verify that git rev-list --count main..HEAD returns >0 when
+        // the worktree branch has commits beyond main.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-false-done-ok");
+
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        crate::team::task_loop::setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-1",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        // Make a commit on the branch
+        std::fs::write(worktree_dir.join("work.txt"), "done\n").unwrap();
+        git_ok(&worktree_dir, &["add", "work.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "task work"]);
+
+        let output =
+            crate::team::git_cmd::run_git(&worktree_dir, &["rev-list", "--count", "main..HEAD"])
+                .unwrap();
+        let count: u32 = output.stdout.trim().parse().unwrap();
+        assert!(count > 0, "branch with commits should return > 0");
+    }
+
+    #[test]
+    fn false_done_prevention_invalid_worktree_returns_error() {
+        // Verify that git rev-list in a non-git directory returns an error
+        let tmp = tempfile::tempdir().unwrap();
+        let result =
+            crate::team::git_cmd::run_git(tmp.path(), &["rev-list", "--count", "main..HEAD"]);
+        assert!(result.is_err(), "non-git dir should return error");
     }
 }
