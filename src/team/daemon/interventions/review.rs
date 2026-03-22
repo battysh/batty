@@ -119,7 +119,7 @@ impl TeamDaemon {
         Ok(())
     }
 
-    fn build_review_intervention_message(
+    pub(super) fn build_review_intervention_message(
         &self,
         member: &MemberInstance,
         review_tasks: &[&crate::task::Task],

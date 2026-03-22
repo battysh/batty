@@ -19,11 +19,8 @@ impl TeamDaemon {
         if super::super::super::pause_marker_path(&self.config.project_root).exists() {
             return Ok(());
         }
-        if super::super::super::nudge_disabled_marker_path(
-            &self.config.project_root,
-            "owned-task",
-        )
-        .exists()
+        if super::super::super::nudge_disabled_marker_path(&self.config.project_root, "owned-task")
+            .exists()
         {
             return Ok(());
         }
@@ -130,8 +127,7 @@ impl TeamDaemon {
             }
 
             let reports = direct_reports.get(&name).cloned().unwrap_or_default();
-            let text =
-                self.build_owned_task_intervention_message(&member, &owned_tasks, &reports);
+            let text = self.build_owned_task_intervention_message(&member, &owned_tasks, &reports);
             info!(
                 member = %name,
                 owned_task_count = owned_tasks.len(),
@@ -169,7 +165,7 @@ impl TeamDaemon {
         Ok(())
     }
 
-    fn build_owned_task_intervention_message(
+    pub(super) fn build_owned_task_intervention_message(
         &self,
         member: &MemberInstance,
         owned_tasks: &[&crate::task::Task],
@@ -244,7 +240,7 @@ impl TeamDaemon {
         self.prepend_member_nudge(member, message)
     }
 
-    fn build_stuck_task_escalation_message(
+    pub(super) fn build_stuck_task_escalation_message(
         &self,
         member: &MemberInstance,
         owned_tasks: &[&crate::task::Task],

@@ -74,12 +74,11 @@ impl TeamDaemon {
                 continue;
             }
 
-            let triage_state =
-                super::super::super::status::delivered_direct_report_triage_state(
-                    &inbox_root,
-                    &name,
-                    reports,
-                )?;
+            let triage_state = super::super::super::status::delivered_direct_report_triage_state(
+                &inbox_root,
+                &name,
+                reports,
+            )?;
             if triage_state.count > 0 {
                 continue;
             }
@@ -110,10 +109,7 @@ impl TeamDaemon {
                 })
                 .collect();
 
-            if report_snapshots
-                .iter()
-                .any(|snapshot| snapshot.is_working)
-            {
+            if report_snapshots.iter().any(|snapshot| snapshot.is_working) {
                 continue;
             }
 

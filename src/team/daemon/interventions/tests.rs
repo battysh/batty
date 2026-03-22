@@ -1,7 +1,6 @@
 use std::fs;
 use std::time::{Duration, Instant};
 
-use super::*;
 use super::board_replenishment::board_replenishment_intervention_signature;
 use super::dispatch::manager_dispatch_intervention_signature;
 use super::owned_tasks::owned_task_intervention_signature;
@@ -9,6 +8,7 @@ use super::review::{
     review_backlog_owner_for_task, review_intervention_key, review_task_intervention_signature,
 };
 use super::utilization::architect_utilization_intervention_signature;
+use super::*;
 use crate::team::config::WorkflowMode;
 use crate::team::daemon::interventions::dispatch::manager_dispatch_intervention_key;
 use crate::team::daemon::interventions::utilization::architect_utilization_intervention_key;
@@ -160,9 +160,9 @@ fn enable_orchestrator_logging(daemon: &mut TeamDaemon) {
 fn assert_log_contains_in_order(log: &str, fragments: &[&str]) {
     let mut offset = 0;
     for fragment in fragments {
-        let next = log[offset..].find(fragment).unwrap_or_else(|| {
-            panic!("log never contained `{fragment}` after offset {offset}")
-        });
+        let next = log[offset..]
+            .find(fragment)
+            .unwrap_or_else(|| panic!("log never contained `{fragment}` after offset {offset}"));
         offset += next + fragment.len();
     }
 }
@@ -288,8 +288,7 @@ fn maybe_intervene_triage_backlog_updates_count_when_new_report_arrives() {
 
     let mut second_result = delivered_result("eng-2", "done too");
     second_result.timestamp += 1;
-    let second_result_id =
-        inbox::deliver_to_inbox(&harness.inbox_root(), &second_result).unwrap();
+    let second_result_id = inbox::deliver_to_inbox(&harness.inbox_root(), &second_result).unwrap();
     inbox::mark_delivered(&harness.inbox_root(), "lead", &second_result_id).unwrap();
 
     enter_idle_epoch(&mut daemon, "lead");
@@ -724,8 +723,7 @@ fn maybe_intervene_architect_utilization_respects_cooldown_until_signature_refir
 }
 
 #[test]
-fn maybe_intervene_board_replenishment_fires_when_todo_below_threshold_and_idle_engineers_exist()
-{
+fn maybe_intervene_board_replenishment_fires_when_todo_below_threshold_and_idle_engineers_exist() {
     let harness = intervention_team_harness()
         .with_member_state("architect", MemberState::Idle)
         .with_member_state("lead", MemberState::Working)
@@ -1311,11 +1309,8 @@ fn build_owned_task_intervention_message_includes_parent_escalation() {
         .unwrap()
         .clone();
 
-    let message = daemon.build_owned_task_intervention_message(
-        &member,
-        &[&tasks[0]],
-        &["eng-1".to_string()],
-    );
+    let message =
+        daemon.build_owned_task_intervention_message(&member, &[&tasks[0]], &["eng-1".to_string()]);
 
     assert!(message.contains("Owned active task backlog detected"));
     assert!(message.starts_with("Manager nudge text.\n\n"));
@@ -1371,9 +1366,7 @@ fn build_review_intervention_message_prepends_review_policy() {
 
     let message = daemon.build_review_intervention_message(&member, &[&tasks[0]]);
 
-    assert!(
-        message.starts_with("Review policy context:\nReview must confirm tests and scope.")
-    );
+    assert!(message.starts_with("Review policy context:\nReview must confirm tests and scope."));
 }
 
 #[test]
@@ -1404,8 +1397,7 @@ fn build_stuck_task_escalation_message_uses_assign_for_engineer() {
 
 #[test]
 fn build_stuck_task_escalation_message_prepends_escalation_policy() {
-    let harness =
-        triage_harness().with_board_task(172, "task-172", "in-progress", Some("eng-1"));
+    let harness = triage_harness().with_board_task(172, "task-172", "in-progress", Some("eng-1"));
     fs::write(
         harness
             .project_root()
@@ -1428,27 +1420,14 @@ fn build_stuck_task_escalation_message_prepends_escalation_policy() {
     let message = daemon.build_stuck_task_escalation_message(&member, &[&tasks[0]], 125);
 
     assert!(
-        message
-            .starts_with("Escalation policy context:\nEscalate only with exact blocker text.")
+        message.starts_with("Escalation policy context:\nEscalate only with exact blocker text.")
     );
 }
 
 #[test]
 fn build_manager_dispatch_gap_message_includes_active_and_unassigned_paths() {
-    let harness = triage_harness()
-        .with_board_task(80, "task-80", "todo", None)
-        .with_board_task(81, "task-81", "backlog", None);
-    let daemon = harness.build_daemon().unwrap();
-    let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
-    let member = daemon
-        .config
-        .members
-        .iter()
-        .find(|member| member.name == "lead")
-        .unwrap();
-
-    // Can't create ReportDispatchSnapshot directly since it's private to dispatch.
-    // Test this via the integration test: maybe_intervene_manager_dispatch_gap_queues_for_idle_lead.
+    // ReportDispatchSnapshot is private to the dispatch submodule.
+    // Covered by: maybe_intervene_manager_dispatch_gap_queues_for_idle_lead.
 }
 
 #[test]
