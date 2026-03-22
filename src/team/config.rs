@@ -1532,4 +1532,49 @@ roles:
         assert!(!config.can_talk("random-sender", "manager"));
         assert!(!config.can_talk("random-sender", "engineer"));
     }
+
+    #[test]
+    fn parse_review_timeout_overrides_from_yaml() {
+        let yaml = r#"
+name: test-team
+workflow_policy:
+  review_nudge_threshold_secs: 1800
+  review_timeout_secs: 7200
+  review_timeout_overrides:
+    critical:
+      review_nudge_threshold_secs: 300
+      review_timeout_secs: 600
+    high:
+      review_timeout_secs: 3600
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        let policy = &config.workflow_policy;
+
+        // Global defaults
+        assert_eq!(policy.review_nudge_threshold_secs, 1800);
+        assert_eq!(policy.review_timeout_secs, 7200);
+
+        // Critical override — both fields set
+        let critical = policy.review_timeout_overrides.get("critical").unwrap();
+        assert_eq!(critical.review_nudge_threshold_secs, Some(300));
+        assert_eq!(critical.review_timeout_secs, Some(600));
+
+        // High override — only escalation set, nudge absent
+        let high = policy.review_timeout_overrides.get("high").unwrap();
+        assert_eq!(high.review_nudge_threshold_secs, None);
+        assert_eq!(high.review_timeout_secs, Some(3600));
+
+        // No override for medium
+        assert!(policy.review_timeout_overrides.get("medium").is_none());
+    }
+
+    #[test]
+    fn empty_overrides_when_absent_in_yaml() {
+        let config: TeamConfig = serde_yaml::from_str(minimal_yaml()).unwrap();
+        assert!(config.workflow_policy.review_timeout_overrides.is_empty());
+    }
 }
