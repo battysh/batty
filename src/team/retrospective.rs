@@ -301,7 +301,6 @@ pub fn analyze_events(events: &[TeamEvent]) -> Option<RunStats> {
 }
 
 /// Parse the events file and analyze.
-#[allow(dead_code)]
 pub fn analyze_event_log(path: &Path) -> Result<Option<RunStats>> {
     let events = read_events(path)?;
     Ok(analyze_events(&events))

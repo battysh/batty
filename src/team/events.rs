@@ -565,7 +565,7 @@ mod tests {
             ),
             (
                 "review_escalated",
-                TeamEvent::review_escalated("manager", "42"),
+                TeamEvent::review_escalated("42", "stale review"),
             ),
             ("task_reworked", TeamEvent::task_reworked("eng-1", "42")),
             ("load_snapshot", TeamEvent::load_snapshot(2, 5, true)),
