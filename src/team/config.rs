@@ -1636,7 +1636,7 @@ roles:
         assert_eq!(high.review_timeout_secs, Some(3600));
 
         // No override for medium
-        assert!(policy.review_timeout_overrides.get("medium").is_none());
+        assert!(!policy.review_timeout_overrides.contains_key("medium"));
     }
 
     #[test]

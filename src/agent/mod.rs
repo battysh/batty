@@ -22,21 +22,16 @@ use serde::{Deserialize, Serialize};
 use crate::prompt::PromptPatterns;
 
 /// Health state of an agent backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendHealth {
     /// Backend binary found and responsive.
+    #[default]
     Healthy,
     /// Backend binary found but returning errors (e.g. API issues).
     Degraded,
     /// Backend binary not found or not executable.
     Unreachable,
-}
-
-impl Default for BackendHealth {
-    fn default() -> Self {
-        Self::Healthy
-    }
 }
 
 impl BackendHealth {

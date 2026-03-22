@@ -1160,8 +1160,6 @@ mod tests {
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::path::{Path, PathBuf};
-    use std::process::Command;
-
     fn production_unwrap_expect_count(path: &Path) -> usize {
         let content = std::fs::read_to_string(path).unwrap();
         let test_split = content.split("\n#[cfg(test)]").next().unwrap_or(&content);

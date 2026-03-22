@@ -20,11 +20,9 @@ impl TeamDaemon {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
     use crate::team::config::BoardConfig;
-    use crate::team::standup::MemberState;
     use crate::team::test_support::{TestDaemonBuilder, engineer_member, manager_member};
 
     #[test]

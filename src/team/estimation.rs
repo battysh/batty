@@ -14,7 +14,6 @@ use tracing::warn;
 /// A completed task's cycle time (seconds) and associated tags.
 #[derive(Debug, Clone)]
 pub(crate) struct CompletedTaskSample {
-    pub task_id: String,
     pub duration_secs: u64,
     pub tags: Vec<String>,
 }
@@ -61,7 +60,6 @@ pub(crate) fn build_samples(
     durations
         .iter()
         .map(|(task_id, duration)| CompletedTaskSample {
-            task_id: task_id.clone(),
             duration_secs: *duration,
             tags: tag_map.get(task_id).cloned().unwrap_or_default(),
         })
@@ -414,22 +412,18 @@ mod tests {
     fn median_by_tag_set_groups_correctly() {
         let samples = vec![
             CompletedTaskSample {
-                task_id: "1".into(),
                 duration_secs: 100,
                 tags: vec!["bugfix".into()],
             },
             CompletedTaskSample {
-                task_id: "2".into(),
                 duration_secs: 300,
                 tags: vec!["bugfix".into()],
             },
             CompletedTaskSample {
-                task_id: "3".into(),
                 duration_secs: 200,
                 tags: vec!["bugfix".into()],
             },
             CompletedTaskSample {
-                task_id: "4".into(),
                 duration_secs: 1000,
                 tags: vec!["feature".into()],
             },
@@ -443,17 +437,14 @@ mod tests {
     fn global_median_across_all_samples() {
         let samples = vec![
             CompletedTaskSample {
-                task_id: "1".into(),
                 duration_secs: 100,
                 tags: vec![],
             },
             CompletedTaskSample {
-                task_id: "2".into(),
                 duration_secs: 500,
                 tags: vec![],
             },
             CompletedTaskSample {
-                task_id: "3".into(),
                 duration_secs: 300,
                 tags: vec![],
             },
@@ -511,12 +502,10 @@ mod tests {
     fn median_by_tag_set_empty_tags_use_empty_key() {
         let samples = vec![
             CompletedTaskSample {
-                task_id: "1".into(),
                 duration_secs: 500,
                 tags: vec![],
             },
             CompletedTaskSample {
-                task_id: "2".into(),
                 duration_secs: 700,
                 tags: vec![],
             },

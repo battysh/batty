@@ -402,7 +402,7 @@ pub(crate) fn agent_health_by_member(
                         // Parse the latest backend health from the transition reason.
                         // Format is "prev→new", e.g. "healthy→unreachable".
                         if let Some(reason) = event.reason.as_deref() {
-                            let new_state = reason.split('→').last().unwrap_or("healthy");
+                            let new_state = reason.split('→').next_back().unwrap_or("healthy");
                             let health_val = match new_state {
                                 "degraded" => crate::agent::BackendHealth::Degraded,
                                 "unreachable" => crate::agent::BackendHealth::Unreachable,

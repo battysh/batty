@@ -44,7 +44,6 @@ impl TeamDaemon {
 
 #[cfg(test)]
 mod tests {
-    use crate::team::config::BoardConfig;
     use crate::team::inbox;
     use crate::team::test_support::{TestDaemonBuilder, engineer_member, manager_member};
 
