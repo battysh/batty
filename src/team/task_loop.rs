@@ -1407,4 +1407,73 @@ mod tests {
         let task = crate::task::Task::from_file(&path).unwrap();
         assert_eq!(task.status, "done", "status should remain done");
     }
+
+    #[test]
+    fn e2e_done_cron_task_recycled() {
+        use crate::team::resolver::{ResolutionStatus, resolve_board};
+        use crate::team::test_support::{engineer_member, manager_member};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+
+        // Create a done cron task with old cron_last_run
+        write_cron_task(
+            board_dir,
+            10,
+            "done",
+            "0 * * * * *",
+            "cron_last_run: \"2020-01-01T00:00:00+00:00\"\n",
+        );
+
+        // Before recycling: task is done, so resolve_board excludes it
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), false),
+        ];
+        let resolutions_before = resolve_board(board_dir, &members).unwrap();
+        assert!(
+            resolutions_before.is_empty(),
+            "done task should not appear in resolve_board"
+        );
+
+        // Recycle the cron task
+        let recycled = recycle_cron_tasks(board_dir).unwrap();
+        assert_eq!(recycled.len(), 1, "one task should be recycled");
+        assert_eq!(recycled[0].0, 10);
+
+        // Verify task file was updated
+        let task = crate::task::Task::from_file(&board_dir.join("tasks").join("010-cron-task.md"))
+            .unwrap();
+        assert_eq!(task.status, "todo", "status should be reset to todo");
+        assert!(task.claimed_by.is_none(), "claimed_by should be cleared");
+        assert!(
+            task.cron_last_run.is_some(),
+            "cron_last_run should be updated"
+        );
+
+        // scheduled_for should be set to a future time
+        let scheduled = task.scheduled_for.as_deref().unwrap();
+        let scheduled_dt = chrono::DateTime::parse_from_rfc3339(scheduled).unwrap();
+        assert!(
+            scheduled_dt > chrono::Utc::now(),
+            "scheduled_for should be in the future, got: {scheduled}"
+        );
+
+        // After recycling: task is now todo with future scheduled_for → Blocked
+        let resolutions_after = resolve_board(board_dir, &members).unwrap();
+        assert_eq!(resolutions_after.len(), 1);
+        assert_eq!(
+            resolutions_after[0].status,
+            ResolutionStatus::Blocked,
+            "recycled cron task with future scheduled_for should be Blocked until its time"
+        );
+        assert!(
+            resolutions_after[0]
+                .blocking_reason
+                .as_ref()
+                .unwrap()
+                .contains("scheduled for"),
+            "blocking reason should mention 'scheduled for'"
+        );
+    }
 }
