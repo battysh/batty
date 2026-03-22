@@ -198,4 +198,230 @@ mod tests {
         // Escalation falls back to global (no override for this field)
         assert_eq!(effective_escalation_threshold(&policy, "high"), 7200);
     }
+
+    // --- New tests for task #261 ---
+
+    #[test]
+    fn wip_limit_none_means_unlimited() {
+        let policy = WorkflowPolicy {
+            wip_limit_per_engineer: None,
+            wip_limit_per_reviewer: None,
+            ..WorkflowPolicy::default()
+        };
+
+        // Even very large counts should be allowed
+        assert!(check_wip_limit(&policy, RoleType::Engineer, 100));
+        assert!(check_wip_limit(&policy, RoleType::Engineer, u32::MAX));
+        assert!(check_wip_limit(&policy, RoleType::Manager, 100));
+        assert!(check_wip_limit(&policy, RoleType::Architect, u32::MAX));
+    }
+
+    #[test]
+    fn wip_limit_zero_blocks_all_work() {
+        let policy = WorkflowPolicy {
+            wip_limit_per_engineer: Some(0),
+            wip_limit_per_reviewer: Some(0),
+            ..WorkflowPolicy::default()
+        };
+
+        assert!(!check_wip_limit(&policy, RoleType::Engineer, 0));
+        assert!(!check_wip_limit(&policy, RoleType::Manager, 0));
+        assert!(!check_wip_limit(&policy, RoleType::Architect, 0));
+    }
+
+    #[test]
+    fn architect_uses_reviewer_wip_limit() {
+        let policy = WorkflowPolicy {
+            wip_limit_per_engineer: Some(5),
+            wip_limit_per_reviewer: Some(2),
+            ..WorkflowPolicy::default()
+        };
+
+        // Architect should use reviewer limit (2), not engineer limit (5)
+        assert!(check_wip_limit(&policy, RoleType::Architect, 1));
+        assert!(!check_wip_limit(&policy, RoleType::Architect, 2));
+        assert!(!check_wip_limit(&policy, RoleType::Architect, 3));
+    }
+
+    #[test]
+    fn user_role_always_passes_wip_check() {
+        let policy = WorkflowPolicy {
+            wip_limit_per_engineer: Some(1),
+            wip_limit_per_reviewer: Some(1),
+            ..WorkflowPolicy::default()
+        };
+
+        assert!(check_wip_limit(&policy, RoleType::User, 0));
+        assert!(check_wip_limit(&policy, RoleType::User, 100));
+        assert!(check_wip_limit(&policy, RoleType::User, u32::MAX));
+    }
+
+    #[test]
+    fn escalation_boundary_values() {
+        let policy = WorkflowPolicy {
+            escalation_threshold_secs: 0,
+            ..WorkflowPolicy::default()
+        };
+
+        // Zero threshold means always escalate
+        assert!(should_escalate(&policy, 0));
+        assert!(should_escalate(&policy, 1));
+    }
+
+    #[test]
+    fn review_nudge_at_zero_threshold() {
+        let policy = WorkflowPolicy {
+            review_nudge_threshold_secs: 0,
+            ..WorkflowPolicy::default()
+        };
+
+        assert!(is_review_nudge_due(&policy, 0));
+        assert!(is_review_nudge_due(&policy, 1));
+    }
+
+    #[test]
+    fn review_stale_at_zero_threshold() {
+        let policy = WorkflowPolicy {
+            review_timeout_secs: 0,
+            ..WorkflowPolicy::default()
+        };
+
+        assert!(is_review_stale(&policy, 0));
+        assert!(is_review_stale(&policy, 1));
+    }
+
+    #[test]
+    fn review_nudge_well_before_threshold() {
+        let policy = WorkflowPolicy {
+            review_nudge_threshold_secs: 10000,
+            ..WorkflowPolicy::default()
+        };
+
+        assert!(!is_review_nudge_due(&policy, 0));
+        assert!(!is_review_nudge_due(&policy, 5000));
+        assert!(!is_review_nudge_due(&policy, 9999));
+    }
+
+    #[test]
+    fn override_with_both_fields_none_falls_back_to_global() {
+        use super::super::config::ReviewTimeoutOverride;
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "low".to_string(),
+            ReviewTimeoutOverride {
+                review_nudge_threshold_secs: None,
+                review_timeout_secs: None,
+            },
+        );
+        let policy = WorkflowPolicy {
+            review_nudge_threshold_secs: 1800,
+            review_timeout_secs: 7200,
+            review_timeout_overrides: overrides,
+            ..WorkflowPolicy::default()
+        };
+
+        // Both should fall back to global
+        assert_eq!(effective_nudge_threshold(&policy, "low"), 1800);
+        assert_eq!(effective_escalation_threshold(&policy, "low"), 7200);
+    }
+
+    #[test]
+    fn multiple_priority_overrides_are_independent() {
+        use super::super::config::ReviewTimeoutOverride;
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "critical".to_string(),
+            ReviewTimeoutOverride {
+                review_nudge_threshold_secs: Some(60),
+                review_timeout_secs: Some(120),
+            },
+        );
+        overrides.insert(
+            "high".to_string(),
+            ReviewTimeoutOverride {
+                review_nudge_threshold_secs: Some(300),
+                review_timeout_secs: Some(600),
+            },
+        );
+        overrides.insert(
+            "low".to_string(),
+            ReviewTimeoutOverride {
+                review_nudge_threshold_secs: Some(3600),
+                review_timeout_secs: Some(14400),
+            },
+        );
+        let policy = WorkflowPolicy {
+            review_nudge_threshold_secs: 1800,
+            review_timeout_secs: 7200,
+            review_timeout_overrides: overrides,
+            ..WorkflowPolicy::default()
+        };
+
+        assert_eq!(effective_nudge_threshold(&policy, "critical"), 60);
+        assert_eq!(effective_escalation_threshold(&policy, "critical"), 120);
+        assert_eq!(effective_nudge_threshold(&policy, "high"), 300);
+        assert_eq!(effective_escalation_threshold(&policy, "high"), 600);
+        assert_eq!(effective_nudge_threshold(&policy, "low"), 3600);
+        assert_eq!(effective_escalation_threshold(&policy, "low"), 14400);
+        // Unknown priority falls back to global
+        assert_eq!(effective_nudge_threshold(&policy, "medium"), 1800);
+        assert_eq!(effective_escalation_threshold(&policy, "medium"), 7200);
+    }
+
+    #[test]
+    fn override_with_only_escalation_set() {
+        use super::super::config::ReviewTimeoutOverride;
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "urgent".to_string(),
+            ReviewTimeoutOverride {
+                review_nudge_threshold_secs: None,
+                review_timeout_secs: Some(300),
+            },
+        );
+        let policy = WorkflowPolicy {
+            review_nudge_threshold_secs: 1800,
+            review_timeout_secs: 7200,
+            review_timeout_overrides: overrides,
+            ..WorkflowPolicy::default()
+        };
+
+        // Nudge falls back to global, escalation uses override
+        assert_eq!(effective_nudge_threshold(&policy, "urgent"), 1800);
+        assert_eq!(effective_escalation_threshold(&policy, "urgent"), 300);
+    }
+
+    #[test]
+    fn wip_limit_at_exact_boundary() {
+        let policy = WorkflowPolicy {
+            wip_limit_per_engineer: Some(3),
+            ..WorkflowPolicy::default()
+        };
+
+        assert!(check_wip_limit(&policy, RoleType::Engineer, 2)); // under limit
+        assert!(!check_wip_limit(&policy, RoleType::Engineer, 3)); // at limit
+        assert!(!check_wip_limit(&policy, RoleType::Engineer, 4)); // over limit
+    }
+
+    #[test]
+    fn default_policy_stall_and_health_fields() {
+        let policy = WorkflowPolicy::default();
+        assert_eq!(policy.stall_threshold_secs, 300);
+        assert_eq!(policy.max_stall_restarts, 2);
+        assert_eq!(policy.health_check_interval_secs, 60);
+        assert_eq!(policy.uncommitted_warn_threshold, 200);
+    }
+
+    #[test]
+    fn escalation_with_large_values() {
+        let policy = WorkflowPolicy {
+            escalation_threshold_secs: u64::MAX,
+            ..WorkflowPolicy::default()
+        };
+
+        // Should never escalate with MAX threshold (unless age is also MAX)
+        assert!(!should_escalate(&policy, 0));
+        assert!(!should_escalate(&policy, u64::MAX - 1));
+        assert!(should_escalate(&policy, u64::MAX));
+    }
 }
