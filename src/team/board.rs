@@ -1068,4 +1068,85 @@ mod tests {
         assert_eq!(summary.archived_count, 0);
         assert!(!board_dir.join("archive").exists());
     }
+
+    #[test]
+    fn archive_preserves_file_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        write_task_file(
+            &tasks_dir,
+            "042-done.md",
+            42,
+            "done",
+            Some("2026-03-15T08:00:00+00:00"),
+        );
+
+        let original_bytes = std::fs::read(tasks_dir.join("042-done.md")).unwrap();
+
+        let tasks = load_tasks_from_dir(&tasks_dir).unwrap();
+        archive_tasks(&board_dir, &tasks, false).unwrap();
+
+        let archived_bytes = std::fs::read(board_dir.join("archive").join("042-done.md")).unwrap();
+        assert_eq!(
+            original_bytes, archived_bytes,
+            "archived file bytes must match original exactly"
+        );
+    }
+
+    #[test]
+    fn archive_summary_counts_correct() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        write_task_file(
+            &tasks_dir,
+            "010-done.md",
+            10,
+            "done",
+            Some("2026-03-01T00:00:00+00:00"),
+        );
+        write_task_file(
+            &tasks_dir,
+            "011-done.md",
+            11,
+            "done",
+            Some("2026-03-02T00:00:00+00:00"),
+        );
+        write_task_file(
+            &tasks_dir,
+            "012-done.md",
+            12,
+            "done",
+            Some("2026-03-03T00:00:00+00:00"),
+        );
+
+        let tasks = load_tasks_from_dir(&tasks_dir).unwrap();
+        let done_tasks: Vec<_> = tasks.into_iter().filter(|t| t.status == "done").collect();
+        assert_eq!(done_tasks.len(), 3);
+
+        let summary = archive_tasks(&board_dir, &done_tasks, false).unwrap();
+        assert_eq!(summary.archived_count, 3);
+        assert_eq!(summary.skipped_count, 0);
+        assert_eq!(summary.archive_dir, board_dir.join("archive"));
+    }
+
+    #[test]
+    fn archive_handles_empty_board() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        // Create board dir but no tasks dir — simulates an empty board
+        std::fs::create_dir_all(&board_dir).unwrap();
+
+        let empty: Vec<Task> = vec![];
+        let summary = archive_tasks(&board_dir, &empty, false).unwrap();
+        assert_eq!(summary.archived_count, 0);
+        assert_eq!(summary.skipped_count, 0);
+        // Archive dir should not be created when there's nothing to archive
+        assert!(!board_dir.join("archive").exists());
+    }
 }
