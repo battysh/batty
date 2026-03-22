@@ -146,12 +146,11 @@ fn blocking_reason(
     if let Some(reason) = metadata.blocked_on.as_ref() {
         return Some(reason.clone());
     }
-    if let Some(scheduled) = &task.scheduled_for {
-        if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(scheduled) {
-            if ts > chrono::Utc::now() {
-                return Some(format!("scheduled for {scheduled}"));
-            }
-        }
+    if task.is_schedule_blocked() {
+        return Some(format!(
+            "scheduled for {}",
+            task.scheduled_for.as_deref().unwrap_or("unknown")
+        ));
     }
     task.depends_on
         .iter()
