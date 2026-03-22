@@ -284,3 +284,107 @@ pub(super) fn review_task_intervention_signature(tasks: &[&crate::task::Task]) -
     parts.sort();
     parts.join("|")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::team::config::RoleType;
+    use crate::team::hierarchy::MemberInstance;
+
+    fn make_member(name: &str, role: RoleType, reports_to: Option<&str>) -> MemberInstance {
+        MemberInstance {
+            name: name.to_string(),
+            role_name: "test".to_string(),
+            role_type: role,
+            agent: None,
+            prompt: None,
+            reports_to: reports_to.map(str::to_string),
+            use_worktrees: false,
+        }
+    }
+
+    fn make_task(id: u32, status: &str, claimed_by: Option<&str>) -> crate::task::Task {
+        crate::task::Task {
+            id,
+            title: format!("task-{id}"),
+            status: status.to_string(),
+            priority: "high".to_string(),
+            claimed_by: claimed_by.map(str::to_string),
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description: String::new(),
+            batty_config: None,
+            source_path: std::path::PathBuf::from(format!("task-{id}.md")),
+        }
+    }
+
+    #[test]
+    fn review_key_uses_review_prefix() {
+        assert_eq!(review_intervention_key("lead"), "review::lead");
+    }
+
+    #[test]
+    fn review_signature_empty_returns_empty() {
+        assert_eq!(review_task_intervention_signature(&[]), "");
+    }
+
+    #[test]
+    fn review_signature_single_task() {
+        let task = make_task(42, "review", Some("eng-1"));
+        assert_eq!(
+            review_task_intervention_signature(&[&task]),
+            "42:review:eng-1"
+        );
+    }
+
+    #[test]
+    fn review_signature_unknown_when_no_claimed_by() {
+        let task = make_task(42, "review", None);
+        assert_eq!(
+            review_task_intervention_signature(&[&task]),
+            "42:review:unknown"
+        );
+    }
+
+    #[test]
+    fn review_backlog_owner_returns_none_for_unclaimed() {
+        let task = make_task(42, "review", None);
+        let members = vec![make_member("lead", RoleType::Manager, None)];
+        assert_eq!(review_backlog_owner_for_task(&task, &members), None);
+    }
+
+    #[test]
+    fn review_backlog_owner_returns_none_for_non_review() {
+        let task = make_task(42, "in-progress", Some("eng-1"));
+        let members = vec![
+            make_member("lead", RoleType::Manager, None),
+            make_member("eng-1", RoleType::Engineer, Some("lead")),
+        ];
+        assert_eq!(review_backlog_owner_for_task(&task, &members), None);
+    }
+
+    #[test]
+    fn review_backlog_owner_uses_reports_to_when_member_found() {
+        let task = make_task(42, "review", Some("eng-1"));
+        let members = vec![
+            make_member("lead", RoleType::Manager, Some("architect")),
+            make_member("eng-1", RoleType::Engineer, Some("lead")),
+        ];
+        assert_eq!(
+            review_backlog_owner_for_task(&task, &members),
+            Some("lead".to_string())
+        );
+    }
+}

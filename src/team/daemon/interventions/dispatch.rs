@@ -319,3 +319,126 @@ pub(super) fn manager_dispatch_intervention_signature(
     parts.sort();
     parts.join("|")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_key_uses_dispatch_prefix() {
+        assert_eq!(manager_dispatch_intervention_key("lead"), "dispatch::lead");
+        assert_eq!(
+            manager_dispatch_intervention_key("mgr-2"),
+            "dispatch::mgr-2"
+        );
+    }
+
+    #[test]
+    fn dispatch_signature_includes_active_reports_with_task_ids() {
+        let active = ReportDispatchSnapshot {
+            name: "eng-1".to_string(),
+            is_working: false,
+            active_task_ids: vec![10, 20],
+        };
+        let sig = manager_dispatch_intervention_signature(&[&active], &[], &[]);
+        assert_eq!(sig, "active:eng-1:10,20");
+    }
+
+    #[test]
+    fn dispatch_signature_includes_idle_and_open_components() {
+        let idle = ReportDispatchSnapshot {
+            name: "eng-2".to_string(),
+            is_working: false,
+            active_task_ids: vec![],
+        };
+        let task = crate::task::Task {
+            id: 50,
+            title: "open-task".to_string(),
+            status: "todo".to_string(),
+            priority: "high".to_string(),
+            claimed_by: None,
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description: String::new(),
+            batty_config: None,
+            source_path: std::path::PathBuf::from("task-50.md"),
+        };
+        let sig = manager_dispatch_intervention_signature(&[], &[&idle], &[&task]);
+        assert_eq!(sig, "idle:eng-2|open:50:todo");
+    }
+
+    #[test]
+    fn dispatch_signature_empty_inputs_returns_empty() {
+        let sig = manager_dispatch_intervention_signature(&[], &[], &[]);
+        assert_eq!(sig, "");
+    }
+
+    #[test]
+    fn dispatch_signature_sorts_all_components() {
+        let active = ReportDispatchSnapshot {
+            name: "eng-z".to_string(),
+            is_working: false,
+            active_task_ids: vec![5],
+        };
+        let idle = ReportDispatchSnapshot {
+            name: "eng-a".to_string(),
+            is_working: false,
+            active_task_ids: vec![],
+        };
+        let task = crate::task::Task {
+            id: 1,
+            title: "task".to_string(),
+            status: "backlog".to_string(),
+            priority: "high".to_string(),
+            claimed_by: None,
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description: String::new(),
+            batty_config: None,
+            source_path: std::path::PathBuf::from("task-1.md"),
+        };
+        let sig = manager_dispatch_intervention_signature(&[&active], &[&idle], &[&task]);
+        assert_eq!(sig, "active:eng-z:5|idle:eng-a|open:1:backlog");
+    }
+
+    #[test]
+    fn dispatch_signature_multiple_active_reports() {
+        let a1 = ReportDispatchSnapshot {
+            name: "eng-2".to_string(),
+            is_working: false,
+            active_task_ids: vec![30],
+        };
+        let a2 = ReportDispatchSnapshot {
+            name: "eng-1".to_string(),
+            is_working: false,
+            active_task_ids: vec![10, 20],
+        };
+        let sig = manager_dispatch_intervention_signature(&[&a1, &a2], &[], &[]);
+        // Should sort: active:eng-1:10,20 before active:eng-2:30
+        assert_eq!(sig, "active:eng-1:10,20|active:eng-2:30");
+    }
+}

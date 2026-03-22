@@ -1587,3 +1587,894 @@ fn nudge_disabled_marker_suppresses_board_replenishment() {
     let pending = harness.pending_inbox_messages("architect").unwrap();
     assert!(pending.is_empty());
 }
+
+// ─── nudge.rs tests ───────────────────────────────────────────────────────────
+
+fn nudge_harness() -> TestHarness {
+    TestHarness::new()
+        .with_member(architect_member("architect"))
+        .with_member(manager_member("lead", Some("architect")))
+        .with_member(engineer_member("eng-1", Some("lead"), false))
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_pane("eng-1", "%999998")
+}
+
+#[test]
+fn maybe_fire_nudges_delivers_when_idle_past_interval() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.nudges.insert(
+        "eng-1".to_string(),
+        NudgeSchedule {
+            text: "Get moving!".to_string(),
+            interval: Duration::from_secs(30),
+            idle_since: Some(Instant::now() - Duration::from_secs(120)),
+            fired_this_idle: false,
+            paused: false,
+        },
+    );
+    daemon.idle_started_at.insert(
+        "eng-1".to_string(),
+        Instant::now() - daemon.automation_idle_grace_duration() - Duration::from_secs(1),
+    );
+
+    daemon.maybe_fire_nudges().unwrap();
+
+    let pending = harness.pending_inbox_messages("eng-1").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].body.contains("Get moving!"));
+    assert!(pending[0].body.contains("Idle nudge"));
+}
+
+#[test]
+fn maybe_fire_nudges_does_not_fire_when_disabled() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.config.team_config.automation.timeout_nudges = false;
+    daemon.nudges.insert(
+        "eng-1".to_string(),
+        NudgeSchedule {
+            text: "nudge".to_string(),
+            interval: Duration::from_secs(1),
+            idle_since: Some(Instant::now() - Duration::from_secs(120)),
+            fired_this_idle: false,
+            paused: false,
+        },
+    );
+
+    daemon.maybe_fire_nudges().unwrap();
+
+    assert!(harness.pending_inbox_messages("eng-1").unwrap().is_empty());
+}
+
+#[test]
+fn maybe_fire_nudges_does_not_fire_when_already_fired_this_idle() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.nudges.insert(
+        "eng-1".to_string(),
+        NudgeSchedule {
+            text: "nudge".to_string(),
+            interval: Duration::from_secs(1),
+            idle_since: Some(Instant::now() - Duration::from_secs(120)),
+            fired_this_idle: true,
+            paused: false,
+        },
+    );
+
+    daemon.maybe_fire_nudges().unwrap();
+
+    assert!(harness.pending_inbox_messages("eng-1").unwrap().is_empty());
+}
+
+#[test]
+fn maybe_fire_nudges_does_not_fire_without_idle_since() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.nudges.insert(
+        "eng-1".to_string(),
+        NudgeSchedule {
+            text: "nudge".to_string(),
+            interval: Duration::from_secs(1),
+            idle_since: None,
+            fired_this_idle: false,
+            paused: false,
+        },
+    );
+
+    daemon.maybe_fire_nudges().unwrap();
+
+    assert!(harness.pending_inbox_messages("eng-1").unwrap().is_empty());
+}
+
+#[test]
+fn maybe_fire_nudges_does_not_fire_with_pending_inbox() {
+    let harness = nudge_harness().with_inbox_message(
+        "eng-1",
+        InboxMessage::new_send("lead", "eng-1", "do this"),
+        false,
+    );
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.nudges.insert(
+        "eng-1".to_string(),
+        NudgeSchedule {
+            text: "nudge".to_string(),
+            interval: Duration::from_secs(1),
+            idle_since: Some(Instant::now() - Duration::from_secs(120)),
+            fired_this_idle: false,
+            paused: false,
+        },
+    );
+    daemon.idle_started_at.insert(
+        "eng-1".to_string(),
+        Instant::now() - daemon.automation_idle_grace_duration() - Duration::from_secs(1),
+    );
+
+    daemon.maybe_fire_nudges().unwrap();
+
+    // Only the pre-existing pending message, no nudge added
+    let pending = harness.pending_inbox_messages("eng-1").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(!pending[0].body.contains("Idle nudge"));
+}
+
+#[test]
+fn maybe_fire_nudges_marks_fired_this_idle() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.nudges.insert(
+        "eng-1".to_string(),
+        NudgeSchedule {
+            text: "nudge".to_string(),
+            interval: Duration::from_secs(1),
+            idle_since: Some(Instant::now() - Duration::from_secs(120)),
+            fired_this_idle: false,
+            paused: false,
+        },
+    );
+    daemon.idle_started_at.insert(
+        "eng-1".to_string(),
+        Instant::now() - daemon.automation_idle_grace_duration() - Duration::from_secs(1),
+    );
+
+    daemon.maybe_fire_nudges().unwrap();
+
+    assert!(daemon.nudges.get("eng-1").unwrap().fired_this_idle);
+}
+
+#[test]
+fn maybe_fire_nudges_paused_marker_suppresses() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.nudges.insert(
+        "eng-1".to_string(),
+        NudgeSchedule {
+            text: "nudge".to_string(),
+            interval: Duration::from_secs(1),
+            idle_since: Some(Instant::now() - Duration::from_secs(120)),
+            fired_this_idle: false,
+            paused: false,
+        },
+    );
+    daemon.idle_started_at.insert(
+        "eng-1".to_string(),
+        Instant::now() - daemon.automation_idle_grace_duration() - Duration::from_secs(1),
+    );
+    let marker = crate::team::pause_marker_path(&daemon.config.project_root);
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "").unwrap();
+
+    daemon.maybe_fire_nudges().unwrap();
+
+    assert!(harness.pending_inbox_messages("eng-1").unwrap().is_empty());
+}
+
+// ─── mod.rs helper function tests ─────────────────────────────────────────────
+
+#[test]
+fn update_nudge_for_state_idle_sets_idle_since_and_clears_fired() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.nudges.insert(
+        "eng-1".to_string(),
+        NudgeSchedule {
+            text: "nudge".to_string(),
+            interval: Duration::from_secs(30),
+            idle_since: None,
+            fired_this_idle: true,
+            paused: true,
+        },
+    );
+
+    daemon.update_nudge_for_state("eng-1", MemberState::Idle);
+
+    let schedule = daemon.nudges.get("eng-1").unwrap();
+    assert!(schedule.idle_since.is_some());
+    assert!(!schedule.fired_this_idle);
+    assert!(!schedule.paused);
+}
+
+#[test]
+fn update_nudge_for_state_working_clears_idle_and_pauses() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.nudges.insert(
+        "eng-1".to_string(),
+        NudgeSchedule {
+            text: "nudge".to_string(),
+            interval: Duration::from_secs(30),
+            idle_since: Some(Instant::now()),
+            fired_this_idle: true,
+            paused: false,
+        },
+    );
+
+    daemon.update_nudge_for_state("eng-1", MemberState::Working);
+
+    let schedule = daemon.nudges.get("eng-1").unwrap();
+    assert!(schedule.idle_since.is_none());
+    assert!(!schedule.fired_this_idle);
+    assert!(schedule.paused);
+}
+
+#[test]
+fn update_nudge_for_state_idle_preserves_active_window() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+    let original = Instant::now() - Duration::from_secs(100);
+    daemon.nudges.insert(
+        "eng-1".to_string(),
+        NudgeSchedule {
+            text: "nudge".to_string(),
+            interval: Duration::from_secs(30),
+            idle_since: Some(original),
+            fired_this_idle: false,
+            paused: false,
+        },
+    );
+
+    daemon.update_nudge_for_state("eng-1", MemberState::Idle);
+
+    // Should not reset idle_since when already tracking and not paused
+    let schedule = daemon.nudges.get("eng-1").unwrap();
+    assert_eq!(schedule.idle_since, Some(original));
+}
+
+#[test]
+fn update_nudge_for_state_idle_from_paused_resets_window() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.nudges.insert(
+        "eng-1".to_string(),
+        NudgeSchedule {
+            text: "nudge".to_string(),
+            interval: Duration::from_secs(30),
+            idle_since: Some(Instant::now() - Duration::from_secs(500)),
+            fired_this_idle: true,
+            paused: true,
+        },
+    );
+
+    daemon.update_nudge_for_state("eng-1", MemberState::Idle);
+
+    let schedule = daemon.nudges.get("eng-1").unwrap();
+    // idle_since should be reset to ~now since paused was true
+    assert!(schedule.idle_since.unwrap().elapsed() < Duration::from_secs(2));
+    assert!(!schedule.fired_this_idle);
+}
+
+#[test]
+fn update_nudge_for_state_unknown_member_is_noop() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+
+    // Should not panic
+    daemon.update_nudge_for_state("nonexistent", MemberState::Idle);
+    daemon.update_nudge_for_state("nonexistent", MemberState::Working);
+}
+
+#[test]
+fn update_triage_for_state_working_creates_entry_at_zero() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+
+    daemon.update_triage_intervention_for_state("eng-1", MemberState::Working);
+
+    assert_eq!(daemon.triage_idle_epochs.get("eng-1"), Some(&0));
+}
+
+#[test]
+fn update_triage_for_state_idle_increments_existing() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.triage_idle_epochs.insert("eng-1".to_string(), 2);
+
+    daemon.update_triage_intervention_for_state("eng-1", MemberState::Idle);
+
+    assert_eq!(daemon.triage_idle_epochs.get("eng-1"), Some(&3));
+}
+
+#[test]
+fn update_triage_for_state_idle_first_time_no_increment() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+
+    daemon.update_triage_intervention_for_state("eng-1", MemberState::Idle);
+
+    // First idle transition creates entry at 0, does not increment
+    assert_eq!(daemon.triage_idle_epochs.get("eng-1"), Some(&0));
+}
+
+#[test]
+fn intervention_on_cooldown_false_when_no_entry() {
+    let harness = nudge_harness();
+    let daemon = harness.build_daemon().unwrap();
+
+    assert!(!daemon.intervention_on_cooldown("nonexistent::key"));
+}
+
+#[test]
+fn intervention_on_cooldown_true_during_cooldown() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon
+        .intervention_cooldowns
+        .insert("test::key".to_string(), Instant::now());
+
+    assert!(daemon.intervention_on_cooldown("test::key"));
+}
+
+#[test]
+fn intervention_on_cooldown_false_after_expiry() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.intervention_cooldowns.insert(
+        "test::key".to_string(),
+        Instant::now()
+            - Duration::from_secs(
+                daemon
+                    .config
+                    .team_config
+                    .automation
+                    .intervention_cooldown_secs
+                    + 1,
+            ),
+    );
+
+    assert!(!daemon.intervention_on_cooldown("test::key"));
+}
+
+#[test]
+fn utilization_cooldown_uses_separate_duration() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+    // Set utilization recovery interval much longer
+    daemon
+        .config
+        .team_config
+        .automation
+        .utilization_recovery_interval_secs = 600;
+    daemon
+        .config
+        .team_config
+        .automation
+        .intervention_cooldown_secs = 30;
+
+    // Within utilization cooldown but past regular cooldown
+    daemon.intervention_cooldowns.insert(
+        "test::key".to_string(),
+        Instant::now() - Duration::from_secs(100),
+    );
+
+    assert!(!daemon.intervention_on_cooldown("test::key"));
+    assert!(daemon.utilization_intervention_on_cooldown("test::key"));
+}
+
+#[test]
+fn is_member_idle_uses_watcher_state_when_available() {
+    use crate::team::watcher::{SessionWatcher, WatcherState};
+
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon
+        .states
+        .insert("eng-1".to_string(), MemberState::Working);
+    let mut watcher = SessionWatcher::new("%999998", "eng-1", 60, None);
+    watcher.state = WatcherState::Idle;
+    daemon.watchers.insert("eng-1".to_string(), watcher);
+
+    // Watcher says idle, state map says working — watcher wins
+    assert!(daemon.is_member_idle("eng-1"));
+}
+
+#[test]
+fn is_member_idle_falls_back_to_states_map() {
+    // No pane for eng-1 → no watcher → falls back to states map
+    let harness = TestHarness::new()
+        .with_member(architect_member("architect"))
+        .with_member(manager_member("lead", Some("architect")))
+        .with_member(engineer_member("eng-1", Some("lead"), false))
+        .with_member_state("eng-1", MemberState::Working);
+    let mut daemon = harness.build_daemon().unwrap();
+
+    assert!(!daemon.is_member_idle("eng-1"));
+
+    daemon.states.insert("eng-1".to_string(), MemberState::Idle);
+    assert!(daemon.is_member_idle("eng-1"));
+}
+
+#[test]
+fn is_member_idle_unknown_member_returns_true() {
+    let harness = nudge_harness();
+    let daemon = harness.build_daemon().unwrap();
+
+    // No watcher, no state entry → falls back to None match → idle
+    assert!(daemon.is_member_idle("nonexistent"));
+}
+
+// ─── disabled flag tests ──────────────────────────────────────────────────────
+
+#[test]
+fn owned_tasks_not_fire_when_disabled() {
+    let harness =
+        owned_task_harness().with_board_task(191, "owned-task", "in-progress", Some("eng-1"));
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon
+        .config
+        .team_config
+        .automation
+        .owned_task_interventions = false;
+
+    enter_idle_epoch(&mut daemon, "eng-1");
+    daemon.maybe_intervene_owned_tasks().unwrap();
+
+    assert!(harness.pending_inbox_messages("eng-1").unwrap().is_empty());
+}
+
+#[test]
+fn review_not_fire_when_disabled() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Idle)
+        .with_pane("lead", "%999997")
+        .with_board_task(191, "review-task", "review", Some("eng-1"));
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.config.team_config.automation.review_interventions = false;
+
+    enter_idle_epoch(&mut daemon, "lead");
+    daemon.maybe_intervene_review_backlog().unwrap();
+
+    assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+}
+
+#[test]
+fn dispatch_not_fire_when_disabled() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("lead", "%999997")
+        .with_board_task(191, "active-task", "in-progress", Some("eng-1"))
+        .with_board_task(192, "open-task", "todo", None);
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon
+        .config
+        .team_config
+        .automation
+        .manager_dispatch_interventions = false;
+
+    enter_idle_epoch(&mut daemon, "lead");
+    daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+    assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+}
+
+#[test]
+fn utilization_not_fire_when_disabled() {
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("architect", "%999996")
+        .with_board_task(191, "active-task", "in-progress", Some("eng-1"));
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon
+        .config
+        .team_config
+        .automation
+        .architect_utilization_interventions = false;
+
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_architect_utilization().unwrap();
+
+    assert!(
+        harness
+            .pending_inbox_messages("architect")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn triage_not_fire_when_disabled() {
+    let harness =
+        triage_harness().with_inbox_message("lead", delivered_result("eng-1", "done"), true);
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.config.team_config.automation.triage_interventions = false;
+
+    enter_idle_epoch(&mut daemon, "lead");
+    daemon.maybe_intervene_triage_backlog().unwrap();
+
+    assert!(!daemon.triage_interventions.contains_key("lead"));
+    assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+}
+
+// ─── pause marker tests ──────────────────────────────────────────────────────
+
+#[test]
+fn pause_marker_suppresses_owned_tasks() {
+    let harness =
+        owned_task_harness().with_board_task(191, "owned-task", "in-progress", Some("eng-1"));
+    let mut daemon = harness.build_daemon().unwrap();
+    let marker = crate::team::pause_marker_path(&daemon.config.project_root);
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "").unwrap();
+
+    enter_idle_epoch(&mut daemon, "eng-1");
+    daemon.maybe_intervene_owned_tasks().unwrap();
+
+    assert!(harness.pending_inbox_messages("eng-1").unwrap().is_empty());
+}
+
+#[test]
+fn pause_marker_suppresses_review() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Idle)
+        .with_pane("lead", "%999997")
+        .with_board_task(191, "review-task", "review", Some("eng-1"));
+    let mut daemon = harness.build_daemon().unwrap();
+    let marker = crate::team::pause_marker_path(&daemon.config.project_root);
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "").unwrap();
+
+    enter_idle_epoch(&mut daemon, "lead");
+    daemon.maybe_intervene_review_backlog().unwrap();
+
+    assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+}
+
+#[test]
+fn pause_marker_suppresses_dispatch() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_pane("lead", "%999997")
+        .with_board_task(191, "active-task", "in-progress", Some("eng-1"))
+        .with_board_task(192, "open-task", "todo", None);
+    let mut daemon = harness.build_daemon().unwrap();
+    let marker = crate::team::pause_marker_path(&daemon.config.project_root);
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "").unwrap();
+
+    enter_idle_epoch(&mut daemon, "lead");
+    daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+    assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+}
+
+#[test]
+fn pause_marker_suppresses_utilization() {
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_pane("architect", "%999996")
+        .with_board_task(191, "active-task", "in-progress", Some("eng-1"));
+    let mut daemon = harness.build_daemon().unwrap();
+    let marker = crate::team::pause_marker_path(&daemon.config.project_root);
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "").unwrap();
+
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_architect_utilization().unwrap();
+
+    assert!(
+        harness
+            .pending_inbox_messages("architect")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+// ─── nudge disabled marker tests ─────────────────────────────────────────────
+
+#[test]
+fn nudge_disabled_marker_suppresses_review() {
+    use crate::team::nudge_disabled_marker_path;
+
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Idle)
+        .with_pane("lead", "%999997")
+        .with_board_task(191, "review-task", "review", Some("eng-1"));
+    let mut daemon = harness.build_daemon().unwrap();
+    let marker = nudge_disabled_marker_path(&daemon.config.project_root, "review");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "").unwrap();
+
+    enter_idle_epoch(&mut daemon, "lead");
+    daemon.maybe_intervene_review_backlog().unwrap();
+
+    assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+}
+
+#[test]
+fn nudge_disabled_marker_suppresses_dispatch() {
+    use crate::team::nudge_disabled_marker_path;
+
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_pane("lead", "%999997")
+        .with_board_task(191, "active-task", "in-progress", Some("eng-1"))
+        .with_board_task(192, "open-task", "todo", None);
+    let mut daemon = harness.build_daemon().unwrap();
+    let marker = nudge_disabled_marker_path(&daemon.config.project_root, "dispatch");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "").unwrap();
+
+    enter_idle_epoch(&mut daemon, "lead");
+    daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+    assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+}
+
+#[test]
+fn nudge_disabled_marker_suppresses_owned_tasks() {
+    use crate::team::nudge_disabled_marker_path;
+
+    let harness =
+        owned_task_harness().with_board_task(191, "owned-task", "in-progress", Some("eng-1"));
+    let mut daemon = harness.build_daemon().unwrap();
+    let marker = nudge_disabled_marker_path(&daemon.config.project_root, "owned-task");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "").unwrap();
+
+    enter_idle_epoch(&mut daemon, "eng-1");
+    daemon.maybe_intervene_owned_tasks().unwrap();
+
+    assert!(harness.pending_inbox_messages("eng-1").unwrap().is_empty());
+}
+
+#[test]
+fn nudge_disabled_marker_suppresses_utilization() {
+    use crate::team::nudge_disabled_marker_path;
+
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_pane("architect", "%999996")
+        .with_board_task(191, "active-task", "in-progress", Some("eng-1"));
+    let mut daemon = harness.build_daemon().unwrap();
+    let marker = nudge_disabled_marker_path(&daemon.config.project_root, "utilization");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "").unwrap();
+
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_architect_utilization().unwrap();
+
+    assert!(
+        harness
+            .pending_inbox_messages("architect")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+// ─── cleanup / edge case tests ────────────────────────────────────────────────
+
+#[test]
+fn owned_tasks_clears_intervention_when_no_owned_tasks() {
+    let harness = owned_task_harness();
+    fs::create_dir_all(harness.board_tasks_dir()).unwrap();
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.owned_task_interventions.insert(
+        "eng-1".to_string(),
+        OwnedTaskInterventionState {
+            idle_epoch: 1,
+            signature: "191:in-progress".to_string(),
+            detected_at: Instant::now(),
+            escalation_sent: false,
+        },
+    );
+
+    daemon.maybe_intervene_owned_tasks().unwrap();
+
+    assert!(!daemon.owned_task_interventions.contains_key("eng-1"));
+}
+
+#[test]
+fn review_clears_intervention_when_no_review_tasks() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Idle)
+        .with_pane("lead", "%999997");
+    fs::create_dir_all(harness.board_tasks_dir()).unwrap();
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.owned_task_interventions.insert(
+        "review::lead".to_string(),
+        OwnedTaskInterventionState {
+            idle_epoch: 1,
+            signature: "191:review:eng-1".to_string(),
+            detected_at: Instant::now(),
+            escalation_sent: false,
+        },
+    );
+
+    enter_idle_epoch(&mut daemon, "lead");
+    daemon.maybe_intervene_review_backlog().unwrap();
+
+    assert!(!daemon.owned_task_interventions.contains_key("review::lead"));
+}
+
+#[test]
+fn utilization_does_not_fire_when_half_engineers_working() {
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("lead", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Working)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("architect", "%999996")
+        .with_board_task(191, "active-task", "in-progress", Some("eng-2"))
+        .with_board_task(192, "open-task", "backlog", None);
+    let mut daemon = harness.build_daemon().unwrap();
+
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_architect_utilization().unwrap();
+
+    // Half the engineers (1 of 2) are working → above threshold → no intervention
+    assert!(
+        harness
+            .pending_inbox_messages("architect")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn utilization_does_not_fire_when_no_engineers() {
+    let harness = TestHarness::new()
+        .with_member(architect_member("architect"))
+        .with_member(manager_member("lead", Some("architect")))
+        .with_member_state("architect", MemberState::Idle)
+        .with_pane("architect", "%999996");
+    fs::create_dir_all(harness.board_tasks_dir()).unwrap();
+    let mut daemon = harness.build_daemon().unwrap();
+
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_architect_utilization().unwrap();
+
+    assert!(
+        harness
+            .pending_inbox_messages("architect")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn dispatch_does_not_fire_when_reports_working() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Working)
+        .with_member_state("eng-2", MemberState::Working)
+        .with_pane("lead", "%999997")
+        .with_board_task(191, "active-task", "in-progress", Some("eng-1"));
+    let mut daemon = harness.build_daemon().unwrap();
+
+    enter_idle_epoch(&mut daemon, "lead");
+    daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+    assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+}
+
+#[test]
+fn board_replenishment_blocked_todo_excluded_from_unblocked_count() {
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("architect", "%999996");
+
+    // Create a blocked todo task using the test_support utility
+    crate::team::test_support::write_board_task_file(
+        harness.project_root(),
+        191,
+        "blocked-task",
+        "todo",
+        None,
+        &[],
+        Some("waiting on external review"),
+    );
+
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.config.team_config.automation.replenishment_threshold = Some(1);
+
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_board_replenishment().unwrap();
+
+    // The blocked todo should not count as unblocked, so replenishment fires
+    let pending = harness.pending_inbox_messages("architect").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].body.contains("Board replenishment needed"));
+}
+
+#[test]
+fn board_replenishment_dependency_unmet_excluded_from_unblocked() {
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("architect", "%999996");
+
+    // Task 191 depends on 190 which is in-progress (not done)
+    crate::team::test_support::write_board_task_file(
+        harness.project_root(),
+        190,
+        "prereq",
+        "in-progress",
+        Some("eng-1"),
+        &[],
+        None,
+    );
+    crate::team::test_support::write_board_task_file(
+        harness.project_root(),
+        191,
+        "depends-task",
+        "todo",
+        None,
+        &[190],
+        None,
+    );
+
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.config.team_config.automation.replenishment_threshold = Some(1);
+
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_board_replenishment().unwrap();
+
+    // Task 191 has unmet dependency → not unblocked → replenishment fires
+    let pending = harness.pending_inbox_messages("architect").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].body.contains("Board replenishment needed"));
+}
+
+#[test]
+fn triage_does_not_fire_without_direct_reports() {
+    // Manager with no engineers reporting to them
+    let harness = TestHarness::new()
+        .with_member(architect_member("architect"))
+        .with_member(manager_member("lead", Some("architect")))
+        .with_member_state("lead", MemberState::Idle)
+        .with_pane("lead", "%999999");
+    let mut daemon = harness.build_daemon().unwrap();
+
+    enter_idle_epoch(&mut daemon, "lead");
+    daemon.maybe_intervene_triage_backlog().unwrap();
+
+    assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+}
+
+#[test]
+fn review_does_not_fire_without_idle_epoch() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Idle)
+        .with_pane("lead", "%999997")
+        .with_board_task(191, "review-task", "review", Some("eng-1"));
+    let mut daemon = harness.build_daemon().unwrap();
+    // Set idle started but don't enter an idle epoch
+    daemon.idle_started_at.insert(
+        "lead".to_string(),
+        Instant::now() - daemon.automation_idle_grace_duration() - Duration::from_secs(1),
+    );
+
+    daemon.maybe_intervene_review_backlog().unwrap();
+
+    assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+}
