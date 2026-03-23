@@ -407,9 +407,7 @@ mod tests {
     use crate::team::standup::MemberState;
     use crate::team::task_loop::setup_engineer_worktree;
     use crate::team::test_helpers::make_test_daemon;
-    use crate::team::test_support::{
-        engineer_member, git_ok, git_stdout, init_git_repo, manager_member,
-    };
+    use crate::team::test_support::{engineer_member, git_ok, init_git_repo, manager_member};
     use std::path::{Path, PathBuf};
 
     fn write_task_file(project_root: &Path, id: u32, title: &str) {

@@ -219,15 +219,10 @@ exit 1
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use crate::team::config::WorkflowPolicy;
     use crate::team::events::TeamEvent;
-    use crate::team::hierarchy::MemberInstance;
     use crate::team::test_helpers::{make_test_daemon, write_event_log};
-    use crate::team::test_support::{
-        TestDaemonBuilder, engineer_member, manager_member, write_owned_task_file,
-    };
+    use crate::team::test_support::{TestDaemonBuilder, manager_member, write_owned_task_file};
     use std::path::PathBuf;
-    use std::time::{Duration, Instant};
 
     #[test]
     fn test_retry_count_increments_and_resets() {
