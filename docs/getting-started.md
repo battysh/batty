@@ -623,20 +623,65 @@ branch actually has commits beyond `main`. If no new commits are found, the
 completion is rejected and the task stays in progress. This prevents empty
 branches from being merged.
 
-## Grafana Dashboard
+## Grafana Monitoring
 
-Batty includes a bundled Grafana dashboard template with 21 panels across 6 rows
-and 6 pre-configured alerts for monitoring agent sessions, pipeline health, and
-task lifecycle.
+Batty includes a bundled Grafana dashboard with 21 panels and 6 pre-configured
+alerts. The `batty grafana` commands handle installation, service management,
+and browser access.
 
-To use it:
+### Setup
 
-1. Copy the dashboard from the source tree: `src/team/grafana/dashboard.json`
-2. Open your Grafana instance
-3. Import the JSON via Dashboards > Import
-4. Point the datasource at your telemetry backend
+Install Grafana, the SQLite datasource plugin, and start the service:
 
-The dashboard rows cover:
+```sh
+batty grafana setup
+```
+
+This runs three steps:
+
+1. `brew install grafana`
+2. `grafana-cli plugins install frser-sqlite-datasource`
+3. `brew services start grafana`
+
+Once Grafana is running, start your team as usual:
+
+```sh
+batty start
+```
+
+The daemon writes telemetry to `.batty/telemetry.db` (SQLite), which the
+dashboard queries via the SQLite datasource plugin.
+
+### Verify
+
+Check that the Grafana server is reachable:
+
+```sh
+batty grafana status
+```
+
+Example output:
+
+```text
+Grafana is running at http://localhost:3000
+{"commit":"...","database":"ok","version":"..."}
+```
+
+### Open The Dashboard
+
+Open the Grafana dashboard in your default browser:
+
+```sh
+batty grafana open
+```
+
+This opens `http://localhost:3000`. Import the bundled dashboard JSON
+(`src/team/grafana/dashboard.json`) via **Dashboards > Import** and point the
+datasource at your `.batty/telemetry.db` file.
+
+### What The Dashboard Shows
+
+The dashboard has 6 rows:
 
 - **Session Overview** — active agents, session uptime, team utilization
 - **Pipeline Health** — task flow rates, queue depths, starvation indicators
@@ -645,8 +690,29 @@ The dashboard rows cover:
 - **Task Lifecycle** — time-in-status breakdowns, rework rates
 - **Recent Activity** — live event stream
 
-Pre-configured alerts fire on agent stalls, delivery failure spikes, pipeline
-starvation, high failure rates, context exhaustion, and session idle.
+### Alerts
+
+Six alerts fire automatically when thresholds are crossed:
+
+1. **Agent Stall** — an agent has stopped producing output
+2. **Delivery Failure Spike** — message delivery error rate is elevated
+3. **Pipeline Starvation** — no tasks are flowing through the pipeline
+4. **High Failure Rate** — task failure rate exceeds normal levels
+5. **Context Exhaustion** — an agent's context window is nearly full
+6. **Session Idle** — the session has been idle for too long
+
+Alert thresholds are configurable inside the dashboard JSON.
+
+### Custom Port
+
+By default, Grafana runs on port 3000. Override it in `team.yaml`:
+
+```yaml
+grafana:
+  port: 9090
+```
+
+All `batty grafana` commands respect this setting.
 
 ## Next Steps
 
