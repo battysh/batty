@@ -188,12 +188,11 @@ mod tests {
     use crate::team::standup::MemberState;
     use crate::team::test_helpers::{make_test_daemon, write_event_log};
     use crate::team::test_support::{
-        TestDaemonBuilder, engineer_member, init_git_repo, setup_fake_claude,
-        write_owned_task_file, write_owned_task_file_with_context,
+        TestDaemonBuilder, engineer_member, setup_fake_claude, write_owned_task_file,
+        write_owned_task_file_with_context,
     };
     use serial_test::serial;
     use std::collections::HashMap;
-    use std::path::PathBuf;
     use std::process::Command;
     use std::time::{Duration, Instant};
 
@@ -639,7 +638,7 @@ mod tests {
 
         let member_name = "eng-stall-cp";
         let lead_name = "lead-stall-cp";
-        let (fake_bin, fake_log) = setup_fake_claude(&tmp, member_name);
+        let (fake_bin, _fake_log) = setup_fake_claude(&tmp, member_name);
 
         let worktree_dir = repo.join(".batty").join("worktrees").join(member_name);
         let team_config_dir = repo.join(".batty").join("team_config");
