@@ -426,6 +426,19 @@ impl TeamDaemon {
                 return true;
             }
 
+            // If the agent is no longer at its ready prompt, it started working —
+            // the marker was consumed and scrolled off the capture window.
+            if self.agent_went_active_after_injection(&pane_id, recipient) {
+                self.clear_failed_delivery(recipient, from, body);
+                info!(
+                    recipient,
+                    attempt,
+                    marker = %message_marker,
+                    "message delivery inferred: agent active after injection (marker scrolloff)"
+                );
+                return true;
+            }
+
             warn!(
                 recipient,
                 attempt,
@@ -475,6 +488,20 @@ impl TeamDaemon {
                     capture_lines,
                     marker = %message_marker,
                     "message delivery verified: marker found in pane"
+                );
+                return true;
+            }
+
+            // If the agent is no longer at its ready prompt, it started working —
+            // the marker was consumed and scrolled off the capture window.
+            if self.agent_went_active_after_injection(&pane_id, recipient) {
+                self.clear_failed_delivery(recipient, from, body);
+                info!(
+                    recipient,
+                    attempt,
+                    capture_lines,
+                    marker = %message_marker,
+                    "message delivery inferred: agent active after injection (marker scrolloff)"
                 );
                 return true;
             }
@@ -552,6 +579,25 @@ impl TeamDaemon {
         } else {
             DELIVERY_VERIFICATION_CAPTURE_LINES
         }
+    }
+
+    /// Check whether the agent is no longer at its ready prompt after message
+    /// injection. If the agent was idle/ready before and is now actively working,
+    /// the delivery marker likely scrolled off the capture window — the agent
+    /// consumed the message. This prevents false-negative delivery failures when
+    /// fast-processing agents push the marker past the capture window.
+    fn agent_went_active_after_injection(&self, pane_id: &str, recipient: &str) -> bool {
+        // Only infer delivery if the watcher had previously confirmed readiness.
+        // This avoids false positives for agents that were never idle.
+        let was_ready = self
+            .watchers
+            .get(recipient)
+            .is_some_and(|w| w.is_ready_for_delivery());
+        if !was_ready {
+            return false;
+        }
+        // Live check: if the agent is no longer at its prompt, it started working.
+        !is_agent_ready(pane_id)
     }
 
     /// Drain pending messages for an agent that just became ready.
@@ -2732,5 +2778,84 @@ mod tests {
         );
         assert_eq!(inbox_msgs[0].body, "Task #42: implement feature");
         assert_eq!(inbox_msgs[0].from, "manager");
+    }
+
+    // --- Marker scrolloff / state-transition delivery inference tests ---
+
+    #[test]
+    fn marker_scrolloff_detected_as_delivered_when_agent_active() {
+        // When the watcher was ready (ready_confirmed=true) and the pane is no
+        // longer showing the agent prompt (nonexistent pane simulates active),
+        // agent_went_active_after_injection should return true.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let mut watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        watcher.activate(); // sets ready_confirmed = true
+        daemon.watchers.insert("eng-1".to_string(), watcher);
+
+        // Pane %9999999 doesn't exist → is_agent_ready returns false →
+        // agent is "active" (not at prompt) → scrolloff inferred as delivered.
+        assert!(daemon.agent_went_active_after_injection("%9999999", "eng-1"));
+    }
+
+    #[test]
+    fn marker_scrolloff_not_inferred_when_watcher_never_ready() {
+        // If the watcher never confirmed readiness, we cannot infer delivery
+        // from the agent being away from its prompt.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        assert!(!watcher.is_ready_for_delivery());
+        daemon.watchers.insert("eng-1".to_string(), watcher);
+
+        assert!(!daemon.agent_went_active_after_injection("%9999999", "eng-1"));
+    }
+
+    #[test]
+    fn marker_scrolloff_not_inferred_without_watcher() {
+        // No watcher for the recipient → cannot infer.
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = failed_delivery_test_daemon(&tmp);
+        assert!(!daemon.agent_went_active_after_injection("%9999999", "unknown-agent"));
+    }
+
+    #[test]
+    fn state_transition_confirms_delivery_after_activate() {
+        // Simulate the full lifecycle: agent was ready, message injected (activate),
+        // then deactivated back to idle — the watcher should still have
+        // ready_confirmed=true, so scrolloff detection works.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let mut watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        watcher.confirm_ready();
+        assert!(watcher.is_ready_for_delivery());
+        watcher.activate(); // simulates injection activating the agent
+        assert!(watcher.is_ready_for_delivery()); // stays true after activate
+        daemon.watchers.insert("eng-1".to_string(), watcher);
+
+        // Pane doesn't exist → agent not at prompt → inferred delivered.
+        assert!(daemon.agent_went_active_after_injection("%9999999", "eng-1"));
+    }
+
+    #[test]
+    fn state_transition_ready_to_active_clears_failed_delivery() {
+        // When scrolloff detection infers delivery, any previously recorded
+        // failure for the same message should be cleared.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let mut watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        watcher.activate();
+        daemon.watchers.insert("eng-1".to_string(), watcher);
+
+        // Seed a failed delivery.
+        daemon
+            .failed_deliveries
+            .push(FailedDelivery::new("eng-1", "manager", "test message"));
+        assert_eq!(daemon.failed_deliveries.len(), 1);
+
+        // clear_failed_delivery should remove it (this is what verify_message_delivered
+        // calls after agent_went_active_after_injection returns true).
+        daemon.clear_failed_delivery("eng-1", "manager", "test message");
+        assert!(daemon.failed_deliveries.is_empty());
     }
 }
