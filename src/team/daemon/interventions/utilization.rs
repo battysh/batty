@@ -52,6 +52,14 @@ impl TeamDaemon {
             return Ok(());
         }
 
+        // Suppress when all engineers have active tasks — transient idle is not starvation.
+        if super::all_engineers_have_active_tasks(&engineer_names, &tasks) {
+            tracing::debug!(
+                "suppressing utilization intervention: all engineers have active tasks"
+            );
+            return Ok(());
+        }
+
         let working_engineers: Vec<String> = engineer_names
             .iter()
             .filter(|name| !self.is_member_idle(name))

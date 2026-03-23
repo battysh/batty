@@ -2478,3 +2478,172 @@ fn review_does_not_fire_without_idle_epoch() {
 
     assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
 }
+
+// --- Starvation false-positive suppression tests (task #286) ---
+
+fn make_task(id: u32, status: &str, claimed_by: Option<&str>) -> crate::task::Task {
+    crate::task::Task {
+        id,
+        title: format!("task-{id}"),
+        status: status.to_string(),
+        priority: "high".to_string(),
+        claimed_by: claimed_by.map(str::to_string),
+        blocked: None,
+        tags: vec![],
+        depends_on: vec![],
+        review_owner: None,
+        blocked_on: None,
+        worktree_path: None,
+        branch: None,
+        commit: None,
+        artifacts: vec![],
+        next_action: None,
+        scheduled_for: None,
+        cron_schedule: None,
+        cron_last_run: None,
+        completed: None,
+        description: String::new(),
+        batty_config: None,
+        source_path: std::path::PathBuf::new(),
+    }
+}
+
+#[test]
+fn suppress_starvation_when_all_engineers_have_tasks() {
+    // All engineers are transiently idle but each has an in-progress task.
+    // Board replenishment should NOT fire — this is a false positive.
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("lead", MemberState::Working)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("architect", "%999996")
+        .with_board_task(191, "task-for-eng-1", "in-progress", Some("eng-1"))
+        .with_board_task(192, "task-for-eng-2", "in-progress", Some("eng-2"));
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.config.team_config.automation.replenishment_threshold = Some(5);
+
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_board_replenishment().unwrap();
+
+    assert!(
+        harness
+            .pending_inbox_messages("architect")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !daemon
+            .owned_task_interventions
+            .contains_key("replenishment::architect")
+    );
+}
+
+#[test]
+fn fire_starvation_when_engineer_truly_idle() {
+    // eng-2 has no in-progress task — board replenishment should fire.
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("lead", MemberState::Working)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("architect", "%999996")
+        .with_board_task(191, "task-for-eng-1", "in-progress", Some("eng-1"));
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.config.team_config.automation.replenishment_threshold = Some(5);
+
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_board_replenishment().unwrap();
+
+    let pending = harness.pending_inbox_messages("architect").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].body.contains("Board replenishment needed"));
+}
+
+#[test]
+fn suppress_utilization_when_all_loaded() {
+    // All engineers are transiently idle but each has an in-progress task.
+    // Utilization intervention should NOT fire.
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("lead", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("architect", "%999996")
+        .with_board_task(191, "task-for-eng-1", "in-progress", Some("eng-1"))
+        .with_board_task(192, "task-for-eng-2", "in-progress", Some("eng-2"))
+        .with_board_task(193, "open-task", "backlog", None);
+    let mut daemon = harness.build_daemon().unwrap();
+
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_architect_utilization().unwrap();
+
+    assert!(
+        harness
+            .pending_inbox_messages("architect")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !daemon
+            .owned_task_interventions
+            .contains_key("utilization::architect")
+    );
+}
+
+#[test]
+fn fire_utilization_when_engineer_free_with_runnable_work() {
+    // eng-2 has no in-progress task and open work exists — utilization should fire.
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("lead", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("architect", "%999996")
+        .with_board_task(191, "task-for-eng-1", "in-progress", Some("eng-1"))
+        .with_board_task(192, "open-task", "backlog", None);
+    let mut daemon = harness.build_daemon().unwrap();
+
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_architect_utilization().unwrap();
+
+    let pending = harness.pending_inbox_messages("architect").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].body.contains("Utilization recovery needed"));
+}
+
+// --- Helper function unit tests ---
+
+#[test]
+fn all_engineers_active_returns_true_when_all_have_in_progress() {
+    let tasks = vec![
+        make_task(1, "in-progress", Some("eng-1")),
+        make_task(2, "in-progress", Some("eng-2")),
+    ];
+    let names = vec!["eng-1".to_string(), "eng-2".to_string()];
+    assert!(super::all_engineers_have_active_tasks(&names, &tasks));
+}
+
+#[test]
+fn all_engineers_active_returns_false_when_one_has_no_task() {
+    let tasks = vec![make_task(1, "in-progress", Some("eng-1"))];
+    let names = vec!["eng-1".to_string(), "eng-2".to_string()];
+    assert!(!super::all_engineers_have_active_tasks(&names, &tasks));
+}
+
+#[test]
+fn all_engineers_active_returns_false_for_empty_engineers() {
+    let tasks = vec![make_task(1, "in-progress", Some("eng-1"))];
+    assert!(!super::all_engineers_have_active_tasks(&[], &tasks));
+}
+
+#[test]
+fn all_engineers_active_ignores_non_in_progress_tasks() {
+    let tasks = vec![
+        make_task(1, "in-progress", Some("eng-1")),
+        make_task(2, "review", Some("eng-2")),
+    ];
+    let names = vec!["eng-1".to_string(), "eng-2".to_string()];
+    // eng-2's task is in "review", not "in-progress" — should return false
+    assert!(!super::all_engineers_have_active_tasks(&names, &tasks));
+}
