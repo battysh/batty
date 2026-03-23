@@ -1,580 +1,21 @@
-//! Daemon management, session lifecycle, and team display functions.
+//! Session lifecycle: pause/resume, nudge management, stop/attach/status/validate.
 //!
-//! Extracted from `mod.rs` — pure refactor, zero logic changes.
+//! Extracted from `lifecycle.rs` — pure refactor, zero logic changes.
 
-use std::fs::File;
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
 use tracing::{info, warn};
 
+use super::daemon_mgmt::{
+    DAEMON_SHUTDOWN_GRACE_PERIOD, force_kill_daemon, request_graceful_daemon_shutdown,
+    resume_marker_path,
+};
 use super::{
-    config, daemon, estimation, events, hierarchy, inbox, layout, now_unix, status,
-    team_config_path, team_events_path,
+    config, estimation, events, hierarchy, now_unix, status, team_config_path, team_events_path,
 };
 use crate::tmux;
-
-pub(crate) const LOG_ROTATION_BYTES: u64 = 5 * 1024 * 1024;
-const LOG_ROTATION_KEEP: usize = 3;
-const DAEMON_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
-const DAEMON_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
-
-/// Path to the daemon PID file.
-fn daemon_pid_path(project_root: &Path) -> PathBuf {
-    project_root.join(".batty").join("daemon.pid")
-}
-
-/// Path to the daemon log file.
-pub(crate) fn daemon_log_path(project_root: &Path) -> PathBuf {
-    project_root.join(".batty").join("daemon.log")
-}
-
-fn rotated_log_path(path: &Path, generation: usize) -> PathBuf {
-    PathBuf::from(format!("{}.{}", path.display(), generation))
-}
-
-pub(crate) fn rotate_log_if_needed(path: &Path) -> Result<()> {
-    let len = match std::fs::metadata(path) {
-        Ok(metadata) => metadata.len(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(error).with_context(|| format!("failed to stat {}", path.display()));
-        }
-    };
-
-    if len <= LOG_ROTATION_BYTES {
-        return Ok(());
-    }
-
-    let oldest = rotated_log_path(path, LOG_ROTATION_KEEP);
-    if oldest.exists() {
-        std::fs::remove_file(&oldest)
-            .with_context(|| format!("failed to remove {}", oldest.display()))?;
-    }
-
-    for generation in (1..LOG_ROTATION_KEEP).rev() {
-        let source = rotated_log_path(path, generation);
-        if !source.exists() {
-            continue;
-        }
-        let destination = rotated_log_path(path, generation + 1);
-        std::fs::rename(&source, &destination).with_context(|| {
-            format!(
-                "failed to rotate {} to {}",
-                source.display(),
-                destination.display()
-            )
-        })?;
-    }
-
-    let rotated = rotated_log_path(path, 1);
-    std::fs::rename(path, &rotated).with_context(|| {
-        format!(
-            "failed to rotate {} to {}",
-            path.display(),
-            rotated.display()
-        )
-    })?;
-    Ok(())
-}
-
-pub(crate) fn open_log_for_append(path: &Path) -> Result<File> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    rotate_log_if_needed(path)?;
-    File::options()
-        .append(true)
-        .create(true)
-        .open(path)
-        .with_context(|| format!("failed to open log file: {}", path.display()))
-}
-
-fn daemon_spawn_args(root_str: &str, resume: bool) -> Vec<String> {
-    let mut args = vec![
-        "-v".to_string(),
-        "daemon".to_string(),
-        "--project-root".to_string(),
-        root_str.to_string(),
-    ];
-    if resume {
-        args.push("--resume".to_string());
-    }
-    args
-}
-
-pub(crate) fn daemon_state_path(project_root: &Path) -> PathBuf {
-    project_root.join(".batty").join("daemon-state.json")
-}
-
-fn workflow_mode_declared(config_path: &Path) -> Result<bool> {
-    let content = std::fs::read_to_string(config_path)
-        .with_context(|| format!("failed to read {}", config_path.display()))?;
-    let value: serde_yaml::Value = serde_yaml::from_str(&content)
-        .with_context(|| format!("failed to parse {}", config_path.display()))?;
-    let Some(mapping) = value.as_mapping() else {
-        return Ok(false);
-    };
-
-    Ok(mapping.contains_key(serde_yaml::Value::String("workflow_mode".to_string())))
-}
-
-fn migration_validation_notes(
-    team_config: &config::TeamConfig,
-    workflow_mode_is_explicit: bool,
-) -> Vec<String> {
-    if !workflow_mode_is_explicit {
-        return vec![
-            "Migration: workflow_mode omitted; defaulting to legacy so existing teams and boards run unchanged.".to_string(),
-        ];
-    }
-
-    match team_config.workflow_mode {
-        config::WorkflowMode::Legacy => vec![
-            "Migration: legacy mode selected; Batty keeps current runtime behavior and treats workflow metadata as optional.".to_string(),
-        ],
-        config::WorkflowMode::Hybrid => vec![
-            "Migration: hybrid mode selected; workflow adoption is incremental and legacy runtime behavior remains available.".to_string(),
-        ],
-        config::WorkflowMode::WorkflowFirst => vec![
-            "Migration: workflow_first mode selected; complete board metadata and orchestrator rollout before treating workflow state as primary truth.".to_string(),
-        ],
-    }
-}
-
-/// Spawn the daemon as a detached background process.
-///
-/// The daemon runs in its own process group with stdio redirected to a log
-/// file, so it survives terminal closure. PID is saved to `.batty/daemon.pid`.
-fn spawn_daemon(project_root: &Path, resume: bool) -> Result<u32> {
-    use std::process::{Command, Stdio};
-
-    let log_path = daemon_log_path(project_root);
-    let pid_path = daemon_pid_path(project_root);
-
-    // Ensure .batty/ exists
-    if let Some(parent) = log_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let log_file = open_log_for_append(&log_path)?;
-    let log_err = log_file
-        .try_clone()
-        .context("failed to clone log file handle")?;
-
-    let exe = std::env::current_exe().context("failed to resolve current executable")?;
-    let root_str = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf())
-        .to_string_lossy()
-        .to_string();
-
-    let mut cmd = Command::new(exe);
-    let args = daemon_spawn_args(&root_str, resume);
-    cmd.args(&args)
-        .stdin(Stdio::null())
-        .stdout(log_file)
-        .stderr(log_err);
-
-    // Detach into a new process group so it survives terminal closure
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-
-    let mut child = cmd.spawn().context("failed to spawn daemon process")?;
-    let pid = child.id();
-
-    // Give the child a moment to start up and verify it didn't exit immediately
-    // (e.g. due to an unrecognized subcommand in an outdated binary).
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    match child.try_wait() {
-        Ok(Some(status)) => {
-            let _ = std::fs::remove_file(&pid_path);
-            // Read the last few lines of the daemon log for the actual error
-            let tail = std::fs::read_to_string(&log_path).ok().and_then(|s| {
-                let lines: Vec<&str> = s.lines().collect();
-                let start = lines.len().saturating_sub(5);
-                let tail = lines[start..].join("\n");
-                if tail.trim().is_empty() {
-                    None
-                } else {
-                    Some(tail)
-                }
-            });
-            match tail {
-                Some(detail) => bail!(
-                    "daemon process exited immediately with {status}\n\n\
-                     {detail}\n\n\
-                     see full log: {log}",
-                    log = log_path.display(),
-                ),
-                None => bail!(
-                    "daemon process exited immediately with {status}; \
-                     see {log} for details",
-                    log = log_path.display(),
-                ),
-            }
-        }
-        Ok(None) => {} // still running — good
-        Err(e) => {
-            warn!(pid, error = %e, "failed to check daemon process status");
-        }
-    }
-
-    std::fs::write(&pid_path, pid.to_string())
-        .with_context(|| format!("failed to write PID file: {}", pid_path.display()))?;
-
-    info!(pid, log = %log_path.display(), "daemon spawned");
-    Ok(pid)
-}
-
-/// Kill the daemon process if it's running.
-fn read_daemon_pid(project_root: &Path) -> Option<u32> {
-    let pid_path = daemon_pid_path(project_root);
-    let pid_str = std::fs::read_to_string(pid_path).ok()?;
-    pid_str.trim().parse::<u32>().ok()
-}
-
-#[cfg(unix)]
-fn send_unix_signal(pid: u32, signal: libc::c_int) -> bool {
-    let status = unsafe { libc::kill(pid as libc::pid_t, signal) };
-    if status == 0 {
-        true
-    } else {
-        let error = std::io::Error::last_os_error();
-        warn!(pid, signal, error = %error, "failed to signal daemon");
-        false
-    }
-}
-
-#[cfg(not(unix))]
-fn send_unix_signal(_pid: u32, _signal: i32) -> bool {
-    false
-}
-
-#[cfg(unix)]
-fn daemon_process_exists(pid: u32) -> bool {
-    let status = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if status == 0 {
-        true
-    } else {
-        !matches!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH)
-        )
-    }
-}
-
-#[cfg(not(unix))]
-fn daemon_process_exists(_pid: u32) -> bool {
-    false
-}
-
-fn wait_for_graceful_daemon_shutdown(
-    project_root: &Path,
-    pid: u32,
-    previous_saved_at: Option<u64>,
-    timeout: Duration,
-) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let clean_snapshot = daemon_state_indicates_clean_shutdown(project_root, previous_saved_at);
-        if clean_snapshot {
-            let _ = std::fs::remove_file(daemon_pid_path(project_root));
-            return true;
-        }
-        let running = daemon_process_exists(pid);
-        if !running {
-            let _ = std::fs::remove_file(daemon_pid_path(project_root));
-            return false;
-        }
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(DAEMON_SHUTDOWN_POLL_INTERVAL);
-    }
-}
-
-fn request_graceful_daemon_shutdown(project_root: &Path, timeout: Duration) -> bool {
-    let Some(pid) = read_daemon_pid(project_root) else {
-        return true;
-    };
-
-    let previous_saved_at = read_daemon_state_probe(project_root).and_then(|state| state.saved_at);
-    #[cfg(unix)]
-    {
-        if !send_unix_signal(pid, libc::SIGTERM) {
-            return false;
-        }
-        info!(pid, "sent SIGTERM to daemon");
-    }
-    #[cfg(not(unix))]
-    {
-        warn!(
-            pid,
-            "graceful daemon shutdown is not supported on this platform"
-        );
-        return false;
-    }
-
-    wait_for_graceful_daemon_shutdown(project_root, pid, previous_saved_at, timeout)
-}
-
-fn force_kill_daemon(project_root: &Path) {
-    let Some(pid) = read_daemon_pid(project_root) else {
-        return;
-    };
-
-    #[cfg(unix)]
-    {
-        if send_unix_signal(pid, libc::SIGKILL) {
-            info!(pid, "sent SIGKILL to daemon");
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        warn!(pid, "cannot force-kill daemon on this platform");
-    }
-
-    let _ = std::fs::remove_file(daemon_pid_path(project_root));
-}
-
-/// Start a team session: load config, resolve hierarchy, create tmux layout,
-/// spawn the daemon as a background process, and optionally attach.
-///
-/// Returns the tmux session name.
-pub fn start_team(project_root: &Path, attach: bool) -> Result<String> {
-    let config_path = team_config_path(project_root);
-    if !config_path.exists() {
-        bail!(
-            "no team config found at {}; run `batty init` first",
-            config_path.display()
-        );
-    }
-
-    let team_config = config::TeamConfig::load(&config_path)?;
-    team_config.validate()?;
-
-    let members = hierarchy::resolve_hierarchy(&team_config)?;
-    let session = format!("batty-{}", team_config.name);
-
-    if tmux::session_exists(&session) {
-        bail!("session '{session}' already exists; use `batty attach` or `batty stop` first");
-    }
-
-    layout::build_layout(
-        &session,
-        &members,
-        &team_config.layout,
-        project_root,
-        team_config.workflow_mode,
-        team_config.orchestrator_enabled(),
-        team_config.orchestrator_position,
-    )?;
-
-    // Initialize Maildir inboxes for all members
-    let inboxes = inbox::inboxes_root(project_root);
-    for member in &members {
-        inbox::init_inbox(&inboxes, &member.name)?;
-    }
-
-    // Check for resume marker (left by a prior `batty stop`)
-    let marker = resume_marker_path(project_root);
-    let resume = marker.exists() || should_resume_from_daemon_state(project_root);
-    if resume {
-        if marker.exists() {
-            // Consume the marker — it's a one-shot flag
-            std::fs::remove_file(&marker).ok();
-        }
-        info!("resuming agent sessions from previous run");
-    }
-
-    info!(session = %session, members = members.len(), resume, "team session started");
-
-    // Spawn daemon as a detached background process
-    let pid = spawn_daemon(project_root, resume)?;
-    info!(pid, "daemon process launched");
-
-    // Give daemon a moment to start spawning agents
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
-    if attach {
-        tmux::attach(&session)?;
-    }
-
-    Ok(session)
-}
-
-/// Run the daemon loop directly (called by the hidden `batty daemon` subcommand).
-///
-/// This is the entry point for the daemonized background process.
-pub fn run_daemon(project_root: &Path, resume: bool) -> Result<()> {
-    let config_path = team_config_path(project_root);
-    if !config_path.exists() {
-        bail!(
-            "no team config found at {}; run `batty init` first",
-            config_path.display()
-        );
-    }
-
-    let team_config = config::TeamConfig::load(&config_path)?;
-    let members = hierarchy::resolve_hierarchy(&team_config)?;
-    let session = format!("batty-{}", team_config.name);
-
-    // Wait for tmux session to be ready (start_team creates it before spawning us)
-    for _ in 0..30 {
-        if tmux::session_exists(&session) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-
-    if !tmux::session_exists(&session) {
-        bail!("tmux session '{session}' not found — did `batty start` create it?");
-    }
-
-    // Reconstruct pane_map from tmux pane options
-    let mut pane_map = std::collections::HashMap::new();
-    for member in &members {
-        // Query tmux for the pane ID tagged with this member's role
-        if let Some(pane_id) = find_pane_for_member(&session, &member.name) {
-            pane_map.insert(member.name.clone(), pane_id);
-        }
-    }
-
-    let daemon_config = daemon::DaemonConfig {
-        project_root: project_root.to_path_buf(),
-        team_config,
-        session,
-        members,
-        pane_map,
-    };
-
-    let events_path = project_root
-        .join(".batty")
-        .join("team_config")
-        .join("events.jsonl");
-
-    let mut d = daemon::TeamDaemon::new(daemon_config)?;
-
-    // Wrap in catch_unwind so panics are logged to events before exit
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| d.run(resume)));
-
-    match result {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => {
-            eprintln!("daemon exited with error: {e:#}");
-            // Try to log the error event
-            if let Ok(mut sink) = events::EventSink::new(&events_path) {
-                let _ = sink.emit(events::TeamEvent::daemon_stopped_with_reason(
-                    &format!("error: {e:#}"),
-                    0,
-                ));
-            }
-            Err(e)
-        }
-        Err(panic_payload) => {
-            let reason = match panic_payload.downcast_ref::<&str>() {
-                Some(s) => s.to_string(),
-                None => match panic_payload.downcast_ref::<String>() {
-                    Some(s) => s.clone(),
-                    None => "unknown panic".to_string(),
-                },
-            };
-            eprintln!("daemon panicked: {reason}");
-            // Log panic event
-            if let Ok(mut sink) = events::EventSink::new(&events_path) {
-                let _ = sink.emit(events::TeamEvent::daemon_panic(&reason));
-            }
-            std::panic::resume_unwind(panic_payload);
-        }
-    }
-}
-
-/// Find the tmux pane ID tagged with `@batty_role=<member_name>` in a session.
-fn find_pane_for_member(session: &str, member_name: &str) -> Option<String> {
-    let output = std::process::Command::new("tmux")
-        .args([
-            "list-panes",
-            "-t",
-            session,
-            "-F",
-            "#{pane_id} #{@batty_role}",
-        ])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        let parts: Vec<&str> = line.splitn(2, ' ').collect();
-        if parts.len() == 2 && parts[1] == member_name {
-            return Some(parts[0].to_string());
-        }
-    }
-    None
-}
-
-/// Path to the resume marker file. Presence indicates agents have prior sessions.
-fn resume_marker_path(project_root: &Path) -> PathBuf {
-    project_root.join(".batty").join("resume")
-}
-
-#[derive(Debug, Deserialize)]
-struct DaemonStateResumeProbe {
-    #[serde(default)]
-    clean_shutdown: bool,
-    #[serde(default)]
-    saved_at: Option<u64>,
-}
-
-fn read_daemon_state_probe(project_root: &Path) -> Option<DaemonStateResumeProbe> {
-    let path = daemon_state_path(project_root);
-    let content = std::fs::read_to_string(&path).ok()?;
-
-    match serde_json::from_str::<DaemonStateResumeProbe>(&content) {
-        Ok(state) => Some(state),
-        Err(error) => {
-            warn!(
-                path = %path.display(),
-                error = %error,
-                "failed to parse daemon state while probing for resume"
-            );
-            None
-        }
-    }
-}
-
-fn daemon_state_indicates_clean_shutdown(
-    project_root: &Path,
-    previous_saved_at: Option<u64>,
-) -> bool {
-    let Some(state) = read_daemon_state_probe(project_root) else {
-        return false;
-    };
-
-    state.clean_shutdown
-        && match (state.saved_at, previous_saved_at) {
-            (Some(saved_at), Some(previous_saved_at)) => saved_at > previous_saved_at,
-            (Some(_), None) => true,
-            (None, Some(_)) => false,
-            (None, None) => true,
-        }
-}
-
-fn should_resume_from_daemon_state(project_root: &Path) -> bool {
-    read_daemon_state_probe(project_root)
-        .map(|state| !state.clean_shutdown)
-        .unwrap_or(false)
-}
 
 /// Path to the pause marker file. Presence pauses nudges and standups.
 pub fn pause_marker_path(project_root: &Path) -> PathBuf {
@@ -981,6 +422,41 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
+fn workflow_mode_declared(config_path: &Path) -> Result<bool> {
+    let content = std::fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let value: serde_yaml::Value = serde_yaml::from_str(&content)
+        .with_context(|| format!("failed to parse {}", config_path.display()))?;
+    let Some(mapping) = value.as_mapping() else {
+        return Ok(false);
+    };
+
+    Ok(mapping.contains_key(serde_yaml::Value::String("workflow_mode".to_string())))
+}
+
+fn migration_validation_notes(
+    team_config: &config::TeamConfig,
+    workflow_mode_is_explicit: bool,
+) -> Vec<String> {
+    if !workflow_mode_is_explicit {
+        return vec![
+            "Migration: workflow_mode omitted; defaulting to legacy so existing teams and boards run unchanged.".to_string(),
+        ];
+    }
+
+    match team_config.workflow_mode {
+        config::WorkflowMode::Legacy => vec![
+            "Migration: legacy mode selected; Batty keeps current runtime behavior and treats workflow metadata as optional.".to_string(),
+        ],
+        config::WorkflowMode::Hybrid => vec![
+            "Migration: hybrid mode selected; workflow adoption is incremental and legacy runtime behavior remains available.".to_string(),
+        ],
+        config::WorkflowMode::WorkflowFirst => vec![
+            "Migration: workflow_first mode selected; complete board metadata and orchestrator rollout before treating workflow state as primary truth.".to_string(),
+        ],
+    }
+}
+
 /// Validate team config without launching.
 pub fn validate_team(project_root: &Path, verbose: bool) -> Result<()> {
     let config_path = team_config_path(project_root);
@@ -1037,7 +513,6 @@ mod tests {
     use crate::team::config::RoleType;
     use crate::team::hierarchy;
     use crate::team::inbox;
-    use crate::team::orchestrator_log_path;
     use crate::team::status;
     use crate::team::team_config_dir;
     use crate::team::team_config_path;
@@ -1113,218 +588,7 @@ mod tests {
         assert!(resume_team(tmp.path()).is_err());
     }
 
-    #[test]
-    fn daemon_state_probe_requests_resume_after_unclean_shutdown() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = daemon_state_path(tmp.path());
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, r#"{"clean_shutdown":false}"#).unwrap();
-
-        assert!(should_resume_from_daemon_state(tmp.path()));
-    }
-
-    #[test]
-    fn daemon_state_probe_ignores_clean_shutdown() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = daemon_state_path(tmp.path());
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, r#"{"clean_shutdown":true}"#).unwrap();
-
-        assert!(!should_resume_from_daemon_state(tmp.path()));
-    }
-
-    #[cfg(unix)]
-    fn write_daemon_script(script_path: &Path, body: &str) {
-        std::fs::write(script_path, body).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn graceful_daemon_shutdown_waits_for_clean_snapshot() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state_path = daemon_state_path(tmp.path());
-        let state_dir = state_path.parent().unwrap();
-        std::fs::create_dir_all(state_dir).unwrap();
-        std::fs::write(&state_path, r#"{"clean_shutdown":false,"saved_at":1}"#).unwrap();
-
-        let state_path_for_thread = state_path.clone();
-        let state_dir_for_thread = state_dir.to_path_buf();
-        let writer = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(200));
-            std::fs::create_dir_all(&state_dir_for_thread).unwrap();
-            std::fs::write(
-                &state_path_for_thread,
-                r#"{"clean_shutdown":true,"saved_at":2}"#,
-            )
-            .unwrap();
-        });
-
-        assert!(wait_for_graceful_daemon_shutdown(
-            tmp.path(),
-            std::process::id(),
-            Some(1),
-            Duration::from_secs(2)
-        ));
-
-        writer.join().unwrap();
-        assert!(daemon_state_indicates_clean_shutdown(tmp.path(), Some(1)));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn graceful_daemon_shutdown_times_out_before_force_kill_fallback() {
-        let tmp = tempfile::tempdir().unwrap();
-        let script_path = tmp.path().join("stubborn-daemon.sh");
-        write_daemon_script(
-            &script_path,
-            "#!/bin/sh\ntrap '' TERM\nwhile :; do :; done\n",
-        );
-
-        let mut child = std::process::Command::new(&script_path).spawn().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".batty")).unwrap();
-        std::fs::write(daemon_pid_path(tmp.path()), child.id().to_string()).unwrap();
-        std::thread::sleep(Duration::from_millis(200));
-
-        assert!(!request_graceful_daemon_shutdown(
-            tmp.path(),
-            Duration::from_millis(300)
-        ));
-        assert!(daemon_process_exists(child.id()));
-
-        force_kill_daemon(tmp.path());
-        let _ = child.wait().unwrap();
-        assert!(!daemon_pid_path(tmp.path()).exists());
-    }
-
-    #[test]
-    fn test_rotate_log_shifts_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let log_path = daemon_log_path(tmp.path());
-        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
-        std::fs::write(&log_path, b"current").unwrap();
-        std::fs::write(rotated_log_path(&log_path, 1), b"older-1").unwrap();
-        std::fs::write(rotated_log_path(&log_path, 2), b"older-2").unwrap();
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&log_path)
-            .unwrap()
-            .set_len(LOG_ROTATION_BYTES + 1)
-            .unwrap();
-
-        rotate_log_if_needed(&log_path).unwrap();
-
-        assert!(!log_path.exists());
-        assert_eq!(
-            std::fs::read(rotated_log_path(&log_path, 1)).unwrap().len() as u64,
-            LOG_ROTATION_BYTES + 1
-        );
-        assert_eq!(
-            std::fs::read_to_string(rotated_log_path(&log_path, 2)).unwrap(),
-            "older-1"
-        );
-        assert_eq!(
-            std::fs::read_to_string(rotated_log_path(&log_path, 3)).unwrap(),
-            "older-2"
-        );
-    }
-
-    #[test]
-    fn test_rotate_log_keeps_max_3() {
-        let tmp = tempfile::tempdir().unwrap();
-        let log_path = orchestrator_log_path(tmp.path());
-        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
-        std::fs::write(&log_path, b"current").unwrap();
-        std::fs::write(rotated_log_path(&log_path, 1), b"older-1").unwrap();
-        std::fs::write(rotated_log_path(&log_path, 2), b"older-2").unwrap();
-        std::fs::write(rotated_log_path(&log_path, 3), b"older-3").unwrap();
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&log_path)
-            .unwrap()
-            .set_len(LOG_ROTATION_BYTES + 1)
-            .unwrap();
-
-        rotate_log_if_needed(&log_path).unwrap();
-
-        assert_eq!(
-            std::fs::read(rotated_log_path(&log_path, 1)).unwrap().len() as u64,
-            LOG_ROTATION_BYTES + 1
-        );
-        assert_eq!(
-            std::fs::read_to_string(rotated_log_path(&log_path, 2)).unwrap(),
-            "older-1"
-        );
-        assert_eq!(
-            std::fs::read_to_string(rotated_log_path(&log_path, 3)).unwrap(),
-            "older-2"
-        );
-        assert!(!rotated_log_path(&log_path, 4).exists());
-    }
-
-    #[test]
-    fn test_rotate_log_noop_under_threshold() {
-        let tmp = tempfile::tempdir().unwrap();
-        let log_path = daemon_log_path(tmp.path());
-        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
-        std::fs::write(&log_path, b"small-log").unwrap();
-
-        rotate_log_if_needed(&log_path).unwrap();
-
-        assert_eq!(std::fs::read_to_string(&log_path).unwrap(), "small-log");
-        assert!(!rotated_log_path(&log_path, 1).exists());
-    }
-
-    #[test]
-    fn test_daemon_log_append_mode() {
-        let tmp = tempfile::tempdir().unwrap();
-        let log_path = daemon_log_path(tmp.path());
-
-        {
-            let mut file = open_log_for_append(&log_path).unwrap();
-            use std::io::Write;
-            writeln!(file, "first").unwrap();
-        }
-
-        {
-            let mut file = open_log_for_append(&log_path).unwrap();
-            use std::io::Write;
-            writeln!(file, "second").unwrap();
-        }
-
-        assert_eq!(
-            std::fs::read_to_string(&log_path).unwrap(),
-            "first\nsecond\n"
-        );
-    }
-
-    #[test]
-    fn daemon_spawn_args_include_verbose_and_resume() {
-        assert_eq!(
-            daemon_spawn_args("/tmp/project", false),
-            vec![
-                "-v".to_string(),
-                "daemon".to_string(),
-                "--project-root".to_string(),
-                "/tmp/project".to_string()
-            ]
-        );
-        assert_eq!(
-            daemon_spawn_args("/tmp/project", true),
-            vec![
-                "-v".to_string(),
-                "daemon".to_string(),
-                "--project-root".to_string(),
-                "/tmp/project".to_string(),
-                "--resume".to_string()
-            ]
-        );
-    }
-
-    fn write_team_config(project_root: &Path, yaml: &str) {
+    fn write_team_config(project_root: &std::path::Path, yaml: &str) {
         std::fs::create_dir_all(team_config_dir(project_root)).unwrap();
         std::fs::write(team_config_path(project_root), yaml).unwrap();
     }
@@ -1367,7 +631,8 @@ roles:
     #[test]
     fn migration_validation_notes_explain_legacy_default_for_older_configs() {
         let config =
-            config::TeamConfig::load(Path::new("src/team/templates/team_pair.yaml")).unwrap();
+            config::TeamConfig::load(std::path::Path::new("src/team/templates/team_pair.yaml"))
+                .unwrap();
         let notes = migration_validation_notes(&config, false);
 
         assert_eq!(notes.len(), 1);
@@ -1951,5 +1216,43 @@ roles:
         // Should only count events from the latest daemon_started.
         assert_eq!(summary.tasks_completed, 1);
         assert!(summary.runtime_secs >= 1799 && summary.runtime_secs <= 1801);
+    }
+
+    /// Count unwrap()/expect() calls in production code (before `#[cfg(test)] mod tests`).
+    fn production_unwrap_expect_count(source: &str) -> usize {
+        // Split at the test module boundary, not individual #[cfg(test)] items
+        let prod = if let Some(pos) = source.find("\n#[cfg(test)]\nmod tests") {
+            &source[..pos]
+        } else {
+            source
+        };
+        prod.lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                // Skip lines that are themselves cfg(test)-gated items
+                !trimmed.starts_with("#[cfg(test)]")
+                    && (trimmed.contains(".unwrap(") || trimmed.contains(".expect("))
+            })
+            .count()
+    }
+
+    #[test]
+    fn production_daemon_mgmt_has_limited_unwrap_or_expect_calls() {
+        let src = include_str!("daemon_mgmt.rs");
+        // spawn_daemon uses unwrap_or_else for canonicalize — this is acceptable
+        assert!(
+            production_unwrap_expect_count(src) <= 1,
+            "daemon_mgmt.rs should minimize unwrap/expect in production code"
+        );
+    }
+
+    #[test]
+    fn production_session_has_no_unwrap_or_expect_calls() {
+        let src = include_str!("session.rs");
+        assert_eq!(
+            production_unwrap_expect_count(src),
+            0,
+            "session.rs should avoid unwrap/expect"
+        );
     }
 }
