@@ -28,7 +28,6 @@ Batty is a tmux-native runtime for AI coding teams. Instead of one agent doing e
 ## Quick Start
 
 ```sh
-cargo install kanban-md --locked
 cargo install batty-cli
 cd my-project && batty init
 batty start --attach
@@ -70,10 +69,32 @@ Batty keeps each role in its own tmux pane, watches for idle/completed states, d
 
 ## Install
 
+### 1. Install kanban-md
+
+kanban-md is a separate Go tool. Grab the latest binary from
+[GitHub releases](https://github.com/antopolskiy/kanban-md/releases):
+
+```sh
+# macOS (Apple Silicon)
+curl -sL https://github.com/antopolskiy/kanban-md/releases/latest/download/kanban-md_0.33.0_darwin_arm64.tar.gz | tar xz
+mv kanban-md /usr/local/bin/
+
+# macOS (Intel)
+curl -sL https://github.com/antopolskiy/kanban-md/releases/latest/download/kanban-md_0.33.0_darwin_amd64.tar.gz | tar xz
+mv kanban-md /usr/local/bin/
+
+# Linux (x86_64)
+curl -sL https://github.com/antopolskiy/kanban-md/releases/latest/download/kanban-md_0.33.0_linux_amd64.tar.gz | tar xz
+mv kanban-md ~/.local/bin/
+```
+
+Or with Go: `go install github.com/antopolskiy/kanban-md@latest`
+
+### 2. Install Batty
+
 From crates.io:
 
 ```sh
-cargo install kanban-md --locked
 cargo install batty-cli
 ```
 
@@ -174,7 +195,7 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 
 - Rust toolchain, stable `>= 1.85`
 - `tmux >= 3.1` (recommended `>= 3.2`)
-- `kanban-md` CLI: `cargo install kanban-md --locked`
+- `kanban-md` CLI: see [Install](#install) for setup
 - At least one coding agent CLI such as Claude Code, Codex, or Aider
 
 ## Engineer Worktrees

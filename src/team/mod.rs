@@ -762,13 +762,28 @@ fn spawn_daemon(project_root: &Path, resume: bool) -> Result<u32> {
     match child.try_wait() {
         Ok(Some(status)) => {
             let _ = std::fs::remove_file(&pid_path);
-            bail!(
-                "daemon process exited immediately with {status}; \
-                 this usually means the installed batty binary is outdated \
-                 and missing the `daemon` subcommand — rebuild and reinstall \
-                 (see {log})",
-                log = log_path.display(),
-            );
+            // Read the last few lines of the daemon log for the actual error
+            let tail = std::fs::read_to_string(&log_path)
+                .ok()
+                .and_then(|s| {
+                    let lines: Vec<&str> = s.lines().collect();
+                    let start = lines.len().saturating_sub(5);
+                    let tail = lines[start..].join("\n");
+                    if tail.trim().is_empty() { None } else { Some(tail) }
+                });
+            match tail {
+                Some(detail) => bail!(
+                    "daemon process exited immediately with {status}\n\n\
+                     {detail}\n\n\
+                     see full log: {log}",
+                    log = log_path.display(),
+                ),
+                None => bail!(
+                    "daemon process exited immediately with {status}; \
+                     see {log} for details",
+                    log = log_path.display(),
+                ),
+            }
         }
         Ok(None) => {} // still running — good
         Err(e) => {
