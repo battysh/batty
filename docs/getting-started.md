@@ -122,6 +122,12 @@ Total members: 5
 Valid.
 ```
 
+Add `--show-checks` to see individual pass/fail status for each validation rule:
+
+```sh
+batty validate --show-checks
+```
+
 The `automation` block controls which daemon behaviors are active. In most teams,
 the reactive interventions should stay enabled:
 
@@ -225,9 +231,13 @@ Stop the daemon and tmux session:
 batty stop
 ```
 
+On stop, Batty prints a session summary with task counts, cycle times, and agent
+uptime before exiting.
+
 Example output:
 
 ```text
+Session summary: 12 tasks completed, avg cycle 8m, 3h uptime
 Team session stopped.
 ```
 
@@ -713,6 +723,71 @@ grafana:
 ```
 
 All `batty grafana` commands respect this setting.
+
+## Metrics Dashboard
+
+`batty metrics` shows a consolidated view of task throughput, cycle times, rates,
+and per-agent performance from the telemetry database:
+
+```sh
+batty metrics
+```
+
+This is a quick alternative to `batty telemetry` when you want a single-screen
+overview instead of querying individual metric categories.
+
+## Team Load And Cost
+
+Estimate team utilization and session spending:
+
+```sh
+batty load    # show team load and recent load history
+batty cost    # estimate current run cost from agent session files
+```
+
+`batty load` shows how many engineers are active vs. idle and the recent load
+trend. `batty cost` reads agent session files to estimate API spending for the
+current run.
+
+## Board Health
+
+`batty board health` shows a dashboard of board status counts, stale tasks,
+and dependency issues:
+
+```sh
+batty board health
+```
+
+Use this when the board feels stuck or when you suspect dependency cycles are
+blocking dispatch.
+
+## Inbox Purge
+
+Clean up delivered messages from inbox directories:
+
+```sh
+batty inbox purge eng-1-1              # purge all delivered for one role
+batty inbox purge --all-roles          # purge across all inboxes
+batty inbox purge eng-1-1 --older-than 7d  # only messages older than 7 days
+```
+
+This keeps inbox directories from growing unbounded during long runs.
+
+## Failure Pattern Detection
+
+The daemon monitors task outcomes over a rolling window and detects recurring
+failure patterns. When failure counts exceed the configured threshold, a
+notification is emitted so the team can investigate systemic issues rather than
+retrying indefinitely.
+
+No additional configuration is needed — pattern detection runs automatically as
+part of the daemon poll loop.
+
+## Daemon Auto-Archive
+
+The daemon automatically archives completed tasks when the active board exceeds
+a size threshold. This keeps `batty board` responsive during long runs without
+requiring manual `batty board archive` invocations.
 
 ## Next Steps
 

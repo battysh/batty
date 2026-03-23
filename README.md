@@ -163,8 +163,16 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 - Daemon restart recovery: dead agent panes are automatically respawned with task context and backoff
 - External senders: allow non-team sources (email routers, Slack bridges) to message any role
 - Graceful non-git-repo handling: git-dependent operations degrade cleanly when the project is not a repository
+- Session summary on `batty stop`: prints task counts, cycle times, and agent uptime before exiting
+- Daemon auto-archive: completed tasks are automatically archived when the board exceeds a threshold
+- Board health dashboard: `batty board health` shows per-status counts, stale tasks, and dependency issues
+- Team load and cost estimation: `batty load` shows team utilization, `batty cost` estimates session spending
+- Inbox purge with age filtering: `batty inbox purge --older-than 7d` cleans up delivered messages
+- `batty validate --show-checks`: individual pass/fail status for each config validation rule
 - `batty doctor --fix`: detect and clean up orphan worktrees and branches left by previous runs
 - `batty board archive`: move completed tasks to an archive directory to keep the active board fast
+- Error resilience: sentinel tests guard production error paths in daemon and task loop modules
+- Modular codebase: large modules (daemon, config, delivery, watcher, doctor, merge) are decomposed into focused submodules
 - Worktree reconciliation: auto-detect cherry-picked branches and reset stale worktrees so engineers always start clean
 - Pending delivery queue: messages sent to agents that are still starting are buffered and delivered automatically when the agent becomes ready
 - YAML config, Markdown boards, JSON/JSONL + SQLite logs: everything stays file-based
@@ -180,6 +188,7 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 | `batty assign <engineer> <task>` | Queue work for an engineer and report delivery result |
 | `batty inbox <member>` / `read` / `ack` | Inspect and manage inbox messages |
 | `batty board` / `board list` / `board summary` | Open the kanban board or inspect it without a TTY |
+| `batty board health` | Show board health dashboard (status counts, stale tasks, dep issues) |
 | `batty board archive [--older-than DATE]` | Move done tasks to archive directory |
 | `batty status [--json]` | Show current team state |
 | `batty merge <engineer>` | Merge an engineer worktree branch |
@@ -188,10 +197,15 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 | `batty task schedule <id> [--at T] [--cron E] [--clear]` | Set or clear scheduled dispatch time and cron recurrence |
 | `batty nudge disable/enable/status` | Toggle specific daemon interventions at runtime |
 | `batty telemetry summary/agents/tasks/reviews/events` | Query SQLite telemetry for agent, task, and review metrics |
-| `batty retro` / `load` / `cost` / `doctor` | Inspect run history, team load, session cost, and diagnostic state |
-| `batty doctor --fix` | Clean up orphan worktrees and branches |
+| `batty retro` | Generate a run retrospective analyzing throughput and failure patterns |
+| `batty load` | Estimate team load and show recent load history |
+| `batty cost` | Estimate current run cost from agent session files |
+| `batty metrics` | Show consolidated telemetry dashboard (tasks, cycle time, rates, agents) |
+| `batty doctor [--fix]` | Dump diagnostic state; `--fix` cleans up orphan worktrees/branches |
 | `batty pause` / `resume` / `queue` | Control automation and inspect queued dispatch work |
-| `batty validate` / `config` / `export-run` | Validate config and export runtime state |
+| `batty inbox purge [--older-than DUR]` | Purge delivered inbox messages, optionally by age |
+| `batty validate [--show-checks]` | Validate config; `--show-checks` shows per-rule pass/fail |
+| `batty config` / `export-run` | Show resolved config and export runtime state |
 | `batty telegram` | Configure Telegram for human communication |
 | `batty completions <shell>` | Generate shell completions |
 
