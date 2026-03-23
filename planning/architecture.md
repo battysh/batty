@@ -197,6 +197,114 @@ The key architectural constraint: auto-merge must be conservative by default. Th
 
 Review feedback becomes structured data (disposition + specific comments stored in task frontmatter) rather than free-text chat messages. This makes rework cycles deterministic: the engineer receives exactly what needs to change, not a vague instruction.
 
+## Agent Backend Abstraction
+
+Batty treats coding agents as interchangeable backends behind a common trait. The daemon and supervisor never call agent-specific CLI flags directly — they go through the `AgentAdapter` trait, which each backend implements. This makes adding a new agent backend a single-file change with no daemon modifications.
+
+### AgentAdapter Trait
+
+Every backend implements `AgentAdapter`, which covers the full agent lifecycle:
+
+- **Spawn** — build the shell command and arguments to launch the agent in a tmux pane
+- **Send message** — format input for injection into the agent's stdin (newline conventions vary)
+- **Detect status** — provide compiled regex patterns that recognize prompts, completions, errors, and permission requests in the agent's output
+- **Restart / reset** — return the tmux key sequence to clear context or kill and relaunch the agent
+- **Launch command** — produce the `exec <agent> ...` string written into the pane's launch script, with flags for idle mode, resume, and session management
+- **Health check** — verify the backend binary is available on PATH
+
+The trait is object-safe (`dyn AgentAdapter`), so the daemon stores a boxed trait object per agent instance and dispatches through it without knowing the concrete type.
+
+Why a trait: testability (mock adapters in unit tests), extensibility (add backends without touching the daemon), and separation of concerns (CLI quirks live in the adapter, not in supervision code).
+
+### Backend Registry
+
+The registry maps agent names to trait implementations:
+
+```
+"claude" / "claude-code"  →  ClaudeCodeAdapter
+"codex"  / "codex-cli"    →  CodexCliAdapter
+"kiro"   / "kiro-cli"     →  KiroCliAdapter
+```
+
+`adapter_from_name(name)` is the single lookup function. It returns `Option<Box<dyn AgentAdapter>>` — `None` for unrecognized names, which surfaces as a config validation error at startup. Adding a new backend means implementing the trait and adding one match arm.
+
+The daemon resolves the backend at spawn time: read the role's `agent` field from team.yaml, look it up in the registry, get a trait object, and use it for all subsequent interactions with that pane.
+
+### Per-Role Backend Configuration
+
+Backend selection follows a fallback chain in `team.yaml`:
+
+```
+instance override  →  role default  →  team default (claude)
+```
+
+At the role level, the `agent` field names the backend:
+
+```yaml
+roles:
+  - name: engineer
+    role_type: engineer
+    agent: codex          # all engineers use Codex by default
+    instances: 4
+```
+
+Per-instance overrides allow mixed backends within a single role:
+
+```yaml
+roles:
+  - name: engineer
+    role_type: engineer
+    agent: claude
+    instances: 4
+    instance_overrides:
+      eng-1-3:
+        agent: kiro       # this specific engineer uses Kiro
+```
+
+If no `agent` field is set at any level, the default is `claude`. Config validation rejects unrecognized agent names at startup rather than at spawn time.
+
+### Health Monitoring Signals
+
+Each backend has different failure modes and health signals:
+
+```
+┌─────────────┬───────────────────────┬─────────────────────────┐
+│ Backend     │ Failure Signals       │ Restart Strategy        │
+├─────────────┼───────────────────────┼─────────────────────────┤
+│ Claude Code │ Context exhaustion    │ Resume with session ID  │
+│             │ API rate limits       │ (preserves conversation)│
+│             │ Crash / SIGTERM       │ Full restart if no      │
+│             │                       │ session to resume       │
+├─────────────┼───────────────────────┼─────────────────────────┤
+│ Codex CLI   │ Process exit          │ Resume with session ID  │
+│             │ Stall (no output)     │ or full restart         │
+│             │ Sandbox errors        │                         │
+├─────────────┼───────────────────────┼─────────────────────────┤
+│ Kiro CLI    │ Process exit          │ Full restart (no resume │
+│             │ Stall (no output)     │ support)                │
+│             │ Connection errors     │                         │
+└─────────────┴───────────────────────┴─────────────────────────┘
+```
+
+The daemon detects these through output monitoring (prompt pattern matching on the pane's captured output) and process liveness checks. `supports_resume()` and `new_session_id()` on the trait tell the daemon whether to attempt a warm resume or a cold restart. Context-reset sequences (`reset_context_keys()`) are backend-specific — Claude uses `/clear`, Codex and Kiro use `Ctrl-C`.
+
+### Mixed-Backend Teams
+
+A single Batty team can run different backends simultaneously. The daemon holds one `Box<dyn AgentAdapter>` per agent instance, resolved independently at spawn time. This means:
+
+```
+┌── batty session ────────────────────────────────────────┐
+│  Architect (Claude)   │  Manager (Claude)               │
+├───────────────────────┼─────────────────────────────────┤
+│  eng-1-1 (Claude)     │  eng-1-2 (Codex)               │
+│  eng-1-3 (Kiro)       │  eng-1-4 (Claude)              │
+└───────────────────────┴─────────────────────────────────┘
+```
+
+Each pane's supervision (prompt detection, input formatting, health checks, restart strategy) is driven by that pane's adapter. The message bus and board are backend-agnostic — they operate on pane IDs and role names, not agent types. An engineer running Kiro receives tasks and reports completions the same way as one running Claude.
+
+The constraint: all backends in a team share the same board, message format, and workflow policies. Backend differences are confined to the pane-level lifecycle (how to launch, how to detect state, how to restart). The daemon's poll loop treats every agent identically through the trait interface.
+
 ## Key Design Decisions
 
 **Why tmux?** Output capture (pipe-pane), input injection (send-keys/paste-buffer), status bar, panes, session persistence — all for free. No custom terminal code.
