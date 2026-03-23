@@ -64,6 +64,7 @@ mod error_handling;
 mod health;
 #[path = "daemon/helpers.rs"]
 mod helpers;
+pub(super) use helpers::*;
 #[path = "daemon/hot_reload.rs"]
 mod hot_reload;
 #[path = "daemon/interventions/mod.rs"]
@@ -87,7 +88,7 @@ use self::hot_reload::{
     BinaryFingerprint, binary_is_reloadable, hot_reload_daemon_args, hot_reload_marker_path,
     write_hot_reload_marker,
 };
-use self::hot_reload::{HotReloadMonitor, consume_hot_reload_marker};
+use self::hot_reload::consume_hot_reload_marker;
 pub(crate) use self::interventions::NudgeSchedule;
 use self::interventions::OwnedTaskInterventionState;
 use self::launcher::{
