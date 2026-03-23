@@ -10,6 +10,7 @@ pub mod auto_merge;
 mod behavioral_tests;
 pub mod board;
 pub mod board_cmd;
+pub mod board_health;
 pub mod capability;
 pub mod checkpoint;
 pub mod comms;
