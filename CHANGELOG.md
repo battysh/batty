@@ -2,6 +2,62 @@
 
 All notable changes to Batty are documented here.
 
+## 0.6.0 — 2026-03-23
+
+Major release adding Grafana monitoring, agent backend abstraction,
+SQLite telemetry migration, and a large-scale codebase decomposition.
+38 commits since v0.5.2.
+
+### Features
+
+- **Grafana monitoring integration** (#306) — new `batty grafana` CLI with
+  `setup`, `status`, and `open` subcommands. Bundled dashboard template with
+  21 panels and 6 alerts covering task throughput, agent health, cycle time,
+  and failure rates. Auto-registers datasource on `batty start`/`stop`.
+  Configurable via `GrafanaConfig` in team.yaml.
+- **Agent backend abstraction** — `AgentAdapter` trait enables mixed-backend
+  teams (Claude, Codex, Kiro). Per-role and per-instance `agent` config in
+  team.yaml. `BackendRegistry` discovers and validates available backends.
+  `BackendHealth` enum tracks per-backend liveness.
+- **Backend health checks in validate** (#325) — `batty validate` now probes
+  each configured backend for reachability and reports health status.
+- **`batty init --agent`** (#303) — set the default agent backend when
+  scaffolding a new project. Also available via the `install` alias.
+- **Shell completion coverage** (#330) — verified and tested completions for
+  all current commands across bash, zsh, and fish shells.
+
+### Telemetry
+
+- **SQLite telemetry migration** (#316) — `batty retro` and `batty status`
+  now query `telemetry.db` first with automatic JSONL fallback. Review
+  metrics (#315) also migrated to SQLite.
+
+### Codebase Health
+
+- **Module decomposition** — 8 large modules split into focused submodules:
+  `health.rs` (6 submodules), `daemon.rs` (6 submodules), `config.rs`,
+  `delivery.rs`, `doctor.rs` (4 submodules), `watcher.rs`, `merge.rs`
+  (4 submodules), and `team/mod.rs` (extracted `init.rs`, `load.rs`,
+  `messaging.rs`, `lifecycle.rs`).
+- **Error resilience sentinel tests** (#308, #311) — dedicated tests
+  confirming `daemon.rs` and `task_loop.rs` handle error paths without panics.
+- **Dead code audit** (#309) — removed 28 stale `#[allow(dead_code)]`
+  annotations.
+- **MockBackend for testing** (#325) — `MockBackend` implements
+  `AgentAdapter`, enabling 18 trait contract tests without real backend
+  dependencies.
+
+### Documentation
+
+- **Grafana getting-started walkthrough** (#328) — step-by-step guide for
+  setting up monitoring with Grafana and the bundled dashboard.
+- **Agent Backend Abstraction docs** — architecture.md updated with backend
+  trait design, registry, and mixed-team configuration.
+- **README and getting-started refresh** — updated for v0.5.x and v0.6.0
+  features, CLI reference regenerated.
+
+---
+
 ## 0.5.2 — 2026-03-23
 
 Patch release adding crates.io publishing and Enter key delivery fix.
