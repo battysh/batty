@@ -373,11 +373,7 @@ impl TeamDaemon {
     /// be stalled waiting for an agent to start. If the agent isn't ready,
     /// the message is deferred to inbox and will be picked up by
     /// `deliver_inbox_messages` once the watcher confirms readiness.
-    pub(in crate::team) fn check_agent_ready(
-        &mut self,
-        recipient: &str,
-        pane_id: &str,
-    ) -> bool {
+    pub(in crate::team) fn check_agent_ready(&mut self, recipient: &str, pane_id: &str) -> bool {
         // Fast path: watcher already confirmed readiness (prompt seen during poll).
         if self
             .watchers
@@ -598,8 +594,7 @@ mod tests {
         daemon.record_failed_delivery("eng-1", "manager", "Please retry this.");
         daemon.record_failed_delivery("eng-1", "manager", "Please retry this.");
 
-        let events =
-            crate::team::events::read_events(&tmp.path().join("events.jsonl")).unwrap();
+        let events = crate::team::events::read_events(&tmp.path().join("events.jsonl")).unwrap();
         let delivery_failed = events
             .into_iter()
             .filter(|event| event.event == "delivery_failed")
@@ -670,8 +665,7 @@ mod tests {
     fn delivery_capture_lines_increased_for_recently_ready_agent() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
-        let mut watcher =
-            crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        let mut watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
         watcher.confirm_ready();
         assert_eq!(watcher.state, crate::team::watcher::WatcherState::Ready);
         daemon.watchers.insert("eng-1".to_string(), watcher);
@@ -696,8 +690,7 @@ mod tests {
     fn check_agent_ready_returns_true_when_watcher_confirmed() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
-        let mut watcher =
-            crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        let mut watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
         watcher.activate(); // sets ready_confirmed = true
         watcher.deactivate();
         daemon.watchers.insert("eng-1".to_string(), watcher);
@@ -709,8 +702,7 @@ mod tests {
     fn check_agent_ready_returns_false_for_unready_nonexistent_pane() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
-        let watcher =
-            crate::team::watcher::SessionWatcher::new("%99999999", "eng-1", 300, None);
+        let watcher = crate::team::watcher::SessionWatcher::new("%99999999", "eng-1", 300, None);
         daemon.watchers.insert("eng-1".to_string(), watcher);
         assert!(
             !daemon
@@ -732,8 +724,7 @@ mod tests {
         daemon.failed_deliveries.push(delivery);
 
         // Watcher is Active (not idle/ready) → retry should be skipped
-        let mut watcher =
-            crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        let mut watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
         watcher.activate();
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
@@ -754,8 +745,7 @@ mod tests {
         daemon.failed_deliveries.push(delivery);
 
         // Watcher is Ready → retry should be attempted
-        let mut watcher =
-            crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        let mut watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
         watcher.confirm_ready();
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
@@ -993,8 +983,7 @@ mod tests {
         let mut daemon = failed_delivery_test_daemon(&tmp);
 
         // Agent watcher is present but not yet confirmed ready.
-        let watcher =
-            crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        let watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
         assert!(!watcher.is_ready_for_delivery());
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
@@ -1029,8 +1018,7 @@ mod tests {
         let mut daemon = failed_delivery_test_daemon(&tmp);
 
         // Agent is ready.
-        let mut watcher =
-            crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        let mut watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
         watcher.confirm_ready();
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
@@ -1059,8 +1047,7 @@ mod tests {
     fn marker_scrolloff_detected_as_delivered_when_agent_active() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
-        let mut watcher =
-            crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        let mut watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
         watcher.activate(); // sets ready_confirmed = true
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
@@ -1071,8 +1058,7 @@ mod tests {
     fn marker_scrolloff_not_inferred_when_watcher_never_ready() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
-        let watcher =
-            crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        let watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
         assert!(!watcher.is_ready_for_delivery());
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
@@ -1090,8 +1076,7 @@ mod tests {
     fn state_transition_confirms_delivery_after_activate() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
-        let mut watcher =
-            crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        let mut watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
         watcher.confirm_ready();
         assert!(watcher.is_ready_for_delivery());
         watcher.activate(); // simulates injection activating the agent
@@ -1106,8 +1091,7 @@ mod tests {
     fn state_transition_ready_to_active_clears_failed_delivery() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
-        let mut watcher =
-            crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        let mut watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
         watcher.activate();
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
