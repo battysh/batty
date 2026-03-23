@@ -59,7 +59,7 @@ mod automation;
 mod dispatch;
 #[path = "daemon/error_handling.rs"]
 mod error_handling;
-#[path = "daemon/health.rs"]
+#[path = "daemon/health/mod.rs"]
 mod health;
 #[path = "daemon/interventions/mod.rs"]
 mod interventions;
