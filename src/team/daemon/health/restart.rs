@@ -69,7 +69,6 @@ impl TeamDaemon {
 #[cfg(test)]
 mod tests {
     use super::super::super::*;
-    use super::super::test_helpers::test_team_config;
     use crate::team::config::{
         AutomationConfig, BoardConfig, OrchestratorPosition, RoleType, StandupConfig, TeamConfig,
         WorkflowMode, WorkflowPolicy,

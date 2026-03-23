@@ -9,7 +9,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use super::{CodexQualitySignals, TrackerState, current_file_len, read_dir_paths, simple_hash};
+use super::{CodexQualitySignals, TrackerState, read_dir_paths, simple_hash};
 
 pub(super) struct CodexSessionTracker {
     pub(super) sessions_root: PathBuf,
@@ -253,6 +253,7 @@ fn first_non_empty_line(text: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::current_file_len;
     use super::*;
     use std::io::Write;
 

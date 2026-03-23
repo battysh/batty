@@ -256,7 +256,7 @@ mod tests {
     use crate::team::test_helpers::make_test_daemon;
     use crate::team::test_support::{
         TestDaemonBuilder, architect_member, engineer_member, git_ok, git_stdout, init_git_repo,
-        manager_member, write_owned_task_file,
+        manager_member,
     };
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
