@@ -607,18 +607,25 @@ impl TeamConfig {
             bail!("team must have at least one role");
         }
 
+        let valid_agents = agent::KNOWN_AGENT_NAMES.join(", ");
+
         // Validate team-level agent if specified.
         if let Some(team_agent) = self.agent.as_deref() {
             if agent::adapter_from_name(team_agent).is_none() {
                 bail!(
-                    "team-level agent '{}' is not a supported backend",
-                    team_agent
+                    "unknown team-level agent '{}'; valid agents: {}",
+                    team_agent,
+                    valid_agents
                 );
             }
         }
 
         let mut role_names: HashSet<&str> = HashSet::new();
         for role in &self.roles {
+            if role.name.is_empty() {
+                bail!("role has empty name — every role requires a non-empty 'name' field");
+            }
+
             if !role_names.insert(&role.name) {
                 bail!("duplicate role name: '{}'", role.name);
             }
@@ -626,9 +633,11 @@ impl TeamConfig {
             // Non-user roles need an agent — either their own or the team default.
             if role.role_type != RoleType::User && role.agent.is_none() && self.agent.is_none() {
                 bail!(
-                    "role '{}' is not a user but has no agent configured \
-                     (set role-level or team-level agent)",
-                    role.name
+                    "role '{}' has no agent configured — \
+                     set a role-level 'agent' field or a team-level 'agent' default; \
+                     valid agents: {}",
+                    role.name,
+                    valid_agents
                 );
             }
 
@@ -647,18 +656,26 @@ impl TeamConfig {
                 && agent::adapter_from_name(agent_name).is_none()
             {
                 bail!(
-                    "role '{}' uses unsupported agent '{}'",
+                    "role '{}' uses unknown agent '{}'; valid agents: {}",
                     role.name,
-                    agent_name
+                    agent_name,
+                    valid_agents
                 );
             }
         }
 
         // Validate talks_to references exist
+        let all_role_names: Vec<&str> = role_names.iter().copied().collect();
         for role in &self.roles {
             for target in &role.talks_to {
                 if !role_names.contains(target.as_str()) {
-                    bail!("role '{}' talks_to unknown role '{}'", role.name, target);
+                    bail!(
+                        "role '{}' references unknown role '{}' in talks_to; \
+                         defined roles: {}",
+                        role.name,
+                        target,
+                        all_role_names.join(", ")
+                    );
                 }
             }
         }
@@ -667,7 +684,12 @@ impl TeamConfig {
             && !role_names.contains(sender.as_str())
             && sender != "human"
         {
-            bail!("automation_sender references unknown role '{}'", sender);
+            bail!(
+                "automation_sender references unknown role '{}'; \
+                 defined roles: {}",
+                sender,
+                all_role_names.join(", ")
+            );
         }
 
         // Validate layout zones if present
@@ -680,6 +702,165 @@ impl TeamConfig {
 
         Ok(())
     }
+
+    /// Run all validation checks, collecting results for each check.
+    /// Returns a list of (check_name, passed, detail) tuples.
+    pub fn validate_verbose(&self) -> Vec<ValidationCheck> {
+        let mut checks = Vec::new();
+
+        // 1. Team name
+        let name_ok = !self.name.is_empty();
+        checks.push(ValidationCheck {
+            name: "team_name".to_string(),
+            passed: name_ok,
+            detail: if name_ok {
+                format!("team name: '{}'", self.name)
+            } else {
+                "team name is empty".to_string()
+            },
+        });
+
+        // 2. Roles present
+        let roles_ok = !self.roles.is_empty();
+        checks.push(ValidationCheck {
+            name: "roles_present".to_string(),
+            passed: roles_ok,
+            detail: if roles_ok {
+                format!("{} role(s) defined", self.roles.len())
+            } else {
+                "no roles defined".to_string()
+            },
+        });
+
+        if !roles_ok {
+            return checks;
+        }
+
+        // 3. Team-level agent
+        let team_agent_ok = match self.agent.as_deref() {
+            Some(name) => agent::adapter_from_name(name).is_some(),
+            None => true,
+        };
+        checks.push(ValidationCheck {
+            name: "team_agent".to_string(),
+            passed: team_agent_ok,
+            detail: match self.agent.as_deref() {
+                Some(name) if team_agent_ok => format!("team agent: '{name}'"),
+                Some(name) => format!("unknown team agent: '{name}'"),
+                None => "no team-level agent (roles must set their own)".to_string(),
+            },
+        });
+
+        // 4. Per-role checks
+        let mut role_names: HashSet<&str> = HashSet::new();
+        for role in &self.roles {
+            let unique = role_names.insert(&role.name);
+            checks.push(ValidationCheck {
+                name: format!("role_unique:{}", role.name),
+                passed: unique,
+                detail: if unique {
+                    format!("role '{}' is unique", role.name)
+                } else {
+                    format!("duplicate role name: '{}'", role.name)
+                },
+            });
+
+            let has_agent =
+                role.role_type == RoleType::User || role.agent.is_some() || self.agent.is_some();
+            checks.push(ValidationCheck {
+                name: format!("role_agent:{}", role.name),
+                passed: has_agent,
+                detail: if has_agent {
+                    let effective = role
+                        .agent
+                        .as_deref()
+                        .or(self.agent.as_deref())
+                        .unwrap_or("(user)");
+                    format!("role '{}' agent: {effective}", role.name)
+                } else {
+                    format!("role '{}' has no agent", role.name)
+                },
+            });
+
+            if let Some(agent_name) = role.agent.as_deref() {
+                let valid = agent::adapter_from_name(agent_name).is_some();
+                checks.push(ValidationCheck {
+                    name: format!("role_agent_valid:{}", role.name),
+                    passed: valid,
+                    detail: if valid {
+                        format!("role '{}' agent '{}' is valid", role.name, agent_name)
+                    } else {
+                        format!("role '{}' uses unknown agent '{}'", role.name, agent_name)
+                    },
+                });
+            }
+
+            let instances_ok = role.instances > 0;
+            checks.push(ValidationCheck {
+                name: format!("role_instances:{}", role.name),
+                passed: instances_ok,
+                detail: format!("role '{}' instances: {}", role.name, role.instances),
+            });
+        }
+
+        // 5. talks_to references
+        for role in &self.roles {
+            for target in &role.talks_to {
+                let valid = role_names.contains(target.as_str());
+                checks.push(ValidationCheck {
+                    name: format!("talks_to:{}→{}", role.name, target),
+                    passed: valid,
+                    detail: if valid {
+                        format!("role '{}' → '{}' is valid", role.name, target)
+                    } else {
+                        format!(
+                            "role '{}' references unknown role '{}' in talks_to",
+                            role.name, target
+                        )
+                    },
+                });
+            }
+        }
+
+        // 6. automation_sender
+        if let Some(sender) = &self.automation_sender {
+            let valid = role_names.contains(sender.as_str()) || sender == "human";
+            checks.push(ValidationCheck {
+                name: "automation_sender".to_string(),
+                passed: valid,
+                detail: if valid {
+                    format!("automation_sender '{sender}' is valid")
+                } else {
+                    format!("automation_sender references unknown role '{sender}'")
+                },
+            });
+        }
+
+        // 7. Layout zones
+        if let Some(layout) = &self.layout {
+            let total_pct: u32 = layout.zones.iter().map(|z| z.width_pct).sum();
+            let valid = total_pct <= 100;
+            checks.push(ValidationCheck {
+                name: "layout_zones".to_string(),
+                passed: valid,
+                detail: if valid {
+                    format!("layout zones sum to {total_pct}%")
+                } else {
+                    format!("layout zones sum to {total_pct}%, exceeds 100%")
+                },
+            });
+        }
+
+        checks
+    }
+}
+
+/// A single validation check result.
+#[derive(Debug, Clone)]
+pub struct ValidationCheck {
+    pub name: String,
+    pub passed: bool,
+    pub detail: String,
 }
 
 pub fn load_planning_directive(
@@ -938,7 +1119,8 @@ roles:
 "#;
         let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
         let error = config.validate().unwrap_err().to_string();
-        assert!(error.contains("unsupported agent 'mystery'"));
+        assert!(error.contains("unknown agent 'mystery'"));
+        assert!(error.contains("valid agents:"));
     }
 
     #[test]
@@ -1545,7 +1727,8 @@ roles:
 
         let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("talks_to unknown role"));
+        assert!(err.contains("unknown role 'manager'"));
+        assert!(err.contains("talks_to"));
     }
 
     #[test]
@@ -1832,11 +2015,8 @@ roles:
     agent: codex
 "#;
         let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
-        // Empty role name should cause duplicate detection (two empty strings)
-        // or validation should catch it — either way, it's an edge case.
-        // Currently empty names pass as the name isn't checked for blankness,
-        // but we can validate that the config at least parses.
-        assert_eq!(config.roles[0].name, "");
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("empty name"));
     }
 
     #[test]
@@ -1853,7 +2033,8 @@ roles:
 "#;
         let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("duplicate"));
+        // Now fails at the first empty name before reaching duplicate check
+        assert!(err.contains("empty name"));
     }
 
     // --- Edge case tests: wrong types in YAML ---
@@ -2463,6 +2644,164 @@ roles:
         assert!(result.is_err());
     }
 
+    // --- Task #291: Config validation improvements ---
+
+    #[test]
+    fn invalid_talks_to_error_shows_defined_roles() {
+        let yaml = r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    talks_to: [nonexistent]
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("references unknown role 'nonexistent'"),
+            "expected unknown role message, got: {err}"
+        );
+        assert!(
+            err.contains("defined roles:"),
+            "expected defined roles list, got: {err}"
+        );
+        assert!(
+            err.contains("architect"),
+            "expected architect in defined roles, got: {err}"
+        );
+        assert!(
+            err.contains("engineer"),
+            "expected engineer in defined roles, got: {err}"
+        );
+    }
+
+    #[test]
+    fn missing_field_error_lists_valid_agents() {
+        let yaml = r#"
+name: test
+roles:
+  - name: worker
+    role_type: engineer
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("no agent configured"),
+            "expected missing agent message, got: {err}"
+        );
+        assert!(
+            err.contains("valid agents:"),
+            "expected valid agents list, got: {err}"
+        );
+        assert!(
+            err.contains("claude"),
+            "expected claude in valid agents, got: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_backend_error_lists_valid_agents() {
+        let yaml = r#"
+name: test
+roles:
+  - name: worker
+    role_type: engineer
+    agent: gpt4
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("unknown agent 'gpt4'"),
+            "expected unknown agent message, got: {err}"
+        );
+        assert!(
+            err.contains("valid agents:"),
+            "expected valid agents list, got: {err}"
+        );
+        assert!(err.contains("claude"), "expected claude listed, got: {err}");
+        assert!(err.contains("codex"), "expected codex listed, got: {err}");
+        assert!(err.contains("kiro"), "expected kiro listed, got: {err}");
+    }
+
+    #[test]
+    fn verbose_shows_checks_all_pass() {
+        let yaml = r#"
+name: test-team
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    talks_to: [architect]
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        let checks = config.validate_verbose();
+
+        assert!(!checks.is_empty(), "expected at least one check");
+        assert!(
+            checks.iter().all(|c| c.passed),
+            "expected all checks to pass, failures: {:?}",
+            checks.iter().filter(|c| !c.passed).collect::<Vec<_>>()
+        );
+
+        // Verify specific checks are present
+        assert!(
+            checks.iter().any(|c| c.name == "team_name"),
+            "expected team_name check"
+        );
+        assert!(
+            checks.iter().any(|c| c.name == "roles_present"),
+            "expected roles_present check"
+        );
+        assert!(
+            checks.iter().any(|c| c.name == "team_agent"),
+            "expected team_agent check"
+        );
+        assert!(
+            checks.iter().any(|c| c.name.starts_with("role_unique:")),
+            "expected role_unique check"
+        );
+        assert!(
+            checks.iter().any(|c| c.name.starts_with("role_agent:")),
+            "expected role_agent check"
+        );
+        assert!(
+            checks.iter().any(|c| c.name.starts_with("talks_to:")),
+            "expected talks_to check"
+        );
+    }
+
+    #[test]
+    fn verbose_shows_checks_with_failures() {
+        let yaml = r#"
+name: test
+roles:
+  - name: worker
+    role_type: engineer
+    agent: mystery
+"#;
+        let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+        let checks = config.validate_verbose();
+
+        let failed: Vec<_> = checks.iter().filter(|c| !c.passed).collect();
+        assert!(!failed.is_empty(), "expected at least one failing check");
+        assert!(
+            failed.iter().any(|c| c.name.contains("role_agent_valid")),
+            "expected role_agent_valid failure, failures: {:?}",
+            failed
+        );
+        assert!(
+            failed.iter().any(|c| c.detail.contains("unknown agent")),
+            "expected unknown agent detail in failure"
+        );
+    }
+
     // --- Property-based tests (proptest) ---
 
     mod proptest_tests {
@@ -2551,7 +2890,7 @@ roles:
                 );
                 let config: TeamConfig = serde_yaml::from_str(&yaml).unwrap();
                 let err = config.validate().unwrap_err().to_string();
-                prop_assert!(err.contains("unsupported agent"), "Error was: {err}");
+                prop_assert!(err.contains("unknown agent"), "Error was: {err}");
             }
         }
 
