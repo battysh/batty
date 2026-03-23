@@ -1995,4 +1995,91 @@ mod tests {
             other => panic!("expected config command, got {other:?}"),
         }
     }
+
+    // --- completion generation tests ---
+
+    /// Helper: generate completion script for a shell into a String.
+    fn generate_completions(shell: clap_complete::Shell) -> String {
+        use clap::CommandFactory;
+        let mut buf = Vec::new();
+        clap_complete::generate(shell, &mut Cli::command(), "batty", &mut buf);
+        String::from_utf8(buf).expect("completions should be valid UTF-8")
+    }
+
+    #[test]
+    fn completions_bash_generates() {
+        let output = generate_completions(clap_complete::Shell::Bash);
+        assert!(!output.is_empty(), "bash completions should not be empty");
+        assert!(
+            output.contains("_batty"),
+            "bash completions should define _batty function"
+        );
+    }
+
+    #[test]
+    fn completions_zsh_generates() {
+        let output = generate_completions(clap_complete::Shell::Zsh);
+        assert!(!output.is_empty(), "zsh completions should not be empty");
+        assert!(
+            output.contains("#compdef batty"),
+            "zsh completions should start with #compdef"
+        );
+    }
+
+    #[test]
+    fn completions_fish_generates() {
+        let output = generate_completions(clap_complete::Shell::Fish);
+        assert!(!output.is_empty(), "fish completions should not be empty");
+        assert!(
+            output.contains("complete -c batty"),
+            "fish completions should contain complete -c batty"
+        );
+    }
+
+    #[test]
+    fn completions_include_grafana_subcommands() {
+        let output = generate_completions(clap_complete::Shell::Fish);
+        // Top-level grafana command
+        assert!(
+            output.contains("grafana"),
+            "completions should include grafana command"
+        );
+        // Grafana subcommands
+        assert!(
+            output.contains("setup"),
+            "completions should include grafana setup"
+        );
+        assert!(
+            output.contains("status"),
+            "completions should include grafana status"
+        );
+        assert!(
+            output.contains("open"),
+            "completions should include grafana open"
+        );
+    }
+
+    #[test]
+    fn completions_include_all_recent_commands() {
+        let output = generate_completions(clap_complete::Shell::Fish);
+        let expected_commands = [
+            "task",
+            "metrics",
+            "grafana",
+            "telemetry",
+            "nudge",
+            "load",
+            "queue",
+            "cost",
+            "doctor",
+            "pause",
+            "resume",
+        ];
+        for cmd in &expected_commands {
+            assert!(
+                output.contains(cmd),
+                "completions should include '{cmd}' command"
+            );
+        }
+    }
 }
