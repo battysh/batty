@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use batty_cli::{
+    agent,
     cli::{
         self, AutoMergeAction, BoardCommand, Cli, Command, DepsFormatArg, InboxCommand,
         NudgeCommand, ReviewDispositionArg, TaskCommand, TaskStateArg,
@@ -127,7 +128,20 @@ fn main() -> Result<()> {
     debug!(root = %root.display(), "project root");
 
     match cli.command {
-        Command::Init { template, from } => {
+        Command::Init {
+            template,
+            from,
+            agent,
+        } => {
+            // Validate agent name if provided
+            if let Some(ref name) = agent {
+                if agent::adapter_from_name(name).is_none() {
+                    bail!(
+                        "unknown agent backend '{name}'. Supported: {}",
+                        agent::KNOWN_AGENT_NAMES.join(", ")
+                    );
+                }
+            }
             let created = if let Some(template_name) = from.as_deref() {
                 team::init_from_template(&root, template_name)?
             } else {
@@ -141,7 +155,7 @@ fn main() -> Result<()> {
                     cli::InitTemplate::Software => "software",
                     cli::InitTemplate::Batty => "batty",
                 };
-                team::init_team(&root, template_name)?
+                team::init_team(&root, template_name, agent.as_deref())?
             };
             println!("Initialized team config ({} files):", created.len());
             for path in &created {

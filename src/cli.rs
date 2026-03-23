@@ -20,6 +20,7 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Scaffold .batty/team_config/ with default team.yaml and prompt templates
+    #[command(alias = "install")]
     Init {
         /// Template to use for scaffolding
         #[arg(long, value_enum, conflicts_with = "from")]
@@ -27,6 +28,9 @@ pub enum Command {
         /// Copy team config from $HOME/.batty/templates/<name>/
         #[arg(long, conflicts_with = "template")]
         from: Option<String>,
+        /// Default agent backend for all roles (claude, codex, kiro)
+        #[arg(long)]
+        agent: Option<String>,
     },
 
     /// Export the current team config as a reusable template
@@ -640,9 +644,14 @@ mod tests {
     fn init_subcommand_defaults_to_simple() {
         let cli = Cli::parse_from(["batty", "init"]);
         match cli.command {
-            Command::Init { template, from } => {
+            Command::Init {
+                template,
+                from,
+                agent,
+            } => {
                 assert_eq!(template, None);
                 assert_eq!(from, None);
+                assert_eq!(agent, None);
             }
             other => panic!("expected init command, got {other:?}"),
         }
@@ -652,7 +661,7 @@ mod tests {
     fn init_subcommand_accepts_large_template() {
         let cli = Cli::parse_from(["batty", "init", "--template", "large"]);
         match cli.command {
-            Command::Init { template, from } => {
+            Command::Init { template, from, .. } => {
                 assert_eq!(template, Some(InitTemplate::Large));
                 assert_eq!(from, None);
             }
@@ -664,7 +673,7 @@ mod tests {
     fn init_subcommand_accepts_from_template_name() {
         let cli = Cli::parse_from(["batty", "init", "--from", "custom-team"]);
         match cli.command {
-            Command::Init { template, from } => {
+            Command::Init { template, from, .. } => {
                 assert_eq!(template, None);
                 assert_eq!(from.as_deref(), Some("custom-team"));
             }
@@ -676,6 +685,45 @@ mod tests {
     fn init_subcommand_rejects_from_with_template() {
         let result = Cli::try_parse_from(["batty", "init", "--template", "large", "--from", "x"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn init_agent_flag_parses() {
+        let cli = Cli::parse_from(["batty", "init", "--agent", "codex"]);
+        match cli.command {
+            Command::Init { agent, .. } => {
+                assert_eq!(agent.as_deref(), Some("codex"));
+            }
+            other => panic!("expected init command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_alias_maps_to_init() {
+        let cli = Cli::parse_from(["batty", "install"]);
+        match cli.command {
+            Command::Init {
+                template,
+                from,
+                agent,
+            } => {
+                assert_eq!(template, None);
+                assert_eq!(from, None);
+                assert_eq!(agent, None);
+            }
+            other => panic!("expected init command via install alias, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_alias_with_agent_flag() {
+        let cli = Cli::parse_from(["batty", "install", "--agent", "kiro"]);
+        match cli.command {
+            Command::Init { agent, .. } => {
+                assert_eq!(agent.as_deref(), Some("kiro"));
+            }
+            other => panic!("expected init command via install alias, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1753,7 +1801,7 @@ mod tests {
         ] {
             let cli = Cli::parse_from(["batty", "init", "--template", arg]);
             match cli.command {
-                Command::Init { template, from } => {
+                Command::Init { template, from, .. } => {
                     assert_eq!(template, Some(expected), "template arg={arg}");
                     assert!(from.is_none());
                 }

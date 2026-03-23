@@ -228,7 +228,7 @@ pub(crate) fn now_unix() -> u64 {
 }
 
 /// Scaffold `.batty/team_config/` with default team.yaml and prompt templates.
-pub fn init_team(project_root: &Path, template: &str) -> Result<Vec<PathBuf>> {
+pub fn init_team(project_root: &Path, template: &str, agent: Option<&str>) -> Result<Vec<PathBuf>> {
     let config_dir = team_config_dir(project_root);
     std::fs::create_dir_all(&config_dir)
         .with_context(|| format!("failed to create {}", config_dir.display()))?;
@@ -253,7 +253,15 @@ pub fn init_team(project_root: &Path, template: &str) -> Result<Vec<PathBuf>> {
         "batty" => include_str!("templates/team_batty.yaml"),
         _ => include_str!("templates/team_simple.yaml"),
     };
-    std::fs::write(&yaml_path, yaml_content)
+    // Replace all role-level agent backends when --agent is specified
+    let yaml_content = if let Some(agent_name) = agent {
+        yaml_content
+            .replace("agent: claude", &format!("agent: {agent_name}"))
+            .replace("agent: codex", &format!("agent: {agent_name}"))
+    } else {
+        yaml_content.to_string()
+    };
+    std::fs::write(&yaml_path, &yaml_content)
         .with_context(|| format!("failed to write {}", yaml_path.display()))?;
     created.push(yaml_path);
 
@@ -2227,7 +2235,7 @@ mod tests {
     #[test]
     fn init_team_creates_scaffolding() {
         let tmp = tempfile::tempdir().unwrap();
-        let created = init_team(tmp.path(), "simple").unwrap();
+        let created = init_team(tmp.path(), "simple", None).unwrap();
         assert!(!created.is_empty());
         assert!(team_config_path(tmp.path()).exists());
         assert!(team_config_dir(tmp.path()).join("architect.md").exists());
@@ -2256,8 +2264,8 @@ mod tests {
     #[test]
     fn init_team_refuses_if_exists() {
         let tmp = tempfile::tempdir().unwrap();
-        init_team(tmp.path(), "simple").unwrap();
-        let result = init_team(tmp.path(), "simple");
+        init_team(tmp.path(), "simple", None).unwrap();
+        let result = init_team(tmp.path(), "simple", None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
@@ -2327,7 +2335,7 @@ mod tests {
     #[test]
     fn init_team_large_template() {
         let tmp = tempfile::tempdir().unwrap();
-        let created = init_team(tmp.path(), "large").unwrap();
+        let created = init_team(tmp.path(), "large", None).unwrap();
         assert!(!created.is_empty());
         let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
         assert!(content.contains("instances: 3") || content.contains("instances: 5"));
@@ -2336,7 +2344,7 @@ mod tests {
     #[test]
     fn init_team_solo_template() {
         let tmp = tempfile::tempdir().unwrap();
-        let created = init_team(tmp.path(), "solo").unwrap();
+        let created = init_team(tmp.path(), "solo", None).unwrap();
         assert!(!created.is_empty());
         let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
         assert!(content.contains("role_type: engineer"));
@@ -2346,7 +2354,7 @@ mod tests {
     #[test]
     fn init_team_pair_template() {
         let tmp = tempfile::tempdir().unwrap();
-        let created = init_team(tmp.path(), "pair").unwrap();
+        let created = init_team(tmp.path(), "pair", None).unwrap();
         assert!(!created.is_empty());
         let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
         assert!(content.contains("role_type: architect"));
@@ -2357,7 +2365,7 @@ mod tests {
     #[test]
     fn init_team_squad_template() {
         let tmp = tempfile::tempdir().unwrap();
-        let created = init_team(tmp.path(), "squad").unwrap();
+        let created = init_team(tmp.path(), "squad", None).unwrap();
         assert!(!created.is_empty());
         let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
         assert!(content.contains("instances: 5"));
@@ -2367,7 +2375,7 @@ mod tests {
     #[test]
     fn init_team_research_template() {
         let tmp = tempfile::tempdir().unwrap();
-        let created = init_team(tmp.path(), "research").unwrap();
+        let created = init_team(tmp.path(), "research", None).unwrap();
         assert!(!created.is_empty());
         let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
         assert!(content.contains("principal"));
@@ -2388,7 +2396,7 @@ mod tests {
     #[test]
     fn init_team_software_template() {
         let tmp = tempfile::tempdir().unwrap();
-        let created = init_team(tmp.path(), "software").unwrap();
+        let created = init_team(tmp.path(), "software", None).unwrap();
         assert!(!created.is_empty());
         let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
         assert!(content.contains("tech-lead"));
@@ -2404,7 +2412,7 @@ mod tests {
     #[test]
     fn init_team_batty_template() {
         let tmp = tempfile::tempdir().unwrap();
-        let created = init_team(tmp.path(), "batty").unwrap();
+        let created = init_team(tmp.path(), "batty", None).unwrap();
         assert!(!created.is_empty());
         let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
         assert!(content.contains("batty-dev"));
@@ -2432,6 +2440,51 @@ mod tests {
             team_config_dir(tmp.path())
                 .join("review_policy.md")
                 .exists()
+        );
+    }
+
+    #[test]
+    fn init_with_agent_codex_sets_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _created = init_team(tmp.path(), "simple", Some("codex")).unwrap();
+        let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
+        assert!(
+            content.contains("agent: codex"),
+            "all agent fields should be codex"
+        );
+        assert!(
+            !content.contains("agent: claude"),
+            "no claude agents should remain"
+        );
+    }
+
+    #[test]
+    fn init_with_agent_kiro_sets_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _created = init_team(tmp.path(), "pair", Some("kiro")).unwrap();
+        let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
+        assert!(
+            content.contains("agent: kiro"),
+            "all agent fields should be kiro"
+        );
+        assert!(
+            !content.contains("agent: claude"),
+            "no claude agents should remain"
+        );
+        assert!(
+            !content.contains("agent: codex"),
+            "no codex agents should remain"
+        );
+    }
+
+    #[test]
+    fn init_default_agent_is_claude() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _created = init_team(tmp.path(), "simple", None).unwrap();
+        let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
+        assert!(
+            content.contains("agent: claude"),
+            "default agent should be claude"
         );
     }
 
