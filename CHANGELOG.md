@@ -2,6 +2,31 @@
 
 All notable changes to Batty are documented here.
 
+## 0.5.1 — 2026-03-22
+
+Patch release with developer experience improvements and delivery reliability fix.
+
+### Features
+
+- **Daemon auto-archive** (#298) — done tasks older than `archive_after_secs` (default: 3600) are automatically moved to archive by the daemon.
+- **Checkpoint wiring for restart** (#299) — agent restart resume prompts now include `.batty/progress/<role>.md` checkpoint content.
+- **Inbox purge** (#300) — `batty inbox purge <role>` deletes delivered messages. Supports `--older-than` for selective cleanup.
+- **Telemetry dashboard** (#301) — `batty metrics` shows tasks completed, avg cycle time, failure rate, merge rate from the telemetry DB.
+
+### Reliability
+
+- **Delivery marker scrolloff fix** (#296) — infer successful delivery from agent state transition when the marker scrolls past the capture window. Eliminates ~80% false-positive delivery failures.
+- **Starvation detection false positive fix** (#286) — suppress alerts when all engineers have active board tasks.
+- **Config validation improvements** (#291) — better error messages for common team.yaml mistakes.
+
+### Maintenance
+
+- **Makefile targets** (#294) — `make test`, `make coverage`, `make release` match CI behavior.
+- **Markdown lint compliance** (#293) — all docs pass markdownlint.
+- **CI skip list stabilization** — skip timing-sensitive and environment-dependent tests in CI.
+
+---
+
 ## 0.5.0 — 2026-03-22
 
 Feature release adding board archival, delivery reliability, worktree
