@@ -445,9 +445,9 @@ pub fn analyze_from_db(conn: &Connection) -> Option<RunStats> {
                     continue;
                 };
                 let tid = task_reference(task);
-                let entry = tasks.entry(tid.clone()).or_insert_with(|| {
-                    TaskAccumulator::new(tid.clone(), role.to_string(), ts, 0)
-                });
+                let entry = tasks
+                    .entry(tid.clone())
+                    .or_insert_with(|| TaskAccumulator::new(tid.clone(), role.to_string(), ts, 0));
                 entry.retry_count += 1;
                 entry.assigned_to = role.to_string();
                 active_task_by_role.insert(role.to_string(), tid);
@@ -474,9 +474,9 @@ pub fn analyze_from_db(conn: &Connection) -> Option<RunStats> {
                     continue;
                 };
                 let r = role.clone().unwrap_or_default();
-                let entry = tasks.entry(task.to_string()).or_insert_with(|| {
-                    TaskAccumulator::new(task.to_string(), r, ts, 0)
-                });
+                let entry = tasks
+                    .entry(task.to_string())
+                    .or_insert_with(|| TaskAccumulator::new(task.to_string(), r, ts, 0));
                 entry.was_escalated = true;
             }
             "message_routed" => {
@@ -487,8 +487,7 @@ pub fn analyze_from_db(conn: &Connection) -> Option<RunStats> {
                 if let Some(task) = task_id.as_deref() {
                     let tid = task_reference(task);
                     if let Some(completed_ts) = task_completed_at.get(&tid) {
-                        review_stall_durations
-                            .push((tid, ts.saturating_sub(*completed_ts)));
+                        review_stall_durations.push((tid, ts.saturating_sub(*completed_ts)));
                     }
                 }
             }
@@ -497,8 +496,7 @@ pub fn analyze_from_db(conn: &Connection) -> Option<RunStats> {
                 if let Some(task) = task_id.as_deref() {
                     let tid = task_reference(task);
                     if let Some(completed_ts) = task_completed_at.get(&tid) {
-                        review_stall_durations
-                            .push((tid, ts.saturating_sub(*completed_ts)));
+                        review_stall_durations.push((tid, ts.saturating_sub(*completed_ts)));
                     }
                 }
             }
@@ -536,8 +534,7 @@ pub fn analyze_from_db(conn: &Connection) -> Option<RunStats> {
         }
     }
 
-    let mut task_stats: Vec<TaskStats> =
-        tasks.into_values().map(|t| t.into_stats()).collect();
+    let mut task_stats: Vec<TaskStats> = tasks.into_values().map(|t| t.into_stats()).collect();
     task_stats.sort_by(|a, b| {
         a.assigned_at
             .cmp(&b.assigned_at)
@@ -2023,5 +2020,256 @@ Task body.
         // tasks dir exists but is empty
         let result = should_generate_retro(tmp.path(), false, 60).unwrap();
         assert_eq!(result, None);
+    }
+
+    // --- SQLite telemetry DB tests ---
+
+    use crate::team::telemetry_db;
+
+    /// Populate a telemetry DB with events matching the basic_run test scenario.
+    fn populate_basic_run_db(conn: &Connection) {
+        let events = vec![
+            at(TeamEvent::daemon_started(), 100),
+            at(TeamEvent::task_assigned("eng-1", "42"), 110),
+            at(TeamEvent::message_routed("manager", "eng-1"), 115),
+            at(TeamEvent::task_completed("eng-1", None), 150),
+            at(TeamEvent::daemon_stopped_with_reason("signal", 50), 160),
+        ];
+        for event in &events {
+            telemetry_db::insert_event(conn, event).unwrap();
+        }
+    }
+
+    #[test]
+    fn retro_with_telemetry_db() {
+        let conn = telemetry_db::open_in_memory().unwrap();
+        populate_basic_run_db(&conn);
+
+        let stats = analyze_from_db(&conn).unwrap();
+
+        assert_eq!(stats.run_start, 100);
+        assert_eq!(stats.run_end, 160);
+        assert_eq!(stats.total_duration_secs, 60);
+        assert_eq!(stats.message_count, 1);
+        assert_eq!(stats.escalation_count, 0);
+        assert_eq!(stats.task_stats.len(), 1);
+        assert_eq!(stats.task_stats[0].task_id, "42");
+        assert_eq!(stats.task_stats[0].assigned_to, "eng-1");
+        assert_eq!(stats.task_stats[0].cycle_time_secs, Some(40));
+        assert_eq!(stats.average_cycle_time_secs, Some(40));
+        assert_eq!(stats.fastest_task_id.as_deref(), Some("42"));
+        assert_eq!(stats.longest_task_id.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn retro_from_db_matches_jsonl_analysis() {
+        // Same events through both paths should produce identical RunStats.
+        let events = vec![
+            at(TeamEvent::daemon_started(), 100),
+            at(TeamEvent::task_assigned("eng-1", "42"), 110),
+            at(TeamEvent::message_routed("manager", "eng-1"), 115),
+            at(TeamEvent::task_completed("eng-1", None), 150),
+            at(TeamEvent::daemon_stopped_with_reason("signal", 50), 160),
+        ];
+
+        let jsonl_stats = analyze_events(&events).unwrap();
+
+        let conn = telemetry_db::open_in_memory().unwrap();
+        for event in &events {
+            telemetry_db::insert_event(&conn, event).unwrap();
+        }
+        let db_stats = analyze_from_db(&conn).unwrap();
+
+        assert_eq!(jsonl_stats.run_start, db_stats.run_start);
+        assert_eq!(jsonl_stats.run_end, db_stats.run_end);
+        assert_eq!(
+            jsonl_stats.total_duration_secs,
+            db_stats.total_duration_secs
+        );
+        assert_eq!(jsonl_stats.task_stats.len(), db_stats.task_stats.len());
+        assert_eq!(
+            jsonl_stats.average_cycle_time_secs,
+            db_stats.average_cycle_time_secs
+        );
+        assert_eq!(jsonl_stats.fastest_task_id, db_stats.fastest_task_id);
+        assert_eq!(jsonl_stats.longest_task_id, db_stats.longest_task_id);
+        assert_eq!(jsonl_stats.escalation_count, db_stats.escalation_count);
+        assert_eq!(jsonl_stats.message_count, db_stats.message_count);
+        assert_eq!(jsonl_stats.idle_time_pct, db_stats.idle_time_pct);
+        assert_eq!(jsonl_stats.auto_merge_count, db_stats.auto_merge_count);
+        assert_eq!(jsonl_stats.manual_merge_count, db_stats.manual_merge_count);
+        assert_eq!(jsonl_stats.rework_count, db_stats.rework_count);
+    }
+
+    #[test]
+    fn retro_without_db_falls_back() {
+        // analyze_project with no DB file should fall back to JSONL.
+        let tmp = tempdir().unwrap();
+        let events_dir = tmp.path().join(".batty").join("team_config");
+        fs::create_dir_all(&events_dir).unwrap();
+
+        let events = vec![
+            at(TeamEvent::daemon_started(), 100),
+            at(TeamEvent::task_assigned("eng-1", "42"), 110),
+            at(TeamEvent::task_completed("eng-1", None), 150),
+            at(TeamEvent::daemon_stopped(), 160),
+        ];
+        write_event_log(tmp.path(), &events);
+
+        // No telemetry.db exists — should fall back to JSONL.
+        let stats = analyze_project(tmp.path()).unwrap().unwrap();
+        assert_eq!(stats.run_start, 100);
+        assert_eq!(stats.run_end, 160);
+        assert_eq!(stats.task_stats.len(), 1);
+        assert_eq!(stats.task_stats[0].task_id, "42");
+    }
+
+    #[test]
+    fn retro_report_format_unchanged() {
+        // Verify DB-sourced stats produce identical Markdown structure.
+        let conn = telemetry_db::open_in_memory().unwrap();
+        populate_basic_run_db(&conn);
+
+        let stats = analyze_from_db(&conn).unwrap();
+        let report = render_retrospective(&stats);
+
+        assert!(report.contains("# Batty Retrospective"));
+        assert!(report.contains("## Summary"));
+        assert!(report.contains("## Task Cycle Times"));
+        assert!(report.contains("## Bottlenecks"));
+        assert!(report.contains("## Recommendations"));
+        assert!(report.contains("- Tasks completed: 1"));
+        assert!(report.contains("- Average cycle time: 40s"));
+        assert!(report.contains("| 42 | eng-1 | completed | 40s | 1 | no |"));
+    }
+
+    #[test]
+    fn retro_from_db_empty_returns_none() {
+        let conn = telemetry_db::open_in_memory().unwrap();
+        assert!(analyze_from_db(&conn).is_none());
+    }
+
+    #[test]
+    fn retro_from_db_with_retries_and_escalations() {
+        let conn = telemetry_db::open_in_memory().unwrap();
+        let events = vec![
+            at(TeamEvent::daemon_started(), 100),
+            at(
+                TeamEvent::task_assigned("eng-1", "Task #42: retry task"),
+                110,
+            ),
+            at(
+                TeamEvent::task_assigned("eng-1", "Task #42: retry task"),
+                130,
+            ),
+            at(TeamEvent::task_escalated("eng-1", "42", None), 135),
+            at(TeamEvent::task_completed("eng-1", None), 170),
+            at(TeamEvent::daemon_stopped_with_reason("signal", 70), 180),
+        ];
+        for event in &events {
+            telemetry_db::insert_event(&conn, event).unwrap();
+        }
+
+        let stats = analyze_from_db(&conn).unwrap();
+        assert_eq!(stats.task_stats.len(), 1);
+        assert_eq!(stats.task_stats[0].task_id, "42");
+        assert_eq!(stats.task_stats[0].retry_count, 2);
+        assert!(stats.task_stats[0].was_escalated);
+        assert_eq!(stats.task_stats[0].cycle_time_secs, Some(60));
+        assert_eq!(stats.escalation_count, 1);
+    }
+
+    #[test]
+    fn retro_from_db_with_review_pipeline() {
+        let conn = telemetry_db::open_in_memory().unwrap();
+        let events = vec![
+            at(TeamEvent::daemon_started(), 100),
+            at(TeamEvent::task_assigned("eng-1", "Task #10: fast"), 110),
+            at(TeamEvent::task_completed("eng-1", None), 150),
+            at(
+                TeamEvent::task_auto_merged("eng-1", "Task #10: fast", 0.9, 2, 10),
+                180,
+            ),
+            at(TeamEvent::task_assigned("eng-2", "Task #20: slow"), 120),
+            at(TeamEvent::task_completed("eng-2", None), 200),
+            at(TeamEvent::task_manual_merged("Task #20: slow"), 300),
+            at(TeamEvent::task_reworked("eng-1", "Task #10: fast"), 145),
+            at(
+                TeamEvent::review_nudge_sent("manager", "Task #10: fast"),
+                155,
+            ),
+            at(TeamEvent::daemon_stopped_with_reason("signal", 210), 310),
+        ];
+        for event in &events {
+            telemetry_db::insert_event(&conn, event).unwrap();
+        }
+
+        let stats = analyze_from_db(&conn).unwrap();
+        assert_eq!(stats.auto_merge_count, 1);
+        assert_eq!(stats.manual_merge_count, 1);
+        assert_eq!(stats.rework_count, 1);
+        assert_eq!(stats.review_nudge_count, 1);
+        // avg of 30s and 100s = 65s
+        assert_eq!(stats.avg_review_stall_secs, Some(65));
+        assert_eq!(stats.max_review_stall_secs, Some(100));
+        assert_eq!(stats.max_review_stall_task.as_deref(), Some("20"));
+        assert_eq!(stats.task_rework_counts, vec![("10".to_string(), 1)]);
+    }
+
+    #[test]
+    fn retro_from_db_multiple_runs_uses_last() {
+        let conn = telemetry_db::open_in_memory().unwrap();
+        let events = vec![
+            // First run
+            at(TeamEvent::daemon_started(), 100),
+            at(TeamEvent::task_assigned("eng-1", "old-task"), 105),
+            at(TeamEvent::daemon_stopped_with_reason("signal", 10), 110),
+            // Second run
+            at(TeamEvent::daemon_started(), 200),
+            at(TeamEvent::task_assigned("eng-2", "Task #12: new-task"), 210),
+            at(TeamEvent::task_completed("eng-2", None), 240),
+            at(TeamEvent::daemon_stopped_with_reason("signal", 45), 245),
+        ];
+        for event in &events {
+            telemetry_db::insert_event(&conn, event).unwrap();
+        }
+
+        let stats = analyze_from_db(&conn).unwrap();
+        assert_eq!(stats.run_start, 200);
+        assert_eq!(stats.run_end, 245);
+        assert_eq!(stats.task_stats.len(), 1);
+        assert_eq!(stats.task_stats[0].task_id, "12");
+    }
+
+    #[test]
+    fn analyze_project_prefers_db_over_jsonl() {
+        let tmp = tempdir().unwrap();
+        // Set up JSONL with task "99"
+        let jsonl_events = vec![
+            at(TeamEvent::daemon_started(), 100),
+            at(TeamEvent::task_assigned("eng-1", "99"), 110),
+            at(TeamEvent::task_completed("eng-1", None), 150),
+            at(TeamEvent::daemon_stopped(), 160),
+        ];
+        write_event_log(tmp.path(), &jsonl_events);
+
+        // Set up DB with task "42"
+        let db_path = tmp.path().join(".batty");
+        fs::create_dir_all(&db_path).unwrap();
+        let conn = telemetry_db::open(tmp.path()).unwrap();
+        let db_events = vec![
+            at(TeamEvent::daemon_started(), 200),
+            at(TeamEvent::task_assigned("eng-1", "42"), 210),
+            at(TeamEvent::task_completed("eng-1", None), 250),
+            at(TeamEvent::daemon_stopped(), 260),
+        ];
+        for event in &db_events {
+            telemetry_db::insert_event(&conn, event).unwrap();
+        }
+        drop(conn);
+
+        // analyze_project should use DB (task "42"), not JSONL (task "99").
+        let stats = analyze_project(tmp.path()).unwrap().unwrap();
+        assert_eq!(stats.task_stats[0].task_id, "42");
     }
 }
