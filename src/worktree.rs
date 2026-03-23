@@ -708,7 +708,7 @@ mod tests {
         }
 
         let tmp = tempfile::tempdir().unwrap();
-        git(tmp.path(), &["init", "-q"]);
+        git(tmp.path(), &["init", "-q", "-b", "main"]);
         git(
             tmp.path(),
             &["config", "user.email", "batty-test@example.com"],
