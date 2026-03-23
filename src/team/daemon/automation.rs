@@ -542,6 +542,54 @@ impl TeamDaemon {
         Ok(())
     }
 
+    /// Periodically archive done tasks that exceed the configured age threshold.
+    ///
+    /// Rate-limited to run at most once per 60 seconds. Disabled when
+    /// `auto_archive_done_after_secs` is `None` or `0`.
+    pub(super) fn maybe_auto_archive(&mut self) -> Result<()> {
+        // Rate-limit to once per minute
+        if self.last_auto_archive.elapsed() < Duration::from_secs(60) {
+            return Ok(());
+        }
+        self.last_auto_archive = Instant::now();
+
+        let threshold_secs = match self
+            .config
+            .team_config
+            .workflow_policy
+            .auto_archive_done_after_secs
+        {
+            Some(0) | None => return Ok(()),
+            Some(secs) => secs,
+        };
+
+        let board_dir = self.board_dir();
+        let tasks_dir = board_dir.join("tasks");
+        if !tasks_dir.is_dir() {
+            return Ok(());
+        }
+
+        let max_age = Duration::from_secs(threshold_secs);
+        let old_done = board::done_tasks_older_than(&board_dir, max_age)?;
+        if old_done.is_empty() {
+            return Ok(());
+        }
+
+        let summary = board::archive_tasks(&board_dir, &old_done, false)?;
+        if summary.archived_count > 0 {
+            info!(
+                archived = summary.archived_count,
+                threshold_secs, "auto-archived done tasks"
+            );
+            self.record_orchestrator_action(format!(
+                "auto-archive: archived {} done tasks older than {}s",
+                summary.archived_count, threshold_secs
+            ));
+        }
+
+        Ok(())
+    }
+
     pub(super) fn maybe_recycle_cron_tasks(&mut self) -> Result<()> {
         let board_dir = self.board_dir();
         let recycled = super::super::task_loop::recycle_cron_tasks(&board_dir)?;
@@ -1865,5 +1913,180 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    // ── maybe_auto_archive ───────────────────────────────────────────
+
+    /// Helper: write a done task with a specific completed date (RFC3339).
+    fn write_done_task_with_completed(project_root: &Path, id: u32, title: &str, completed: &str) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let content = format!(
+            "---\nid: {id}\ntitle: {title}\nstatus: done\npriority: high\ncompleted: \"{completed}\"\nclass: standard\n---\n\nTask.\n"
+        );
+        std::fs::write(tasks_dir.join(format!("{id:03}-{title}.md")), content).unwrap();
+    }
+
+    /// Backdate the rate-limit timer so the archive check fires immediately.
+    fn backdate_auto_archive(daemon: &mut TeamDaemon) {
+        daemon.last_auto_archive = Instant::now() - Duration::from_secs(120);
+    }
+
+    #[test]
+    fn auto_archive_moves_old_done_tasks() {
+        use crate::team::config::WorkflowPolicy;
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = WorkflowPolicy {
+            auto_archive_done_after_secs: Some(60),
+            ..WorkflowPolicy::default()
+        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .workflow_policy(policy)
+            .build();
+        backdate_auto_archive(&mut daemon);
+
+        // A task completed 2 hours ago — should be archived
+        write_done_task_with_completed(tmp.path(), 1, "old-done", "2020-01-01T00:00:00+00:00");
+
+        daemon.maybe_auto_archive().unwrap();
+
+        let archive_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("archive");
+        assert!(archive_dir.join("001-old-done.md").exists());
+    }
+
+    #[test]
+    fn auto_archive_skips_recent_done() {
+        use crate::team::config::WorkflowPolicy;
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = WorkflowPolicy {
+            auto_archive_done_after_secs: Some(86400), // 24h
+            ..WorkflowPolicy::default()
+        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .workflow_policy(policy)
+            .build();
+        backdate_auto_archive(&mut daemon);
+
+        // A task completed just now — should NOT be archived
+        let now = chrono::Utc::now().to_rfc3339();
+        write_done_task_with_completed(tmp.path(), 2, "recent-done", &now);
+
+        daemon.maybe_auto_archive().unwrap();
+
+        let archive_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("archive");
+        assert!(!archive_dir.exists() || !archive_dir.join("002-recent-done.md").exists());
+    }
+
+    #[test]
+    fn auto_archive_respects_config_threshold() {
+        use crate::team::config::WorkflowPolicy;
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Very large threshold — nothing should be archived
+        let policy = WorkflowPolicy {
+            auto_archive_done_after_secs: Some(999_999_999),
+            ..WorkflowPolicy::default()
+        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .workflow_policy(policy)
+            .build();
+        backdate_auto_archive(&mut daemon);
+
+        // Even an old task shouldn't be archived with a huge threshold
+        write_done_task_with_completed(tmp.path(), 3, "old-but-kept", "2024-01-01T00:00:00+00:00");
+
+        daemon.maybe_auto_archive().unwrap();
+
+        // Task file should still be in tasks/
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        assert!(tasks_dir.join("003-old-but-kept.md").exists());
+    }
+
+    #[test]
+    fn auto_archive_noop_when_disabled() {
+        use crate::team::config::WorkflowPolicy;
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Disabled: auto_archive_done_after_secs = Some(0)
+        let policy = WorkflowPolicy {
+            auto_archive_done_after_secs: Some(0),
+            ..WorkflowPolicy::default()
+        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .workflow_policy(policy)
+            .build();
+        backdate_auto_archive(&mut daemon);
+
+        write_done_task_with_completed(
+            tmp.path(),
+            4,
+            "disabled-archive",
+            "2020-01-01T00:00:00+00:00",
+        );
+
+        daemon.maybe_auto_archive().unwrap();
+
+        // Task should remain in tasks/
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        assert!(tasks_dir.join("004-disabled-archive.md").exists());
+    }
+
+    #[test]
+    fn auto_archive_noop_when_none() {
+        use crate::team::config::WorkflowPolicy;
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Disabled: auto_archive_done_after_secs = None (default)
+        let policy = WorkflowPolicy {
+            auto_archive_done_after_secs: None,
+            ..WorkflowPolicy::default()
+        };
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .workflow_policy(policy)
+            .build();
+        backdate_auto_archive(&mut daemon);
+
+        write_done_task_with_completed(tmp.path(), 5, "none-archive", "2020-01-01T00:00:00+00:00");
+
+        daemon.maybe_auto_archive().unwrap();
+
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        assert!(tasks_dir.join("005-none-archive.md").exists());
     }
 }
