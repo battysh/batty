@@ -112,6 +112,7 @@ pub struct TeamDaemon {
     pub(super) paused_standups: HashSet<String>,
     pub(super) last_standup: HashMap<String, Instant>,
     pub(super) last_board_rotation: Instant,
+    pub(super) last_auto_archive: Instant,
     pub(super) last_auto_dispatch: Instant,
     pub(super) pipeline_starvation_fired: bool,
     pub(super) pipeline_starvation_last_fired: Option<Instant>,
@@ -370,6 +371,7 @@ impl TeamDaemon {
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
+            last_auto_archive: Instant::now(),
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             pipeline_starvation_last_fired: None,
@@ -568,6 +570,7 @@ impl TeamDaemon {
                 Ok(())
             });
             self.run_recoverable_step("maybe_rotate_board", |daemon| daemon.maybe_rotate_board());
+            self.run_recoverable_step("maybe_auto_archive", |daemon| daemon.maybe_auto_archive());
             self.run_recoverable_step_with_catch_unwind("maybe_generate_retrospective", |daemon| {
                 daemon.maybe_generate_retrospective()
             });

@@ -1055,6 +1055,7 @@ mod tests {
             paused_standups: HashSet::new(),
             last_standup: HashMap::new(),
             last_board_rotation: Instant::now(),
+            last_auto_archive: Instant::now(),
             last_auto_dispatch: Instant::now(),
             pipeline_starvation_fired: false,
             pipeline_starvation_last_fired: None,
