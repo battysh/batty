@@ -3841,4 +3841,114 @@ mod tests {
             "medium task should NOT be nudged at 400s (threshold 1800s)"
         );
     }
+
+    // ── Error-path sentinel tests ──────────────────────────────────────
+
+    #[test]
+    fn load_daemon_state_returns_none_for_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No daemon state file exists
+        let result = load_daemon_state(tmp.path());
+        assert!(result.is_none(), "missing state file should return None");
+    }
+
+    #[test]
+    fn load_daemon_state_returns_none_for_corrupt_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = super::daemon_state_path(tmp.path());
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        std::fs::write(&state_path, "not valid json {{{").unwrap();
+
+        let result = load_daemon_state(tmp.path());
+        assert!(
+            result.is_none(),
+            "corrupt JSON should return None, not panic"
+        );
+    }
+
+    #[test]
+    fn save_daemon_state_returns_error_on_readonly_dir() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tmp = tempfile::tempdir().unwrap();
+            let lock_dir = tmp.path().join(".batty");
+            std::fs::create_dir_all(&lock_dir).unwrap();
+            // Make directory read-only so write fails
+            std::fs::set_permissions(&lock_dir, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+            let state = PersistedDaemonState {
+                clean_shutdown: false,
+                saved_at: 0,
+                states: HashMap::new(),
+                active_tasks: HashMap::new(),
+                retry_counts: HashMap::new(),
+                dispatch_queue: Vec::new(),
+                paused_standups: HashSet::new(),
+                last_standup_elapsed_secs: HashMap::new(),
+                nudge_state: HashMap::new(),
+                pipeline_starvation_fired: false,
+            };
+
+            let result = save_daemon_state(tmp.path(), &state);
+            // Restore permissions for cleanup
+            std::fs::set_permissions(&lock_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(
+                result.is_err(),
+                "writing to read-only directory should return error, not panic"
+            );
+        }
+    }
+
+    #[test]
+    fn watcher_mut_missing_member_returns_error_not_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+        let mut daemon = make_test_daemon(tmp.path(), vec![manager_member("manager", None)]);
+
+        let result = daemon.watcher_mut("nonexistent-member");
+        match result {
+            Ok(_) => panic!("expected error for missing member"),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("nonexistent-member"),
+                    "error should name the missing member, got: {msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extract_nudge_missing_file_returns_none_not_panic() {
+        let result = extract_nudge_section(Path::new("/nonexistent/path/prompt.md"));
+        assert!(
+            result.is_none(),
+            "missing prompt file should return None, not panic"
+        );
+    }
+
+    #[test]
+    fn binary_fingerprint_capture_missing_file_returns_error() {
+        let result = BinaryFingerprint::capture(Path::new("/nonexistent/binary"));
+        assert!(
+            result.is_err(),
+            "capturing fingerprint of missing file should return error, not panic"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("/nonexistent/binary"),
+            "error should include the file path"
+        );
+    }
+
+    #[test]
+    fn load_dispatch_queue_graceful_when_no_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let queue = load_dispatch_queue_snapshot(tmp.path());
+        assert!(
+            queue.is_empty(),
+            "dispatch queue from missing state should be empty, not panic"
+        );
+    }
 }
