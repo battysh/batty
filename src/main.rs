@@ -214,8 +214,8 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Validate => {
-            team::validate_team(&root)?;
+        Command::Validate { show_checks } => {
+            team::validate_team(&root, show_checks)?;
         }
 
         Command::Config { json } => {

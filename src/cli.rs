@@ -82,7 +82,11 @@ pub enum Command {
     },
 
     /// Validate team config without launching
-    Validate,
+    Validate {
+        /// Show all individual checks with pass/fail status
+        #[arg(long, default_value_t = false)]
+        show_checks: bool,
+    },
 
     /// Show resolved team configuration
     Config {
@@ -781,7 +785,19 @@ mod tests {
     #[test]
     fn validate_subcommand_parses() {
         let cli = Cli::parse_from(["batty", "validate"]);
-        assert!(matches!(cli.command, Command::Validate));
+        match cli.command {
+            Command::Validate { show_checks } => assert!(!show_checks),
+            other => panic!("expected validate command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_subcommand_show_checks_flag() {
+        let cli = Cli::parse_from(["batty", "validate", "--show-checks"]);
+        match cli.command {
+            Command::Validate { show_checks } => assert!(show_checks),
+            other => panic!("expected validate command with show_checks, got {other:?}"),
+        }
     }
 
     #[test]
