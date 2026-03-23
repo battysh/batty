@@ -363,8 +363,21 @@ fn main() -> Result<()> {
                 role,
                 all_roles,
                 before,
+                older_than,
                 all,
             }) => {
+                let before = match (before, older_than) {
+                    (Some(ts), _) => Some(ts),
+                    (_, Some(dur)) => {
+                        let age = team::board::parse_age_threshold(&dur)?;
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs();
+                        Some(now.saturating_sub(age.as_secs()))
+                    }
+                    _ => None,
+                };
                 let summary = team::purge_inbox(&root, role.as_deref(), all_roles, before, all)?;
                 if all_roles {
                     println!(
