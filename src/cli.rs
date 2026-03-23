@@ -281,6 +281,8 @@ pub enum BoardCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Show board health dashboard
+    Health,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -610,6 +612,17 @@ mod tests {
                 assert!(dry_run);
             }
             other => panic!("expected board archive command with dry_run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn board_health_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "board", "health"]);
+        match cli.command {
+            Command::Board {
+                command: Some(BoardCommand::Health),
+            } => {}
+            other => panic!("expected board health command, got {other:?}"),
         }
     }
 
