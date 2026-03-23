@@ -37,6 +37,7 @@ Commands:
   nudge            Per-intervention runtime toggles
   pause            Pause nudges and standups
   resume           Resume nudges and standups
+  grafana          Manage Grafana monitoring (setup, status, open)
   telegram         Set up Telegram bot for human communication
   load             Estimate team load and show recent load history
   queue            Show pending dispatch queue entries
@@ -384,6 +385,80 @@ Usage: batty export-template [OPTIONS] <NAME>
 Arguments:
   <NAME>
           Template name
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty grafana`
+
+Manage Grafana monitoring (setup, status, open)
+
+```text
+Manage Grafana monitoring (setup, status, open)
+
+Usage: batty grafana [OPTIONS] <COMMAND>
+
+Commands:
+  setup   Install Grafana and the SQLite datasource plugin, then start the service
+  status  Check whether the Grafana server is reachable
+  open    Open the Grafana dashboard in the default browser
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty grafana open`
+
+Open the Grafana dashboard in the default browser
+
+```text
+Open the Grafana dashboard in the default browser
+
+Usage: batty grafana open [OPTIONS]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty grafana setup`
+
+Install Grafana and the SQLite datasource plugin, then start the service
+
+```text
+Install Grafana and the SQLite datasource plugin, then start the service
+
+Usage: batty grafana setup [OPTIONS]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty grafana status`
+
+Check whether the Grafana server is reachable
+
+```text
+Check whether the Grafana server is reachable
+
+Usage: batty grafana status [OPTIONS]
 
 Options:
   -v, --verbose...

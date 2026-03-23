@@ -28,6 +28,44 @@ Optional runtime defaults are read from `.batty/config.toml` when the file is pr
 | `dangerous_mode.enabled` | boolean | `false` | Enable dangerous-mode flags for supported agent wrappers. |
 | `policy.auto_answer` | table[string -> string] | `{}` | Prompt-to-answer overrides for runtime paths that use this config. |
 
+## Agent Backend Configuration (team.yaml)
+
+Team topology is configured in `.batty/team_config/team.yaml`. Each role can specify which agent backend to use.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `agent` (team-level) | string or null | `claude` | Default agent backend for all roles. |
+| `roles[].agent` | string or null | _(inherits team default)_ | Per-role agent backend override. |
+
+Resolution order: role-level `agent` > team-level `agent` > `"claude"` (hardcoded default).
+
+Supported backends: `claude`, `codex`, `kiro`.
+
+Use `batty init --agent <backend>` to scaffold a team config with a specific default backend.
+
+Use `batty validate --show-checks` to verify all configured backends are installed and reachable.
+
+### Example
+
+```yaml
+name: my-team
+agent: claude  # team default
+
+roles:
+  - name: architect
+    role_type: architect
+    agent: codex   # override: use codex for architect
+    instances: 1
+  - name: manager
+    role_type: manager
+    instances: 1
+    # inherits team default (claude)
+  - name: eng
+    role_type: engineer
+    agent: kiro    # override: use kiro for engineers
+    instances: 3
+```
+
 ## Default Template
 
 ```toml
