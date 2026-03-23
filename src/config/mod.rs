@@ -37,7 +37,6 @@ pub struct Defaults {
 /// "Allow tool" = "y"
 /// ```
 #[derive(Debug, Deserialize, Default)]
-#[allow(dead_code)] // Used by policy engine (task #8), wired in task #12
 pub struct PolicyConfig {
     #[serde(default)]
     pub auto_answer: HashMap<String, String>,
@@ -174,7 +173,6 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub defaults: Defaults,
     #[serde(default)]
-    #[allow(dead_code)] // Used by policy engine, wired in task #12
     pub policy: PolicyConfig,
     #[serde(default)]
     pub supervisor: SupervisorConfig,

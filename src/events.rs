@@ -46,7 +46,6 @@ pub enum PipeEvent {
     /// Executor made a git commit.
     CommitMade { hash: String, message: String },
     /// Raw output line (for lines that don't match any pattern).
-    #[allow(dead_code)] // Retained for optional verbose event buffering and dedicated tests.
     OutputLine { line: String },
 }
 
@@ -207,13 +206,11 @@ impl EventBuffer {
     }
 
     /// Check if the buffer is empty.
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Clear all events.
-    #[allow(dead_code)]
     pub fn clear(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.events.clear();

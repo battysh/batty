@@ -104,7 +104,6 @@ impl TeamEvent {
         Self::base("daemon_reloaded")
     }
 
-    #[allow(dead_code)]
     pub fn daemon_stopped() -> Self {
         Self::base("daemon_stopped")
     }
@@ -446,7 +445,6 @@ impl EventSink {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         &self.path
     }

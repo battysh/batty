@@ -97,7 +97,6 @@ pub struct ModelPricing {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct WorkflowPolicy {
     #[serde(default)]
     pub wip_limit_per_engineer: Option<u32>,

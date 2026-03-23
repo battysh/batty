@@ -41,7 +41,6 @@ pub struct LogEntry {
 }
 
 /// All event types that can appear in the execution log.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", content = "data")]
 #[serde(rename_all = "snake_case")]
@@ -179,7 +178,6 @@ pub enum LogEvent {
 /// Writer for JSON lines execution logs.
 pub struct ExecutionLog {
     writer: Mutex<BufWriter<File>>,
-    #[allow(dead_code)]
     path: PathBuf,
 }
 
@@ -225,7 +223,6 @@ impl ExecutionLog {
     }
 
     /// Get the path to the log file.
-    #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         &self.path
     }
