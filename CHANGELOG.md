@@ -2,6 +2,20 @@
 
 All notable changes to Batty are documented here.
 
+## 0.5.2 — 2026-03-23
+
+Patch release adding crates.io publishing and Enter key delivery fix.
+
+### Reliability
+
+- **Enter key reliability** (#302) — paste verification + retry in `inject_message()`. Messages now reliably submit after injection instead of sitting idle in the pane.
+
+### Infrastructure
+
+- **crates.io publishing** — `cargo install batty-cli` now installs the latest release from crates.io. Release workflow publishes automatically on tag push.
+
+---
+
 ## 0.5.1 — 2026-03-22
 
 Patch release with developer experience improvements and delivery reliability fix.
