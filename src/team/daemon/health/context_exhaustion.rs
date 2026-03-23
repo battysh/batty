@@ -76,9 +76,10 @@ impl TeamDaemon {
             member_name,
             &task,
         );
-        if let Err(error) =
-            super::super::super::checkpoint::write_checkpoint(&self.config.project_root, &checkpoint)
-        {
+        if let Err(error) = super::super::super::checkpoint::write_checkpoint(
+            &self.config.project_root,
+            &checkpoint,
+        ) {
             warn!(member = %member_name, error = %error, "failed to write progress checkpoint");
         }
 
@@ -265,11 +266,9 @@ mod tests {
                 .join("events.jsonl"),
         )
         .unwrap();
-        assert!(events
-            .iter()
-            .any(|event| event.event == "agent_restarted"
-                && event.task.as_deref() == Some("42")
-                && event.reason.as_deref() == Some("context_exhausted")));
+        assert!(events.iter().any(|event| event.event == "agent_restarted"
+            && event.task.as_deref() == Some("42")
+            && event.reason.as_deref() == Some("context_exhausted")));
 
         let restart_msg =
             inbox::pending_messages(&inbox::inboxes_root(tmp.path()), member_name).unwrap();
@@ -305,13 +304,8 @@ mod tests {
 
         write_owned_task_file(tmp.path(), 42, "test-task", "in-progress", member_name);
 
-        crate::tmux::create_session(
-            &session,
-            "bash",
-            &[],
-            wrong_dir.to_string_lossy().as_ref(),
-        )
-        .unwrap();
+        crate::tmux::create_session(&session, "bash", &[], wrong_dir.to_string_lossy().as_ref())
+            .unwrap();
         crate::tmux::create_window(
             &session,
             "keeper",
