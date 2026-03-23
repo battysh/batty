@@ -9,6 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
+use super::helpers::MemberWorktreeContext;
 use super::*;
 
 impl TeamDaemon {
