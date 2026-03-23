@@ -162,10 +162,7 @@ impl TeamDaemon {
 mod tests {
     use super::super::super::*;
     use super::super::test_helpers::test_team_config;
-    use crate::team::config::{
-        AutomationConfig, BoardConfig, OrchestratorPosition, RoleType, StandupConfig, TeamConfig,
-        WorkflowMode, WorkflowPolicy,
-    };
+    use crate::team::config::RoleType;
     use crate::team::events::TeamEvent;
     use crate::team::hierarchy::MemberInstance;
     use crate::team::standup::MemberState;
@@ -297,7 +294,7 @@ mod tests {
 
         let member_name = "eng-ctx-cwd";
         let lead_name = "manager-ctx-cwd";
-        let (fake_bin, fake_log) = setup_fake_claude(&tmp, member_name);
+        let (fake_bin, _fake_log) = setup_fake_claude(&tmp, member_name);
         let inbox_root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&inbox_root, lead_name).unwrap();
         inbox::init_inbox(&inbox_root, member_name).unwrap();

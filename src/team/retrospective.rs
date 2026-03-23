@@ -402,7 +402,8 @@ pub fn analyze_from_db(conn: &Connection) -> Option<RunStats> {
         )
         .ok()?;
 
-    let rows: Vec<(i64, String, Option<String>, Option<String>, String)> = stmt
+    type EventRow = (i64, String, Option<String>, Option<String>, String);
+    let rows: Vec<EventRow> = stmt
         .query_map(params![run_start as i64], |row| {
             Ok((
                 row.get(0)?,

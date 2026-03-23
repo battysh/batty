@@ -91,7 +91,7 @@ mod tests {
     use super::super::super::*;
     use super::super::helpers::{board_dir, ensure_board_initialized, ensure_kanban_available};
     use super::super::test_helpers::{EnvVarGuard, PATH_LOCK, setup_fake_kanban, test_team_config};
-    use crate::team::config::{OrchestratorPosition, RoleType};
+    use crate::team::config::RoleType;
     use crate::team::hierarchy::MemberInstance;
     use crate::team::test_support::{
         TestDaemonBuilder, architect_member, engineer_member, init_git_repo, setup_fake_claude,
