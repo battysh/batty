@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD041 -->
 <p align="center">
   <img src="assets/batty-icon.png" alt="Batty" width="200">
   <h1 align="center">Batty</h1>
@@ -108,7 +109,7 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 `batty init --template <name>` scaffolds a ready-to-run team:
 
 | Template | Agents | Description |
-|---|---:|---|
+| --- | ---: | --- |
 | `solo` | 1 | Single engineer, no hierarchy |
 | `pair` | 2 | Architect + 1 engineer |
 | `simple` | 6 | Human + architect + manager + 3 engineers |
@@ -146,7 +147,7 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 ## CLI Quick Reference
 
 | Command | Purpose |
-|---|---|
+| --- | --- |
 | `batty init [--template NAME]` | Scaffold `.batty/team_config/` |
 | `batty start [--attach]` | Launch the daemon and tmux session |
 | `batty stop` / `batty attach` | Stop or reattach to the team session |
