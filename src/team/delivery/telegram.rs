@@ -144,23 +144,21 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
+    use super::super::MessageDelivery;
     use super::TELEGRAM_DELIVERY_CIRCUIT_BREAKER_COOLDOWN;
     use super::TELEGRAM_DELIVERY_CIRCUIT_BREAKER_THRESHOLD;
-    use super::super::{FAILED_DELIVERY_RETRY_DELAY, MessageDelivery};
     use crate::team::comms::Channel;
     use crate::team::config::OrchestratorPosition;
-    use crate::team::config::{
-        AutomationConfig, BoardConfig, ChannelConfig, RoleDef, StandupConfig, WorkflowMode,
-        WorkflowPolicy,
-    };
     use crate::team::config::RoleType;
+    use crate::team::config::{
+        AutomationConfig, BoardConfig, StandupConfig, WorkflowMode, WorkflowPolicy,
+    };
     use crate::team::daemon::{DaemonConfig, TeamDaemon};
     use crate::team::errors::DeliveryError;
     use crate::team::events::EventSink;
     use crate::team::failure_patterns::FailureTracker;
     use crate::team::hierarchy::MemberInstance;
     use crate::team::inbox;
-    use crate::team::message;
 
     struct RecordingChannel {
         messages: Arc<Mutex<Vec<String>>>,
