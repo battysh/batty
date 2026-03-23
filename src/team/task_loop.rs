@@ -2120,4 +2120,65 @@ mod tests {
         let recycled = recycle_cron_tasks(tmp.path()).unwrap();
         assert!(recycled.is_empty(), "future trigger should be skipped");
     }
+
+    // --- sentinel tests for error resilience (#311) ---
+
+    /// Refresh on a stale/nonexistent worktree should return Ok, not panic.
+    #[test]
+    fn refresh_nonexistent_worktree_returns_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_worktree = tmp.path().join("does-not-exist");
+        let team_cfg = tmp.path().join("team_config");
+        std::fs::create_dir_all(&team_cfg).unwrap();
+
+        let result =
+            refresh_engineer_worktree(tmp.path(), &fake_worktree, "no-branch", &team_cfg);
+        // Non-existent worktree should be handled gracefully (early return Ok)
+        assert!(
+            result.is_ok(),
+            "refresh on nonexistent worktree should not panic: {result:?}"
+        );
+    }
+
+    /// run_tests_in_worktree should return a clean error when cargo is not
+    /// found or the directory is invalid, not panic.
+    #[test]
+    fn test_gating_missing_dir_returns_error() {
+        let fake_dir = Path::new("/tmp/batty-nonexistent-worktree-test-311");
+        let result = run_tests_in_worktree(fake_dir);
+        // Should propagate an error via context, not panic
+        assert!(
+            result.is_err(),
+            "run_tests_in_worktree on missing dir should return Err"
+        );
+        let err_msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            err_msg.contains("cargo test") || err_msg.contains("failed"),
+            "error should describe the failed cargo test operation, got: {err_msg}"
+        );
+    }
+
+    /// checkout_worktree_branch_from_main should propagate an error cleanly
+    /// when run against a non-git directory, not panic.
+    #[test]
+    fn checkout_branch_in_non_git_dir_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        // tmp is not a git repo, so git operations should fail
+        let result = checkout_worktree_branch_from_main(tmp.path(), "fake-branch");
+        assert!(
+            result.is_err(),
+            "checkout on non-git dir should return Err, not panic"
+        );
+    }
+
+    /// Verify the production code in this file has zero bare .unwrap() or
+    /// .expect() calls (only safe fallback variants like unwrap_or_default).
+    #[test]
+    fn no_panicking_unwraps_in_production_code() {
+        let count = production_unwrap_expect_count(Path::new("src/team/task_loop.rs"));
+        assert_eq!(
+            count, 0,
+            "production code should have zero bare .unwrap()/.expect() calls, found {count}"
+        );
+    }
 }
