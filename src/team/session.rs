@@ -499,6 +499,13 @@ pub fn validate_team(project_root: &Path, verbose: bool) -> Result<()> {
     );
     println!("Roles: {}", team_config.roles.len());
     println!("Total members: {}", members.len());
+
+    // Backend health checks — warn about missing binaries but don't fail validation.
+    let backend_warnings = team_config.check_backend_health();
+    for warning in &backend_warnings {
+        println!("[WARN] {warning}");
+    }
+
     for note in migration_validation_notes(&team_config, workflow_mode_is_explicit) {
         println!("{note}");
     }

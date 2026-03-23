@@ -378,7 +378,54 @@ impl TeamConfig {
             });
         }
 
+        // 8. Backend health checks (warnings, not failures)
+        for (agent_name, health) in self.backend_health_results() {
+            let healthy = health.is_healthy();
+            checks.push(ValidationCheck {
+                name: format!("backend_health:{agent_name}"),
+                passed: healthy,
+                detail: if healthy {
+                    format!("backend '{agent_name}' is available")
+                } else {
+                    format!(
+                        "backend '{agent_name}' binary not found on PATH (status: {})",
+                        health.as_str()
+                    )
+                },
+            });
+        }
+
         checks
+    }
+
+    /// Collect unique configured backends and their health status.
+    pub fn backend_health_results(&self) -> Vec<(String, agent::BackendHealth)> {
+        let mut seen = HashSet::new();
+        let mut results = Vec::new();
+        for role in &self.roles {
+            if let Some(agent_name) = self.resolve_agent(role) {
+                if seen.insert(agent_name.clone()) {
+                    let health = agent::health_check_by_name(&agent_name)
+                        .unwrap_or(agent::BackendHealth::Unreachable);
+                    results.push((agent_name, health));
+                }
+            }
+        }
+        results
+    }
+
+    /// Return warning messages for any unhealthy backends.
+    pub fn check_backend_health(&self) -> Vec<String> {
+        self.backend_health_results()
+            .into_iter()
+            .filter(|(_, health)| !health.is_healthy())
+            .map(|(name, health)| {
+                format!(
+                    "backend '{name}' binary not found on PATH (status: {})",
+                    health.as_str()
+                )
+            })
+            .collect()
     }
 }
 
