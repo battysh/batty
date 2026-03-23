@@ -7,6 +7,7 @@ use std::time::Instant;
 use anyhow::Result;
 use tracing::{info, warn};
 
+use super::super::helpers::format_stuck_duration;
 use super::super::*;
 use super::{OwnedTaskInterventionState, task_needs_owned_intervention};
 use crate::team::config::PlanningDirectiveFile;
