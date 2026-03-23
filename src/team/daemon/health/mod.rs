@@ -13,8 +13,8 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result};
 use super::*;
+use anyhow::{Context, Result};
 
 mod checks;
 mod context_exhaustion;
