@@ -13,6 +13,14 @@ use super::*;
 const CONTEXT_RESTART_COOLDOWN: Duration = Duration::from_secs(30);
 const STARTUP_PREFLIGHT_RESPAWN_DELAY: Duration = Duration::from_millis(200);
 
+/// Format checkpoint content for inclusion in a restart notice.
+///
+/// Wraps the checkpoint content with `[RESUMING FROM CHECKPOINT]` and
+/// `[END CHECKPOINT]` markers so the restarted agent can parse it.
+fn format_checkpoint_section(cp_content: &str) -> String {
+    format!("\n\n[RESUMING FROM CHECKPOINT]\n{cp_content}\n[END CHECKPOINT]")
+}
+
 impl TeamDaemon {
     pub(super) fn run_startup_preflight(&mut self) -> Result<()> {
         ensure_tmux_session_ready(&self.config.session)?;
@@ -237,8 +245,7 @@ impl TeamDaemon {
         if let Some(cp_content) =
             super::super::checkpoint::read_checkpoint(&self.config.project_root, member_name)
         {
-            restart_notice.push_str("\n\n--- Progress Checkpoint ---\n");
-            restart_notice.push_str(&cp_content);
+            restart_notice.push_str(&format_checkpoint_section(&cp_content));
         }
         if let Err(error) = self.queue_message("daemon", member_name, &restart_notice) {
             warn!(member = %member_name, error = %error, "failed to inject restart notice");
@@ -389,8 +396,7 @@ Next step: decide whether to split the task, redirect the engineer, or intervene
         if let Some(cp_content) =
             super::super::checkpoint::read_checkpoint(&self.config.project_root, member_name)
         {
-            restart_notice.push_str("\n\n--- Progress Checkpoint ---\n");
-            restart_notice.push_str(&cp_content);
+            restart_notice.push_str(&format_checkpoint_section(&cp_content));
         }
         if let Err(error) = self.queue_message("daemon", member_name, &restart_notice) {
             warn!(member = %member_name, error = %error, "failed to inject stall restart notice");
@@ -4596,5 +4602,85 @@ exit 1
             .current_dir(&repo)
             .args(["branch", "-D", &base])
             .output();
+    }
+
+    // ── format_checkpoint_section tests ──
+
+    #[test]
+    fn restart_includes_checkpoint() {
+        let cp_content = "# Progress Checkpoint: eng-1-1\n\n**Task:** #42 — Fix widget\n";
+        let section = super::format_checkpoint_section(cp_content);
+        assert!(
+            section.contains("[RESUMING FROM CHECKPOINT]"),
+            "must contain opening marker"
+        );
+        assert!(
+            section.contains("[END CHECKPOINT]"),
+            "must contain closing marker"
+        );
+        assert!(
+            section.contains(cp_content),
+            "must include the checkpoint content verbatim"
+        );
+    }
+
+    #[test]
+    fn handles_missing_checkpoint() {
+        // read_checkpoint returns None for a nonexistent role — the restart
+        // notice should be constructed without any checkpoint section.
+        let tmp = tempfile::tempdir().unwrap();
+        let cp = crate::team::checkpoint::read_checkpoint(tmp.path(), "eng-no-such-role");
+        assert!(cp.is_none(), "missing checkpoint must return None");
+
+        // When None, the restart notice must not contain checkpoint markers.
+        let mut notice = String::from("Restarted after context exhaustion.");
+        if let Some(cp_content) = cp {
+            notice.push_str(&super::format_checkpoint_section(&cp_content));
+        }
+        assert!(
+            !notice.contains("[RESUMING FROM CHECKPOINT]"),
+            "no checkpoint marker when checkpoint is missing"
+        );
+        assert!(
+            !notice.contains("[END CHECKPOINT]"),
+            "no end marker when checkpoint is missing"
+        );
+    }
+
+    #[test]
+    fn content_matches() {
+        // Write a checkpoint, read it back, wrap it — the content between
+        // markers must match the original checkpoint file content.
+        let tmp = tempfile::tempdir().unwrap();
+        let cp = crate::team::checkpoint::Checkpoint {
+            role: "eng-1-1".to_string(),
+            task_id: 77,
+            task_title: "Checkpoint round-trip".to_string(),
+            task_description: "Verify checkpoint content survives the round-trip.".to_string(),
+            branch: Some("eng-1-1/77".to_string()),
+            last_commit: Some("deadbeef checkpoint test".to_string()),
+            test_summary: Some("test result: ok. 3 passed".to_string()),
+            timestamp: "2026-03-22T14:00:00Z".to_string(),
+        };
+        crate::team::checkpoint::write_checkpoint(tmp.path(), &cp).unwrap();
+
+        let read_back = crate::team::checkpoint::read_checkpoint(tmp.path(), "eng-1-1").unwrap();
+        let section = super::format_checkpoint_section(&read_back);
+
+        // Extract content between markers.
+        let start_marker = "[RESUMING FROM CHECKPOINT]\n";
+        let end_marker = "\n[END CHECKPOINT]";
+        let start = section.find(start_marker).expect("missing start marker") + start_marker.len();
+        let end = section.find(end_marker).expect("missing end marker");
+        let extracted = &section[start..end];
+
+        assert_eq!(
+            extracted, read_back,
+            "content between markers must match the checkpoint file"
+        );
+        assert!(extracted.contains("**Task:** #77"));
+        assert!(extracted.contains("eng-1-1/77"));
+        assert!(extracted.contains("deadbeef checkpoint test"));
+        assert!(extracted.contains("3 passed"));
     }
 }
