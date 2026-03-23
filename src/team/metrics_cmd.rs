@@ -175,7 +175,7 @@ pub fn format_dashboard(m: &DashboardMetrics) -> String {
     out.push('\n');
     let avg = m
         .avg_cycle_time_secs
-        .map(|s| format_duration(s))
+        .map(format_duration)
         .unwrap_or_else(|| na.clone());
     let min = m
         .min_cycle_time_secs
@@ -223,7 +223,7 @@ pub fn format_dashboard(m: &DashboardMetrics) -> String {
         .unwrap_or_else(|| na.clone());
     let latency = m
         .avg_review_latency_secs
-        .map(|s| format_duration(s))
+        .map(format_duration)
         .unwrap_or_else(|| na.clone());
     out.push_str(&format!("  Auto-merge Rate: {}\n", amr));
     out.push_str(&format!(
