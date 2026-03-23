@@ -220,7 +220,6 @@ fn engineer_instance_name(
 }
 
 /// Count total panes needed (excludes user roles which have no pane).
-#[allow(dead_code)] // Used by layout/capacity tests and future sizing checks.
 pub fn pane_count(members: &[MemberInstance]) -> usize {
     members
         .iter()
