@@ -763,14 +763,16 @@ fn spawn_daemon(project_root: &Path, resume: bool) -> Result<u32> {
         Ok(Some(status)) => {
             let _ = std::fs::remove_file(&pid_path);
             // Read the last few lines of the daemon log for the actual error
-            let tail = std::fs::read_to_string(&log_path)
-                .ok()
-                .and_then(|s| {
-                    let lines: Vec<&str> = s.lines().collect();
-                    let start = lines.len().saturating_sub(5);
-                    let tail = lines[start..].join("\n");
-                    if tail.trim().is_empty() { None } else { Some(tail) }
-                });
+            let tail = std::fs::read_to_string(&log_path).ok().and_then(|s| {
+                let lines: Vec<&str> = s.lines().collect();
+                let start = lines.len().saturating_sub(5);
+                let tail = lines[start..].join("\n");
+                if tail.trim().is_empty() {
+                    None
+                } else {
+                    Some(tail)
+                }
+            });
             match tail {
                 Some(detail) => bail!(
                     "daemon process exited immediately with {status}\n\n\
