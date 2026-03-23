@@ -348,7 +348,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use super::super::{FailedDelivery, MessageDelivery, PendingMessage, FAILED_DELIVERY_RETRY_DELAY, FAILED_DELIVERY_MAX_ATTEMPTS};
+    use super::super::{MessageDelivery, PendingMessage};
     use crate::team::AssignmentResultStatus;
     use crate::team::comms::Channel;
     use crate::team::config::OrchestratorPosition;
@@ -909,8 +909,7 @@ mod tests {
         let msg = inbox::InboxMessage::new_send("manager", "eng-1", "test assignment");
         inbox::deliver_to_inbox(&root, &msg).unwrap();
 
-        let mut watcher =
-            crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        let mut watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
         watcher.activate();
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
@@ -933,8 +932,7 @@ mod tests {
         let msg = inbox::InboxMessage::new_send("manager", "eng-1", "test assignment");
         inbox::deliver_to_inbox(&root, &msg).unwrap();
 
-        let mut watcher =
-            crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        let mut watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
         watcher.confirm_ready();
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
@@ -1030,8 +1028,7 @@ mod tests {
     fn pending_queue_buffers_message_when_agent_not_ready() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
-        let watcher =
-            crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        let watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
         assert!(!watcher.is_ready_for_delivery());
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
@@ -1065,8 +1062,7 @@ mod tests {
                 queued_at: Instant::now(),
             });
 
-        let mut watcher =
-            crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        let mut watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
         watcher.confirm_ready();
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
@@ -1106,8 +1102,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
 
-        let watcher =
-            crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        let watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
         for i in 1..=3u32 {
@@ -1149,8 +1144,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
 
-        let watcher =
-            crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        let watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
         assert!(!watcher.is_ready_for_delivery());
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
