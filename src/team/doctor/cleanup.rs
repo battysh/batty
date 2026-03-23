@@ -6,9 +6,7 @@ use tracing::info;
 
 use super::super::config::TeamConfig;
 use super::super::git_cmd;
-use super::util::{
-    display_cleanup_path, is_task_branch, launch_state_path, load_team_config,
-};
+use super::util::{display_cleanup_path, is_task_branch, launch_state_path, load_team_config};
 use super::{CleanupPlan, CleanupSummary, OrphanStatus};
 use crate::task::load_tasks_from_dir;
 
@@ -307,7 +305,7 @@ roles:
 
         let paths = vec![
             launch_state_path(root),
-            super::super::super::daemon_state_path(root),
+            crate::team::daemon_state_path(root),
             batty_dir.join("merge.lock"),
         ];
 
@@ -457,10 +455,7 @@ roles:
 
         assert_eq!(candidates.len(), 3);
         assert_eq!(candidates[0], launch_state_path(tmp.path()));
-        assert_eq!(
-            candidates[1],
-            super::super::super::daemon_state_path(tmp.path())
-        );
+        assert_eq!(candidates[1], crate::team::daemon_state_path(tmp.path()));
         assert_eq!(candidates[2], tmp.path().join(".batty").join("merge.lock"));
     }
 
