@@ -268,7 +268,21 @@ fn main() -> Result<()> {
     debug!(root = %root.display(), "project root");
 
     match cli.command {
-        Command::Init { template, from, force } => {
+        Command::Init {
+            template,
+            from,
+            force,
+            agent,
+        } => {
+            // Validate agent name if provided
+            if let Some(ref name) = agent {
+                if agent::adapter_from_name(name).is_none() {
+                    bail!(
+                        "unknown agent backend '{name}'. Supported: {}",
+                        agent::KNOWN_AGENT_NAMES.join(", ")
+                    );
+                }
+            }
             let created = if let Some(template_name) = from.as_deref() {
                 team::init_from_template(&root, template_name)?
             } else {
@@ -282,7 +296,6 @@ fn main() -> Result<()> {
                     cli::InitTemplate::Software => "software",
                     cli::InitTemplate::Batty => "batty",
                 };
-
                 // Interactive prompts for project name and agent
                 let default_name = root
                     .file_name()
@@ -293,14 +306,18 @@ fn main() -> Result<()> {
                     .default(default_name)
                     .interact_text()?;
 
-                let agents = agent::KNOWN_AGENT_NAMES;
-                let default_idx = agents.iter().position(|&a| a == "claude").unwrap_or(0);
-                let agent_idx = Select::new()
-                    .with_prompt("Agent backend")
-                    .items(agents)
-                    .default(default_idx)
-                    .interact()?;
-                let agent = agents[agent_idx];
+                let selected_agent = if let Some(agent_name) = agent.as_deref() {
+                    agent_name
+                } else {
+                    let agents = agent::KNOWN_AGENT_NAMES;
+                    let default_idx = agents.iter().position(|&a| a == "claude").unwrap_or(0);
+                    let agent_idx = Select::new()
+                        .with_prompt("Agent backend")
+                        .items(agents)
+                        .default(default_idx)
+                        .interact()?;
+                    agents[agent_idx]
+                };
 
                 let overrides = collect_init_overrides()?;
 
@@ -308,7 +325,7 @@ fn main() -> Result<()> {
                     &root,
                     template_name,
                     Some(&project_name),
-                    Some(agent),
+                    Some(selected_agent),
                     force,
                     Some(&overrides),
                 )?
