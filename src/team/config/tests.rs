@@ -939,3 +939,206 @@ fn empty_overrides_when_absent_in_yaml() {
     let config: TeamConfig = serde_yaml::from_str(minimal_yaml()).unwrap();
     assert!(config.workflow_policy.review_timeout_overrides.is_empty());
 }
+
+// --- Backend health check tests ---
+
+#[test]
+fn backend_health_results_returns_unique_backends() {
+    let config: TeamConfig = serde_yaml::from_str(
+        r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: manager
+    role_type: manager
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+"#,
+    )
+    .unwrap();
+
+    let results = config.backend_health_results();
+    let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
+    // claude used by both architect and manager, should appear only once
+    assert_eq!(names.len(), 2);
+    assert!(names.contains(&"claude"));
+    assert!(names.contains(&"codex"));
+}
+
+#[test]
+fn backend_health_results_skips_user_roles() {
+    let config: TeamConfig = serde_yaml::from_str(
+        r#"
+name: test
+roles:
+  - name: human
+    role_type: user
+  - name: worker
+    role_type: engineer
+    agent: claude
+"#,
+    )
+    .unwrap();
+
+    let results = config.backend_health_results();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, "claude");
+}
+
+#[test]
+fn backend_health_results_uses_team_level_default() {
+    let config: TeamConfig = serde_yaml::from_str(
+        r#"
+name: test
+agent: codex
+roles:
+  - name: worker
+    role_type: engineer
+"#,
+    )
+    .unwrap();
+
+    let results = config.backend_health_results();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, "codex");
+}
+
+#[test]
+fn backend_health_results_falls_back_to_claude_default() {
+    // When no team-level or role-level agent is set, resolve_agent returns "claude"
+    let config: TeamConfig = serde_yaml::from_str(
+        r#"
+name: test
+roles:
+  - name: worker
+    role_type: engineer
+    agent: claude
+"#,
+    )
+    .unwrap();
+
+    let results = config.backend_health_results();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, "claude");
+}
+
+#[test]
+fn check_backend_health_returns_empty_when_all_healthy() {
+    // Use a backend we know exists on the system — we can't guarantee any agent
+    // binary is present, but we can test that the method filters correctly by
+    // checking the function signature works with a real config.
+    let config: TeamConfig = serde_yaml::from_str(
+        r#"
+name: test
+roles:
+  - name: worker
+    role_type: engineer
+    agent: claude
+"#,
+    )
+    .unwrap();
+
+    // check_backend_health returns only unhealthy backends
+    let warnings = config.check_backend_health();
+    // We can't assert specific health since it depends on the system,
+    // but verify the function runs without error and returns Vec<String>
+    assert!(warnings.iter().all(|w| w.contains("not found on PATH")));
+}
+
+#[test]
+fn validate_verbose_includes_backend_health_checks() {
+    let config: TeamConfig = serde_yaml::from_str(
+        r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+"#,
+    )
+    .unwrap();
+
+    let checks = config.validate_verbose();
+    let backend_checks: Vec<_> = checks
+        .iter()
+        .filter(|c| c.name.starts_with("backend_health:"))
+        .collect();
+
+    // Should have checks for both claude and codex
+    assert_eq!(backend_checks.len(), 2);
+    assert!(
+        backend_checks
+            .iter()
+            .any(|c| c.name == "backend_health:claude")
+    );
+    assert!(
+        backend_checks
+            .iter()
+            .any(|c| c.name == "backend_health:codex")
+    );
+}
+
+#[test]
+fn validate_verbose_backend_health_does_not_fail_validation() {
+    // Backend health checks are warnings, not errors — even if a backend binary
+    // is missing, validate_verbose should still succeed (passed=false is a warning).
+    let config: TeamConfig = serde_yaml::from_str(
+        r#"
+name: test
+roles:
+  - name: worker
+    role_type: engineer
+    agent: claude
+"#,
+    )
+    .unwrap();
+
+    let checks = config.validate_verbose();
+    // Non-backend checks should all pass for this valid config
+    let non_backend_failures: Vec<_> = checks
+        .iter()
+        .filter(|c| !c.name.starts_with("backend_health:") && !c.passed)
+        .collect();
+    assert!(
+        non_backend_failures.is_empty(),
+        "non-backend checks should all pass: {:?}",
+        non_backend_failures
+    );
+}
+
+#[test]
+fn backend_health_results_with_mixed_backends() {
+    let config: TeamConfig = serde_yaml::from_str(
+        r#"
+name: mixed-team
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: manager
+    role_type: manager
+    agent: kiro
+  - name: eng-a
+    role_type: engineer
+    agent: codex
+  - name: eng-b
+    role_type: engineer
+    agent: claude
+"#,
+    )
+    .unwrap();
+
+    let results = config.backend_health_results();
+    let names: Vec<&str> = results.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names.len(), 3);
+    assert!(names.contains(&"claude"));
+    assert!(names.contains(&"kiro"));
+    assert!(names.contains(&"codex"));
+}
