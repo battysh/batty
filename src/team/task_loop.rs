@@ -2080,8 +2080,7 @@ mod tests {
         let team_cfg = tmp.path().join("team_config");
         std::fs::create_dir_all(&team_cfg).unwrap();
 
-        let result =
-            refresh_engineer_worktree(tmp.path(), &fake_worktree, "no-branch", &team_cfg);
+        let result = refresh_engineer_worktree(tmp.path(), &fake_worktree, "no-branch", &team_cfg);
         // Non-existent worktree should be handled gracefully (early return Ok)
         assert!(
             result.is_ok(),
