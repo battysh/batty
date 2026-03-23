@@ -336,6 +336,15 @@ fn main() -> Result<()> {
                         );
                     }
                 }
+                Some(BoardCommand::Health) => {
+                    let events_path = root
+                        .join(".batty")
+                        .join("team_config")
+                        .join("events.jsonl");
+                    let health =
+                        team::board_health::compute_health(&board_dir, &events_path)?;
+                    print!("{}", team::board_health::format_health(&health));
+                }
                 None => {
                     let status = std::process::Command::new("kanban-md")
                         .args(["tui", "--dir", &board_dir.to_string_lossy()])
