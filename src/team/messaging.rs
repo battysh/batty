@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
-use super::{config, completion, hierarchy, inbox, merge, team_config_path, telegram};
+use super::{completion, config, hierarchy, inbox, merge, team_config_path, telegram};
 
 const INBOX_BODY_PREVIEW_CHARS: usize = 140;
 
