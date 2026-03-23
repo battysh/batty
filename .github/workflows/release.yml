@@ -121,3 +121,18 @@ jobs:
             artifacts/batty-*.tar.gz
             artifacts/batty-*.tar.gz.sha256
             checksums-sha256.txt
+
+  publish:
+    name: Publish to crates.io
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --no-verify
