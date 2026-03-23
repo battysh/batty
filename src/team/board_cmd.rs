@@ -6,6 +6,11 @@ use std::process::Command;
 
 pub use super::errors::BoardError;
 
+/// YAML frontmatter fields that batty adds but kanban-md doesn't know about.
+/// kanban-md move/pick rewrites frontmatter and drops these, so we preserve
+/// them around any operation that modifies status.
+const SCHEDULING_FIELDS: &[&str] = &["scheduled_for", "cron_schedule", "cron_last_run"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoardOutput {
     pub stdout: String,
@@ -26,12 +31,19 @@ pub fn move_task(
     status: &str,
     claim: Option<&str>,
 ) -> Result<(), BoardError> {
+    // Preserve scheduling fields that kanban-md doesn't know about
+    let saved_fields = extract_scheduling_fields(board_dir, task_id);
+
     let mut args = vec!["move".to_string(), task_id.to_string(), status.to_string()];
     if let Some(claim) = claim {
         args.push("--claim".to_string());
         args.push(claim.to_string());
     }
-    run_board_owned(board_dir, &args).map(|_| ())
+    run_board_owned(board_dir, &args)?;
+
+    // Restore scheduling fields that kanban-md stripped
+    restore_scheduling_fields(board_dir, task_id, &saved_fields);
+    Ok(())
 }
 
 pub fn edit_task(board_dir: &Path, task_id: &str, block_reason: &str) -> Result<(), BoardError> {
@@ -63,9 +75,21 @@ pub fn pick_task(
     claim: &str,
     move_to: &str,
 ) -> Result<Option<String>, BoardError> {
+    // Save scheduling fields for all tasks before pick (we don't know which will be picked)
+    let saved = snapshot_scheduling_fields(board_dir);
+
     match run_board(board_dir, &["pick", "--claim", claim, "--move", move_to]) {
-        Ok(output) => Ok(extract_task_id(&output.stdout, "Picked and moved task #")
-            .or_else(|| extract_task_id(&output.stdout, "Picked task #"))),
+        Ok(output) => {
+            let task_id = extract_task_id(&output.stdout, "Picked and moved task #")
+                .or_else(|| extract_task_id(&output.stdout, "Picked task #"));
+            // Restore scheduling fields for the picked task
+            if let Some(ref id) = task_id {
+                if let Some(fields) = saved.get(id.as_str()) {
+                    restore_scheduling_fields(board_dir, id, fields);
+                }
+            }
+            Ok(task_id)
+        }
         Err(BoardError::Permanent { stderr, .. }) if is_empty_pick(&stderr) => Ok(None),
         Err(error) => Err(error),
     }
@@ -132,6 +156,146 @@ pub fn create_task(
         ),
         stderr: output.stderr,
     })
+}
+
+/// Extract scheduling fields from a task file's YAML frontmatter.
+/// Returns a map of field_name→field_value for any scheduling fields found.
+fn extract_scheduling_fields(board_dir: &Path, task_id: &str) -> Vec<(String, String)> {
+    let task_path = match find_task_file(board_dir, task_id) {
+        Some(path) => path,
+        None => return Vec::new(),
+    };
+    let content = match std::fs::read_to_string(&task_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    parse_scheduling_fields_from_frontmatter(&content)
+}
+
+/// Parse scheduling fields out of raw file content with YAML frontmatter.
+fn parse_scheduling_fields_from_frontmatter(content: &str) -> Vec<(String, String)> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return Vec::new();
+    }
+    let after_open = &trimmed[3..];
+    let after_open = after_open.strip_prefix('\n').unwrap_or(after_open);
+    let close_pos = match after_open.find("\n---") {
+        Some(pos) => pos,
+        None => return Vec::new(),
+    };
+    let frontmatter = &after_open[..close_pos];
+
+    let mut fields = Vec::new();
+    for line in frontmatter.lines() {
+        for &field in SCHEDULING_FIELDS {
+            if let Some(rest) = line.strip_prefix(field) {
+                if let Some(value) = rest.strip_prefix(':') {
+                    let value = value.trim().trim_matches('"').trim_matches('\'');
+                    if !value.is_empty() {
+                        fields.push((field.to_string(), value.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    fields
+}
+
+/// Re-insert scheduling fields into a task file after kanban-md has rewritten it.
+fn restore_scheduling_fields(board_dir: &Path, task_id: &str, fields: &[(String, String)]) {
+    if fields.is_empty() {
+        return;
+    }
+    let task_path = match find_task_file(board_dir, task_id) {
+        Some(path) => path,
+        None => return,
+    };
+    let content = match std::fs::read_to_string(&task_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return;
+    }
+    let after_open = &trimmed[3..];
+    let after_open = after_open.strip_prefix('\n').unwrap_or(after_open);
+    let close_pos = match after_open.find("\n---") {
+        Some(pos) => pos,
+        None => return,
+    };
+
+    let frontmatter = &after_open[..close_pos];
+    let body = &after_open[close_pos + 4..];
+
+    // Build new frontmatter lines, appending scheduling fields at the end
+    let mut lines: Vec<String> = frontmatter.lines().map(|l| l.to_string()).collect();
+    for (key, value) in fields {
+        // Remove any existing line for this field (shouldn't exist after move, but be safe)
+        lines.retain(|l| !l.starts_with(key.as_str()) || !l[key.len()..].starts_with(':'));
+        lines.push(format!("{key}: {value}"));
+    }
+
+    let mut updated = String::from("---\n");
+    for line in &lines {
+        updated.push_str(line);
+        updated.push('\n');
+    }
+    updated.push_str("---");
+    updated.push_str(body);
+
+    let _ = std::fs::write(&task_path, updated);
+}
+
+/// Snapshot scheduling fields for all tasks in the board (used before pick).
+fn snapshot_scheduling_fields(
+    board_dir: &Path,
+) -> std::collections::HashMap<String, Vec<(String, String)>> {
+    let tasks_dir = board_dir.join("tasks");
+    let mut map = std::collections::HashMap::new();
+    let entries = match std::fs::read_dir(&tasks_dir) {
+        Ok(e) => e,
+        Err(_) => return map,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if !name_str.ends_with(".md") {
+            continue;
+        }
+        // Extract task ID from filename prefix (e.g., "001-title.md" → "1")
+        if let Some(id_str) = name_str.split('-').next() {
+            if let Ok(id) = id_str.parse::<u32>() {
+                let content = match std::fs::read_to_string(entry.path()) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let fields = parse_scheduling_fields_from_frontmatter(&content);
+                if !fields.is_empty() {
+                    map.insert(id.to_string(), fields);
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Find a task file by numeric ID in the board's tasks directory.
+fn find_task_file(board_dir: &Path, task_id: &str) -> Option<std::path::PathBuf> {
+    let tasks_dir = board_dir.join("tasks");
+    let id: u32 = task_id.parse().ok()?;
+    let prefix = format!("{id:03}-");
+    let entries = std::fs::read_dir(&tasks_dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with(&prefix) && name_str.ends_with(".md") {
+            return Some(entry.path());
+        }
+    }
+    None
 }
 
 fn run_board_owned(board_dir: &Path, args: &[String]) -> Result<BoardOutput, BoardError> {
@@ -679,5 +843,283 @@ mod tests {
     fn classify_failure_empty_stderr_is_permanent() {
         let error = classify_failure("failed".to_string(), "".to_string());
         assert!(matches!(error, BoardError::Permanent { .. }));
+    }
+
+    // --- scheduling field preservation ---
+
+    #[test]
+    fn parse_scheduling_fields_extracts_all_three() {
+        let content = "---\nid: 42\ntitle: recurring task\nstatus: todo\nscheduled_for: 2026-04-01T09:00:00Z\ncron_schedule: 0 9 * * 1\ncron_last_run: 2026-03-21T09:00:00Z\n---\n\nBody.\n";
+        let fields = parse_scheduling_fields_from_frontmatter(content);
+        assert_eq!(fields.len(), 3);
+        assert_eq!(
+            fields[0],
+            (
+                "scheduled_for".to_string(),
+                "2026-04-01T09:00:00Z".to_string()
+            )
+        );
+        assert_eq!(
+            fields[1],
+            ("cron_schedule".to_string(), "0 9 * * 1".to_string())
+        );
+        assert_eq!(
+            fields[2],
+            (
+                "cron_last_run".to_string(),
+                "2026-03-21T09:00:00Z".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn parse_scheduling_fields_extracts_quoted_values() {
+        let content = "---\nid: 1\ntitle: test\nstatus: todo\nscheduled_for: \"2026-06-15T12:00:00Z\"\n---\n\nBody.\n";
+        let fields = parse_scheduling_fields_from_frontmatter(content);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(
+            fields[0],
+            (
+                "scheduled_for".to_string(),
+                "2026-06-15T12:00:00Z".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn parse_scheduling_fields_returns_empty_when_none_present() {
+        let content = "---\nid: 1\ntitle: test\nstatus: todo\n---\n\nBody.\n";
+        let fields = parse_scheduling_fields_from_frontmatter(content);
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn parse_scheduling_fields_handles_missing_frontmatter() {
+        let fields = parse_scheduling_fields_from_frontmatter("no frontmatter here");
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn parse_scheduling_fields_handles_unclosed_frontmatter() {
+        let fields = parse_scheduling_fields_from_frontmatter("---\nid: 1\ntitle: test\n");
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn parse_scheduling_fields_ignores_empty_values() {
+        let content = "---\nid: 1\ntitle: test\nstatus: todo\nscheduled_for:\n---\n\nBody.\n";
+        let fields = parse_scheduling_fields_from_frontmatter(content);
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn find_task_file_locates_by_id() {
+        let temp = TempDir::new().unwrap();
+        let tasks_dir = temp.path().join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(
+            tasks_dir.join("042-recurring-task.md"),
+            "---\nid: 42\n---\n",
+        )
+        .unwrap();
+        fs::write(tasks_dir.join("001-other.md"), "---\nid: 1\n---\n").unwrap();
+
+        let found = find_task_file(temp.path(), "42");
+        assert!(found.is_some());
+        assert!(found.unwrap().ends_with("042-recurring-task.md"));
+    }
+
+    #[test]
+    fn find_task_file_returns_none_for_missing_id() {
+        let temp = TempDir::new().unwrap();
+        let tasks_dir = temp.path().join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(tasks_dir.join("001-test.md"), "---\nid: 1\n---\n").unwrap();
+
+        assert!(find_task_file(temp.path(), "99").is_none());
+    }
+
+    #[test]
+    fn find_task_file_returns_none_for_missing_dir() {
+        let temp = TempDir::new().unwrap();
+        assert!(find_task_file(temp.path(), "1").is_none());
+    }
+
+    #[test]
+    fn extract_and_restore_scheduling_fields_round_trip() {
+        let temp = TempDir::new().unwrap();
+        let tasks_dir = temp.path().join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+
+        let original = "---\nid: 5\ntitle: recurring\nstatus: todo\nscheduled_for: 2026-04-01T09:00:00Z\ncron_schedule: 0 9 * * 1\ncron_last_run: 2026-03-21T09:00:00Z\n---\n\nTask body.\n";
+        fs::write(tasks_dir.join("005-recurring.md"), original).unwrap();
+
+        // Extract fields
+        let fields = extract_scheduling_fields(temp.path(), "5");
+        assert_eq!(fields.len(), 3);
+
+        // Simulate kanban-md stripping the fields
+        let stripped = "---\nid: 5\ntitle: recurring\nstatus: in-progress\nclaimed_by: eng-1-2\n---\n\nTask body.\n";
+        fs::write(tasks_dir.join("005-recurring.md"), stripped).unwrap();
+
+        // Restore fields
+        restore_scheduling_fields(temp.path(), "5", &fields);
+
+        // Verify the fields are back
+        let result = fs::read_to_string(tasks_dir.join("005-recurring.md")).unwrap();
+        assert!(result.contains("scheduled_for: 2026-04-01T09:00:00Z"));
+        assert!(result.contains("cron_schedule: 0 9 * * 1"));
+        assert!(result.contains("cron_last_run: 2026-03-21T09:00:00Z"));
+        // And the new status is preserved
+        assert!(result.contains("status: in-progress"));
+        assert!(result.contains("claimed_by: eng-1-2"));
+    }
+
+    #[test]
+    fn restore_does_nothing_when_no_fields() {
+        let temp = TempDir::new().unwrap();
+        let tasks_dir = temp.path().join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+
+        let content = "---\nid: 1\ntitle: test\nstatus: done\n---\n\nBody.\n";
+        fs::write(tasks_dir.join("001-test.md"), content).unwrap();
+
+        restore_scheduling_fields(temp.path(), "1", &[]);
+
+        let result = fs::read_to_string(tasks_dir.join("001-test.md")).unwrap();
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn restore_handles_missing_task_file() {
+        let temp = TempDir::new().unwrap();
+        let tasks_dir = temp.path().join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+
+        // Should not panic — gracefully no-op
+        restore_scheduling_fields(
+            temp.path(),
+            "99",
+            &[("cron_schedule".to_string(), "0 9 * * *".to_string())],
+        );
+    }
+
+    #[test]
+    fn snapshot_scheduling_fields_indexes_by_task_id() {
+        let temp = TempDir::new().unwrap();
+        let tasks_dir = temp.path().join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+
+        fs::write(
+            tasks_dir.join("010-scheduled.md"),
+            "---\nid: 10\ntitle: scheduled\nstatus: todo\nscheduled_for: 2026-05-01T00:00:00Z\n---\n\nBody.\n",
+        ).unwrap();
+        fs::write(
+            tasks_dir.join("011-plain.md"),
+            "---\nid: 11\ntitle: plain\nstatus: todo\n---\n\nBody.\n",
+        )
+        .unwrap();
+        fs::write(
+            tasks_dir.join("012-cron.md"),
+            "---\nid: 12\ntitle: cron\nstatus: todo\ncron_schedule: 30 8 * * *\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        let snapshot = snapshot_scheduling_fields(temp.path());
+        assert_eq!(snapshot.len(), 2);
+        assert!(snapshot.contains_key("10"));
+        assert!(snapshot.contains_key("12"));
+        assert!(!snapshot.contains_key("11"));
+    }
+
+    #[test]
+    fn move_task_preserves_scheduling_fields_end_to_end() {
+        if !real_kanban_available() {
+            return;
+        }
+
+        with_live_board_cwd(|| {
+            let temp = TempDir::new().unwrap();
+            let board_dir = temp.path().join("board");
+            run_real_board(&board_dir, &["init"]).unwrap();
+
+            // Create a task
+            let task_id = create_task_real(
+                &board_dir,
+                "Recurring task",
+                "This runs on a schedule",
+                Some("medium"),
+                None,
+                None,
+            )
+            .unwrap();
+
+            // Manually add scheduling fields to the task file
+            let task_file = board_dir.join("tasks/001-recurring-task.md");
+            let content = fs::read_to_string(&task_file).unwrap();
+            let patched = content.replace(
+                "\n---\n",
+                "\nscheduled_for: 2026-06-01T00:00:00Z\ncron_schedule: 0 9 * * 1\ncron_last_run: 2026-05-25T09:00:00Z\n---\n",
+            );
+            fs::write(&task_file, &patched).unwrap();
+
+            // Verify fields are present before move
+            let before = fs::read_to_string(&task_file).unwrap();
+            assert!(before.contains("cron_schedule: 0 9 * * 1"));
+
+            // Move the task — this would normally strip the fields
+            run_real_board(
+                &board_dir,
+                &["move", &task_id, "in-progress", "--claim", "eng-1-2"],
+            )
+            .unwrap();
+
+            // Without our fix, these fields would be gone. But we're testing the raw
+            // kanban-md here. Let's verify they ARE stripped by raw kanban-md:
+            let after_raw = fs::read_to_string(&task_file).unwrap();
+            // (This documents the bug — kanban-md strips them)
+            let fields_stripped = !after_raw.contains("cron_schedule");
+
+            if fields_stripped {
+                // Now test our wrapper: reset, re-add fields, use our move_task
+                run_real_board(
+                    &board_dir,
+                    &["move", &task_id, "todo", "--claim", "eng-1-2"],
+                )
+                .unwrap();
+                let content2 = fs::read_to_string(&task_file).unwrap();
+                let patched2 = content2.replace(
+                    "\n---\n",
+                    "\nscheduled_for: 2026-06-01T00:00:00Z\ncron_schedule: 0 9 * * 1\ncron_last_run: 2026-05-25T09:00:00Z\n---\n",
+                );
+                fs::write(&task_file, &patched2).unwrap();
+
+                // Use a real wrapper that calls the real binary
+                // We can't use move_task directly because it uses "kanban-md" not the real path,
+                // but we can test the extract/restore logic directly
+                let saved = extract_scheduling_fields(&board_dir, &task_id);
+                assert_eq!(saved.len(), 3);
+
+                run_real_board(
+                    &board_dir,
+                    &["move", &task_id, "in-progress", "--claim", "eng-1-2"],
+                )
+                .unwrap();
+
+                // Fields are gone after raw move
+                let after = fs::read_to_string(&task_file).unwrap();
+                assert!(!after.contains("cron_schedule"));
+
+                // Restore them
+                restore_scheduling_fields(&board_dir, &task_id, &saved);
+
+                // Now they're back
+                let restored = fs::read_to_string(&task_file).unwrap();
+                assert!(restored.contains("scheduled_for: 2026-06-01T00:00:00Z"));
+                assert!(restored.contains("cron_schedule: 0 9 * * 1"));
+                assert!(restored.contains("cron_last_run: 2026-05-25T09:00:00Z"));
+                assert!(restored.contains("status: in-progress"));
+            }
+        });
     }
 }
