@@ -138,6 +138,9 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 - External senders: allow non-team sources (email routers, Slack bridges) to message any role
 - Graceful non-git-repo handling: git-dependent operations degrade cleanly when the project is not a repository
 - `batty doctor --fix`: detect and clean up orphan worktrees and branches left by previous runs
+- `batty board archive`: move completed tasks to an archive directory to keep the active board fast
+- Worktree reconciliation: auto-detect cherry-picked branches and reset stale worktrees so engineers always start clean
+- Pending delivery queue: messages sent to agents that are still starting are buffered and delivered automatically when the agent becomes ready
 - YAML config, Markdown boards, JSON/JSONL + SQLite logs: everything stays file-based
 
 ## CLI Quick Reference
@@ -151,6 +154,7 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 | `batty assign <engineer> <task>` | Queue work for an engineer and report delivery result |
 | `batty inbox <member>` / `read` / `ack` | Inspect and manage inbox messages |
 | `batty board` / `board list` / `board summary` | Open the kanban board or inspect it without a TTY |
+| `batty board archive [--older-than DATE]` | Move done tasks to archive directory |
 | `batty status [--json]` | Show current team state |
 | `batty merge <engineer>` | Merge an engineer worktree branch |
 | `batty review <id> <disposition> [feedback]` | Record a review disposition (approve, request-changes, reject) |
@@ -249,6 +253,7 @@ This session shows Batty coordinating a live team in `~/mafia_solver`: the `arch
 - [Runtime Config Reference](docs/reference/config.md)
 - [Module Reference](docs/reference/modules.md)
 - [Scheduled Tasks & Cron](docs/scheduled-tasks.md)
+- [Intervention System](docs/interventions.md)
 - [Orchestrator Guide](docs/orchestrator.md)
 - [Architecture](docs/architecture.md)
 - [Troubleshooting](docs/troubleshooting.md)
