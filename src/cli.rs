@@ -254,10 +254,13 @@ pub enum InboxCommand {
         #[arg(long, default_value_t = false)]
         all_roles: bool,
         /// Purge delivered messages older than this unix timestamp
-        #[arg(long, conflicts_with = "all")]
+        #[arg(long, conflicts_with_all = ["all", "older_than"])]
         before: Option<u64>,
+        /// Purge delivered messages older than this duration (e.g. 24h, 7d, 2w)
+        #[arg(long, conflicts_with_all = ["all", "before"])]
+        older_than: Option<String>,
         /// Purge all delivered messages
-        #[arg(long, default_value_t = false, conflicts_with = "before")]
+        #[arg(long, default_value_t = false, conflicts_with_all = ["before", "older_than"])]
         all: bool,
     },
 }
@@ -897,6 +900,7 @@ mod tests {
                         role,
                         all_roles,
                         before,
+                        older_than,
                         all,
                     }),
                 member,
@@ -906,6 +910,7 @@ mod tests {
                 assert_eq!(role.as_deref(), Some("architect"));
                 assert!(!all_roles);
                 assert_eq!(before, Some(123));
+                assert!(older_than.is_none());
                 assert!(!all);
             }
             other => panic!("expected inbox purge command, got {other:?}"),
@@ -922,6 +927,7 @@ mod tests {
                         role,
                         all_roles,
                         before,
+                        older_than,
                         all,
                     }),
                 member,
@@ -931,10 +937,65 @@ mod tests {
                 assert!(role.is_none());
                 assert!(all_roles);
                 assert_eq!(before, None);
+                assert!(older_than.is_none());
                 assert!(all);
             }
             other => panic!("expected inbox purge command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn inbox_purge_subcommand_parses_older_than() {
+        let cli = Cli::parse_from(["batty", "inbox", "purge", "eng-1", "--older-than", "24h"]);
+        match cli.command {
+            Command::Inbox {
+                command:
+                    Some(InboxCommand::Purge {
+                        role,
+                        all_roles,
+                        before,
+                        older_than,
+                        all,
+                    }),
+                ..
+            } => {
+                assert_eq!(role.as_deref(), Some("eng-1"));
+                assert!(!all_roles);
+                assert_eq!(before, None);
+                assert_eq!(older_than.as_deref(), Some("24h"));
+                assert!(!all);
+            }
+            other => panic!("expected inbox purge command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inbox_purge_rejects_older_than_with_before() {
+        let result = Cli::try_parse_from([
+            "batty",
+            "inbox",
+            "purge",
+            "eng-1",
+            "--older-than",
+            "24h",
+            "--before",
+            "100",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn inbox_purge_rejects_older_than_with_all() {
+        let result = Cli::try_parse_from([
+            "batty",
+            "inbox",
+            "purge",
+            "eng-1",
+            "--older-than",
+            "24h",
+            "--all",
+        ]);
+        assert!(result.is_err());
     }
 
     #[test]
