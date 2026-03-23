@@ -676,6 +676,7 @@ mod tests {
             layout: None,
             workflow_policy: Default::default(),
             cost: CostConfig { models },
+            grafana: Default::default(),
             event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
             retro_min_duration_secs: 60,
             roles: vec![

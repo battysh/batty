@@ -42,11 +42,34 @@ pub struct TeamConfig {
     pub workflow_policy: WorkflowPolicy,
     #[serde(default)]
     pub cost: CostConfig,
+    #[serde(default)]
+    pub grafana: GrafanaConfig,
     #[serde(default = "default_event_log_max_bytes")]
     pub event_log_max_bytes: u64,
     #[serde(default = "default_retro_min_duration_secs")]
     pub retro_min_duration_secs: u64,
     pub roles: Vec<RoleDef>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GrafanaConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_grafana_port")]
+    pub port: u16,
+}
+
+impl Default for GrafanaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_grafana_port(),
+        }
+    }
+}
+
+fn default_grafana_port() -> u16 {
+    3000
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
