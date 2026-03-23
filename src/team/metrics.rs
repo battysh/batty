@@ -1,4 +1,6 @@
-pub use super::status::{WorkflowMetrics, compute_metrics, compute_metrics_with_events};
+pub use super::status::{
+    WorkflowMetrics, compute_metrics, compute_metrics_with_events, compute_metrics_with_telemetry,
+};
 
 #[cfg(test)]
 use super::status::format_metrics;
