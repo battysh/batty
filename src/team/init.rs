@@ -393,8 +393,7 @@ mod tests {
     use std::ffi::OsString;
 
     use crate::team::{
-        daemon_log_path, orchestrator_log_path, team_config_dir, team_config_path,
-        team_events_path,
+        daemon_log_path, orchestrator_log_path, team_config_dir, team_config_path, team_events_path,
     };
 
     struct HomeGuard {
