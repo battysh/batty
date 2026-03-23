@@ -171,5 +171,21 @@ pub(super) fn task_needs_owned_intervention(status: &str) -> bool {
     !matches!(status, "review" | "done" | "archived")
 }
 
+/// Returns true if every engineer has at least one in-progress task claimed by them.
+/// Used to suppress false-positive starvation/utilization alerts when all engineers
+/// are actively working but show transient idle state.
+pub(super) fn all_engineers_have_active_tasks(
+    engineer_names: &[String],
+    tasks: &[crate::task::Task],
+) -> bool {
+    !engineer_names.is_empty()
+        && engineer_names.iter().all(|name| {
+            tasks.iter().any(|task| {
+                task.claimed_by.as_deref() == Some(name.as_str())
+                    && matches!(task.status.as_str(), "in-progress" | "in_progress")
+            })
+        })
+}
+
 #[cfg(test)]
 mod tests;
