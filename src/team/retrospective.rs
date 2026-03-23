@@ -1,12 +1,16 @@
 //! Pure event-log analysis and markdown report generation for retrospectives.
+//!
+//! Prefers SQLite telemetry DB when available, falls back to JSONL parsing.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use rusqlite::{Connection, params};
 
 use super::events::{TeamEvent, read_events};
+use super::telemetry_db;
 use crate::task;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -354,6 +358,267 @@ pub fn analyze_events(events: &[TeamEvent]) -> Option<RunStats> {
     })
 }
 
+/// Build a `RunStats` from the SQLite telemetry database.
+///
+/// Queries the `events`, `task_metrics`, `agent_metrics`, and `session_summary`
+/// tables to produce the same report that `analyze_events` builds from JSONL.
+pub fn analyze_from_db(conn: &Connection) -> Option<RunStats> {
+    // Find the last session (last daemon_started event).
+    let last_session_start: Option<i64> = conn
+        .query_row(
+            "SELECT MAX(timestamp) FROM events WHERE event_type = 'daemon_started'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+    let run_start = last_session_start? as u64;
+
+    // Find run_end: daemon_stopped after last start, or latest event.
+    let run_end: u64 = conn
+        .query_row(
+            "SELECT timestamp FROM events
+             WHERE event_type = 'daemon_stopped' AND timestamp >= ?1
+             ORDER BY timestamp DESC LIMIT 1",
+            params![run_start as i64],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or_else(|_| {
+            conn.query_row(
+                "SELECT MAX(timestamp) FROM events WHERE timestamp >= ?1",
+                params![run_start as i64],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .unwrap_or(None)
+            .unwrap_or(run_start as i64)
+        }) as u64;
+
+    // --- Task stats from events table (same logic as analyze_events) ---
+    // We still need to walk events for the current run to build per-task stats
+    // because task_metrics doesn't track assignment order or role-based completion.
+    let mut stmt = conn
+        .prepare(
+            "SELECT timestamp, event_type, role, task_id, payload FROM events
+             WHERE timestamp >= ?1 ORDER BY timestamp ASC",
+        )
+        .ok()?;
+
+    let rows: Vec<(i64, String, Option<String>, Option<String>, String)> = stmt
+        .query_map(params![run_start as i64], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .ok()?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if rows.is_empty() {
+        return None;
+    }
+
+    let mut tasks: HashMap<String, TaskAccumulator> = HashMap::new();
+    let mut active_task_by_role: HashMap<String, String> = HashMap::new();
+    let mut idle_samples = Vec::new();
+    let mut escalation_count = 0u32;
+    let mut message_count = 0u32;
+    let mut auto_merge_count = 0u32;
+    let mut manual_merge_count = 0u32;
+    let mut rework_count = 0u32;
+    let mut review_nudge_count = 0u32;
+    let mut review_escalation_count = 0u32;
+    let mut task_completed_at: HashMap<String, u64> = HashMap::new();
+    let mut review_stall_durations: Vec<(String, u64)> = Vec::new();
+    let mut per_task_rework: HashMap<String, u32> = HashMap::new();
+
+    for (ts, event_type, role, task_id, payload) in &rows {
+        let ts = *ts as u64;
+        match event_type.as_str() {
+            "task_assigned" => {
+                let Some(role) = role.as_deref() else {
+                    continue;
+                };
+                let Some(task) = task_id.as_deref() else {
+                    continue;
+                };
+                let tid = task_reference(task);
+                let entry = tasks.entry(tid.clone()).or_insert_with(|| {
+                    TaskAccumulator::new(tid.clone(), role.to_string(), ts, 0)
+                });
+                entry.retry_count += 1;
+                entry.assigned_to = role.to_string();
+                active_task_by_role.insert(role.to_string(), tid);
+            }
+            "task_completed" => {
+                let Some(role) = role.as_deref() else {
+                    continue;
+                };
+                let Some(tid) = active_task_by_role.remove(role) else {
+                    continue;
+                };
+                let Some(task) = tasks.get_mut(&tid) else {
+                    continue;
+                };
+                if task.completed_at.is_none() {
+                    task.completed_at = Some(ts);
+                    task.cycle_time_secs = Some(ts.saturating_sub(task.assigned_at));
+                }
+                task_completed_at.insert(tid, ts);
+            }
+            "task_escalated" => {
+                escalation_count += 1;
+                let Some(task) = task_id.as_deref() else {
+                    continue;
+                };
+                let r = role.clone().unwrap_or_default();
+                let entry = tasks.entry(task.to_string()).or_insert_with(|| {
+                    TaskAccumulator::new(task.to_string(), r, ts, 0)
+                });
+                entry.was_escalated = true;
+            }
+            "message_routed" => {
+                message_count += 1;
+            }
+            "task_auto_merged" => {
+                auto_merge_count += 1;
+                if let Some(task) = task_id.as_deref() {
+                    let tid = task_reference(task);
+                    if let Some(completed_ts) = task_completed_at.get(&tid) {
+                        review_stall_durations
+                            .push((tid, ts.saturating_sub(*completed_ts)));
+                    }
+                }
+            }
+            "task_manual_merged" => {
+                manual_merge_count += 1;
+                if let Some(task) = task_id.as_deref() {
+                    let tid = task_reference(task);
+                    if let Some(completed_ts) = task_completed_at.get(&tid) {
+                        review_stall_durations
+                            .push((tid, ts.saturating_sub(*completed_ts)));
+                    }
+                }
+            }
+            "task_reworked" => {
+                rework_count += 1;
+                if let Some(task) = task_id.as_deref() {
+                    let tid = task_reference(task);
+                    *per_task_rework.entry(tid).or_insert(0) += 1;
+                }
+            }
+            "review_nudge_sent" => {
+                review_nudge_count += 1;
+            }
+            "review_escalated" => {
+                review_escalation_count += 1;
+            }
+            "load_snapshot" => {
+                // Parse working_members/total_members from payload JSON.
+                if let Ok(evt) = serde_json::from_str::<TeamEvent>(payload) {
+                    let Some(working_members) = evt.working_members else {
+                        continue;
+                    };
+                    let Some(total_members) = evt.total_members else {
+                        continue;
+                    };
+                    let idle_pct = if total_members == 0 {
+                        1.0
+                    } else {
+                        1.0 - (working_members as f64 / total_members as f64)
+                    };
+                    idle_samples.push(idle_pct);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut task_stats: Vec<TaskStats> =
+        tasks.into_values().map(|t| t.into_stats()).collect();
+    task_stats.sort_by(|a, b| {
+        a.assigned_at
+            .cmp(&b.assigned_at)
+            .then_with(|| a.task_id.cmp(&b.task_id))
+    });
+
+    let idle_time_pct = if idle_samples.is_empty() {
+        0.0
+    } else {
+        idle_samples.iter().sum::<f64>() / idle_samples.len() as f64
+    };
+
+    let (
+        average_cycle_time_secs,
+        fastest_task_id,
+        fastest_cycle_time_secs,
+        longest_task_id,
+        longest_cycle_time_secs,
+    ) = cycle_time_metrics(&task_stats);
+
+    let (avg_review_stall_secs, max_review_stall_secs, max_review_stall_task) =
+        if review_stall_durations.is_empty() {
+            (None, None, None)
+        } else {
+            let total: u64 = review_stall_durations.iter().map(|(_, d)| *d).sum();
+            let avg = total / review_stall_durations.len() as u64;
+            let (max_task, max_dur) = review_stall_durations
+                .iter()
+                .max_by_key(|(_, d)| *d)
+                .map(|(t, d)| (t.clone(), *d))
+                .expect("non-empty");
+            (Some(avg), Some(max_dur), Some(max_task))
+        };
+
+    let mut task_rework_counts: Vec<(String, u32)> = per_task_rework.into_iter().collect();
+    task_rework_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    Some(RunStats {
+        run_start,
+        run_end,
+        total_duration_secs: run_end.saturating_sub(run_start),
+        task_stats,
+        average_cycle_time_secs,
+        fastest_task_id,
+        fastest_cycle_time_secs,
+        longest_task_id,
+        longest_cycle_time_secs,
+        idle_time_pct,
+        escalation_count,
+        message_count,
+        auto_merge_count,
+        manual_merge_count,
+        rework_count,
+        review_nudge_count,
+        review_escalation_count,
+        avg_review_stall_secs,
+        max_review_stall_secs,
+        max_review_stall_task,
+        task_rework_counts,
+    })
+}
+
+/// Analyze the last run. Prefers telemetry DB when available, falls back to JSONL.
+pub fn analyze_project(project_root: &Path) -> Result<Option<RunStats>> {
+    let db_path = project_root.join(".batty").join("telemetry.db");
+    if db_path.exists() {
+        if let Ok(conn) = telemetry_db::open(project_root) {
+            if let Some(stats) = analyze_from_db(&conn) {
+                return Ok(Some(stats));
+            }
+        }
+    }
+
+    // Fallback to JSONL
+    let events_path = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("events.jsonl");
+    analyze_event_log(&events_path)
+}
+
 /// Parse the events file and analyze.
 pub fn analyze_event_log(path: &Path) -> Result<Option<RunStats>> {
     let events = read_events(path)?;
@@ -387,11 +652,7 @@ pub fn should_generate_retro(
         return Ok(None);
     }
 
-    let events_path = project_root
-        .join(".batty")
-        .join("team_config")
-        .join("events.jsonl");
-    let stats = analyze_event_log(&events_path)?;
+    let stats = analyze_project(project_root)?;
 
     // Suppress trivial retrospectives: short runs with zero completions.
     // Completions override the duration check — a short run that finished
