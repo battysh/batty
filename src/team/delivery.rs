@@ -2668,4 +2668,61 @@ mod tests {
         bodies.sort();
         assert_eq!(bodies, vec!["msg-1", "msg-2", "msg-3"]);
     }
+
+    // --- Full pending queue lifecycle test (#289) ---
+
+    #[test]
+    fn pending_queue_full_lifecycle_buffer_transition_drain_verify() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+
+        // Step 1: Agent in starting state — watcher present but not ready.
+        let watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        assert!(!watcher.is_ready_for_delivery());
+        daemon.watchers.insert("eng-1".to_string(), watcher);
+
+        // Step 2: deliver_message → DeferredPending, message is in queue.
+        let result = daemon
+            .deliver_message("manager", "eng-1", "Task #42: implement feature")
+            .unwrap();
+        assert_eq!(
+            result,
+            MessageDelivery::DeferredPending,
+            "message to starting agent must be deferred"
+        );
+        let queue = daemon.pending_delivery_queue.get("eng-1").unwrap();
+        assert_eq!(queue.len(), 1, "pending queue must contain exactly one message");
+        assert_eq!(queue[0].from, "manager");
+        assert_eq!(queue[0].body, "Task #42: implement feature");
+
+        // Step 3: Transition watcher to ready (simulate agent prompt detection).
+        daemon.watchers.get_mut("eng-1").unwrap().confirm_ready();
+        assert!(
+            daemon
+                .watchers
+                .get("eng-1")
+                .unwrap()
+                .is_ready_for_delivery()
+        );
+
+        // Step 4: drain_pending_queue → message delivered.
+        daemon.drain_pending_queue("eng-1").unwrap();
+
+        // Step 5: Queue is empty after drain.
+        assert!(
+            daemon
+                .pending_delivery_queue
+                .get("eng-1")
+                .map(|q| q.is_empty())
+                .unwrap_or(true),
+            "pending queue must be empty after drain"
+        );
+
+        // Message should have reached inbox (pane %9999999 doesn't exist → inbox fallback).
+        let root = inbox::inboxes_root(tmp.path());
+        let inbox_msgs = inbox::pending_messages(&root, "eng-1").unwrap();
+        assert_eq!(inbox_msgs.len(), 1, "message must arrive in inbox after drain");
+        assert_eq!(inbox_msgs[0].body, "Task #42: implement feature");
+        assert_eq!(inbox_msgs[0].from, "manager");
+    }
 }
