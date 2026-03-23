@@ -751,19 +751,6 @@ roles:
         fs::write(tasks_dir.join(format!("{id:03}-task-{id}.md")), content).unwrap();
     }
 
-    fn write_claimed_task(root: &Path, id: u32, status: &str, claimed_by: &str) {
-        let tasks_dir = root
-            .join(".batty")
-            .join("team_config")
-            .join("board")
-            .join("tasks");
-        fs::create_dir_all(&tasks_dir).unwrap();
-        let content = format!(
-            "---\nid: {id}\ntitle: Task {id}\nstatus: {status}\npriority: medium\nclaimed_by: {claimed_by}\nclass: standard\n---\n\nTask body.\n"
-        );
-        fs::write(tasks_dir.join(format!("{id:03}-task-{id}.md")), content).unwrap();
-    }
-
     fn write_dependency_task(root: &Path, id: u32, title: &str, status: &str, depends_on: &[u32]) {
         let tasks_dir = root
             .join(".batty")
