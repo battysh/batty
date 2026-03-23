@@ -495,7 +495,23 @@ fn starts_with_agent_prompt(line: &str, prompt: char) -> bool {
 }
 
 fn looks_like_kiro_prompt(line: &str) -> bool {
-    matches!(line, "Kiro>" | "kiro>" | "Kiro >" | "kiro >" | ">")
+    if matches!(line, "Kiro>" | "kiro>" | "Kiro >" | "kiro >" | ">") {
+        return true;
+    }
+    // Kiro shows prompts like "4% !>" or "!>" with optional credit percentage prefix
+    let trimmed = line.trim();
+    if trimmed == "!>" {
+        return true;
+    }
+    if let Some(rest) = trimmed.strip_suffix("!>") {
+        let rest = rest.trim();
+        // e.g. "4%" or "12%"
+        return rest.is_empty()
+            || rest
+                .strip_suffix('%')
+                .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()));
+    }
+    false
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1216,6 +1232,19 @@ mod tests {
         let capture = "Kiro>\n";
         assert!(is_at_agent_prompt(capture));
         assert_eq!(classify_capture_state(capture), ScreenState::Idle);
+
+        // Real kiro prompt with credit percentage
+        let capture2 = "4% !>\n";
+        assert!(is_at_agent_prompt(capture2));
+        assert_eq!(classify_capture_state(capture2), ScreenState::Idle);
+
+        // Bare !> prompt
+        let capture3 = "!>\n";
+        assert!(is_at_agent_prompt(capture3));
+
+        // Double-digit percentage
+        let capture4 = "12% !>\n";
+        assert!(is_at_agent_prompt(capture4));
     }
 
     #[test]
