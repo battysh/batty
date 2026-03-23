@@ -1241,7 +1241,83 @@ pub fn nudge_status(project_root: &Path) -> Result<()> {
 }
 
 /// Stop a running team session and clean up any orphaned `batty-` sessions.
+/// Summary statistics for a completed session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionSummary {
+    pub tasks_completed: u32,
+    pub tasks_merged: u32,
+    pub runtime_secs: u64,
+}
+
+impl SessionSummary {
+    pub fn display(&self) -> String {
+        format!(
+            "Session summary: {} tasks completed, {} merged, runtime {}",
+            self.tasks_completed,
+            self.tasks_merged,
+            format_runtime(self.runtime_secs),
+        )
+    }
+}
+
+fn format_runtime(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        if mins == 0 {
+            format!("{hours}h")
+        } else {
+            format!("{hours}h {mins}m")
+        }
+    }
+}
+
+/// Compute session summary from the event log.
+///
+/// Finds the most recent `daemon_started` event and counts completions and
+/// merges that occurred after it. Runtime is calculated from the daemon start
+/// timestamp to now.
+pub(crate) fn compute_session_summary(project_root: &Path) -> Option<SessionSummary> {
+    let events_path = team_events_path(project_root);
+    let all_events = events::read_events(&events_path).ok()?;
+
+    // Find the most recent daemon_started event.
+    let session_start = all_events
+        .iter()
+        .rev()
+        .find(|e| e.event == "daemon_started")?;
+    let start_ts = session_start.ts;
+    let now_ts = now_unix();
+
+    let session_events: Vec<_> = all_events.iter().filter(|e| e.ts >= start_ts).collect();
+
+    let tasks_completed = session_events
+        .iter()
+        .filter(|e| e.event == "task_completed")
+        .count() as u32;
+
+    let tasks_merged = session_events
+        .iter()
+        .filter(|e| e.event == "task_auto_merged" || e.event == "task_manual_merged")
+        .count() as u32;
+
+    let runtime_secs = now_ts.saturating_sub(start_ts);
+
+    Some(SessionSummary {
+        tasks_completed,
+        tasks_merged,
+        runtime_secs,
+    })
+}
+
 pub fn stop_team(project_root: &Path) -> Result<()> {
+    // Compute session summary before shutting down (events log is still available).
+    let summary = compute_session_summary(project_root);
+
     // Write resume marker before tearing down — agents have sessions to continue
     let marker = resume_marker_path(project_root);
     if let Some(parent) = marker.parent() {
@@ -1275,6 +1351,12 @@ pub fn stop_team(project_root: &Path) -> Result<()> {
         None => {
             bail!("no team config found at {}", config_path.display());
         }
+    }
+
+    // Print session summary after teardown.
+    if let Some(summary) = summary {
+        println!();
+        println!("{}", summary.display());
     }
 
     Ok(())
@@ -3762,5 +3844,134 @@ roles:
             0,
             "production mod.rs should avoid unwrap/expect"
         );
+    }
+
+    // --- Session summary tests ---
+
+    #[test]
+    fn session_summary_counts_completions_correctly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config");
+        std::fs::create_dir_all(&events_dir).unwrap();
+
+        let now = now_unix();
+        let events = vec![
+            format!(r#"{{"event":"daemon_started","ts":{}}}"#, now - 3600),
+            format!(r#"{{"event":"task_completed","role":"eng-1","task":"10","ts":{}}}"#, now - 3000),
+            format!(r#"{{"event":"task_completed","role":"eng-2","task":"11","ts":{}}}"#, now - 2000),
+            format!(r#"{{"event":"task_auto_merged","role":"eng-1","task":"10","ts":{}}}"#, now - 2900),
+            format!(r#"{{"event":"task_manual_merged","role":"eng-2","task":"11","ts":{}}}"#, now - 1900),
+            format!(r#"{{"event":"task_completed","role":"eng-1","task":"12","ts":{}}}"#, now - 1000),
+        ];
+        std::fs::write(events_dir.join("events.jsonl"), events.join("\n")).unwrap();
+
+        let summary = compute_session_summary(tmp.path()).unwrap();
+        assert_eq!(summary.tasks_completed, 3);
+        assert_eq!(summary.tasks_merged, 2);
+        assert!(summary.runtime_secs >= 3599 && summary.runtime_secs <= 3601);
+    }
+
+    #[test]
+    fn session_summary_calculates_runtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config");
+        std::fs::create_dir_all(&events_dir).unwrap();
+
+        let now = now_unix();
+        let events = vec![
+            format!(r#"{{"event":"daemon_started","ts":{}}}"#, now - 7200),
+        ];
+        std::fs::write(events_dir.join("events.jsonl"), events.join("\n")).unwrap();
+
+        let summary = compute_session_summary(tmp.path()).unwrap();
+        assert_eq!(summary.tasks_completed, 0);
+        assert_eq!(summary.tasks_merged, 0);
+        assert!(summary.runtime_secs >= 7199 && summary.runtime_secs <= 7201);
+    }
+
+    #[test]
+    fn session_summary_handles_empty_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config");
+        std::fs::create_dir_all(&events_dir).unwrap();
+
+        // No daemon_started event — summary returns None.
+        std::fs::write(events_dir.join("events.jsonl"), "").unwrap();
+        assert!(compute_session_summary(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn session_summary_handles_missing_events_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No events.jsonl at all.
+        assert!(compute_session_summary(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn session_summary_display_format() {
+        let summary = SessionSummary {
+            tasks_completed: 5,
+            tasks_merged: 4,
+            runtime_secs: 8100, // 2h 15m
+        };
+        assert_eq!(
+            summary.display(),
+            "Session summary: 5 tasks completed, 4 merged, runtime 2h 15m"
+        );
+    }
+
+    #[test]
+    fn format_runtime_seconds() {
+        assert_eq!(format_runtime(45), "45s");
+    }
+
+    #[test]
+    fn format_runtime_minutes() {
+        assert_eq!(format_runtime(300), "5m");
+    }
+
+    #[test]
+    fn format_runtime_hours_and_minutes() {
+        assert_eq!(format_runtime(5400), "1h 30m");
+    }
+
+    #[test]
+    fn format_runtime_exact_hours() {
+        assert_eq!(format_runtime(7200), "2h");
+    }
+
+    #[test]
+    fn session_summary_uses_latest_daemon_started() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config");
+        std::fs::create_dir_all(&events_dir).unwrap();
+
+        let now = now_unix();
+        // First session had 2 completions, second session has 1.
+        let events = vec![
+            format!(r#"{{"event":"daemon_started","ts":{}}}"#, now - 7200),
+            format!(r#"{{"event":"task_completed","role":"eng-1","task":"1","ts":{}}}"#, now - 6000),
+            format!(r#"{{"event":"task_completed","role":"eng-1","task":"2","ts":{}}}"#, now - 5000),
+            format!(r#"{{"event":"daemon_started","ts":{}}}"#, now - 1800),
+            format!(r#"{{"event":"task_completed","role":"eng-1","task":"3","ts":{}}}"#, now - 1000),
+        ];
+        std::fs::write(events_dir.join("events.jsonl"), events.join("\n")).unwrap();
+
+        let summary = compute_session_summary(tmp.path()).unwrap();
+        // Should only count events from the latest daemon_started.
+        assert_eq!(summary.tasks_completed, 1);
+        assert!(summary.runtime_secs >= 1799 && summary.runtime_secs <= 1801);
     }
 }
