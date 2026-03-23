@@ -4,7 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{Context, Result, bail};
+#[cfg(not(unix))]
+use anyhow::bail;
+use anyhow::{Context, Result};
 use tracing::warn;
 
 use super::{TeamDaemon, now_unix};

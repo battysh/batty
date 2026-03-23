@@ -28,7 +28,6 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::board;
-use super::board_cmd;
 use super::comms::{self, Channel};
 #[cfg(test)]
 use super::config::OrchestratorPosition;
@@ -63,6 +62,8 @@ mod dispatch;
 mod error_handling;
 #[path = "daemon/health/mod.rs"]
 mod health;
+#[path = "daemon/helpers.rs"]
+mod helpers;
 #[path = "daemon/hot_reload.rs"]
 mod hot_reload;
 #[path = "daemon/interventions/mod.rs"]
@@ -78,6 +79,7 @@ mod telemetry;
 
 #[cfg(test)]
 use self::dispatch::normalized_assignment_dir;
+use self::helpers::{extract_nudge_section, role_prompt_path};
 #[cfg(test)]
 use self::hot_reload::{
     BinaryFingerprint, binary_is_reloadable, hot_reload_daemon_args, hot_reload_marker_path,
@@ -159,12 +161,6 @@ pub struct TeamDaemon {
     /// Messages deferred because the target agent was still starting.
     /// Drained automatically when the agent transitions to ready.
     pub(super) pending_delivery_queue: HashMap<String, Vec<PendingMessage>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MemberWorktreeContext {
-    path: PathBuf,
-    branch: Option<String>,
 }
 
 impl TeamDaemon {
@@ -707,198 +703,6 @@ impl TeamDaemon {
         );
         self.update_triage_intervention_for_state(member_name, new_state);
     }
-}
-
-fn describe_command_failure(command: &str, args: &[&str], output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let details = if !stderr.is_empty() {
-        stderr
-    } else if !stdout.is_empty() {
-        stdout
-    } else {
-        format!("process exited with status {}", output.status)
-    };
-
-    format!("`{command} {}` failed: {details}", args.join(" "))
-}
-
-fn default_prompt_file_for_role(role_type: RoleType) -> &'static str {
-    match role_type {
-        RoleType::Architect => "architect.md",
-        RoleType::Manager => "manager.md",
-        RoleType::Engineer => "engineer.md",
-        RoleType::User => "architect.md",
-    }
-}
-
-fn role_prompt_path(
-    team_config_dir: &Path,
-    prompt_override: Option<&str>,
-    role_type: RoleType,
-) -> PathBuf {
-    team_config_dir.join(prompt_override.unwrap_or(default_prompt_file_for_role(role_type)))
-}
-
-/// Extract the `## Nudge` section from a prompt .md file.
-///
-/// Returns the text after `## Nudge` up to the next `## ` heading or EOF.
-/// Returns `None` if no `## Nudge` section is found.
-fn extract_nudge_section(prompt_path: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(prompt_path).ok()?;
-    let mut in_nudge = false;
-    let mut lines = Vec::new();
-
-    for line in content.lines() {
-        if line.starts_with("## Nudge") {
-            in_nudge = true;
-            continue;
-        }
-        if in_nudge {
-            // Stop at next heading
-            if line.starts_with("## ") {
-                break;
-            }
-            lines.push(line);
-        }
-    }
-
-    if lines.is_empty() {
-        return None;
-    }
-
-    let text = lines.join("\n").trim().to_string();
-    if text.is_empty() { None } else { Some(text) }
-}
-
-/// Strip the `## Nudge` section from prompt text so it's not sent to the agent.
-///
-/// The nudge content is daemon-only — injected periodically, not part of the
-/// initial prompt.
-fn format_stuck_duration(stuck_age_secs: u64) -> String {
-    if stuck_age_secs >= 3600 {
-        let hours = stuck_age_secs / 3600;
-        let mins = (stuck_age_secs % 3600) / 60;
-        format!("{hours}h {mins}m")
-    } else if stuck_age_secs >= 60 {
-        let mins = stuck_age_secs / 60;
-        let secs = stuck_age_secs % 60;
-        format!("{mins}m {secs}s")
-    } else {
-        format!("{stuck_age_secs}s")
-    }
-}
-
-fn ensure_tmux_session_ready(session: &str) -> Result<()> {
-    if tmux::session_exists(session) {
-        Ok(())
-    } else {
-        bail!("daemon startup pre-flight failed: tmux session '{session}' is missing")
-    }
-}
-
-const KANBAN_MD_VERSION: &str = "0.33.0";
-
-fn kanban_md_download_url() -> Option<String> {
-    let (os, arch) = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => ("darwin", "arm64"),
-        ("macos", "x86_64") => ("darwin", "amd64"),
-        ("linux", "x86_64") => ("linux", "amd64"),
-        ("linux", "aarch64") => ("linux", "arm64"),
-        _ => return None,
-    };
-    Some(format!(
-        "https://github.com/antopolskiy/kanban-md/releases/download/v{v}/kanban-md_{v}_{os}_{arch}.tar.gz",
-        v = KANBAN_MD_VERSION,
-    ))
-}
-
-fn auto_install_kanban_md() -> Result<()> {
-    let url = kanban_md_download_url()
-        .context("unsupported platform for automatic kanban-md install")?;
-
-    // Install into the same directory as the batty binary, or fall back to ~/.local/bin
-    let bin_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| {
-            let mut p = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
-            p.push(".local/bin");
-            p
-        });
-    std::fs::create_dir_all(&bin_dir)?;
-    let dest = bin_dir.join("kanban-md");
-
-    info!(%url, dest = %dest.display(), "auto-installing kanban-md");
-
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "curl -sL '{url}' | tar xz -C '{dir}'",
-            dir = bin_dir.display(),
-        ))
-        .status()
-        .context("failed to run curl | tar for kanban-md install")?;
-
-    if !status.success() {
-        bail!("kanban-md download failed (exit {status})");
-    }
-    if !dest.exists() {
-        bail!("kanban-md binary not found at {} after extraction", dest.display());
-    }
-    info!(path = %dest.display(), "kanban-md installed successfully");
-    Ok(())
-}
-
-fn ensure_kanban_available() -> Result<()> {
-    let output = std::process::Command::new("kanban-md")
-        .arg("--help")
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => return Ok(()),
-        _ => {}
-    }
-
-    // Not found or failed — try to auto-install
-    info!("kanban-md not found, attempting automatic install");
-    auto_install_kanban_md().context(
-        "kanban-md is required but not installed and automatic install failed.\n\
-         Install manually: https://github.com/antopolskiy/kanban-md/releases"
-    )?;
-
-    // Verify it works now
-    let output = std::process::Command::new("kanban-md")
-        .arg("--help")
-        .output()
-        .context("kanban-md still not found after install — is the install directory in PATH?")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        bail!("kanban-md installed but `kanban-md --help` failed: {stderr}");
-    }
-    Ok(())
-}
-
-fn board_dir(project_root: &Path) -> PathBuf {
-    project_root
-        .join(".batty")
-        .join("team_config")
-        .join("board")
-}
-
-fn ensure_board_initialized(project_root: &Path) -> Result<bool> {
-    let board_dir = board_dir(project_root);
-    if board_dir.join("tasks").is_dir() {
-        return Ok(false);
-    }
-
-    board_cmd::init(&board_dir).map_err(|error| {
-        anyhow::anyhow!(
-            "daemon startup pre-flight failed: unable to initialize board at '{}': {error}",
-            board_dir.display()
-        )
-    })?;
-    Ok(true)
 }
 
 #[cfg(test)]
