@@ -2683,6 +2683,51 @@ mod tests {
     }
 
     #[test]
+    fn init_with_agent_codex_sets_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _created = init_team(tmp.path(), "simple", None, Some("codex"), false).unwrap();
+        let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
+        assert!(
+            content.contains("agent: codex"),
+            "all agent fields should be codex"
+        );
+        assert!(
+            !content.contains("agent: claude"),
+            "no claude agents should remain"
+        );
+    }
+
+    #[test]
+    fn init_with_agent_kiro_sets_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _created = init_team(tmp.path(), "pair", None, Some("kiro"), false).unwrap();
+        let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
+        assert!(
+            content.contains("agent: kiro"),
+            "all agent fields should be kiro"
+        );
+        assert!(
+            !content.contains("agent: claude"),
+            "no claude agents should remain"
+        );
+        assert!(
+            !content.contains("agent: codex"),
+            "no codex agents should remain"
+        );
+    }
+
+    #[test]
+    fn init_default_agent_is_claude() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _created = init_team(tmp.path(), "simple", None, None, false).unwrap();
+        let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
+        assert!(
+            content.contains("agent: claude"),
+            "default agent should be claude"
+        );
+    }
+
+    #[test]
     #[serial]
     fn export_template_creates_directory_and_copies_files() {
         let tmp = tempfile::tempdir().unwrap();
