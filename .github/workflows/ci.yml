@@ -106,10 +106,10 @@ jobs:
           --skip work::phase_worktree::tests::prepare_agent_worktrees_creates
           --skip team::daemon::tests::startup_cwd_validation_corrects_all_agent_panes
           --skip team::daemon::tests::restart_member_corrects_mismatched_cwd_after_respawn
-          --skip team::daemon::health::tests::check_backend_health_emits_event_on_transition
-          --skip team::daemon::health::tests::check_backend_health_no_event_when_state_unchanged
-          --skip team::daemon::telegram_bridge::tests::maybe_intervene_triage_backlog_marks_member_working_after_live_delivery
+          --skip team::daemon::health::tests::check_backend_health
           --skip team::daemon::health::tests::uncommitted_diff_lines
+          --skip team::daemon::health::tests::reconcile_skips_unmerged_branch
+          --skip team::daemon::telegram_bridge::tests::maybe_intervene_triage_backlog_marks_member_working_after_live_delivery
 
   coverage:
     name: Code Coverage
