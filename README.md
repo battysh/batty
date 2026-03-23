@@ -144,18 +144,22 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 
 - Hierarchical agent teams instead of one overloaded coding agent
 - tmux-native runtime with persistent panes and session resume
-- Agent-agnostic role assignment: Claude Code, Codex, Aider, or similar
+- Agent-agnostic role assignment: Claude Code, Codex, Aider, Kiro, or similar — set the default with `batty init --agent <backend>`
 - Maildir inbox routing with explicit `talks_to` communication rules
 - Stable per-engineer worktrees with fresh task branches on each assignment
 - Kanban-driven task loop with auto-dispatch, retry tracking, and test gating
 - Scheduled tasks: `scheduled_for` delays dispatch until a future time, `cron_schedule` enables recurring tasks that auto-recycle from done back to todo ([guide](docs/scheduled-tasks.md))
+- [Intervention system](docs/interventions.md): seven automated recovery mechanisms (triage, review, owned-task, dispatch-gap, utilization, board replenishment, idle nudge) with cooldowns, dedup, and escalation
 - Per-intervention runtime toggles via `batty nudge` to disable or re-enable specific daemon behaviors without restarting
 - Orchestrator automation for triage, review, owned-task recovery, dispatch-gap recovery, utilization recovery, standups, nudges, and retrospectives
 - Auto-merge policy engine with confidence scoring and configurable thresholds for safe unattended merges
 - Review timeout escalation: stale reviews are nudged and auto-escalated after configurable thresholds, with per-priority overrides
+- Failure pattern detection: rolling window analysis detects recurring failures and notifies when thresholds are exceeded
 - SQLite telemetry database: `batty telemetry` queries agent performance, task lifecycle, review pipeline metrics, and event history
+- Consolidated metrics dashboard: `batty metrics` shows tasks, cycle time, rates, and agent performance in one view
 - Run retrospectives: `batty retro` generates Markdown reports analyzing task throughput, review stall durations, rework rates, and failure patterns
 - Team template export/import: `batty export-template` saves your team config, `batty init --from` restores it
+- Bundled Grafana dashboard template with 21 panels and 6 alerts for monitoring agent sessions, pipeline health, and task lifecycle
 - Daemon restart recovery: dead agent panes are automatically respawned with task context and backoff
 - External senders: allow non-team sources (email routers, Slack bridges) to message any role
 - Graceful non-git-repo handling: git-dependent operations degrade cleanly when the project is not a repository
@@ -169,7 +173,7 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 
 | Command | Purpose |
 | --- | --- |
-| `batty init [--template NAME]` | Scaffold `.batty/team_config/` |
+| `batty init [--template NAME] [--agent BACKEND]` | Scaffold `.batty/team_config/` |
 | `batty start [--attach]` | Launch the daemon and tmux session |
 | `batty stop` / `batty attach` | Stop or reattach to the team session |
 | `batty send <role> <message>` | Send a message to a role |
@@ -266,6 +270,23 @@ Notes:
 This session shows Batty coordinating a live team in `~/mafia_solver`: the `architect` sets direction, `black-lead` and `red-lead` turn that into lane-specific work, and the `black-eng-*` / `red-eng-*` panes are individual engineer agents running in separate worktrees inside one shared `tmux` layout.
 
 - [chess_test](https://github.com/Zedmor/chess_test): a chess engine built by a Batty team (architect + manager + engineers)
+
+## Grafana Monitoring
+
+Batty includes a bundled Grafana dashboard template with 21 panels across 6 rows and 6 pre-configured alerts. The dashboard covers session overview, pipeline health, agent performance, delivery and communication, task lifecycle, and recent activity.
+
+The dashboard JSON is available in the source tree at `src/team/grafana/dashboard.json`. Copy it and import into your Grafana instance to monitor live team runs.
+
+Pre-configured alerts:
+
+| Alert | Detects |
+| --- | --- |
+| Agent Stall | Agent silent past threshold |
+| Delivery Failure Spike | Message delivery failures climbing |
+| Pipeline Starvation | Not enough work in the pipeline |
+| High Failure Rate | Tasks failing above threshold |
+| Context Exhaustion | Agent context window nearly full |
+| Session Idle | Entire team idle too long |
 
 ## Docs and Links
 
