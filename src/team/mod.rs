@@ -3873,7 +3873,7 @@ roles:
         std::fs::create_dir_all(&events_dir).unwrap();
 
         let now = now_unix();
-        let events = vec![
+        let events = [
             format!(r#"{{"event":"daemon_started","ts":{}}}"#, now - 3600),
             format!(
                 r#"{{"event":"task_completed","role":"eng-1","task":"10","ts":{}}}"#,
@@ -3911,7 +3911,7 @@ roles:
         std::fs::create_dir_all(&events_dir).unwrap();
 
         let now = now_unix();
-        let events = vec![format!(
+        let events = [format!(
             r#"{{"event":"daemon_started","ts":{}}}"#,
             now - 7200
         )];
@@ -3982,7 +3982,7 @@ roles:
 
         let now = now_unix();
         // First session had 2 completions, second session has 1.
-        let events = vec![
+        let events = [
             format!(r#"{{"event":"daemon_started","ts":{}}}"#, now - 7200),
             format!(
                 r#"{{"event":"task_completed","role":"eng-1","task":"1","ts":{}}}"#,

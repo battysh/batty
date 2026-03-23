@@ -4,15 +4,15 @@ The intervention system is an automated recovery mechanism in the Batty daemon t
 
 ## Quick Reference
 
-| Intervention | Trigger | Cooldown | Escalation | Config Key |
-| --- | --- | --- | --- | --- |
-| Idle Timeout Nudge | Member idle past `nudge_interval_secs` | Once per idle period | None | `timeout_nudges` |
-| Triage | Manager idle with unreviewed direct-report results | `intervention_cooldown_secs` (120s) | None | `triage_interventions` |
-| Owned-Task | Member idle but owns active tasks | `intervention_cooldown_secs` (120s) | To `reports_to` parent after `escalation_threshold_secs` (3600s) | `owned_task_interventions` |
-| Review | Member idle with review-status tasks pending | `intervention_cooldown_secs` (120s) | None | `review_interventions` |
-| Manager Dispatch-Gap | Manager idle, all reports idle, dispatchable work exists | `intervention_cooldown_secs` (120s) | None | `manager_dispatch_interventions` |
-| Architect Utilization | <50% engineers working, utilization gap, architect idle | `utilization_recovery_interval_secs` (1200s) | None | `architect_utilization_interventions` |
-| Board Replenishment | Unblocked todo below threshold, idle unassigned engineers | `intervention_cooldown_secs` (120s) | None | (always on) |
+| Intervention          | Trigger                                                   | Cooldown                                     | Escalation                                                       | Config Key                            |
+| --------------------- | --------------------------------------------------------- | -------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------- |
+| Idle Timeout Nudge    | Member idle past `nudge_interval_secs`                    | Once per idle period                         | None                                                             | `timeout_nudges`                      |
+| Triage                | Manager idle with unreviewed direct-report results        | `intervention_cooldown_secs` (120s)          | None                                                             | `triage_interventions`                |
+| Owned-Task            | Member idle but owns active tasks                         | `intervention_cooldown_secs` (120s)          | To `reports_to` parent after `escalation_threshold_secs` (3600s) | `owned_task_interventions`            |
+| Review                | Member idle with review-status tasks pending              | `intervention_cooldown_secs` (120s)          | None                                                             | `review_interventions`                |
+| Manager Dispatch-Gap  | Manager idle, all reports idle, dispatchable work exists  | `intervention_cooldown_secs` (120s)          | None                                                             | `manager_dispatch_interventions`      |
+| Architect Utilization | \<50% engineers working, utilization gap, architect idle  | `utilization_recovery_interval_secs` (1200s) | None                                                             | `architect_utilization_interventions` |
+| Board Replenishment   | Unblocked todo below threshold, idle unassigned engineers | `intervention_cooldown_secs` (120s)          | None                                                             | (always on)                           |
 
 ## Common Behavior
 
@@ -374,17 +374,17 @@ All intervention settings live in `team.yaml` under the `automation` and `workfl
 
 ### `automation` section
 
-| Field                                 | Type        | Default             | Description                                                 |
-| ------------------------------------- | ----------- | ------------------- | ----------------------------------------------------------- |
-| `timeout_nudges`                      | bool        | `true`              | Enable idle timeout nudges                                  |
-| `triage_interventions`                | bool        | `true`              | Enable triage backlog interventions                         |
-| `review_interventions`                | bool        | `true`              | Enable review queue interventions                           |
-| `owned_task_interventions`            | bool        | `true`              | Enable owned-task interventions                             |
-| `manager_dispatch_interventions`      | bool        | `true`              | Enable dispatch-gap interventions                           |
-| `architect_utilization_interventions` | bool        | `true`              | Enable utilization interventions                            |
-| `replenishment_threshold`             | int or null | number of engineers | Unblocked todo threshold for replenishment                  |
-| `intervention_idle_grace_secs`        | int         | `60`                | Seconds a member must be idle before any intervention fires |
-| `intervention_cooldown_secs`          | int         | `120`               | Seconds between repeated fires of the same intervention key |
+| Field                                 | Type        | Default             | Description                                                      |
+| ------------------------------------- | ----------- | ------------------- | ---------------------------------------------------------------- |
+| `timeout_nudges`                      | bool        | `true`              | Enable idle timeout nudges                                       |
+| `triage_interventions`                | bool        | `true`              | Enable triage backlog interventions                              |
+| `review_interventions`                | bool        | `true`              | Enable review queue interventions                                |
+| `owned_task_interventions`            | bool        | `true`              | Enable owned-task interventions                                  |
+| `manager_dispatch_interventions`      | bool        | `true`              | Enable dispatch-gap interventions                                |
+| `architect_utilization_interventions` | bool        | `true`              | Enable utilization interventions                                 |
+| `replenishment_threshold`             | int or null | number of engineers | Unblocked todo threshold for replenishment                       |
+| `intervention_idle_grace_secs`        | int         | `60`                | Seconds a member must be idle before any intervention fires      |
+| `intervention_cooldown_secs`          | int         | `120`               | Seconds between repeated fires of the same intervention key      |
 | `utilization_recovery_interval_secs`  | int         | `1200`              | Seconds between utilization intervention fires (longer cooldown) |
 
 ### `workflow_policy` section

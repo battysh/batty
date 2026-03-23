@@ -26,7 +26,7 @@ Once the time passes, the task becomes `Runnable` and enters the normal dispatch
 The `Task::is_schedule_blocked()` method checks whether `scheduled_for` is in the future. Two places use this:
 
 1. **Resolver** (`src/team/resolver.rs`) — marks the task as `Blocked` with a scheduling reason.
-2. **Dispatch** (`src/team/dispatch.rs`) — filters out schedule-blocked tasks from the candidate list.
+1. **Dispatch** (`src/team/dispatch.rs`) — filters out schedule-blocked tasks from the candidate list.
 
 A task with no `scheduled_for` field is never schedule-blocked.
 
@@ -45,24 +45,24 @@ Standard 5-field cron expressions are supported. Batty auto-prepends a `0` secon
 
 ### Cron expression examples
 
-| Expression | Meaning |
-|---|---|
-| `* * * * *` | Every minute |
-| `0 9 * * *` | Daily at 9:00 AM |
-| `0 9 * * MON` | Every Monday at 9:00 AM |
-| `30 8 * * 1-5` | Weekdays at 8:30 AM |
-| `0 */2 * * *` | Every 2 hours |
-| `0 9 1 * *` | First of every month at 9:00 AM |
+| Expression     | Meaning                         |
+| -------------- | ------------------------------- |
+| `* * * * *`    | Every minute                    |
+| `0 9 * * *`    | Daily at 9:00 AM                |
+| `0 9 * * MON`  | Every Monday at 9:00 AM         |
+| `30 8 * * 1-5` | Weekdays at 8:30 AM             |
+| `0 */2 * * *`  | Every 2 hours                   |
+| `0 9 1 * *`    | First of every month at 9:00 AM |
 
 ### How the cron recycler works
 
 The recycler runs as part of the daemon poll loop. On each tick it:
 
 1. Loads all tasks from the board.
-2. Finds tasks that are `done` and have a `cron_schedule`.
-3. Skips archived or in-progress tasks.
-4. Parses the cron expression and determines the next trigger after `cron_last_run` (or now minus 1 day if no last run exists).
-5. If the next trigger is in the past (i.e., a run is due), the recycler:
+1. Finds tasks that are `done` and have a `cron_schedule`.
+1. Skips archived or in-progress tasks.
+1. Parses the cron expression and determines the next trigger after `cron_last_run` (or now minus 1 day if no last run exists).
+1. If the next trigger is in the past (i.e., a run is due), the recycler:
    - Sets `status` back to `todo`.
    - Sets `scheduled_for` to the next **future** occurrence.
    - Updates `cron_last_run` to now.
@@ -84,6 +84,7 @@ batty task schedule 42 --at '2026-03-25T09:00:00-04:00' --cron '0 9 * * MON'
 ```
 
 This means:
+
 - The task is initially blocked until March 25 at 9 AM.
 - After it completes (reaches `done`), the cron recycler moves it back to `todo` with the next Monday 9 AM as the new `scheduled_for`.
 
@@ -117,10 +118,10 @@ At least one of `--at`, `--cron`, or `--clear` is required. Invalid timestamps a
 
 These fields are stored in the YAML frontmatter of each task file:
 
-| Field | Type | Description |
-|---|---|---|
-| `scheduled_for` | RFC 3339 string | Dispatch is blocked until this time |
-| `cron_schedule` | Cron expression | Recurrence pattern for auto-recycling |
+| Field           | Type            | Description                                        |
+| --------------- | --------------- | -------------------------------------------------- |
+| `scheduled_for` | RFC 3339 string | Dispatch is blocked until this time                |
+| `cron_schedule` | Cron expression | Recurrence pattern for auto-recycling              |
 | `cron_last_run` | RFC 3339 string | Timestamp of the last cron recycle (set by daemon) |
 
 Example task file:
