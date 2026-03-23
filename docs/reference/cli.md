@@ -135,7 +135,73 @@ Commands:
   summary  Show per-status task counts
   deps     Show dependency graph
   archive  Move done tasks to archive directory
+  health   Show board health dashboard
   help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty board archive`
+
+Move done tasks to archive directory
+
+```text
+Move done tasks to archive directory
+
+Usage: batty board archive [OPTIONS]
+
+Options:
+      --older-than <OLDER_THAN>
+          Only archive tasks older than this (e.g. "7d", "24h", "2w", or ISO date)
+          
+          [default: 0s]
+
+      --dry-run
+          Show what would be archived without moving files
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty board deps`
+
+Show dependency graph
+
+```text
+Show dependency graph
+
+Usage: batty board deps [OPTIONS]
+
+Options:
+      --format <FORMAT>
+          Output format: tree (default), flat, or dot
+          
+          [default: tree]
+          [possible values: tree, flat, dot]
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty board health`
+
+Show board health dashboard
+
+```text
+Show board health dashboard
+
+Usage: batty board health [OPTIONS]
 
 Options:
   -v, --verbose...
@@ -175,49 +241,6 @@ Show per-status task counts
 Usage: batty board summary [OPTIONS]
 
 Options:
-  -v, --verbose...
-          Verbosity level (-v, -vv, -vvv)
-
-  -h, --help
-          Print help
-```
-
-## `batty board deps`
-
-Show dependency graph
-
-```text
-Show dependency graph
-
-Usage: batty board deps [OPTIONS]
-
-Options:
-      --format <FORMAT>
-          Output format: tree (default), flat, or dot
-
-          [default: tree]
-          [possible values: tree, flat, dot]
-
-  -v, --verbose...
-          Verbosity level (-v, -vv, -vvv)
-
-  -h, --help
-          Print help
-```
-
-## `batty board archive`
-
-Move done tasks to archive directory
-
-```text
-Move done tasks to archive directory
-
-Usage: batty board archive [OPTIONS]
-
-Options:
-      --older-than <OLDER_THAN>
-          Only archive tasks completed before this date (YYYY-MM-DD)
-
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 
@@ -648,26 +671,6 @@ Options:
           Print help
 ```
 
-## `batty review`
-
-Record a structured review disposition for a task
-
-```text
-Record a structured review disposition for a task
-
-Usage: batty review [OPTIONS] <TASK_ID> <DISPOSITION> [FEEDBACK]
-
-Arguments:
-  <TASK_ID>      Task id
-  <DISPOSITION>  Review disposition [possible values: approve, request-changes, reject]
-  [FEEDBACK]     Feedback text
-
-Options:
-      --reviewer <REVIEWER>  Reviewer name (default: human) [default: human]
-  -v, --verbose...           Verbosity level (-v, -vv, -vvv)
-  -h, --help                 Print help
-```
-
 ## `batty resume`
 
 Resume nudges and standups
@@ -697,6 +700,40 @@ Usage: batty retro [OPTIONS]
 Options:
       --events <EVENTS>
           Path to events.jsonl (default: .batty/team_config/events.jsonl)
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty review`
+
+Record a structured review disposition for a task
+
+```text
+Record a structured review disposition for a task
+
+Usage: batty review [OPTIONS] <TASK_ID> <DISPOSITION> [FEEDBACK]
+
+Arguments:
+  <TASK_ID>
+          Task id
+
+  <DISPOSITION>
+          Review disposition
+          
+          [possible values: approve, request-changes, reject]
+
+  [FEEDBACK]
+          Feedback text
+
+Options:
+      --reviewer <REVIEWER>
+          Reviewer name (default: human)
+          
+          [default: human]
 
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
@@ -983,6 +1020,23 @@ Options:
           Print help
 ```
 
+## `batty telegram`
+
+Set up Telegram bot for human communication
+
+```text
+Set up Telegram bot for human communication
+
+Usage: batty telegram [OPTIONS]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
 ## `batty telemetry`
 
 Query the telemetry database for agent and task metrics
@@ -1001,22 +1055,11 @@ Commands:
   help     Print this message or the help of the given subcommand(s)
 
 Options:
-  -v, --verbose...  Verbosity level (-v, -vv, -vvv)
-  -h, --help        Print help
-```
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
 
-## `batty telemetry summary`
-
-Show session summaries
-
-```text
-Show session summaries
-
-Usage: batty telemetry summary [OPTIONS]
-
-Options:
-  -v, --verbose...  Verbosity level (-v, -vv, -vvv)
-  -h, --help        Print help
+  -h, --help
+          Print help
 ```
 
 ## `batty telemetry agents`
@@ -1029,36 +1072,11 @@ Show per-agent performance metrics
 Usage: batty telemetry agents [OPTIONS]
 
 Options:
-  -v, --verbose...  Verbosity level (-v, -vv, -vvv)
-  -h, --help        Print help
-```
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
 
-## `batty telemetry tasks`
-
-Show per-task lifecycle metrics
-
-```text
-Show per-task lifecycle metrics
-
-Usage: batty telemetry tasks [OPTIONS]
-
-Options:
-  -v, --verbose...  Verbosity level (-v, -vv, -vvv)
-  -h, --help        Print help
-```
-
-## `batty telemetry reviews`
-
-Show review pipeline metrics (auto-merge rate, rework, latency)
-
-```text
-Show review pipeline metrics (auto-merge rate, rework, latency)
-
-Usage: batty telemetry reviews [OPTIONS]
-
-Options:
-  -v, --verbose...  Verbosity level (-v, -vv, -vvv)
-  -h, --help        Print help
+  -h, --help
+          Print help
 ```
 
 ## `batty telemetry events`
@@ -1071,19 +1089,60 @@ Show recent events from the telemetry database
 Usage: batty telemetry events [OPTIONS]
 
 Options:
-  -n, --limit <LIMIT>  Maximum number of events to show [default: 50]
-  -v, --verbose...     Verbosity level (-v, -vv, -vvv)
-  -h, --help           Print help
+  -n, --limit <LIMIT>
+          Maximum number of events to show
+          
+          [default: 50]
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
 ```
 
-## `batty telegram`
+## `batty telemetry reviews`
 
-Set up Telegram bot for human communication
+Show review pipeline metrics (auto-merge rate, rework, latency)
 
 ```text
-Set up Telegram bot for human communication
+Show review pipeline metrics (auto-merge rate, rework, latency)
 
-Usage: batty telegram [OPTIONS]
+Usage: batty telemetry reviews [OPTIONS]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty telemetry summary`
+
+Show session summaries
+
+```text
+Show session summaries
+
+Usage: batty telemetry summary [OPTIONS]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty telemetry tasks`
+
+Show per-task lifecycle metrics
+
+```text
+Show per-task lifecycle metrics
+
+Usage: batty telemetry tasks [OPTIONS]
 
 Options:
   -v, --verbose...
@@ -1103,6 +1162,9 @@ Validate team config without launching
 Usage: batty validate [OPTIONS]
 
 Options:
+      --show-checks
+          Show all individual checks with pass/fail status
+
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 

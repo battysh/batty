@@ -28,55 +28,6 @@ Optional runtime defaults are read from `.batty/config.toml` when the file is pr
 | `dangerous_mode.enabled`            | boolean                            | `false`                       | Enable dangerous-mode flags for supported agent wrappers.               |
 | `policy.auto_answer`                | table[string -> string]            | `{}`                          | Prompt-to-answer overrides for runtime paths that use this config.      |
 
-## team.yaml — Workflow Policy Keys
-
-These keys live under `workflow_policy:` in `.batty/team_config/team.yaml`.
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `wip_limit_per_engineer` | integer or null | `(none)` | Maximum concurrent tasks per engineer. |
-| `wip_limit_per_reviewer` | integer or null | `(none)` | Maximum concurrent reviews per reviewer. |
-| `pipeline_starvation_threshold` | integer or null | `3` | Minimum todo tasks before replenishment nudge fires. |
-| `escalation_threshold_secs` | integer | `7200` | Seconds before a blocked task is escalated. |
-| `review_nudge_threshold_secs` | integer | `1800` | Seconds before a stale review triggers a nudge. |
-| `review_timeout_secs` | integer | `7200` | Seconds before a stale review is escalated. |
-| `review_timeout_overrides` | map[string → object] | `{}` | Per-priority overrides for review thresholds (keys: priority name, values: `review_nudge_threshold_secs`, `review_timeout_secs`). |
-| `stall_threshold_secs` | integer | `300` | Seconds of agent silence before the daemon treats it as stalled. |
-| `max_stall_restarts` | integer | `2` | Maximum restart attempts for a stalled agent before escalation. |
-| `health_check_interval_secs` | integer | `60` | How often (seconds) the daemon checks agent backend health. |
-| `uncommitted_warn_threshold` | integer | `200` | Uncommitted diff lines in an engineer worktree before the daemon warns the manager. |
-| `auto_archive_done_after_secs` | integer or null | `(none)` | Auto-archive done tasks after this many seconds. |
-| `capability_overrides` | map[string → array] | `{}` | Override default capability sets per role. |
-
-### team.yaml — Auto-Merge Policy Keys
-
-These keys live under `workflow_policy.auto_merge:` in `.batty/team_config/team.yaml`.
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `enabled` | boolean | `false` | Enable automatic merging of low-risk branches. |
-| `max_diff_lines` | integer | `200` | Maximum diff lines for auto-merge eligibility. |
-| `max_files_changed` | integer | `5` | Maximum files changed for auto-merge eligibility. |
-| `max_modules_touched` | integer | `2` | Maximum top-level directories touched. |
-| `sensitive_paths` | array[string] | `[Cargo.toml, team.yaml, .env]` | Paths that disqualify a branch from auto-merge. |
-| `confidence_threshold` | float | `0.8` | Minimum confidence score (0.0–1.0) for auto-merge. |
-| `require_tests_pass` | boolean | `true` | Require passing tests before auto-merge. |
-
-### team.yaml — Board Config Keys
-
-These keys live under `board:` in `.batty/team_config/team.yaml`.
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `dispatch_manual_cooldown_secs` | integer | `30` | Cooldown (seconds) after a manual dispatch before auto-dispatcher resumes. |
-
-### team.yaml — Other Top-Level Keys
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `agent` | string or null | `(none)` | Team-level default agent backend. Individual roles override with their own `agent` field. Fallback: `"claude"`. |
-| `external_senders` | array[string] | `[]` | Non-team sources allowed to message any role (bypasses `talks_to`). |
-
 ## Default Template
 
 ```toml
