@@ -1751,14 +1751,31 @@ fn load_point_char(value: f64) -> char {
 }
 
 /// Validate team config without launching.
-pub fn validate_team(project_root: &Path) -> Result<()> {
+pub fn validate_team(project_root: &Path, verbose: bool) -> Result<()> {
     let config_path = team_config_path(project_root);
     if !config_path.exists() {
         bail!("no team config found at {}", config_path.display());
     }
 
     let team_config = config::TeamConfig::load(&config_path)?;
-    team_config.validate()?;
+
+    if verbose {
+        let checks = team_config.validate_verbose();
+        let mut any_failed = false;
+        for check in &checks {
+            let status = if check.passed { "PASS" } else { "FAIL" };
+            println!("[{status}] {}: {}", check.name, check.detail);
+            if !check.passed {
+                any_failed = true;
+            }
+        }
+        if any_failed {
+            bail!("validation failed — see FAIL checks above");
+        }
+    } else {
+        team_config.validate()?;
+    }
+
     let workflow_mode_is_explicit = workflow_mode_declared(&config_path)?;
 
     let members = hierarchy::resolve_hierarchy(&team_config)?;
@@ -3852,20 +3869,32 @@ roles:
     #[test]
     fn session_summary_counts_completions_correctly() {
         let tmp = tempfile::tempdir().unwrap();
-        let events_dir = tmp
-            .path()
-            .join(".batty")
-            .join("team_config");
+        let events_dir = tmp.path().join(".batty").join("team_config");
         std::fs::create_dir_all(&events_dir).unwrap();
 
         let now = now_unix();
         let events = vec![
             format!(r#"{{"event":"daemon_started","ts":{}}}"#, now - 3600),
-            format!(r#"{{"event":"task_completed","role":"eng-1","task":"10","ts":{}}}"#, now - 3000),
-            format!(r#"{{"event":"task_completed","role":"eng-2","task":"11","ts":{}}}"#, now - 2000),
-            format!(r#"{{"event":"task_auto_merged","role":"eng-1","task":"10","ts":{}}}"#, now - 2900),
-            format!(r#"{{"event":"task_manual_merged","role":"eng-2","task":"11","ts":{}}}"#, now - 1900),
-            format!(r#"{{"event":"task_completed","role":"eng-1","task":"12","ts":{}}}"#, now - 1000),
+            format!(
+                r#"{{"event":"task_completed","role":"eng-1","task":"10","ts":{}}}"#,
+                now - 3000
+            ),
+            format!(
+                r#"{{"event":"task_completed","role":"eng-2","task":"11","ts":{}}}"#,
+                now - 2000
+            ),
+            format!(
+                r#"{{"event":"task_auto_merged","role":"eng-1","task":"10","ts":{}}}"#,
+                now - 2900
+            ),
+            format!(
+                r#"{{"event":"task_manual_merged","role":"eng-2","task":"11","ts":{}}}"#,
+                now - 1900
+            ),
+            format!(
+                r#"{{"event":"task_completed","role":"eng-1","task":"12","ts":{}}}"#,
+                now - 1000
+            ),
         ];
         std::fs::write(events_dir.join("events.jsonl"), events.join("\n")).unwrap();
 
@@ -3878,16 +3907,14 @@ roles:
     #[test]
     fn session_summary_calculates_runtime() {
         let tmp = tempfile::tempdir().unwrap();
-        let events_dir = tmp
-            .path()
-            .join(".batty")
-            .join("team_config");
+        let events_dir = tmp.path().join(".batty").join("team_config");
         std::fs::create_dir_all(&events_dir).unwrap();
 
         let now = now_unix();
-        let events = vec![
-            format!(r#"{{"event":"daemon_started","ts":{}}}"#, now - 7200),
-        ];
+        let events = vec![format!(
+            r#"{{"event":"daemon_started","ts":{}}}"#,
+            now - 7200
+        )];
         std::fs::write(events_dir.join("events.jsonl"), events.join("\n")).unwrap();
 
         let summary = compute_session_summary(tmp.path()).unwrap();
@@ -3899,10 +3926,7 @@ roles:
     #[test]
     fn session_summary_handles_empty_session() {
         let tmp = tempfile::tempdir().unwrap();
-        let events_dir = tmp
-            .path()
-            .join(".batty")
-            .join("team_config");
+        let events_dir = tmp.path().join(".batty").join("team_config");
         std::fs::create_dir_all(&events_dir).unwrap();
 
         // No daemon_started event — summary returns None.
@@ -3953,20 +3977,26 @@ roles:
     #[test]
     fn session_summary_uses_latest_daemon_started() {
         let tmp = tempfile::tempdir().unwrap();
-        let events_dir = tmp
-            .path()
-            .join(".batty")
-            .join("team_config");
+        let events_dir = tmp.path().join(".batty").join("team_config");
         std::fs::create_dir_all(&events_dir).unwrap();
 
         let now = now_unix();
         // First session had 2 completions, second session has 1.
         let events = vec![
             format!(r#"{{"event":"daemon_started","ts":{}}}"#, now - 7200),
-            format!(r#"{{"event":"task_completed","role":"eng-1","task":"1","ts":{}}}"#, now - 6000),
-            format!(r#"{{"event":"task_completed","role":"eng-1","task":"2","ts":{}}}"#, now - 5000),
+            format!(
+                r#"{{"event":"task_completed","role":"eng-1","task":"1","ts":{}}}"#,
+                now - 6000
+            ),
+            format!(
+                r#"{{"event":"task_completed","role":"eng-1","task":"2","ts":{}}}"#,
+                now - 5000
+            ),
             format!(r#"{{"event":"daemon_started","ts":{}}}"#, now - 1800),
-            format!(r#"{{"event":"task_completed","role":"eng-1","task":"3","ts":{}}}"#, now - 1000),
+            format!(
+                r#"{{"event":"task_completed","role":"eng-1","task":"3","ts":{}}}"#,
+                now - 1000
+            ),
         ];
         std::fs::write(events_dir.join("events.jsonl"), events.join("\n")).unwrap();
 

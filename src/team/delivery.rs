@@ -2691,7 +2691,11 @@ mod tests {
             "message to starting agent must be deferred"
         );
         let queue = daemon.pending_delivery_queue.get("eng-1").unwrap();
-        assert_eq!(queue.len(), 1, "pending queue must contain exactly one message");
+        assert_eq!(
+            queue.len(),
+            1,
+            "pending queue must contain exactly one message"
+        );
         assert_eq!(queue[0].from, "manager");
         assert_eq!(queue[0].body, "Task #42: implement feature");
 
@@ -2721,7 +2725,11 @@ mod tests {
         // Message should have reached inbox (pane %9999999 doesn't exist → inbox fallback).
         let root = inbox::inboxes_root(tmp.path());
         let inbox_msgs = inbox::pending_messages(&root, "eng-1").unwrap();
-        assert_eq!(inbox_msgs.len(), 1, "message must arrive in inbox after drain");
+        assert_eq!(
+            inbox_msgs.len(),
+            1,
+            "message must arrive in inbox after drain"
+        );
         assert_eq!(inbox_msgs[0].body, "Task #42: implement feature");
         assert_eq!(inbox_msgs[0].from, "manager");
     }
