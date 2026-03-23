@@ -2,8 +2,8 @@ use anyhow::{Context, Result, bail};
 use batty_cli::{
     agent,
     cli::{
-        self, AutoMergeAction, BoardCommand, Cli, Command, DepsFormatArg, InboxCommand,
-        NudgeCommand, ReviewDispositionArg, TaskCommand, TaskStateArg,
+        self, AutoMergeAction, BoardCommand, Cli, Command, DepsFormatArg, GrafanaCommand,
+        InboxCommand, NudgeCommand, ReviewDispositionArg, TaskCommand, TaskStateArg,
     },
     team,
 };
@@ -941,6 +941,20 @@ fn main() -> Result<()> {
 
         Command::Doctor { fix, yes } => {
             print!("{}", team::doctor::run(&root, fix, yes)?);
+        }
+
+        Command::Grafana { command } => {
+            let config_path = team::team_config_path(&root);
+            let port = if config_path.exists() {
+                team::config::TeamConfig::load(&config_path)?.grafana.port
+            } else {
+                team::grafana::DEFAULT_PORT
+            };
+            match command {
+                GrafanaCommand::Setup => team::grafana::setup(port)?,
+                GrafanaCommand::Status => team::grafana::status(port)?,
+                GrafanaCommand::Open => team::grafana::open(port)?,
+            }
         }
 
         Command::Telegram => {
