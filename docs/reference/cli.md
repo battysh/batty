@@ -42,6 +42,7 @@ Commands:
   queue            Show pending dispatch queue entries
   cost             Estimate current run cost from agent session files
   doctor           Dump diagnostic state from Batty state files
+  metrics          Show consolidated telemetry dashboard (tasks, cycle time, rates, agents)
   telemetry        Query the telemetry database for agent and task metrics
   help             Print this message or the help of the given subcommand(s)
 
@@ -446,6 +447,9 @@ Options:
       --before <BEFORE>
           Purge delivered messages older than this unix timestamp
 
+      --older-than <OLDER_THAN>
+          Purge delivered messages older than this duration (e.g. 24h, 7d, 2w)
+
       --all
           Purge all delivered messages
 
@@ -518,6 +522,23 @@ Usage: batty merge [OPTIONS] <ENGINEER>
 Arguments:
   <ENGINEER>
           Engineer instance name (e.g., "eng-1-1")
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty metrics`
+
+Show consolidated telemetry dashboard (tasks, cycle time, rates, agents)
+
+```text
+Show consolidated telemetry dashboard (tasks, cycle time, rates, agents)
+
+Usage: batty metrics [OPTIONS]
 
 Options:
   -v, --verbose...
