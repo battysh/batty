@@ -531,6 +531,24 @@ batty board deps --format dot  # Graphviz DOT output
 The dispatcher respects dependencies — a task will not be auto-assigned until
 all its `depends_on` tasks have reached `done`.
 
+## Worktree Reconciliation
+
+When branches are merged via cherry-pick instead of a fast-forward merge, the
+original branch still looks unmerged to `git branch --merged`. Batty detects
+this situation automatically using `git cherry` and resets the worktree to the
+base branch so the next assignment starts clean.
+
+This runs during the daemon poll loop. No configuration is needed — if all
+commits on an engineer's branch have been cherry-picked onto main, the worktree
+is reset without manual intervention.
+
+## Pending Delivery Queue
+
+Messages sent to agents that are still starting (never been ready) are buffered
+in a pending delivery queue instead of being dropped to inbox. When the daemon
+detects that the agent has transitioned to the Ready state, all queued messages
+are delivered automatically. This prevents lost messages during agent startup.
+
 ## Board Archive
 
 Move completed tasks out of the active board into an archive directory:
@@ -600,3 +618,4 @@ branches from being merged.
 
 - [Runtime Config Reference](reference/config.md)
 - [CLI Reference](reference/cli.md)
+- [Intervention System](interventions.md)
