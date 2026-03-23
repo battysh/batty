@@ -563,7 +563,7 @@ roles:
         )
         .unwrap();
         fs::write(
-            super::daemon_state_path(tmp.path()),
+            crate::team::daemon_state_path(tmp.path()),
             r#"{"clean_shutdown":false,"saved_at":10,"states":{"architect":"working","manager":"idle"},"active_tasks":{"engineer":58}}"#,
         )
         .unwrap();
@@ -655,9 +655,7 @@ roles:
         assert!(report.contains("== Board-Git Consistency =="));
         assert!(report.contains("== Board Dependency Graph =="));
         assert!(report.contains("PASS: no task dependencies declared"));
-        assert!(
-            report.contains("PASS: all 1 active task branches exist and are ahead of main")
-        );
+        assert!(report.contains("PASS: all 1 active task branches exist and are ahead of main"));
         assert!(
             report.contains("PASS: all 1 active task worktrees exist and match board metadata")
         );
