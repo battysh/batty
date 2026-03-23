@@ -9,6 +9,8 @@ pub mod auto_merge;
 #[cfg(test)]
 mod behavioral_tests;
 pub mod board;
+#[cfg(test)]
+mod smoke_tests;
 // -- Decomposed submodules --
 mod init;
 pub use init::*;
