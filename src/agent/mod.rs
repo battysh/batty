@@ -66,8 +66,6 @@ pub struct SpawnConfig {
     /// Working directory for the agent process.
     pub work_dir: String,
     /// Environment variables to set (key, value pairs).
-    #[allow(dead_code)]
-    // Reserved for supervisor PTY execution path; not read in current tmux orchestrator mode.
     pub env: Vec<(String, String)>,
 }
 
@@ -108,7 +106,6 @@ pub trait AgentAdapter: Send + Sync {
     /// Format a response to send to the agent's stdin.
     ///
     /// Some agents need a trailing newline, some don't. The adapter handles it.
-    #[allow(dead_code)]
     fn format_input(&self, response: &str) -> String;
 
     /// Return tmux send-keys sequence to reset agent context.
