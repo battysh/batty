@@ -10,8 +10,8 @@ use super::util::{
     is_engineer_name, is_task_branch, resolve_task_worktree, short_prompt_hash,
 };
 use super::{
-    ActiveTaskTargets, CheckLevel, CheckLine, LaunchIdentityRecord, ResumeEligibility,
-    TeamConfig, WorktreeStatus,
+    ActiveTaskTargets, CheckLevel, CheckLine, LaunchIdentityRecord, ResumeEligibility, TeamConfig,
+    WorktreeStatus,
 };
 use crate::task::load_tasks_from_dir;
 
@@ -665,10 +665,11 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    use super::super::super::hierarchy;
+    use super::super::LaunchIdentityRecord;
     use super::super::util::{load_team_config, strip_nudge_section};
-    use super::super::{LaunchIdentityRecord, MemberInstance, RoleType};
     use super::*;
+    use crate::team::config::RoleType;
+    use crate::team::hierarchy::{self, MemberInstance};
 
     fn write_team_config(root: &Path) {
         let team_dir = root.join(".batty").join("team_config");
@@ -906,10 +907,26 @@ roles:
 
         let graph = build_board_dependency_graph(tmp.path());
 
-        assert!(graph.iter().any(|line| line.contains("#12 [todo] Consumer task")));
-        assert!(graph.iter().any(|line| line.contains("-> #10 [done] Completed dependency (satisfied)")));
-        assert!(graph.iter().any(|line| line.contains("-> #11 [in-progress] Active dependency (blocking)")));
-        assert!(graph.iter().any(|line| line.contains("-> #99 [missing] (blocking)")));
+        assert!(
+            graph
+                .iter()
+                .any(|line| line.contains("#12 [todo] Consumer task"))
+        );
+        assert!(
+            graph
+                .iter()
+                .any(|line| line.contains("-> #10 [done] Completed dependency (satisfied)"))
+        );
+        assert!(
+            graph
+                .iter()
+                .any(|line| line.contains("-> #11 [in-progress] Active dependency (blocking)"))
+        );
+        assert!(
+            graph
+                .iter()
+                .any(|line| line.contains("-> #99 [missing] (blocking)"))
+        );
     }
 
     #[test]
@@ -920,8 +937,16 @@ roles:
 
         let graph = build_board_dependency_graph(tmp.path());
 
-        assert!(graph.iter().any(|line| line.contains("Circular dependencies:")));
-        assert!(graph.iter().any(|line| line.contains("WARN: #20 -> #21 -> #20")));
+        assert!(
+            graph
+                .iter()
+                .any(|line| line.contains("Circular dependencies:"))
+        );
+        assert!(
+            graph
+                .iter()
+                .any(|line| line.contains("WARN: #20 -> #21 -> #20"))
+        );
     }
 
     #[test]
