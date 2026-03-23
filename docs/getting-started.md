@@ -54,6 +54,15 @@ Then run: batty start
 
 If you want a different scaffold, use `batty init --template solo|pair|simple|squad|large|research|software|batty`.
 
+To set the default agent backend for all roles at init time:
+
+```sh
+batty init --agent codex
+batty init --template squad --agent claude
+```
+
+Supported backends include `claude`, `codex`, and `kiro`. You can override individual roles later in `team.yaml`.
+
 ## Configure
 
 Edit `.batty/team_config/team.yaml`. Start with `name`, `layout`, `roles`, `use_worktrees`, and the `automation` block.
@@ -613,6 +622,31 @@ When an engineer reports completion, the daemon verifies that the worktree
 branch actually has commits beyond `main`. If no new commits are found, the
 completion is rejected and the task stays in progress. This prevents empty
 branches from being merged.
+
+## Grafana Dashboard
+
+Batty includes a bundled Grafana dashboard template with 21 panels across 6 rows
+and 6 pre-configured alerts for monitoring agent sessions, pipeline health, and
+task lifecycle.
+
+To use it:
+
+1. Copy the dashboard from the source tree: `src/team/grafana/dashboard.json`
+2. Open your Grafana instance
+3. Import the JSON via Dashboards > Import
+4. Point the datasource at your telemetry backend
+
+The dashboard rows cover:
+
+- **Session Overview** — active agents, session uptime, team utilization
+- **Pipeline Health** — task flow rates, queue depths, starvation indicators
+- **Agent Performance** — per-agent task counts, cycle times, failure rates
+- **Delivery & Communication** — message delivery success rates, latency
+- **Task Lifecycle** — time-in-status breakdowns, rework rates
+- **Recent Activity** — live event stream
+
+Pre-configured alerts fire on agent stalls, delivery failure spikes, pipeline
+starvation, high failure rates, context exhaustion, and session idle.
 
 ## Next Steps
 
