@@ -350,9 +350,13 @@ fn main() -> Result<()> {
         }
 
         Command::Retro { events } => {
-            let events_path = events
-                .unwrap_or_else(|| root.join(".batty").join("team_config").join("events.jsonl"));
-            let stats = team::retrospective::analyze_event_log(&events_path)?;
+            let stats = if let Some(events_path) = events {
+                // Explicit path: use JSONL directly.
+                team::retrospective::analyze_event_log(&events_path)?
+            } else {
+                // Default: prefer telemetry DB, fall back to JSONL.
+                team::retrospective::analyze_project(&root)?
+            };
             match stats {
                 Some(stats) => {
                     let path = team::retrospective::generate_retrospective(&root, &stats)?;
