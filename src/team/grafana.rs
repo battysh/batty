@@ -1,10 +1,21 @@
-//! Bundled Grafana dashboard template for per-project monitoring.
+//! Grafana monitoring: bundled dashboard template and CLI commands.
 //!
 //! The JSON is compiled into the binary via `include_str!()` so `batty init`
 //! can write it without needing a network fetch or external file.
+//!
+//! CLI commands:
+//! - `batty grafana setup` — install Grafana + SQLite plugin, start the service
+//! - `batty grafana status` — check if the Grafana server is reachable
+//! - `batty grafana open` — open the dashboard in the default browser
+
+use anyhow::{Context, Result, bail};
+use std::process::Command as ProcessCommand;
 
 /// Raw JSON for the Grafana dashboard template.
 pub const DASHBOARD_JSON: &str = include_str!("grafana/dashboard.json");
+
+/// Default Grafana port.
+pub const DEFAULT_PORT: u16 = 3000;
 
 /// Expected row titles in the dashboard (used for validation).
 pub const REQUIRED_ROWS: &[&str] = &[
@@ -33,6 +44,93 @@ pub fn write_dashboard(path: &std::path::Path) -> anyhow::Result<()> {
     }
     std::fs::write(path, DASHBOARD_JSON)?;
     Ok(())
+}
+
+/// Build the Grafana base URL from a port number.
+pub fn grafana_url(port: u16) -> String {
+    format!("http://localhost:{port}")
+}
+
+/// Install Grafana and the SQLite datasource plugin via Homebrew, then start
+/// the service.
+///
+/// Steps:
+/// 1. `brew install grafana`
+/// 2. `grafana-cli plugins install frser-sqlite-datasource`
+/// 3. `brew services start grafana`
+pub fn setup(port: u16) -> Result<()> {
+    println!("Installing Grafana via Homebrew...");
+    run_cmd("brew", &["install", "grafana"])?;
+
+    println!("Installing SQLite datasource plugin...");
+    run_cmd(
+        "grafana-cli",
+        &["plugins", "install", "frser-sqlite-datasource"],
+    )?;
+
+    println!("Starting Grafana service...");
+    run_cmd("brew", &["services", "start", "grafana"])?;
+
+    println!("Grafana setup complete. Dashboard at {}", grafana_url(port));
+    Ok(())
+}
+
+/// Check whether the Grafana server is reachable by hitting `/api/health`.
+pub fn status(port: u16) -> Result<()> {
+    let url = format!("{}/api/health", grafana_url(port));
+    match check_health(&url) {
+        Ok(body) => {
+            println!("Grafana is running at {}", grafana_url(port));
+            println!("{body}");
+            Ok(())
+        }
+        Err(e) => {
+            bail!("Grafana is not reachable at {}: {e}", grafana_url(port));
+        }
+    }
+}
+
+/// Open the Grafana dashboard in the default browser.
+pub fn open(port: u16) -> Result<()> {
+    let url = grafana_url(port);
+    open_browser(&url).context("failed to open browser")?;
+    println!("Opened {url}");
+    Ok(())
+}
+
+// --- internal helpers -------------------------------------------------------
+
+fn run_cmd(program: &str, args: &[&str]) -> Result<()> {
+    let status = ProcessCommand::new(program)
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to run {program} — is it installed?"))?;
+    if !status.success() {
+        bail!("{program} exited with status {status}");
+    }
+    Ok(())
+}
+
+fn check_health(url: &str) -> Result<String> {
+    let output = ProcessCommand::new("curl")
+        .args(["-sf", url])
+        .output()
+        .context("failed to run curl")?;
+    if !output.status.success() {
+        bail!("HTTP request failed (status {})", output.status);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn open_browser(url: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(target_os = "linux")]
+    let program = "xdg-open";
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let program = "open";
+
+    run_cmd(program, &[url])
 }
 
 #[cfg(test)]
@@ -165,5 +263,29 @@ mod tests {
         assert_eq!(parsed["title"].as_str(), Some("Batty — Project Dashboard"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- CLI command tests ---
+
+    #[test]
+    fn grafana_url_default_port() {
+        assert_eq!(grafana_url(3000), "http://localhost:3000");
+    }
+
+    #[test]
+    fn grafana_url_custom_port() {
+        assert_eq!(grafana_url(9090), "http://localhost:9090");
+    }
+
+    #[test]
+    fn default_port_is_3000() {
+        assert_eq!(DEFAULT_PORT, 3000);
+    }
+
+    #[test]
+    fn check_health_unreachable() {
+        // Port 1 is almost certainly not running Grafana
+        let result = check_health("http://localhost:1/api/health");
+        assert!(result.is_err());
     }
 }

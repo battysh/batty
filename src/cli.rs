@@ -189,6 +189,12 @@ pub enum Command {
     /// Resume nudges and standups
     Resume,
 
+    /// Manage Grafana monitoring (setup, status, open)
+    Grafana {
+        #[command(subcommand)]
+        command: GrafanaCommand,
+    },
+
     /// Set up Telegram bot for human communication
     Telegram,
 
@@ -248,6 +254,16 @@ pub enum TelemetryCommand {
         #[arg(short = 'n', long = "limit", default_value_t = 50)]
         limit: usize,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum GrafanaCommand {
+    /// Install Grafana and the SQLite datasource plugin, then start the service
+    Setup,
+    /// Check whether the Grafana server is reachable
+    Status,
+    /// Open the Grafana dashboard in the default browser
+    Open,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1645,6 +1661,47 @@ mod tests {
     #[test]
     fn telemetry_rejects_missing_subcommand() {
         let result = Cli::try_parse_from(["batty", "telemetry"]);
+        assert!(result.is_err());
+    }
+
+    // --- grafana ---
+
+    #[test]
+    fn grafana_setup_parses() {
+        let cli = Cli::parse_from(["batty", "grafana", "setup"]);
+        assert!(matches!(
+            cli.command,
+            Command::Grafana {
+                command: GrafanaCommand::Setup
+            }
+        ));
+    }
+
+    #[test]
+    fn grafana_status_parses() {
+        let cli = Cli::parse_from(["batty", "grafana", "status"]);
+        assert!(matches!(
+            cli.command,
+            Command::Grafana {
+                command: GrafanaCommand::Status
+            }
+        ));
+    }
+
+    #[test]
+    fn grafana_open_parses() {
+        let cli = Cli::parse_from(["batty", "grafana", "open"]);
+        assert!(matches!(
+            cli.command,
+            Command::Grafana {
+                command: GrafanaCommand::Open
+            }
+        ));
+    }
+
+    #[test]
+    fn grafana_rejects_missing_subcommand() {
+        let result = Cli::try_parse_from(["batty", "grafana"]);
         assert!(result.is_err());
     }
 
