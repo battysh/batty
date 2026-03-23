@@ -287,35 +287,21 @@ Auto-merge policy engine, daemon integration with per-task overrides, stale revi
 
 ---
 
-## Error Resilience (Partial — Continuing)
+## Error Resilience (Done)
 
-Reduce crash surface from 1,282 unwrap/expect calls to under 200 in production paths. Make every failure diagnosable.
-
-### Shipped
+Reduce crash surface in production paths. Make every failure diagnosable.
 
 - **Daemon poll loop isolation** — subsystem calls wrapped with criticality tiers (critical/recoverable/catch_unwind), consecutive failure tracking with escalation warnings. (#183, merged)
-- **Remaining module unwrap cleanup** — mod.rs, events.rs, watcher.rs, inbox.rs, merge.rs cleaned with sentinel tests. (#184, merged)
-
-### Deferred to Next Session
-
-- **daemon.rs and task_loop.rs unwrap cleanup** — the largest cleanup (~580 calls). eng-1-4 stalled on this; carrying forward. (#182, partial/closed)
+- **Module unwrap cleanup** — mod.rs, events.rs, watcher.rs, inbox.rs, merge.rs cleaned with sentinel tests. (#184, merged)
+- **daemon.rs and task_loop.rs audit** — confirmed 0 panicking unwraps in production code (all ~559 were in test blocks). Sentinel tests added to guard both files. (#308, #311, merged)
 
 ---
 
-## Documentation & Hygiene (Partial — Continuing)
+## Documentation & Hygiene (Done)
 
-Close documentation gaps and clean up accumulated technical debt. Lightweight tasks suitable for parallel execution alongside heavier phases.
-
-### Wave 1: Documentation
-
-- **Intervention system documentation** — document all 5 intervention types (triage, owned-task, review, dispatch, utilization), triggers, state machines, cooldown/dedup, and configuration.
-- **README and getting-started refresh** — update user-facing docs to reflect all features shipped since v0.3.0: dogfooding fixes, review automation, error resilience, external senders, non-git support, auto-merge policy.
-
-### Wave 2: Hygiene
-
-- **Dead code audit and compiler warning cleanup** — zero warnings target. Remove unused dependencies, dead code paths, stale imports. Clean `cargo clippy --all-targets`.
-
-**Exit:** System fully documented. Zero compiler warnings. User-facing docs current.
+- **Intervention system documentation** — all 7 intervention types documented at docs/interventions.md (456 lines). (#310)
+- **README and getting-started refresh** — updated for all features shipped since v0.3.0. (#310, #327 in progress)
+- **Dead code audit and compiler warning cleanup** — zero clippy/compiler warnings. 28 stale annotations removed. (#309, merged)
 
 ---
 
@@ -329,46 +315,15 @@ Close documentation gaps and clean up accumulated technical debt. Lightweight ta
 | Tasks | Markdown kanban board |
 | Logs | JSON lines |
 | Comms | Telegram (optional) |
-
----
-
-## Review Automation (Next)
-
-The review queue is the #1 throughput killer across all dogfooding sessions. Engineers complete tasks and sit idle while the manager manually reviews, tests, and merges. This phase automates the safe cases and adds time-bounded escalation for the rest.
-
-### Wave 1: Auto-Merge for Low-Risk Tasks
-
-Eliminate manual review for tasks that pass automated quality gates. The manager still handles complex or risky changes, but routine tasks (small diffs, all tests pass, no conflict) merge automatically.
-
-- **Auto-merge policy engine** — configurable policy in team.yaml defining when a completed task can be merged without manual review. Policy evaluates: test pass/fail, diff size (lines changed), file count, conflict status, task priority, and optional tag-based rules. When all criteria are met, the daemon merges directly. Manager retains a per-task override to force manual review.
-- **Merge confidence scoring** — before auto-merging, compute a confidence score based on diff characteristics (test coverage of changed files, number of modules touched, presence of migration/config changes). Low-confidence changes are routed to manual review even if they meet the size threshold. This prevents auto-merging a 10-line change that touches 5 critical modules.
-
-**Exit:** Tasks that pass tests and meet policy thresholds merge without human intervention. Manager reviews only what needs human judgment.
-
-### Wave 2: Review Queue Drain
-
-Prevent the review queue from silently rotting. Add time-based escalation and structured feedback.
-
-- **Review timeout and escalation** — tasks in review status beyond a configurable threshold trigger escalation. First: nudge the reviewer (manager). If still stale after a second threshold: escalate to architect. Configurable per-priority (high-priority tasks escalate faster). Prevents the pattern where 3 tasks sit in review while engineers idle.
-- **Structured review feedback** — when manual review is required, the reviewer records disposition (approve/request-changes/reject) with specific, actionable feedback via `batty review <task_id> <disposition> "<feedback>"`. Rework cycles receive the exact feedback, not a generic "fix it" nudge. Feedback is stored in task frontmatter for traceability.
-
-**Exit:** Review queue drains within configured time bounds. Review feedback is structured, stored, and actionable.
-
-### Wave 3: Review Observability
-
-Make the review pipeline visible and measurable.
-
-- **Review queue metrics** — track review queue depth, average review latency, auto-merge rate, manual review rate, and rework rate. Surface in `batty status` and periodic standups. This gives the architect data to tune auto-merge thresholds.
-- **Review history in retrospectives** — include review queue stall duration, auto-merge vs manual-merge ratio, and rework cycles per task in run retrospectives. Identifies whether auto-merge thresholds are too aggressive or too conservative.
-
-**Exit:** Review pipeline performance is observable and feeds back into policy tuning.
+| Monitoring | Grafana + SQLite (optional) |
 
 ---
 
 ## Architectural Concerns
 
-- **interventions.rs ~2,400 lines** — the board replenishment intervention added ~900 lines. This module needs decomposition in a future phase (extract each intervention type into its own submodule).
-- **dispatch.rs ~700 lines** — grew significantly with the dispatch queue. Monitor for further growth.
+- ~~interventions.rs ~2,400 lines~~ — decomposed into 7 submodules.
+- ~~dispatch.rs ~700 lines~~ — stable.
+- All modules now under 2,300 lines after decomposition wave (#312–#321).
 
 ## Risks
 
