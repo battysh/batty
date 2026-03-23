@@ -82,12 +82,12 @@ mod telemetry;
 #[cfg(test)]
 use self::dispatch::normalized_assignment_dir;
 use self::helpers::{extract_nudge_section, role_prompt_path};
+use self::hot_reload::consume_hot_reload_marker;
 #[cfg(test)]
 use self::hot_reload::{
     BinaryFingerprint, binary_is_reloadable, hot_reload_daemon_args, hot_reload_marker_path,
     write_hot_reload_marker,
 };
-use self::hot_reload::consume_hot_reload_marker;
 pub(crate) use self::interventions::NudgeSchedule;
 use self::interventions::OwnedTaskInterventionState;
 use self::launcher::{
