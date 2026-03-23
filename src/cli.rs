@@ -204,6 +204,9 @@ pub enum Command {
         yes: bool,
     },
 
+    /// Show consolidated telemetry dashboard (tasks, cycle time, rates, agents)
+    Metrics,
+
     /// Query the telemetry database for agent and task metrics
     Telemetry {
         #[command(subcommand)]

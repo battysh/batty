@@ -33,6 +33,7 @@ pub mod layout;
 pub mod merge;
 pub mod message;
 pub mod metrics;
+pub mod metrics_cmd;
 pub mod nudge;
 pub mod policy;
 pub mod resolver;
