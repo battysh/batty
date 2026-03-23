@@ -24,7 +24,6 @@ use crate::prompt::PromptPatterns;
 pub enum ClaudeMode {
     /// Print mode: `-p --output-format stream-json`.
     /// Best for fully automated runs. Structured JSON output.
-    #[allow(dead_code)]
     Print,
     /// Interactive mode: user sees the full TUI.
     /// Batty supervises via PTY pattern matching on ANSI-stripped output.
@@ -48,13 +47,11 @@ impl ClaudeCodeAdapter {
         }
     }
 
-    #[allow(dead_code)]
     pub fn with_mode(mut self, mode: ClaudeMode) -> Self {
         self.mode = mode;
         self
     }
 
-    #[allow(dead_code)]
     pub fn mode(&self) -> ClaudeMode {
         self.mode
     }

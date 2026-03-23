@@ -15,7 +15,6 @@ use super::config::ChannelConfig;
 #[derive(Debug, Clone)]
 pub struct InboundMessage {
     pub from_user_id: i64,
-    #[allow(dead_code)] // Retained for future reply routing and audits.
     pub chat_id: i64,
     pub text: String,
 }
@@ -54,7 +53,6 @@ impl TelegramBot {
     /// Check whether a Telegram user ID is in the allowed list.
     ///
     /// An empty `allowed_user_ids` list denies everyone.
-    #[allow(dead_code)] // Used by tests and future inbound access checks.
     pub fn is_authorized(&self, user_id: i64) -> bool {
         self.allowed_user_ids.contains(&user_id)
     }
@@ -374,7 +372,6 @@ fn prompt_yes_no(msg: &str, default_yes: bool) -> Result<bool> {
 
 /// Parse a getMe API response and extract the bot username.
 /// Exposed for testing.
-#[allow(dead_code)] // Used by tests and setup flows; outbound-only runtime does not call it yet.
 pub fn parse_get_me_response(json: &serde_json::Value) -> Option<String> {
     if json["ok"].as_bool() != Some(true) {
         return None;
