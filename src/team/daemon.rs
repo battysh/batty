@@ -18,7 +18,9 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+#[cfg(test)]
+use std::time::SystemTime;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -61,6 +63,8 @@ mod dispatch;
 mod error_handling;
 #[path = "daemon/health/mod.rs"]
 mod health;
+#[path = "daemon/hot_reload.rs"]
+mod hot_reload;
 #[path = "daemon/interventions/mod.rs"]
 mod interventions;
 #[path = "launcher.rs"]
@@ -74,12 +78,19 @@ mod telemetry;
 
 #[cfg(test)]
 use self::dispatch::normalized_assignment_dir;
+#[cfg(test)]
+use self::hot_reload::{
+    BinaryFingerprint, binary_is_reloadable, hot_reload_daemon_args, hot_reload_marker_path,
+    write_hot_reload_marker,
+};
+use self::hot_reload::{HotReloadMonitor, consume_hot_reload_marker};
 pub(crate) use self::interventions::NudgeSchedule;
 use self::interventions::OwnedTaskInterventionState;
 use self::launcher::{
     duplicate_claude_session_ids, load_launch_state, member_session_tracker_config,
 };
 pub use self::state::load_dispatch_queue_snapshot;
+#[cfg(test)]
 use self::state::{
     PersistedDaemonState, PersistedNudgeState, daemon_state_path, load_daemon_state,
     save_daemon_state,
@@ -94,9 +105,6 @@ pub struct DaemonConfig {
     pub members: Vec<MemberInstance>,
     pub pane_map: HashMap<String, String>,
 }
-
-const HOT_RELOAD_CHECK_INTERVAL: Duration = Duration::from_secs(30);
-const HOT_RELOAD_MIN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The running team daemon.
 pub struct TeamDaemon {
@@ -157,87 +165,6 @@ pub struct TeamDaemon {
 struct MemberWorktreeContext {
     path: PathBuf,
     branch: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BinaryFingerprint {
-    path: PathBuf,
-    modified: SystemTime,
-    len: u64,
-    #[cfg(unix)]
-    inode: u64,
-}
-
-impl BinaryFingerprint {
-    fn capture(path: &Path) -> Result<Self> {
-        let metadata =
-            fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
-        let modified = metadata
-            .modified()
-            .with_context(|| format!("failed to read mtime for {}", path.display()))?;
-        Ok(Self {
-            path: path.to_path_buf(),
-            modified,
-            len: metadata.len(),
-            #[cfg(unix)]
-            inode: std::os::unix::fs::MetadataExt::ino(&metadata),
-        })
-    }
-
-    fn changed_from(&self, previous: &Self) -> bool {
-        self.modified != previous.modified || self.len != previous.len || {
-            #[cfg(unix)]
-            {
-                self.inode != previous.inode
-            }
-            #[cfg(not(unix))]
-            {
-                false
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct HotReloadMonitor {
-    binary: BinaryFingerprint,
-    last_checked: Instant,
-    last_reload_attempt: Option<Instant>,
-}
-
-impl HotReloadMonitor {
-    fn new(binary: BinaryFingerprint) -> Self {
-        Self {
-            binary,
-            last_checked: Instant::now(),
-            last_reload_attempt: None,
-        }
-    }
-
-    fn for_current_exe() -> Result<Self> {
-        let path = std::env::current_exe().context("failed to resolve current executable")?;
-        Ok(Self::new(BinaryFingerprint::capture(&path)?))
-    }
-
-    fn should_check(&self) -> bool {
-        self.last_checked.elapsed() >= HOT_RELOAD_CHECK_INTERVAL
-    }
-
-    fn changed_binary(&mut self) -> Result<Option<BinaryFingerprint>> {
-        self.last_checked = Instant::now();
-        let current = BinaryFingerprint::capture(&self.binary.path)?;
-        Ok(current.changed_from(&self.binary).then_some(current))
-    }
-
-    fn can_attempt_reload(&self) -> bool {
-        self.last_reload_attempt
-            .map(|instant| instant.elapsed() >= HOT_RELOAD_MIN_INTERVAL)
-            .unwrap_or(true)
-    }
-
-    fn mark_reload_attempt(&mut self) {
-        self.last_reload_attempt = Some(Instant::now());
-    }
 }
 
 impl TeamDaemon {
@@ -629,56 +556,6 @@ impl TeamDaemon {
         Ok(())
     }
 
-    fn maybe_hot_reload_binary(&mut self, monitor: Option<&mut HotReloadMonitor>) -> Result<()> {
-        let Some(monitor) = monitor else {
-            return Ok(());
-        };
-        if !monitor.should_check() {
-            return Ok(());
-        }
-
-        let Some(updated_binary) = monitor.changed_binary()? else {
-            return Ok(());
-        };
-
-        if !monitor.can_attempt_reload() {
-            warn!(
-                path = %updated_binary.path.display(),
-                "binary changed again but reload attempt is rate-limited"
-            );
-            return Ok(());
-        }
-
-        if !binary_is_reloadable(&updated_binary.path) {
-            warn!(
-                path = %updated_binary.path.display(),
-                "binary changed but is not safe to hot-reload yet"
-            );
-            return Ok(());
-        }
-
-        monitor.mark_reload_attempt();
-        self.persist_runtime_state(false)?;
-        self.record_daemon_reloading();
-        self.record_orchestrator_action(format!(
-            "runtime: daemon reloading after binary change ({})",
-            updated_binary.path.display()
-        ));
-        write_hot_reload_marker(&self.config.project_root)?;
-
-        if let Err(error) = exec_reloaded_daemon(&updated_binary.path, &self.config.project_root) {
-            let _ = clear_hot_reload_marker(&self.config.project_root);
-            warn!(
-                path = %updated_binary.path.display(),
-                error = %error,
-                "failed to exec updated daemon binary; continuing on existing process"
-            );
-            self.record_orchestrator_action(format!("runtime: daemon reload failed ({error})"));
-        }
-
-        Ok(())
-    }
-
     pub(super) fn mark_member_working(&mut self, member_name: &str) {
         self.states
             .insert(member_name.to_string(), MemberState::Working);
@@ -1022,100 +899,6 @@ fn ensure_board_initialized(project_root: &Path) -> Result<bool> {
         )
     })?;
     Ok(true)
-}
-
-fn hot_reload_marker_path(project_root: &Path) -> PathBuf {
-    project_root.join(".batty").join("reload")
-}
-
-fn write_hot_reload_marker(project_root: &Path) -> Result<()> {
-    let path = hot_reload_marker_path(project_root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    fs::write(&path, now_unix().to_string())
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
-}
-
-fn clear_hot_reload_marker(project_root: &Path) -> Result<()> {
-    let path = hot_reload_marker_path(project_root);
-    if !path.exists() {
-        return Ok(());
-    }
-    fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
-    Ok(())
-}
-
-fn consume_hot_reload_marker(project_root: &Path) -> bool {
-    let path = hot_reload_marker_path(project_root);
-    if !path.exists() {
-        return false;
-    }
-    clear_hot_reload_marker(project_root).is_ok()
-}
-
-fn hot_reload_daemon_args(project_root: &Path) -> Vec<String> {
-    let root = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf())
-        .to_string_lossy()
-        .to_string();
-    vec![
-        "-v".to_string(),
-        "daemon".to_string(),
-        "--project-root".to_string(),
-        root,
-        "--resume".to_string(),
-    ]
-}
-
-fn binary_is_reloadable(path: &Path) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o111 == 0 {
-            return false;
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let Ok(status) = std::process::Command::new("codesign")
-            .args(["--verify", path.to_string_lossy().as_ref()])
-            .status()
-        else {
-            return false;
-        };
-        if !status.success() {
-            return false;
-        }
-    }
-
-    true
-}
-
-#[cfg(unix)]
-fn exec_reloaded_daemon(executable: &Path, project_root: &Path) -> Result<()> {
-    use std::os::unix::process::CommandExt;
-
-    let error = std::process::Command::new(executable)
-        .args(hot_reload_daemon_args(project_root))
-        .exec();
-    Err(anyhow::Error::new(error).context(format!("failed to exec {}", executable.display())))
-}
-
-#[cfg(not(unix))]
-fn exec_reloaded_daemon(_executable: &Path, _project_root: &Path) -> Result<()> {
-    bail!("daemon hot reload via exec is only supported on unix")
 }
 
 #[cfg(test)]
