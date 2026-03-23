@@ -2,6 +2,50 @@
 
 All notable changes to Batty are documented here.
 
+## 0.5.0 — 2026-03-22
+
+Feature release adding board archival, delivery reliability, worktree
+intelligence, telemetry completeness, and session summary. 13 commits
+since v0.4.1.
+
+### Features
+
+- **Board archive command** (#277) — `batty board archive` moves completed
+  tasks older than a configurable threshold (`--older-than 7d`) out of the
+  active board. Supports `--dry-run` for safe previewing.
+- **Delivery readiness gate** (#276) — messages sent to agents still starting
+  up are buffered in a pending queue instead of being dropped. Messages drain
+  automatically once the agent reaches Ready state.
+- **Cherry-pick worktree reconciliation** (#278) — detects when all commits on
+  a task branch have been cherry-picked onto main and auto-resets the worktree,
+  preventing stale-branch accumulation.
+- **Agent metrics telemetry wiring** (#275) — `delivery_failed` and
+  `context_exhausted` events now correctly increment failure and restart
+  counters in the `agent_metrics` SQLite table.
+- **Session summary on stop** — `batty stop` now prints run statistics
+  (duration, tasks completed, messages routed) when ending a session.
+
+### Reliability
+
+- **Error handling tests** (#279) — additional tests for `error_handling.rs`
+  covering telemetry split edge cases.
+- **Clippy cleanup** (#282) — zero warnings on `cargo clippy --all-targets`.
+
+### Documentation
+
+- **Intervention system docs** (#283) — complete documentation of the
+  intervention subsystem (health checks, nudges, escalation, auto-restart).
+- **README and getting-started refresh** — updated for post-v0.4.1 features.
+
+### Maintenance
+
+- **Dependency updates** (#273) — toml 0.8→1.0, cron 0.13→0.15,
+  rusqlite 0.32→0.39.
+- **Property-based tests** (#270) — 16 proptest-driven config parsing tests
+  for fuzz-level confidence in YAML deserialization.
+- **Board archive integration tests** — helpers for testing archive workflows
+  end-to-end.
+
 ## 0.4.1 — 2026-03-22
 
 Stability patch focused on test coverage expansion and reliability. 664 new
