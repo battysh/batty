@@ -214,7 +214,11 @@ impl TeamDaemon {
     }
 
     /// Load the prompt template for a member, substituting role-specific info.
-    pub(in super::super) fn load_prompt(&self, member: &MemberInstance, config_dir: &Path) -> String {
+    pub(in super::super) fn load_prompt(
+        &self,
+        member: &MemberInstance,
+        config_dir: &Path,
+    ) -> String {
         let prompt_file = member.prompt.as_deref().unwrap_or(match member.role_type {
             RoleType::Architect => "architect.md",
             RoleType::Manager => "manager.md",
@@ -248,10 +252,11 @@ mod tests {
     use crate::team::config::{RoleType, WorkflowPolicy};
     use crate::team::hierarchy::MemberInstance;
     use crate::team::standup::MemberState;
+    use crate::team::task_loop::setup_engineer_worktree;
     use crate::team::test_helpers::make_test_daemon;
     use crate::team::test_support::{
         TestDaemonBuilder, architect_member, engineer_member, git_ok, git_stdout, init_git_repo,
-        manager_member, setup_engineer_worktree, write_owned_task_file,
+        manager_member, write_owned_task_file,
     };
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -473,10 +478,14 @@ mod tests {
             .build();
 
         daemon.is_git_repo = true;
-        daemon.check_worktree_staleness().unwrap();
+        daemon.maybe_reconcile_stale_worktrees().unwrap();
 
-        let current = crate::worktree::git_current_branch(&worktree_dir).unwrap();
-        assert_eq!(current, "eng-main/eng-reconcile");
+        let branch = git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(
+            branch,
+            engineer_base_branch_name("eng-reconcile"),
+            "worktree should be reset to base branch"
+        );
 
         let _ = Command::new("git")
             .current_dir(&repo)
@@ -491,26 +500,25 @@ mod tests {
 
     #[test]
     fn reconcile_skips_working_engineer() {
-        let (_tmp, repo, worktree_dir) = setup_reconcile_scenario("eng-reconcile-skip");
+        let (_tmp, repo, worktree_dir) = setup_reconcile_scenario("eng-working");
 
         let members = vec![
             manager_member("manager", None),
-            engineer_member("eng-reconcile-skip", Some("manager"), true),
+            engineer_member("eng-working", Some("manager"), true),
         ];
-        let states = HashMap::from([("eng-reconcile-skip".to_string(), MemberState::Working)]);
+        let states = HashMap::from([("eng-working".to_string(), MemberState::Working)]);
         let mut daemon = TestDaemonBuilder::new(&repo)
             .members(members)
             .states(states)
             .build();
-
         daemon.is_git_repo = true;
-        daemon.active_tasks.insert("eng-reconcile-skip".to_string(), 42);
-        daemon.check_worktree_staleness().unwrap();
 
-        let current = crate::worktree::git_current_branch(&worktree_dir).unwrap();
-        assert_ne!(
-            current, "eng-main/eng-reconcile-skip",
-            "working engineer should NOT be reset"
+        daemon.maybe_reconcile_stale_worktrees().unwrap();
+
+        let branch = git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(
+            branch, "eng-working-42",
+            "worktree should stay on task branch when engineer is working"
         );
 
         let _ = Command::new("git")
@@ -526,28 +534,26 @@ mod tests {
 
     #[test]
     fn reconcile_skips_idle_engineer_with_active_task() {
-        let (_tmp, repo, worktree_dir) = setup_reconcile_scenario("eng-reconcile-active");
+        let (_tmp, repo, worktree_dir) = setup_reconcile_scenario("eng-active");
 
         let members = vec![
             manager_member("manager", None),
-            engineer_member("eng-reconcile-active", Some("manager"), true),
+            engineer_member("eng-active", Some("manager"), true),
         ];
-        let states = HashMap::from([("eng-reconcile-active".to_string(), MemberState::Idle)]);
+        let states = HashMap::from([("eng-active".to_string(), MemberState::Idle)]);
         let mut daemon = TestDaemonBuilder::new(&repo)
             .members(members)
             .states(states)
             .build();
-
         daemon.is_git_repo = true;
-        daemon
-            .active_tasks
-            .insert("eng-reconcile-active".to_string(), 42);
-        daemon.check_worktree_staleness().unwrap();
+        daemon.active_tasks.insert("eng-active".to_string(), 42);
 
-        let current = crate::worktree::git_current_branch(&worktree_dir).unwrap();
-        assert_ne!(
-            current, "eng-main/eng-reconcile-active",
-            "idle engineer with active task should NOT be reset"
+        daemon.maybe_reconcile_stale_worktrees().unwrap();
+
+        let branch = git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(
+            branch, "eng-active-42",
+            "worktree should stay on task branch when engineer has active task"
         );
 
         let _ = Command::new("git")
@@ -565,34 +571,33 @@ mod tests {
     fn reconcile_skips_unmerged_branch() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "batty-reconcile-unmerged");
-        let engineer_name = "eng-unmerged";
-        let worktree_dir = repo.join(".batty").join("worktrees").join(engineer_name);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-unmerged");
         let team_config_dir = repo.join(".batty").join("team_config");
-        setup_engineer_worktree(&repo, &worktree_dir, engineer_name, &team_config_dir).unwrap();
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-unmerged", &team_config_dir).unwrap();
 
-        let task_branch = format!("{engineer_name}-99");
-        git_ok(&worktree_dir, &["checkout", "-b", &task_branch]);
+        let task_branch = "eng-unmerged-99";
+        git_ok(&worktree_dir, &["checkout", "-b", task_branch]);
         std::fs::write(worktree_dir.join("wip.txt"), "wip\n").unwrap();
         git_ok(&worktree_dir, &["add", "wip.txt"]);
-        git_ok(&worktree_dir, &["commit", "-m", "wip"]);
-        // Do NOT merge into main.
+        git_ok(&worktree_dir, &["commit", "-m", "work in progress"]);
 
         let members = vec![
             manager_member("manager", None),
-            engineer_member(engineer_name, Some("manager"), true),
+            engineer_member("eng-unmerged", Some("manager"), true),
         ];
-        let states = HashMap::from([(engineer_name.to_string(), MemberState::Idle)]);
+        let states = HashMap::from([("eng-unmerged".to_string(), MemberState::Idle)]);
         let mut daemon = TestDaemonBuilder::new(&repo)
             .members(members)
             .states(states)
             .build();
         daemon.is_git_repo = true;
-        daemon.check_worktree_staleness().unwrap();
 
-        let current = crate::worktree::git_current_branch(&worktree_dir).unwrap();
+        daemon.maybe_reconcile_stale_worktrees().unwrap();
+
+        let branch = git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
         assert_eq!(
-            current, task_branch,
-            "unmerged branch should NOT be reset"
+            branch, "eng-unmerged-99",
+            "worktree should stay on unmerged task branch"
         );
 
         let _ = Command::new("git")
@@ -608,35 +613,30 @@ mod tests {
 
     #[test]
     fn reconcile_emits_worktree_reconciled_event() {
-        let (_tmp, repo, worktree_dir) = setup_reconcile_scenario("eng-reconcile-event");
+        let (_tmp, repo, _worktree_dir) = setup_reconcile_scenario("eng-event");
 
         let members = vec![
             manager_member("manager", None),
-            engineer_member("eng-reconcile-event", Some("manager"), true),
+            engineer_member("eng-event", Some("manager"), true),
         ];
-        let states = HashMap::from([("eng-reconcile-event".to_string(), MemberState::Idle)]);
+        let states = HashMap::from([("eng-event".to_string(), MemberState::Idle)]);
         let mut daemon = TestDaemonBuilder::new(&repo)
             .members(members)
             .states(states)
             .build();
         daemon.is_git_repo = true;
-        daemon.check_worktree_staleness().unwrap();
 
-        let orch_log = daemon.orchestrator_log.join("\n");
+        daemon.maybe_reconcile_stale_worktrees().unwrap();
+
+        let events = crate::team::events::read_events(
+            &repo.join(".batty").join("team_config").join("events.jsonl"),
+        )
+        .unwrap_or_default();
         assert!(
-            orch_log.contains("auto-reset"),
-            "orchestrator log should mention auto-reset"
+            events.iter().any(|e| e.event == "worktree_reconciled"
+                && e.role.as_deref() == Some("eng-event")),
+            "should emit worktree_reconciled event"
         );
-
-        let _ = Command::new("git")
-            .current_dir(&repo)
-            .args([
-                "worktree",
-                "remove",
-                "--force",
-                worktree_dir.to_str().unwrap(),
-            ])
-            .output();
     }
 
     // ---- uncommitted work warning tests ----
@@ -760,7 +760,11 @@ mod tests {
         let mut daemon = TestDaemonBuilder::new(repo)
             .members(vec![manager_member("manager", None), engineer])
             .build();
-        daemon.config.team_config.workflow_policy.uncommitted_warn_threshold = threshold;
+        daemon
+            .config
+            .team_config
+            .workflow_policy
+            .uncommitted_warn_threshold = threshold;
         daemon
     }
 
@@ -829,7 +833,11 @@ mod tests {
         let mut daemon = TestDaemonBuilder::new(tmp.path())
             .members(vec![manager_member("manager", None), engineer])
             .build();
-        daemon.config.team_config.workflow_policy.uncommitted_warn_threshold = 10;
+        daemon
+            .config
+            .team_config
+            .workflow_policy
+            .uncommitted_warn_threshold = 10;
 
         let inbox_root = inbox::inboxes_root(tmp.path());
         inbox::init_inbox(&inbox_root, "eng-no-wt").unwrap();

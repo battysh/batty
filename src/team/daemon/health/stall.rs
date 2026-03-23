@@ -79,9 +79,10 @@ impl TeamDaemon {
             member_name,
             &task,
         );
-        if let Err(error) =
-            super::super::super::checkpoint::write_checkpoint(&self.config.project_root, &checkpoint)
-        {
+        if let Err(error) = super::super::super::checkpoint::write_checkpoint(
+            &self.config.project_root,
+            &checkpoint,
+        ) {
             warn!(member = %member_name, error = %error, "failed to write progress checkpoint");
         }
 
@@ -652,16 +653,10 @@ mod tests {
 
         // Create a task branch with some work
         let task_branch = format!("{member_name}/42");
-        crate::team::test_support::git_ok(
-            &worktree_dir,
-            &["checkout", "-b", &task_branch],
-        );
+        crate::team::test_support::git_ok(&worktree_dir, &["checkout", "-b", &task_branch]);
         std::fs::write(worktree_dir.join("work.rs"), "fn main() {}\n").unwrap();
         crate::team::test_support::git_ok(&worktree_dir, &["add", "work.rs"]);
-        crate::team::test_support::git_ok(
-            &worktree_dir,
-            &["commit", "-m", "partial impl"],
-        );
+        crate::team::test_support::git_ok(&worktree_dir, &["commit", "-m", "partial impl"]);
 
         let inbox_root = inbox::inboxes_root(&repo);
         inbox::init_inbox(&inbox_root, member_name).unwrap();
@@ -727,8 +722,7 @@ mod tests {
         daemon.handle_stalled_agent(member_name, 300).unwrap();
 
         // Checkpoint should have been written
-        let cp_content =
-            crate::team::checkpoint::read_checkpoint(&repo, member_name);
+        let cp_content = crate::team::checkpoint::read_checkpoint(&repo, member_name);
         assert!(
             cp_content.is_some(),
             "checkpoint should be written before stall restart"
@@ -827,16 +821,10 @@ mod tests {
         .unwrap();
 
         let task_branch = format!("{member_name}/55");
-        crate::team::test_support::git_ok(
-            &worktree_dir,
-            &["checkout", "-b", &task_branch],
-        );
+        crate::team::test_support::git_ok(&worktree_dir, &["checkout", "-b", &task_branch]);
         std::fs::write(worktree_dir.join("v1.rs"), "fn v1() {}\n").unwrap();
         crate::team::test_support::git_ok(&worktree_dir, &["add", "v1.rs"]);
-        crate::team::test_support::git_ok(
-            &worktree_dir,
-            &["commit", "-m", "first version"],
-        );
+        crate::team::test_support::git_ok(&worktree_dir, &["commit", "-m", "first version"]);
 
         let inbox_root = inbox::inboxes_root(&repo);
         inbox::init_inbox(&inbox_root, member_name).unwrap();
@@ -959,13 +947,7 @@ mod tests {
         inbox::init_inbox(&inbox_root, member_name).unwrap();
         inbox::init_inbox(&inbox_root, lead_name).unwrap();
 
-        write_owned_task_file(
-            tmp.path(),
-            66,
-            "no-wt-task",
-            "in-progress",
-            member_name,
-        );
+        write_owned_task_file(tmp.path(), 66, "no-wt-task", "in-progress", member_name);
 
         crate::tmux::create_session(&session, "bash", &[], tmp.path().to_str().unwrap()).unwrap();
         crate::tmux::create_window(
@@ -1057,9 +1039,7 @@ mod tests {
             timestamp: "2026-03-22T00:00:00Z".to_string(),
         };
         crate::team::checkpoint::write_checkpoint(tmp.path(), &cp).unwrap();
-        assert!(
-            crate::team::checkpoint::read_checkpoint(tmp.path(), member_name).is_some()
-        );
+        assert!(crate::team::checkpoint::read_checkpoint(tmp.path(), member_name).is_some());
 
         daemon.clear_active_task(member_name);
 
