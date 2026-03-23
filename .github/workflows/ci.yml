@@ -159,9 +159,7 @@ jobs:
           --skip worktree::tests::reset_worktree_to_base
           --skip team::daemon::health::tests::check_backend_health_emits_event_on_transition
           --skip team::daemon::health::tests::check_backend_health_no_event_when_state_unchanged
-          --skip team::daemon::health::tests::uncommitted_diff_lines_includes_staged_changes
-          --skip team::daemon::health::tests::uncommitted_diff_lines_mixed_staged_and_unstaged
-          --skip team::daemon::health::tests::uncommitted_diff_lines_new_file_counts
+          --skip team::daemon::health::tests::uncommitted_diff_lines
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v5
