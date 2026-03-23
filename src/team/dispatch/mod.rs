@@ -18,6 +18,7 @@ mod tests;
 
 use super::super::events::TeamEvent;
 use super::super::task_loop::prepare_engineer_assignment_worktree;
+use super::helpers::describe_command_failure;
 use super::launcher::{
     canonical_agent_name, new_member_session_id, strip_nudge_section, write_launch_script,
 };

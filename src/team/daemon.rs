@@ -28,7 +28,6 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::board;
-use super::board_cmd;
 use super::comms::{self, Channel};
 #[cfg(test)]
 use super::config::OrchestratorPosition;
@@ -63,6 +62,8 @@ mod dispatch;
 mod error_handling;
 #[path = "daemon/health/mod.rs"]
 mod health;
+#[path = "daemon/helpers.rs"]
+mod helpers;
 #[path = "daemon/hot_reload.rs"]
 mod hot_reload;
 #[path = "daemon/interventions/mod.rs"]
@@ -78,6 +79,7 @@ mod telemetry;
 
 #[cfg(test)]
 use self::dispatch::normalized_assignment_dir;
+use self::helpers::{extract_nudge_section, role_prompt_path};
 #[cfg(test)]
 use self::hot_reload::{
     BinaryFingerprint, binary_is_reloadable, hot_reload_daemon_args, hot_reload_marker_path,
@@ -155,12 +157,6 @@ pub struct TeamDaemon {
     /// Messages deferred because the target agent was still starting.
     /// Drained automatically when the agent transitions to ready.
     pub(super) pending_delivery_queue: HashMap<String, Vec<PendingMessage>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MemberWorktreeContext {
-    path: PathBuf,
-    branch: Option<String>,
 }
 
 impl TeamDaemon {
@@ -682,136 +678,6 @@ impl TeamDaemon {
         );
         self.update_triage_intervention_for_state(member_name, new_state);
     }
-}
-
-fn describe_command_failure(command: &str, args: &[&str], output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let details = if !stderr.is_empty() {
-        stderr
-    } else if !stdout.is_empty() {
-        stdout
-    } else {
-        format!("process exited with status {}", output.status)
-    };
-
-    format!("`{command} {}` failed: {details}", args.join(" "))
-}
-
-fn default_prompt_file_for_role(role_type: RoleType) -> &'static str {
-    match role_type {
-        RoleType::Architect => "architect.md",
-        RoleType::Manager => "manager.md",
-        RoleType::Engineer => "engineer.md",
-        RoleType::User => "architect.md",
-    }
-}
-
-fn role_prompt_path(
-    team_config_dir: &Path,
-    prompt_override: Option<&str>,
-    role_type: RoleType,
-) -> PathBuf {
-    team_config_dir.join(prompt_override.unwrap_or(default_prompt_file_for_role(role_type)))
-}
-
-/// Extract the `## Nudge` section from a prompt .md file.
-///
-/// Returns the text after `## Nudge` up to the next `## ` heading or EOF.
-/// Returns `None` if no `## Nudge` section is found.
-fn extract_nudge_section(prompt_path: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(prompt_path).ok()?;
-    let mut in_nudge = false;
-    let mut lines = Vec::new();
-
-    for line in content.lines() {
-        if line.starts_with("## Nudge") {
-            in_nudge = true;
-            continue;
-        }
-        if in_nudge {
-            // Stop at next heading
-            if line.starts_with("## ") {
-                break;
-            }
-            lines.push(line);
-        }
-    }
-
-    if lines.is_empty() {
-        return None;
-    }
-
-    let text = lines.join("\n").trim().to_string();
-    if text.is_empty() { None } else { Some(text) }
-}
-
-/// Strip the `## Nudge` section from prompt text so it's not sent to the agent.
-///
-/// The nudge content is daemon-only — injected periodically, not part of the
-/// initial prompt.
-fn format_stuck_duration(stuck_age_secs: u64) -> String {
-    if stuck_age_secs >= 3600 {
-        let hours = stuck_age_secs / 3600;
-        let mins = (stuck_age_secs % 3600) / 60;
-        format!("{hours}h {mins}m")
-    } else if stuck_age_secs >= 60 {
-        let mins = stuck_age_secs / 60;
-        let secs = stuck_age_secs % 60;
-        format!("{mins}m {secs}s")
-    } else {
-        format!("{stuck_age_secs}s")
-    }
-}
-
-fn ensure_tmux_session_ready(session: &str) -> Result<()> {
-    if tmux::session_exists(session) {
-        Ok(())
-    } else {
-        bail!("daemon startup pre-flight failed: tmux session '{session}' is missing")
-    }
-}
-
-fn ensure_kanban_available() -> Result<()> {
-    let output = std::process::Command::new("kanban-md")
-        .arg("--help")
-        .output()
-        .context(
-            "daemon startup pre-flight failed while verifying board tooling: could not execute `kanban-md --help`",
-        )?;
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let detail = if stderr.is_empty() {
-        "unknown error".to_string()
-    } else {
-        stderr
-    };
-    bail!("daemon startup pre-flight failed: `kanban-md --help` failed: {detail}");
-}
-
-fn board_dir(project_root: &Path) -> PathBuf {
-    project_root
-        .join(".batty")
-        .join("team_config")
-        .join("board")
-}
-
-fn ensure_board_initialized(project_root: &Path) -> Result<bool> {
-    let board_dir = board_dir(project_root);
-    if board_dir.join("tasks").is_dir() {
-        return Ok(false);
-    }
-
-    board_cmd::init(&board_dir).map_err(|error| {
-        anyhow::anyhow!(
-            "daemon startup pre-flight failed: unable to initialize board at '{}': {error}",
-            board_dir.display()
-        )
-    })?;
-    Ok(true)
 }
 
 #[cfg(test)]
