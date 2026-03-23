@@ -65,6 +65,8 @@ mod health;
 mod interventions;
 #[path = "launcher.rs"]
 mod launcher;
+#[path = "daemon/state.rs"]
+mod state;
 #[path = "telegram_bridge.rs"]
 mod telegram_bridge;
 #[path = "daemon/telemetry.rs"]
@@ -76,6 +78,11 @@ pub(crate) use self::interventions::NudgeSchedule;
 use self::interventions::OwnedTaskInterventionState;
 use self::launcher::{
     duplicate_claude_session_ids, load_launch_state, member_session_tracker_config,
+};
+pub use self::state::load_dispatch_queue_snapshot;
+use self::state::{
+    PersistedDaemonState, PersistedNudgeState, daemon_state_path, load_daemon_state,
+    save_daemon_state,
 };
 pub(super) use super::delivery::MessageDelivery;
 
@@ -146,28 +153,6 @@ pub struct TeamDaemon {
 struct MemberWorktreeContext {
     path: PathBuf,
     branch: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct PersistedNudgeState {
-    idle_elapsed_secs: Option<u64>,
-    fired_this_idle: bool,
-    paused: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct PersistedDaemonState {
-    clean_shutdown: bool,
-    saved_at: u64,
-    states: HashMap<String, MemberState>,
-    active_tasks: HashMap<String, u32>,
-    retry_counts: HashMap<String, u32>,
-    #[serde(default)]
-    dispatch_queue: Vec<DispatchQueueEntry>,
-    paused_standups: HashSet<String>,
-    last_standup_elapsed_secs: HashMap<String, u64>,
-    nudge_state: HashMap<String, PersistedNudgeState>,
-    pipeline_starvation_fired: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -820,68 +805,6 @@ impl TeamDaemon {
         );
         self.update_triage_intervention_for_state(member_name, new_state);
     }
-
-    fn restore_runtime_state(&mut self) {
-        let Some(state) = load_daemon_state(&self.config.project_root) else {
-            return;
-        };
-
-        self.states = state.states;
-        self.idle_started_at = self
-            .states
-            .iter()
-            .filter(|(_, state)| matches!(state, MemberState::Idle))
-            .map(|(member, _)| (member.clone(), Instant::now()))
-            .collect();
-        self.active_tasks = state.active_tasks;
-        self.retry_counts = state.retry_counts;
-        self.dispatch_queue = state.dispatch_queue;
-        self.paused_standups = state.paused_standups;
-        self.last_standup = standup::restore_timer_state(state.last_standup_elapsed_secs);
-
-        for (member_name, persisted) in state.nudge_state {
-            let Some(schedule) = self.nudges.get_mut(&member_name) else {
-                continue;
-            };
-            schedule.idle_since = persisted.idle_elapsed_secs.map(|elapsed_secs| {
-                Instant::now()
-                    .checked_sub(Duration::from_secs(elapsed_secs))
-                    .unwrap_or_else(Instant::now)
-            });
-            schedule.fired_this_idle = persisted.fired_this_idle;
-            schedule.paused = persisted.paused;
-        }
-        self.pipeline_starvation_fired = state.pipeline_starvation_fired;
-    }
-
-    fn persist_runtime_state(&self, clean_shutdown: bool) -> Result<()> {
-        let state = PersistedDaemonState {
-            clean_shutdown,
-            saved_at: now_unix(),
-            states: self.states.clone(),
-            active_tasks: self.active_tasks.clone(),
-            retry_counts: self.retry_counts.clone(),
-            dispatch_queue: self.dispatch_queue.clone(),
-            paused_standups: self.paused_standups.clone(),
-            last_standup_elapsed_secs: standup::snapshot_timer_state(&self.last_standup),
-            nudge_state: self
-                .nudges
-                .iter()
-                .map(|(member, schedule)| {
-                    (
-                        member.clone(),
-                        PersistedNudgeState {
-                            idle_elapsed_secs: schedule.idle_since.map(|t| t.elapsed().as_secs()),
-                            fired_this_idle: schedule.fired_this_idle,
-                            paused: schedule.paused,
-                        },
-                    )
-                })
-                .collect(),
-            pipeline_starvation_fired: self.pipeline_starvation_fired,
-        };
-        save_daemon_state(&self.config.project_root, &state)
-    }
 }
 
 fn describe_command_failure(command: &str, args: &[&str], output: &std::process::Output) -> String {
@@ -1106,43 +1029,6 @@ fn exec_reloaded_daemon(executable: &Path, project_root: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn exec_reloaded_daemon(_executable: &Path, _project_root: &Path) -> Result<()> {
     bail!("daemon hot reload via exec is only supported on unix")
-}
-
-fn daemon_state_path(project_root: &Path) -> PathBuf {
-    super::daemon_state_path(project_root)
-}
-
-fn load_daemon_state(project_root: &Path) -> Option<PersistedDaemonState> {
-    let path = daemon_state_path(project_root);
-    let Ok(content) = fs::read_to_string(&path) else {
-        return None;
-    };
-
-    match serde_json::from_str(&content) {
-        Ok(state) => Some(state),
-        Err(error) => {
-            warn!(path = %path.display(), error = %error, "failed to parse daemon state, ignoring");
-            None
-        }
-    }
-}
-
-pub fn load_dispatch_queue_snapshot(project_root: &Path) -> Vec<DispatchQueueEntry> {
-    load_daemon_state(project_root)
-        .map(|state| state.dispatch_queue)
-        .unwrap_or_default()
-}
-
-fn save_daemon_state(project_root: &Path, state: &PersistedDaemonState) -> Result<()> {
-    let path = daemon_state_path(project_root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let content =
-        serde_json::to_string_pretty(state).context("failed to serialize daemon state")?;
-    fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
 }
 
 #[cfg(test)]
