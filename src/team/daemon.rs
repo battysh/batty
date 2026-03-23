@@ -972,24 +972,86 @@ fn ensure_tmux_session_ready(session: &str) -> Result<()> {
     }
 }
 
+const KANBAN_MD_VERSION: &str = "0.33.0";
+
+fn kanban_md_download_url() -> Option<String> {
+    let (os, arch) = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => ("darwin", "arm64"),
+        ("macos", "x86_64") => ("darwin", "amd64"),
+        ("linux", "x86_64") => ("linux", "amd64"),
+        ("linux", "aarch64") => ("linux", "arm64"),
+        _ => return None,
+    };
+    Some(format!(
+        "https://github.com/antopolskiy/kanban-md/releases/download/v{v}/kanban-md_{v}_{os}_{arch}.tar.gz",
+        v = KANBAN_MD_VERSION,
+    ))
+}
+
+fn auto_install_kanban_md() -> Result<()> {
+    let url = kanban_md_download_url()
+        .context("unsupported platform for automatic kanban-md install")?;
+
+    // Install into the same directory as the batty binary, or fall back to ~/.local/bin
+    let bin_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| {
+            let mut p = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
+            p.push(".local/bin");
+            p
+        });
+    std::fs::create_dir_all(&bin_dir)?;
+    let dest = bin_dir.join("kanban-md");
+
+    info!(%url, dest = %dest.display(), "auto-installing kanban-md");
+
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "curl -sL '{url}' | tar xz -C '{dir}'",
+            dir = bin_dir.display(),
+        ))
+        .status()
+        .context("failed to run curl | tar for kanban-md install")?;
+
+    if !status.success() {
+        bail!("kanban-md download failed (exit {status})");
+    }
+    if !dest.exists() {
+        bail!("kanban-md binary not found at {} after extraction", dest.display());
+    }
+    info!(path = %dest.display(), "kanban-md installed successfully");
+    Ok(())
+}
+
 fn ensure_kanban_available() -> Result<()> {
     let output = std::process::Command::new("kanban-md")
         .arg("--help")
-        .output()
-        .context(
-            "daemon startup pre-flight failed while verifying board tooling: could not execute `kanban-md --help`",
-        )?;
-    if output.status.success() {
-        return Ok(());
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => return Ok(()),
+        _ => {}
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let detail = if stderr.is_empty() {
-        "unknown error".to_string()
-    } else {
-        stderr
-    };
-    bail!("daemon startup pre-flight failed: `kanban-md --help` failed: {detail}");
+    // Not found or failed — try to auto-install
+    info!("kanban-md not found, attempting automatic install");
+    auto_install_kanban_md().context(
+        "kanban-md is required but not installed and automatic install failed.\n\
+         Install manually: https://github.com/antopolskiy/kanban-md/releases"
+    )?;
+
+    // Verify it works now
+    let output = std::process::Command::new("kanban-md")
+        .arg("--help")
+        .output()
+        .context("kanban-md still not found after install — is the install directory in PATH?")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!("kanban-md installed but `kanban-md --help` failed: {stderr}");
+    }
+    Ok(())
 }
 
 fn board_dir(project_root: &Path) -> PathBuf {
