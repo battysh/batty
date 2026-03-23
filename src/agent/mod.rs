@@ -13,6 +13,7 @@
 pub mod claude;
 pub mod codex;
 pub mod kiro;
+pub mod mock;
 
 use std::path::Path;
 use std::process::Command;
