@@ -846,7 +846,44 @@ pub(crate) fn build_team_status_json_report(
 }
 
 pub fn compute_metrics(board_dir: &Path, members: &[MemberInstance]) -> Result<WorkflowMetrics> {
-    compute_metrics_with_events(board_dir, members, None)
+    compute_metrics_with_telemetry(board_dir, members, None, None)
+}
+
+/// Compute workflow metrics, preferring SQLite telemetry DB over JSONL events.
+///
+/// If a `db` connection is provided, review pipeline metrics come from SQLite.
+/// Otherwise falls back to `events_path` (JSONL), or returns zero review metrics.
+pub fn compute_metrics_with_telemetry(
+    board_dir: &Path,
+    members: &[MemberInstance],
+    db: Option<&rusqlite::Connection>,
+    events_path: Option<&Path>,
+) -> Result<WorkflowMetrics> {
+    let board_metrics = compute_board_metrics(board_dir, members)?;
+
+    let review = if let Some(conn) = db {
+        compute_review_metrics_from_db(conn)
+    } else {
+        compute_review_metrics(events_path)
+    };
+
+    Ok(WorkflowMetrics {
+        runnable_count: board_metrics.runnable_count,
+        blocked_count: board_metrics.blocked_count,
+        in_review_count: board_metrics.in_review_count,
+        in_progress_count: board_metrics.in_progress_count,
+        idle_with_runnable: board_metrics.idle_with_runnable,
+        oldest_review_age_secs: board_metrics.oldest_review_age_secs,
+        oldest_assignment_age_secs: board_metrics.oldest_assignment_age_secs,
+        auto_merge_count: review.auto_merge_count,
+        manual_merge_count: review.manual_merge_count,
+        auto_merge_rate: review.auto_merge_rate,
+        rework_count: review.rework_count,
+        rework_rate: review.rework_rate,
+        review_nudge_count: review.review_nudge_count,
+        review_escalation_count: review.review_escalation_count,
+        avg_review_latency_secs: review.avg_review_latency_secs,
+    })
 }
 
 pub fn compute_metrics_with_events(
@@ -854,14 +891,45 @@ pub fn compute_metrics_with_events(
     members: &[MemberInstance],
     events_path: Option<&Path>,
 ) -> Result<WorkflowMetrics> {
+    compute_metrics_with_telemetry(board_dir, members, None, events_path)
+}
+
+/// Board-only metrics (no event/review data).
+struct BoardMetrics {
+    runnable_count: u32,
+    blocked_count: u32,
+    in_review_count: u32,
+    in_progress_count: u32,
+    idle_with_runnable: Vec<String>,
+    oldest_review_age_secs: Option<u64>,
+    oldest_assignment_age_secs: Option<u64>,
+}
+
+fn compute_board_metrics(board_dir: &Path, members: &[MemberInstance]) -> Result<BoardMetrics> {
     let tasks_dir = board_dir.join("tasks");
     if !tasks_dir.is_dir() {
-        return Ok(WorkflowMetrics::default());
+        return Ok(BoardMetrics {
+            runnable_count: 0,
+            blocked_count: 0,
+            in_review_count: 0,
+            in_progress_count: 0,
+            idle_with_runnable: Vec::new(),
+            oldest_review_age_secs: None,
+            oldest_assignment_age_secs: None,
+        });
     }
 
     let tasks = task::load_tasks_from_dir(&tasks_dir)?;
     if tasks.is_empty() {
-        return Ok(WorkflowMetrics::default());
+        return Ok(BoardMetrics {
+            runnable_count: 0,
+            blocked_count: 0,
+            in_review_count: 0,
+            in_progress_count: 0,
+            idle_with_runnable: Vec::new(),
+            oldest_review_age_secs: None,
+            oldest_assignment_age_secs: None,
+        });
     }
 
     let task_status_by_id: HashMap<u32, String> = tasks
@@ -908,9 +976,7 @@ pub fn compute_metrics_with_events(
 
     let idle_with_runnable = compute_idle_with_runnable(board_dir, members, &tasks, runnable_count);
 
-    let review = compute_review_metrics(events_path);
-
-    Ok(WorkflowMetrics {
+    Ok(BoardMetrics {
         runnable_count,
         blocked_count,
         in_review_count,
@@ -918,17 +984,10 @@ pub fn compute_metrics_with_events(
         idle_with_runnable,
         oldest_review_age_secs,
         oldest_assignment_age_secs,
-        auto_merge_count: review.auto_merge_count,
-        manual_merge_count: review.manual_merge_count,
-        auto_merge_rate: review.auto_merge_rate,
-        rework_count: review.rework_count,
-        rework_rate: review.rework_rate,
-        review_nudge_count: review.review_nudge_count,
-        review_escalation_count: review.review_escalation_count,
-        avg_review_latency_secs: review.avg_review_latency_secs,
     })
 }
 
+#[derive(Default)]
 struct ReviewMetrics {
     auto_merge_count: u32,
     manual_merge_count: u32,
@@ -1019,6 +1078,44 @@ fn compute_review_metrics(events_path: Option<&Path>) -> ReviewMetrics {
         review_nudge_count,
         review_escalation_count,
         avg_review_latency_secs,
+    }
+}
+
+/// Compute review pipeline metrics from the SQLite telemetry database.
+fn compute_review_metrics_from_db(conn: &rusqlite::Connection) -> ReviewMetrics {
+    let row = match crate::team::telemetry_db::query_review_metrics(conn) {
+        Ok(row) => row,
+        Err(error) => {
+            warn!(error = %error, "failed to query review metrics from telemetry DB; returning zeros");
+            return ReviewMetrics::default();
+        }
+    };
+
+    let auto_merge_count = row.auto_merge_count as u32;
+    let manual_merge_count = row.manual_merge_count as u32;
+    let rework_count = row.rework_count as u32;
+    let total_merges = auto_merge_count + manual_merge_count;
+    let auto_merge_rate = if total_merges > 0 {
+        Some(auto_merge_count as f64 / total_merges as f64)
+    } else {
+        None
+    };
+    let total_reviewed = total_merges + rework_count;
+    let rework_rate = if total_reviewed > 0 {
+        Some(rework_count as f64 / total_reviewed as f64)
+    } else {
+        None
+    };
+
+    ReviewMetrics {
+        auto_merge_count,
+        manual_merge_count,
+        auto_merge_rate,
+        rework_count,
+        rework_rate,
+        review_nudge_count: row.review_nudge_count as u32,
+        review_escalation_count: row.review_escalation_count as u32,
+        avg_review_latency_secs: row.avg_review_latency_secs,
     }
 }
 
@@ -1134,7 +1231,17 @@ pub(crate) fn workflow_metrics_section(
     }
 
     let board_dir = team_config_dir(project_root).join("board");
-    match compute_metrics(&board_dir, members) {
+    let events_path = team_events_path(project_root);
+
+    // Try SQLite telemetry DB first, fall back to JSONL events.
+    let db = crate::team::telemetry_db::open(project_root).ok();
+    let events_fallback = if db.is_none() && events_path.is_file() {
+        Some(events_path.as_path())
+    } else {
+        None
+    };
+
+    match compute_metrics_with_telemetry(&board_dir, members, db.as_ref(), events_fallback) {
         Ok(metrics) => {
             let formatted = format_metrics(&metrics);
             Some((formatted, metrics))
@@ -2231,5 +2338,115 @@ mod tests {
         }];
         let health = build_team_status_health(&rows, true, false);
         assert_eq!(health.unhealthy_members, vec!["eng-bad".to_string()]);
+    }
+
+    // --- SQLite telemetry migration tests ---
+
+    #[test]
+    fn compute_metrics_with_telemetry_db_returns_review_metrics() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Set up board with a task.
+        write_board_task(
+            tmp.path(),
+            "001-task.md",
+            "id: 1\ntitle: Test\nstatus: todo\npriority: high\n",
+        );
+
+        // Set up in-memory telemetry DB with events.
+        let conn = crate::team::telemetry_db::open_in_memory().unwrap();
+        let events = vec![
+            crate::team::events::TeamEvent::task_completed("eng-1", Some("1")),
+            crate::team::events::TeamEvent::task_auto_merged("eng-1", "1", 0.9, 3, 50),
+            crate::team::events::TeamEvent::task_completed("eng-1", Some("2")),
+            crate::team::events::TeamEvent::task_manual_merged("2"),
+            crate::team::events::TeamEvent::task_reworked("eng-1", "3"),
+        ];
+        for event in &events {
+            crate::team::telemetry_db::insert_event(&conn, event).unwrap();
+        }
+
+        let metrics =
+            compute_metrics_with_telemetry(&board_dir(tmp.path()), &[], Some(&conn), None).unwrap();
+
+        assert_eq!(metrics.auto_merge_count, 1);
+        assert_eq!(metrics.manual_merge_count, 1);
+        assert_eq!(metrics.rework_count, 1);
+        assert!(metrics.auto_merge_rate.is_some());
+        // Board metric still works.
+        assert_eq!(metrics.runnable_count, 1);
+    }
+
+    #[test]
+    fn compute_metrics_without_db_falls_back_to_jsonl() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        write_board_task(
+            tmp.path(),
+            "001-task.md",
+            "id: 1\ntitle: Test\nstatus: todo\npriority: high\n",
+        );
+
+        // Write events to JSONL (no DB).
+        let events_path = team_events_path(tmp.path());
+        let mut sink = EventSink::new(&events_path).unwrap();
+        sink.emit(TeamEvent::task_auto_merged("eng-1", "1", 0.9, 3, 50))
+            .unwrap();
+
+        let metrics =
+            compute_metrics_with_telemetry(&board_dir(tmp.path()), &[], None, Some(&events_path))
+                .unwrap();
+
+        assert_eq!(metrics.auto_merge_count, 1);
+        assert_eq!(metrics.runnable_count, 1);
+    }
+
+    #[test]
+    fn compute_metrics_without_db_or_events_returns_zero_review_metrics() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        write_board_task(
+            tmp.path(),
+            "001-task.md",
+            "id: 1\ntitle: Test\nstatus: todo\npriority: high\n",
+        );
+
+        // No DB, no events path.
+        let metrics =
+            compute_metrics_with_telemetry(&board_dir(tmp.path()), &[], None, None).unwrap();
+
+        assert_eq!(metrics.auto_merge_count, 0);
+        assert_eq!(metrics.manual_merge_count, 0);
+        assert_eq!(metrics.rework_count, 0);
+        assert_eq!(metrics.auto_merge_rate, None);
+        // Board metric still works.
+        assert_eq!(metrics.runnable_count, 1);
+    }
+
+    #[test]
+    fn format_metrics_unchanged_with_db_source() {
+        let conn = crate::team::telemetry_db::open_in_memory().unwrap();
+        let events = vec![
+            crate::team::events::TeamEvent::task_completed("eng-1", Some("1")),
+            crate::team::events::TeamEvent::task_auto_merged("eng-1", "1", 0.9, 3, 50),
+        ];
+        for event in &events {
+            crate::team::telemetry_db::insert_event(&conn, event).unwrap();
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_board_task(
+            tmp.path(),
+            "001-task.md",
+            "id: 1\ntitle: Test\nstatus: review\npriority: high\nclaimed_by: eng-1\n",
+        );
+
+        let metrics =
+            compute_metrics_with_telemetry(&board_dir(tmp.path()), &[], Some(&conn), None).unwrap();
+
+        let formatted = format_metrics(&metrics);
+        assert!(formatted.contains("Workflow Metrics"));
+        assert!(formatted.contains("Auto-merge Rate: 100%"));
+        assert!(formatted.contains("In Review: 1"));
     }
 }
