@@ -496,6 +496,10 @@ fn main() -> Result<()> {
             }
         }
 
+        Command::Metrics => {
+            team::metrics_cmd::run(&root)?;
+        }
+
         Command::Telemetry { command } => {
             let conn =
                 team::telemetry_db::open(&root).context("failed to open telemetry database")?;
