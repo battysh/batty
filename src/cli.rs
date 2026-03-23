@@ -27,6 +27,9 @@ pub enum Command {
         /// Copy team config from $HOME/.batty/templates/<name>/
         #[arg(long, conflicts_with = "template")]
         from: Option<String>,
+        /// Overwrite existing team config files
+        #[arg(long)]
+        force: bool,
     },
 
     /// Export the current team config as a reusable template
@@ -640,7 +643,7 @@ mod tests {
     fn init_subcommand_defaults_to_simple() {
         let cli = Cli::parse_from(["batty", "init"]);
         match cli.command {
-            Command::Init { template, from } => {
+            Command::Init { template, from, .. } => {
                 assert_eq!(template, None);
                 assert_eq!(from, None);
             }
@@ -652,7 +655,7 @@ mod tests {
     fn init_subcommand_accepts_large_template() {
         let cli = Cli::parse_from(["batty", "init", "--template", "large"]);
         match cli.command {
-            Command::Init { template, from } => {
+            Command::Init { template, from, .. } => {
                 assert_eq!(template, Some(InitTemplate::Large));
                 assert_eq!(from, None);
             }
@@ -664,7 +667,7 @@ mod tests {
     fn init_subcommand_accepts_from_template_name() {
         let cli = Cli::parse_from(["batty", "init", "--from", "custom-team"]);
         match cli.command {
-            Command::Init { template, from } => {
+            Command::Init { template, from, .. } => {
                 assert_eq!(template, None);
                 assert_eq!(from.as_deref(), Some("custom-team"));
             }
@@ -1753,7 +1756,7 @@ mod tests {
         ] {
             let cli = Cli::parse_from(["batty", "init", "--template", arg]);
             match cli.command {
-                Command::Init { template, from } => {
+                Command::Init { template, from, .. } => {
                     assert_eq!(template, Some(expected), "template arg={arg}");
                     assert!(from.is_none());
                 }

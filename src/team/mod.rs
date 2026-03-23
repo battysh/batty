@@ -228,7 +228,13 @@ pub(crate) fn now_unix() -> u64 {
 }
 
 /// Scaffold `.batty/team_config/` with default team.yaml and prompt templates.
-pub fn init_team(project_root: &Path, template: &str) -> Result<Vec<PathBuf>> {
+pub fn init_team(
+    project_root: &Path,
+    template: &str,
+    project_name: Option<&str>,
+    agent: Option<&str>,
+    force: bool,
+) -> Result<Vec<PathBuf>> {
     let config_dir = team_config_dir(project_root);
     std::fs::create_dir_all(&config_dir)
         .with_context(|| format!("failed to create {}", config_dir.display()))?;
@@ -236,9 +242,9 @@ pub fn init_team(project_root: &Path, template: &str) -> Result<Vec<PathBuf>> {
     let mut created = Vec::new();
 
     let yaml_path = config_dir.join(TEAM_CONFIG_FILE);
-    if yaml_path.exists() {
+    if yaml_path.exists() && !force {
         bail!(
-            "team config already exists at {}; remove it first or edit directly",
+            "team config already exists at {}; remove it first or use --force",
             yaml_path.display()
         );
     }
@@ -253,7 +259,19 @@ pub fn init_team(project_root: &Path, template: &str) -> Result<Vec<PathBuf>> {
         "batty" => include_str!("templates/team_batty.yaml"),
         _ => include_str!("templates/team_simple.yaml"),
     };
-    std::fs::write(&yaml_path, yaml_content)
+    let mut yaml_content = yaml_content.to_string();
+    if let Some(name) = project_name {
+        // Replace the first `name: <anything>` line (the project name).
+        if let Some(end) = yaml_content.find('\n') {
+            yaml_content = format!("name: {name}{}", &yaml_content[end..]);
+        }
+    }
+    if let Some(agent) = agent {
+        yaml_content = yaml_content
+            .replace("agent: claude", &format!("agent: {agent}"))
+            .replace("agent: codex", &format!("agent: {agent}"));
+    }
+    std::fs::write(&yaml_path, &yaml_content)
         .with_context(|| format!("failed to write {}", yaml_path.display()))?;
     created.push(yaml_path);
 
@@ -295,7 +313,7 @@ pub fn init_team(project_root: &Path, template: &str) -> Result<Vec<PathBuf>> {
 
     for (name, content) in prompt_files {
         let path = config_dir.join(name);
-        if !path.exists() {
+        if force || !path.exists() {
             std::fs::write(&path, content)
                 .with_context(|| format!("failed to write {}", path.display()))?;
             created.push(path);
@@ -318,7 +336,7 @@ pub fn init_team(project_root: &Path, template: &str) -> Result<Vec<PathBuf>> {
     ];
     for (name, content) in directive_files {
         let path = config_dir.join(name);
-        if !path.exists() {
+        if force || !path.exists() {
             std::fs::write(&path, content)
                 .with_context(|| format!("failed to write {}", path.display()))?;
             created.push(path);
@@ -2227,7 +2245,7 @@ mod tests {
     #[test]
     fn init_team_creates_scaffolding() {
         let tmp = tempfile::tempdir().unwrap();
-        let created = init_team(tmp.path(), "simple").unwrap();
+        let created = init_team(tmp.path(), "simple", None, None, false).unwrap();
         assert!(!created.is_empty());
         assert!(team_config_path(tmp.path()).exists());
         assert!(team_config_dir(tmp.path()).join("architect.md").exists());
@@ -2256,8 +2274,8 @@ mod tests {
     #[test]
     fn init_team_refuses_if_exists() {
         let tmp = tempfile::tempdir().unwrap();
-        init_team(tmp.path(), "simple").unwrap();
-        let result = init_team(tmp.path(), "simple");
+        init_team(tmp.path(), "simple", None, None, false).unwrap();
+        let result = init_team(tmp.path(), "simple", None, None, false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
@@ -2327,7 +2345,7 @@ mod tests {
     #[test]
     fn init_team_large_template() {
         let tmp = tempfile::tempdir().unwrap();
-        let created = init_team(tmp.path(), "large").unwrap();
+        let created = init_team(tmp.path(), "large", None, None, false).unwrap();
         assert!(!created.is_empty());
         let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
         assert!(content.contains("instances: 3") || content.contains("instances: 5"));
@@ -2336,7 +2354,7 @@ mod tests {
     #[test]
     fn init_team_solo_template() {
         let tmp = tempfile::tempdir().unwrap();
-        let created = init_team(tmp.path(), "solo").unwrap();
+        let created = init_team(tmp.path(), "solo", None, None, false).unwrap();
         assert!(!created.is_empty());
         let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
         assert!(content.contains("role_type: engineer"));
@@ -2346,7 +2364,7 @@ mod tests {
     #[test]
     fn init_team_pair_template() {
         let tmp = tempfile::tempdir().unwrap();
-        let created = init_team(tmp.path(), "pair").unwrap();
+        let created = init_team(tmp.path(), "pair", None, None, false).unwrap();
         assert!(!created.is_empty());
         let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
         assert!(content.contains("role_type: architect"));
@@ -2357,7 +2375,7 @@ mod tests {
     #[test]
     fn init_team_squad_template() {
         let tmp = tempfile::tempdir().unwrap();
-        let created = init_team(tmp.path(), "squad").unwrap();
+        let created = init_team(tmp.path(), "squad", None, None, false).unwrap();
         assert!(!created.is_empty());
         let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
         assert!(content.contains("instances: 5"));
@@ -2367,7 +2385,7 @@ mod tests {
     #[test]
     fn init_team_research_template() {
         let tmp = tempfile::tempdir().unwrap();
-        let created = init_team(tmp.path(), "research").unwrap();
+        let created = init_team(tmp.path(), "research", None, None, false).unwrap();
         assert!(!created.is_empty());
         let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
         assert!(content.contains("principal"));
@@ -2388,7 +2406,7 @@ mod tests {
     #[test]
     fn init_team_software_template() {
         let tmp = tempfile::tempdir().unwrap();
-        let created = init_team(tmp.path(), "software").unwrap();
+        let created = init_team(tmp.path(), "software", None, None, false).unwrap();
         assert!(!created.is_empty());
         let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
         assert!(content.contains("tech-lead"));
@@ -2404,7 +2422,7 @@ mod tests {
     #[test]
     fn init_team_batty_template() {
         let tmp = tempfile::tempdir().unwrap();
-        let created = init_team(tmp.path(), "batty").unwrap();
+        let created = init_team(tmp.path(), "batty", None, None, false).unwrap();
         assert!(!created.is_empty());
         let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
         assert!(content.contains("batty-dev"));

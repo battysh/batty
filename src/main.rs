@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use batty_cli::{
+    agent,
     cli::{
         self, AutoMergeAction, BoardCommand, Cli, Command, DepsFormatArg, InboxCommand,
         NudgeCommand, ReviewDispositionArg, TaskCommand, TaskStateArg,
@@ -7,6 +8,7 @@ use batty_cli::{
     team,
 };
 use clap::Parser;
+use dialoguer::{Input, Select};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::debug;
@@ -127,7 +129,7 @@ fn main() -> Result<()> {
     debug!(root = %root.display(), "project root");
 
     match cli.command {
-        Command::Init { template, from } => {
+        Command::Init { template, from, force } => {
             let created = if let Some(template_name) = from.as_deref() {
                 team::init_from_template(&root, template_name)?
             } else {
@@ -141,7 +143,27 @@ fn main() -> Result<()> {
                     cli::InitTemplate::Software => "software",
                     cli::InitTemplate::Batty => "batty",
                 };
-                team::init_team(&root, template_name)?
+
+                // Interactive prompts for project name and agent
+                let default_name = root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "my-project".to_string());
+                let project_name: String = Input::new()
+                    .with_prompt("Project name")
+                    .default(default_name)
+                    .interact_text()?;
+
+                let agents = agent::KNOWN_AGENT_NAMES;
+                let default_idx = agents.iter().position(|&a| a == "claude").unwrap_or(0);
+                let agent_idx = Select::new()
+                    .with_prompt("Agent backend")
+                    .items(agents)
+                    .default(default_idx)
+                    .interact()?;
+                let agent = agents[agent_idx];
+
+                team::init_team(&root, template_name, Some(&project_name), Some(agent), force)?
             };
             println!("Initialized team config ({} files):", created.len());
             for path in &created {

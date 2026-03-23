@@ -367,7 +367,16 @@ pub(super) fn write_launch_script(
 
     let adapter = agent::adapter_from_name(agent_name)
         .unwrap_or_else(|| agent::adapter_from_name("claude").unwrap());
-    let agent_cmd = adapter.launch_command(prompt, idle, resume, session_id)?;
+
+    // For kiro, write a per-member agent config so the prompt is loaded as a
+    // system prompt via --agent rather than passed as user input.
+    let effective_prompt = if matches!(agent_name, "kiro" | "kiro-cli") {
+        agent::kiro::write_kiro_agent_config(member_name, prompt, &launch_dir)?
+    } else {
+        prompt.to_string()
+    };
+
+    let agent_cmd = adapter.launch_command(&effective_prompt, idle, resume, session_id)?;
 
     let wrapper_dir = std::env::temp_dir().join(format!("batty-bin-{project_slug}-{member_name}"));
     std::fs::create_dir_all(&wrapper_dir).ok();
@@ -918,45 +927,50 @@ mod tests {
     }
 
     #[test]
-    fn launch_script_idle_kiro_uses_chat_agent_mode_without_prompt() {
+    fn launch_script_idle_kiro_uses_agent_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
         write_launch_script(
             "eng-kiro",
             "kiro",
-            "ignored idle prompt",
+            "idle role prompt",
             None,
-            Path::new("/project"),
-            Path::new("/project"),
+            project,
+            project,
             true,
             false,
             None,
         )
         .unwrap();
-        let script_path = std::env::temp_dir().join("batty-launch-project-eng-kiro.sh");
+        let slug = project.file_name().unwrap().to_string_lossy();
+        let script_path = std::env::temp_dir().join(format!("batty-launch-{slug}-eng-kiro.sh"));
         let content = std::fs::read_to_string(&script_path).unwrap();
-        assert!(content.contains("cd '/project'"));
-        assert_eq!(
-            content.trim().lines().last().unwrap().trim(),
-            "exec kiro chat --mode agent"
-        );
+        assert!(content.contains("--agent batty-eng-kiro"));
+        // Agent config file should exist
+        assert!(project.join(".kiro/agents/batty-eng-kiro.json").exists());
     }
 
     #[test]
-    fn launch_script_active_kiro_passes_prompt_to_chat() {
+    fn launch_script_active_kiro_uses_agent_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
         write_launch_script(
             "eng-kiro-active",
             "kiro",
             "solve the bug",
             None,
-            Path::new("/project"),
-            Path::new("/project"),
+            project,
+            project,
             false,
             false,
             None,
         )
         .unwrap();
-        let script_path = std::env::temp_dir().join("batty-launch-project-eng-kiro-active.sh");
+        let slug = project.file_name().unwrap().to_string_lossy();
+        let script_path =
+            std::env::temp_dir().join(format!("batty-launch-{slug}-eng-kiro-active.sh"));
         let content = std::fs::read_to_string(&script_path).unwrap();
-        assert!(content.contains("exec kiro chat --mode agent 'solve the bug'"));
+        assert!(content.contains("--agent batty-eng-kiro-active"));
     }
 
     #[test]

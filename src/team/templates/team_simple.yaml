@@ -28,7 +28,6 @@ layout:
       width_pct: 33
     - name: engineers
       width_pct: 34
-      split: { horizontal: 3 }
 
 roles:
   - name: human
