@@ -185,7 +185,7 @@ Steps 5-8 often loop multiple times within a sprint.
 ## 6. Comparison with Research/AI Teams
 
 | Aspect | Software Team | Research Team (e.g. CICERO) |
-|--------|--------------|----------------------------|
+| -------- | -------------- | ---------------------------- |
 | Central coordinator | PM (what to build) | Tech Lead (what to explore) |
 | Heaviest communicator | Tech Lead (bridge role) | Tech Lead (integration role) |
 | Information flow | Linear (spec → build → test → ship) | Convergent (components → integration) |

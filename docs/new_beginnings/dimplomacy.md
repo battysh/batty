@@ -36,7 +36,7 @@ Total: ~15-20 people
 ### 3.1 Tech Lead / PI
 
 | Owns | Does NOT Own |
-|------|--------------|
+| ------ | -------------- |
 | Research roadmap & milestones | Sprint planning, ticket grooming |
 | Master architecture design doc | Individual component design docs |
 | Final say on integration decisions | People management, hiring process |
@@ -50,7 +50,7 @@ The Tech Lead's job is NOT to understand every detail. It is to understand every
 ### 3.2 Engineering Manager
 
 | Owns | Does NOT Own |
-|------|--------------|
+| ------ | -------------- |
 | Hiring, onboarding, retention | Research direction |
 | Compute budget & resource allocation | Architecture decisions |
 | Project-level Jira board (cross-team) | Component-level technical choices |
@@ -63,7 +63,7 @@ This person notices "the dialogue team has been blocked for 2 weeks waiting on a
 ### 3.3 Strategic Engine Lead
 
 | Owns | Does NOT Own |
-|------|--------------|
+| ------ | -------------- |
 | RL training pipeline & self-play infra | Dialogue generation |
 | Action space representation | How intents get turned into messages |
 | Human regularization (piKL) approach | Evaluation against humans |
@@ -72,6 +72,7 @@ This person notices "the dialogue team has been blocked for 2 weeks waiting on a
 | Their sub-board in Jira | |
 
 **ICs:**
+
 - IC1: Self-play training loop, reward shaping, hyperparameter sweeps
 - IC2: Search/planning at inference time, action space encoding
 - IC3 (if needed): Human behavior prediction model (what will other players do?)
@@ -79,7 +80,7 @@ This person notices "the dialogue team has been blocked for 2 weeks waiting on a
 ### 3.4 Dialogue System Lead
 
 | Owns | Does NOT Own |
-|------|--------------|
+| ------ | -------------- |
 | Language model fine-tuning | What intent to generate messages for |
 | Controllable generation (intent → message) | Strategic planning |
 | Message filtering & re-ranking pipeline | Whether to send a message at all (that's integration) |
@@ -88,6 +89,7 @@ This person notices "the dialogue team has been blocked for 2 weeks waiting on a
 | Their sub-board in Jira | |
 
 **ICs:**
+
 - IC1: Base model training, fine-tuning on Diplomacy corpus
 - IC2: Controllable generation — conditioning on intent, filtering contradictions
 - IC3 (if needed): Message understanding — parsing incoming human messages into structured beliefs
@@ -95,7 +97,7 @@ This person notices "the dialogue team has been blocked for 2 weeks waiting on a
 ### 3.5 Integration & Evaluation Lead
 
 | Owns | Does NOT Own |
-|------|--------------|
+| ------ | -------------- |
 | The runtime pipeline (strategy ↔ dialogue loop) | Individual component quality |
 | Live game infrastructure (bot on webDiplomacy) | RL training |
 | Evaluation framework & metrics | Language model training |
@@ -104,6 +106,7 @@ This person notices "the dialogue team has been blocked for 2 weeks waiting on a
 | "System Design" doc | |
 
 **ICs:**
+
 - IC1: Runtime pipeline — orchestrates the turn loop: receive messages → update beliefs → plan → generate messages → submit orders
 - IC2: Evaluation — runs tournaments, computes Elo, tracks metrics over time, manages human evaluation sessions
 
@@ -112,13 +115,14 @@ This role is critically undervalued in most research teams. Without it, you get 
 ### 3.6 Game Theory Lead
 
 | Owns | Does NOT Own |
-|------|--------------|
+| ------ | -------------- |
 | Equilibrium computation methods | Training infrastructure |
 | Theoretical grounding of the approach | NLP pipeline |
 | Formal analysis (convergence, regret bounds) | Day-to-day experiment running |
 | Component design doc: "Planning & Equilibria" | |
 
 **ICs:**
+
 - IC1: Algorithm design and implementation for search/equilibrium finding
 - IC2 (possibly shared with Strategy team): Bridging theory to practice at Diplomacy's scale
 
@@ -136,7 +140,7 @@ This role is critically undervalued in most research teams. Without it, you get 
 ### 4.1 Synchronous (Meetings)
 
 | Meeting | Who | Frequency | Purpose |
-|---------|-----|-----------|---------|
+| --------- | ----- | ----------- | --------- |
 | Full team standup | Everyone | 2x/week, 15 min | Quick blockers, announcements |
 | Architecture sync | Tech Lead + all sub-leads | Weekly, 60 min | Interface issues, integration decisions, roadmap check |
 | Component standups | Each sub-team internally | Daily or 3x/week, 10 min | Within-component coordination |
@@ -182,12 +186,14 @@ The most important channel is **#diplomacy-integration**. This is where cross-cu
 
 ### 5.2 Jira Boards
 
-**Board 1: Project-level (EM owns)**
+#### Board 1: Project-level (EM owns)
+
 - Epics = milestones: "No-Press baseline", "Intent-conditioned dialogue", "End-to-end integration", "Live human evaluation"
 - Tracks cross-team dependencies
 - This is what leadership outside the team looks at
 
-**Boards 2-5: Component-level (each sub-lead owns their own)**
+#### Boards 2-5: Component-level (each sub-lead owns their own)
+
 - Strategy board, Dialogue board, Integration board, Game Theory board
 - Individual tasks, bugs, experiments
 - Sub-leads groom their own boards
@@ -239,7 +245,7 @@ diplomacy/
 The roadmap is shared but not equal:
 
 | Aspect | Owner |
-|--------|-------|
+| -------- | ------- |
 | Research roadmap (what scientific questions, in what order, when to pivot) | Tech Lead |
 | Execution roadmap (timelines, resource allocation, risk mitigation) | Engineering Manager |
 | Component roadmaps ("to hit milestone X, my team does A, B, C") | Sub-leads |
@@ -272,6 +278,6 @@ The roadmap lives as a single doc (Tech Lead maintains) with a corresponding Gan
 
 ## References
 
-- Meta FAIR Diplomacy Team. "Human-level play in the game of Diplomacy by combining language models with strategic reasoning." *Science*, Nov 2022. https://www.science.org/doi/10.1126/science.ade9097
-- Bakhtin et al. "Mastering the Game of No-Press Diplomacy via Human-Regularized Reinforcement Learning and Planning." 2022. https://arxiv.org/abs/2210.05492
-- CICERO source code: https://github.com/facebookresearch/diplomacy_cicero
+- Meta FAIR Diplomacy Team. "Human-level play in the game of Diplomacy by combining language models with strategic reasoning." *Science*, Nov 2022. <https://www.science.org/doi/10.1126/science.ade9097>
+- Bakhtin et al. "Mastering the Game of No-Press Diplomacy via Human-Regularized Reinforcement Learning and Planning." 2022. <https://arxiv.org/abs/2210.05492>
+- CICERO source code: <https://github.com/facebookresearch/diplomacy_cicero>
