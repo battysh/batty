@@ -1,98 +1,24 @@
-//! Merge orchestration extracted from the team daemon.
+//! Engineer completion handling — the daemon's entry point when an engineer
+//! reports a task as done.
 //!
-//! This module owns the completion path after an engineer reports a task as
-//! done in a worktree-based flow. It validates that the branch contains real
-//! work, runs the configured test gate, serializes merges with a lock, and
-//! either lands the branch on `main` or escalates conflicts and failures back
-//! through the daemon.
-//!
-//! The daemon calls into this module so the poll loop can stay focused on
-//! orchestration while merge-specific retries and board transitions remain in
-//! one place.
+//! Validates commits, runs tests, evaluates auto-merge policy, performs the
+//! merge, and handles retries and escalation.
 
-use std::fs::OpenOptions;
-use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use tracing::{info, warn};
 
-use super::artifact::append_test_timing_record;
+use crate::team::artifact::append_test_timing_record;
 #[cfg(test)]
-use super::artifact::read_test_timing_log;
-use super::auto_merge::{self, AutoMergeDecision};
-use super::daemon::TeamDaemon;
-use super::task_loop::{
-    auto_commit_before_reset, branch_is_merged_into, checkout_worktree_branch_from_main,
-    current_worktree_branch, delete_branch, engineer_base_branch_name, is_worktree_safe_to_mutate,
-    read_task_title, run_tests_in_worktree,
-};
+use crate::team::artifact::read_test_timing_log;
+use crate::team::auto_merge::{self, AutoMergeDecision};
+use crate::team::daemon::TeamDaemon;
+use crate::team::task_loop::{current_worktree_branch, read_task_title, run_tests_in_worktree};
 
-fn run_git_with_context(
-    repo_dir: &Path,
-    args: &[&str],
-    intent: &str,
-) -> Result<std::process::Output> {
-    let command = format!("git {}", args.join(" "));
-    std::process::Command::new("git")
-        .args(args)
-        .current_dir(repo_dir)
-        .output()
-        .with_context(|| {
-            format!(
-                "failed while trying to {intent}: could not execute `{command}` in {}",
-                repo_dir.display()
-            )
-        })
-}
-
-fn describe_git_failure(repo_dir: &Path, args: &[&str], intent: &str, stderr: &str) -> String {
-    format!(
-        "failed while trying to {intent}: `git {}` in {} returned: {}",
-        args.join(" "),
-        repo_dir.display(),
-        stderr.trim()
-    )
-}
-
-pub(crate) struct MergeLock {
-    path: PathBuf,
-}
-
-impl MergeLock {
-    pub fn acquire(project_root: &Path) -> Result<Self> {
-        let path = project_root.join(".batty").join("merge.lock");
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let start = std::time::Instant::now();
-        loop {
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(_) => return Ok(Self { path }),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if start.elapsed() > std::time::Duration::from_secs(60) {
-                        bail!("merge lock timeout after 60s: {}", path.display());
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                }
-                Err(error) => bail!("failed to acquire merge lock: {error}"),
-            }
-        }
-    }
-}
-
-impl Drop for MergeLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum MergeOutcome {
-    Success,
-    RebaseConflict(String),
-    MergeFailure(String),
-}
+use super::git_ops::{commits_ahead_of_main, now_unix};
+use super::lock::{MergeLock, MergeOutcome};
+use super::operations::merge_engineer_branch;
 
 pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str) -> Result<()> {
     let Some(task_id) = daemon.active_task_id(engineer) else {
@@ -137,7 +63,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         if let Ok(ref summary) = diff_analysis {
             let confidence = auto_merge::compute_merge_confidence(summary, &policy);
             let task_str = task_id.to_string();
-            let info = super::events::MergeConfidenceInfo {
+            let info = super::super::events::MergeConfidenceInfo {
                 engineer,
                 task: &task_str,
                 confidence,
@@ -430,224 +356,6 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     Ok(())
 }
 
-pub(crate) fn merge_engineer_branch(
-    project_root: &Path,
-    engineer_name: &str,
-) -> Result<MergeOutcome> {
-    let worktree_dir = project_root
-        .join(".batty")
-        .join("worktrees")
-        .join(engineer_name);
-
-    if !worktree_dir.exists() {
-        bail!(
-            "no worktree found for '{}' at {}",
-            engineer_name,
-            worktree_dir.display()
-        );
-    }
-
-    let branch = current_worktree_branch(&worktree_dir)?;
-    info!(engineer = engineer_name, branch = %branch, "merging worktree branch");
-
-    // Ensure project_root is on main before merging. Without this check,
-    // the merge silently lands on whatever branch happens to be checked out,
-    // causing "merge reported success but commits not on main" (#189, #198).
-    let main_branch = current_worktree_branch(project_root)?;
-    if main_branch != "main" {
-        warn!(
-            engineer = engineer_name,
-            branch = %branch,
-            actual_branch = %main_branch,
-            "project root not on main before merge, attempting checkout"
-        );
-        let checkout = run_git_with_context(
-            project_root,
-            &["checkout", "main"],
-            "checkout main in project root before merge",
-        )?;
-        if !checkout.status.success() {
-            let stderr = String::from_utf8_lossy(&checkout.stderr).trim().to_string();
-            return Ok(MergeOutcome::MergeFailure(format!(
-                "project root is on '{main_branch}', not 'main', and checkout failed: {stderr}"
-            )));
-        }
-    }
-
-    let rebase = run_git_with_context(
-        &worktree_dir,
-        &["rebase", "main"],
-        &format!(
-            "rebase engineer branch '{branch}' onto main before merging for '{engineer_name}'"
-        ),
-    )?;
-
-    if !rebase.status.success() {
-        let stderr = String::from_utf8_lossy(&rebase.stderr).trim().to_string();
-        let _ = run_git_with_context(
-            &worktree_dir,
-            &["rebase", "--abort"],
-            &format!("abort rebase for engineer branch '{branch}' after conflict"),
-        );
-        warn!(engineer = engineer_name, branch = %branch, "rebase conflict during merge");
-        return Ok(MergeOutcome::RebaseConflict(describe_git_failure(
-            &worktree_dir,
-            &["rebase", "main"],
-            &format!(
-                "rebase engineer branch '{branch}' onto main before merging for '{engineer_name}'"
-            ),
-            &stderr,
-        )));
-    }
-
-    let output = run_git_with_context(
-        project_root,
-        &["merge", &branch, "--no-edit"],
-        &format!("merge engineer branch '{branch}' from '{engineer_name}' into main"),
-    )?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        warn!(engineer = engineer_name, branch = %branch, "git merge failed");
-        return Ok(MergeOutcome::MergeFailure(describe_git_failure(
-            project_root,
-            &["merge", &branch, "--no-edit"],
-            &format!("merge engineer branch '{branch}' from '{engineer_name}' into main"),
-            &stderr,
-        )));
-    }
-
-    println!("Merged branch '{branch}' from {engineer_name}");
-
-    if let Err(error) = reset_engineer_worktree(project_root, engineer_name) {
-        warn!(
-            engineer = engineer_name,
-            error = %error,
-            "worktree reset failed after merge"
-        );
-    }
-
-    Ok(MergeOutcome::Success)
-}
-
-pub(crate) fn reset_engineer_worktree(project_root: &Path, engineer_name: &str) -> Result<()> {
-    let worktree_dir = project_root
-        .join(".batty")
-        .join("worktrees")
-        .join(engineer_name);
-
-    if !worktree_dir.exists() {
-        return Ok(());
-    }
-
-    let previous_branch = current_worktree_branch(&worktree_dir)?;
-    let base_branch = engineer_base_branch_name(engineer_name);
-
-    // Guard: refuse to destroy uncommitted work on a task branch.
-    if !is_worktree_safe_to_mutate(&worktree_dir)? {
-        warn!(
-            engineer = engineer_name,
-            worktree = %worktree_dir.display(),
-            "skipping worktree reset — uncommitted changes on task branch"
-        );
-        return Ok(());
-    }
-
-    // Force-clean uncommitted changes before switching branches.
-    // Without this, `checkout -B` fails when the worktree is dirty.
-    force_clean_worktree(&worktree_dir, engineer_name);
-
-    if let Err(error) = checkout_worktree_branch_from_main(&worktree_dir, &base_branch) {
-        warn!(
-            engineer = engineer_name,
-            current_branch = %previous_branch,
-            expected_branch = %base_branch,
-            error = %error,
-            "failed to reset worktree after merge"
-        );
-        return Ok(());
-    }
-
-    // Verify HEAD landed on the base branch.
-    match current_worktree_branch(&worktree_dir) {
-        Ok(actual) if actual == base_branch => {}
-        Ok(actual) => {
-            warn!(
-                engineer = engineer_name,
-                current_branch = %actual,
-                expected_branch = %base_branch,
-                "worktree reset did not land on expected branch"
-            );
-        }
-        Err(error) => {
-            warn!(
-                engineer = engineer_name,
-                error = %error,
-                "could not verify worktree branch after reset"
-            );
-        }
-    }
-
-    if previous_branch != base_branch
-        && previous_branch != "HEAD"
-        && (previous_branch == engineer_name
-            || previous_branch.starts_with(&format!("{engineer_name}/")))
-        && branch_is_merged_into(project_root, &previous_branch, "main")?
-        && let Err(error) = delete_branch(project_root, &previous_branch)
-    {
-        warn!(
-            engineer = engineer_name,
-            branch = %previous_branch,
-            error = %error,
-            "failed to delete merged engineer task branch"
-        );
-    }
-
-    info!(
-        engineer = engineer_name,
-        branch = %base_branch,
-        worktree = %worktree_dir.display(),
-        "reset worktree to main after merge"
-    );
-    Ok(())
-}
-
-/// Preserve uncommitted changes via auto-commit, then force-clean the worktree
-/// so `checkout -B` can succeed.
-/// Best-effort: failures are logged but do not block the reset attempt.
-fn force_clean_worktree(worktree_dir: &Path, engineer_name: &str) {
-    // Try to auto-commit first to preserve work in git history.
-    if !auto_commit_before_reset(worktree_dir) {
-        info!(
-            engineer = engineer_name,
-            "auto-commit skipped or failed, proceeding with force-clean"
-        );
-    }
-
-    if let Err(error) = run_git_with_context(
-        worktree_dir,
-        &["reset", "--hard"],
-        "discard staged/unstaged changes before worktree reset",
-    ) {
-        warn!(
-            engineer = engineer_name,
-            error = %error,
-            "git reset --hard failed during worktree cleanup"
-        );
-    }
-    if let Err(error) = run_git_with_context(
-        worktree_dir,
-        &["clean", "-fd", "--exclude=.batty/"],
-        "remove untracked files before worktree reset",
-    ) {
-        warn!(
-            engineer = engineer_name,
-            error = %error,
-            "git clean failed during worktree cleanup"
-        );
-    }
-}
-
 fn record_merge_test_timing(
     daemon: &mut TeamDaemon,
     task_id: u32,
@@ -689,60 +397,20 @@ fn record_merge_test_timing(
     Ok(())
 }
 
-fn commits_ahead_of_main(worktree_dir: &Path) -> Result<u32> {
-    let output = run_git_with_context(
-        worktree_dir,
-        &["rev-list", "--count", "main..HEAD"],
-        "count commits ahead of main before accepting engineer completion",
-    )?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "{}",
-            describe_git_failure(
-                worktree_dir,
-                &["rev-list", "--count", "main..HEAD"],
-                "count commits ahead of main before accepting engineer completion",
-                &stderr,
-            )
-        );
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.trim().parse::<u32>().with_context(|| {
-        format!(
-            "failed to parse git rev-list --count main..HEAD output: {:?}",
-            stdout.trim()
-        )
-    })
-}
-
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::team::config::AutoMergePolicy;
+    use crate::team::events::read_events;
     use crate::team::hierarchy::MemberInstance;
     use crate::team::inbox;
     use crate::team::standup::MemberState;
-    use crate::team::task_loop::{prepare_engineer_assignment_worktree, setup_engineer_worktree};
+    use crate::team::task_loop::setup_engineer_worktree;
     use crate::team::test_helpers::make_test_daemon;
     use crate::team::test_support::{
-        engineer_member, git, git_ok, git_stdout, init_git_repo, manager_member,
+        engineer_member, git_ok, git_stdout, init_git_repo, manager_member,
     };
-    use std::path::Path;
-    use std::sync::{
-        Arc, Barrier,
-        atomic::{AtomicBool, Ordering},
-    };
-    use std::thread;
-    use std::time::Duration;
+    use std::path::{Path, PathBuf};
 
     fn write_task_file(project_root: &Path, id: u32, title: &str) {
         let tasks_dir = project_root
@@ -766,20 +434,12 @@ mod tests {
         (worktree_dir, team_config_dir)
     }
 
-    fn setup_completion_daemon(repo: &Path, engineer: &str) -> TeamDaemon {
+    fn setup_completion_daemon(repo: &Path, engineer: &str) -> crate::team::daemon::TeamDaemon {
         let members = vec![
             manager_member("manager", None),
             engineer_member(engineer, Some("manager"), true),
         ];
         make_test_daemon(repo, members)
-    }
-
-    #[test]
-    fn commits_ahead_of_main_error_includes_command_and_intent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let error = commits_ahead_of_main(tmp.path()).unwrap_err().to_string();
-        assert!(error.contains("count commits ahead of main before accepting engineer completion"));
-        assert!(error.contains("git rev-list --count main..HEAD"));
     }
 
     fn setup_rebase_conflict_repo(
@@ -806,440 +466,33 @@ mod tests {
         (tmp, repo, worktree_dir, team_config_dir)
     }
 
-    #[test]
-    fn merge_rejects_missing_worktree() {
+    fn setup_auto_merge_repo(engineer: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
-        let err = merge_engineer_branch(tmp.path(), "eng-1-1").unwrap_err();
-        assert!(err.to_string().contains("no worktree found"));
-    }
+        let repo = init_git_repo(&tmp, "batty-auto-merge-test");
+        write_task_file(&repo, 42, "auto-merge-task");
 
-    #[test]
-    fn merge_lock_acquire_release() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".batty")).unwrap();
-        let lock_path = tmp.path().join(".batty").join("merge.lock");
-
-        {
-            let lock = MergeLock::acquire(tmp.path()).unwrap();
-            assert!(lock_path.exists());
-            drop(lock);
-        }
-        assert!(!lock_path.exists());
-    }
-
-    #[test]
-    fn merge_lock_second_acquire_waits_for_release() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".batty")).unwrap();
-
-        let first_lock = MergeLock::acquire(tmp.path()).unwrap();
-        let project_root = tmp.path().to_path_buf();
-        let barrier = Arc::new(Barrier::new(2));
-        let acquired = Arc::new(AtomicBool::new(false));
-
-        let thread_barrier = Arc::clone(&barrier);
-        let thread_acquired = Arc::clone(&acquired);
-        let handle = thread::spawn(move || {
-            thread_barrier.wait();
-            let second_lock = MergeLock::acquire(&project_root).unwrap();
-            thread_acquired.store(true, Ordering::SeqCst);
-            drop(second_lock);
-        });
-
-        barrier.wait();
-        thread::sleep(Duration::from_millis(600));
-        assert!(!acquired.load(Ordering::SeqCst));
-
-        drop(first_lock);
-        handle.join().unwrap();
-        assert!(acquired.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn merge_with_rebase_picks_up_main() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
         let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join(engineer);
+        setup_engineer_worktree(&repo, &worktree_dir, engineer, &team_config_dir).unwrap();
 
-        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+        // Create a small change in the worktree
+        std::fs::write(worktree_dir.join("note.txt"), "done\n").unwrap();
+        git_ok(&worktree_dir, &["add", "note.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "add note"]);
 
-        std::fs::write(worktree_dir.join("feature.txt"), "engineer work\n").unwrap();
-        git_ok(&worktree_dir, &["add", "feature.txt"]);
-        git_ok(&worktree_dir, &["commit", "-m", "engineer feature"]);
-
-        std::fs::write(repo.join("other.txt"), "main work\n").unwrap();
-        git_ok(&repo, &["add", "other.txt"]);
-        git_ok(&repo, &["commit", "-m", "main advance"]);
-
-        let result = merge_engineer_branch(&repo, "eng-1").unwrap();
-        assert!(matches!(result, MergeOutcome::Success));
-        assert!(repo.join("feature.txt").exists());
-        assert!(repo.join("other.txt").exists());
+        (tmp, repo, worktree_dir)
     }
 
-    #[test]
-    fn reset_worktree_after_merge() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
-        let team_config_dir = repo.join(".batty").join("team_config");
-
-        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
-
-        std::fs::write(worktree_dir.join("feature.txt"), "work\n").unwrap();
-        git_ok(&worktree_dir, &["add", "feature.txt"]);
-        git_ok(&worktree_dir, &["commit", "-m", "engineer work"]);
-
-        let result = merge_engineer_branch(&repo, "eng-1").unwrap();
-        assert!(matches!(result, MergeOutcome::Success));
-
-        let main_head = git_stdout(&repo, &["rev-parse", "HEAD"]);
-        let worktree_head = git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
-        assert_eq!(main_head, worktree_head);
-    }
-
-    #[test]
-    fn merge_empty_diff_returns_success() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-empty");
-
-        setup_engineer_worktree(&repo, &worktree_dir, "eng-empty", &team_config_dir).unwrap();
-        let main_before = git_stdout(&repo, &["rev-parse", "main"]);
-
-        let result = merge_engineer_branch(&repo, "eng-empty").unwrap();
-
-        assert!(matches!(result, MergeOutcome::Success));
-        assert_eq!(git_stdout(&repo, &["rev-parse", "main"]), main_before);
-    }
-
-    #[test]
-    fn merge_empty_diff_resets_worktree_to_engineer_base_branch() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-empty");
-
-        setup_engineer_worktree(&repo, &worktree_dir, "eng-empty", &team_config_dir).unwrap();
-
-        let result = merge_engineer_branch(&repo, "eng-empty").unwrap();
-
-        assert!(matches!(result, MergeOutcome::Success));
-        assert_eq!(
-            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
-            engineer_base_branch_name("eng-empty")
-        );
-    }
-
-    #[test]
-    fn merge_with_two_main_advances_rebases_cleanly() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-stale");
-
-        setup_engineer_worktree(&repo, &worktree_dir, "eng-stale", &team_config_dir).unwrap();
-
-        std::fs::write(worktree_dir.join("feature.txt"), "engineer work\n").unwrap();
-        git_ok(&worktree_dir, &["add", "feature.txt"]);
-        git_ok(&worktree_dir, &["commit", "-m", "engineer feature"]);
-
-        std::fs::write(repo.join("main-one.txt"), "main one\n").unwrap();
-        git_ok(&repo, &["add", "main-one.txt"]);
-        git_ok(&repo, &["commit", "-m", "main advance 1"]);
-
-        std::fs::write(repo.join("main-two.txt"), "main two\n").unwrap();
-        git_ok(&repo, &["add", "main-two.txt"]);
-        git_ok(&repo, &["commit", "-m", "main advance 2"]);
-
-        let result = merge_engineer_branch(&repo, "eng-stale").unwrap();
-
-        assert!(matches!(result, MergeOutcome::Success));
-        assert!(repo.join("feature.txt").exists());
-        assert!(repo.join("main-one.txt").exists());
-        assert!(repo.join("main-two.txt").exists());
-    }
-
-    #[test]
-    fn reset_worktree_restores_engineer_base_branch_after_task_merge() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
-        let team_config_dir = repo.join(".batty").join("team_config");
-
-        prepare_engineer_assignment_worktree(
-            &repo,
-            &worktree_dir,
-            "eng-1",
-            "eng-1/42",
-            &team_config_dir,
-        )
-        .unwrap();
-
-        std::fs::write(worktree_dir.join("feature.txt"), "work\n").unwrap();
-        git_ok(&worktree_dir, &["add", "feature.txt"]);
-        git_ok(&worktree_dir, &["commit", "-m", "engineer work"]);
-
-        let result = merge_engineer_branch(&repo, "eng-1").unwrap();
-        assert!(matches!(result, MergeOutcome::Success));
-        assert_eq!(
-            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
-            engineer_base_branch_name("eng-1")
-        );
-
-        let branch_check = git(&repo, &["rev-parse", "--verify", "eng-1/42"]);
-        assert!(
-            !branch_check.status.success(),
-            "merged task branch should be deleted"
-        );
-    }
-
-    #[test]
-    fn reset_worktree_leaves_clean_state() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
-        let team_config_dir = repo.join(".batty").join("team_config");
-
-        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
-
-        std::fs::write(worktree_dir.join("new.txt"), "content\n").unwrap();
-        git_ok(&worktree_dir, &["add", "new.txt"]);
-        git_ok(&worktree_dir, &["commit", "-m", "add file"]);
-
-        let result = merge_engineer_branch(&repo, "eng-1").unwrap();
-        assert!(matches!(result, MergeOutcome::Success));
-
-        let status = git_stdout(&worktree_dir, &["status", "--porcelain"]);
-        let tracked_changes: Vec<&str> = status
-            .lines()
-            .filter(|line| !line.starts_with("?? .batty/"))
-            .collect();
-        assert!(
-            tracked_changes.is_empty(),
-            "worktree has tracked changes: {:?}",
-            tracked_changes
-        );
-    }
-
-    #[test]
-    fn reset_worktree_noops_when_worktree_is_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-
-        reset_engineer_worktree(&repo, "eng-missing").unwrap();
-    }
-
-    #[test]
-    fn reset_worktree_keeps_unmerged_task_branch() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-keep");
-
-        prepare_engineer_assignment_worktree(
-            &repo,
-            &worktree_dir,
-            "eng-keep",
-            "eng-keep/77",
-            &team_config_dir,
-        )
-        .unwrap();
-
-        std::fs::write(worktree_dir.join("feature.txt"), "keep me\n").unwrap();
-        git_ok(&worktree_dir, &["add", "feature.txt"]);
-        git_ok(&worktree_dir, &["commit", "-m", "unmerged feature"]);
-
-        reset_engineer_worktree(&repo, "eng-keep").unwrap();
-
-        assert_eq!(
-            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
-            engineer_base_branch_name("eng-keep")
-        );
-        assert!(
-            git(&repo, &["rev-parse", "--verify", "eng-keep/77"])
-                .status
-                .success()
-        );
-    }
-
-    #[test]
-    fn reset_worktree_deletes_merged_legacy_task_branch() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-legacy");
-
-        setup_engineer_worktree(
-            &repo,
-            &worktree_dir,
-            &engineer_base_branch_name("eng-legacy"),
-            &team_config_dir,
-        )
-        .unwrap();
-        git_ok(
-            &worktree_dir,
-            &["checkout", "-B", "eng-legacy/task-55", "main"],
-        );
-        std::fs::write(worktree_dir.join("legacy.txt"), "legacy branch work\n").unwrap();
-        git_ok(&worktree_dir, &["add", "legacy.txt"]);
-        git_ok(&worktree_dir, &["commit", "-m", "legacy task work"]);
-        git_ok(&repo, &["merge", "eng-legacy/task-55", "--no-edit"]);
-
-        reset_engineer_worktree(&repo, "eng-legacy").unwrap();
-
-        assert!(
-            !git(&repo, &["rev-parse", "--verify", "eng-legacy/task-55"])
-                .status
-                .success()
-        );
-        assert_eq!(
-            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
-            engineer_base_branch_name("eng-legacy")
-        );
-    }
-
-    #[test]
-    fn reset_worktree_keeps_non_engineer_namespace_branch() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-keep");
-
-        setup_engineer_worktree(&repo, &worktree_dir, "eng-keep", &team_config_dir).unwrap();
-        git_ok(&worktree_dir, &["checkout", "-B", "feature/custom", "main"]);
-        std::fs::write(worktree_dir.join("feature.txt"), "non engineer branch\n").unwrap();
-        git_ok(&worktree_dir, &["add", "feature.txt"]);
-        git_ok(&worktree_dir, &["commit", "-m", "feature branch work"]);
-
-        reset_engineer_worktree(&repo, "eng-keep").unwrap();
-
-        assert!(
-            git(&repo, &["rev-parse", "--verify", "feature/custom"])
-                .status
-                .success()
-        );
-    }
-
-    #[test]
-    fn merge_success_deletes_merged_engineer_branch_namespace() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-delete");
-
-        setup_engineer_worktree(&repo, &worktree_dir, "eng-delete", &team_config_dir).unwrap();
-
-        std::fs::write(worktree_dir.join("feature.txt"), "remove branch\n").unwrap();
-        git_ok(&worktree_dir, &["add", "feature.txt"]);
-        git_ok(&worktree_dir, &["commit", "-m", "engineer work"]);
-
-        let result = merge_engineer_branch(&repo, "eng-delete").unwrap();
-
-        assert!(matches!(result, MergeOutcome::Success));
-        assert!(
-            !git(&repo, &["rev-parse", "--verify", "eng-delete"])
-                .status
-                .success()
-        );
-    }
-
-    #[test]
-    fn merge_rebase_conflict_returns_conflict() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-2");
-        let team_config_dir = repo.join(".batty").join("team_config");
-
-        std::fs::write(repo.join("conflict.txt"), "original\n").unwrap();
-        git_ok(&repo, &["add", "conflict.txt"]);
-        git_ok(&repo, &["commit", "-m", "add conflict file"]);
-
-        setup_engineer_worktree(&repo, &worktree_dir, "eng-2", &team_config_dir).unwrap();
-
-        std::fs::write(worktree_dir.join("conflict.txt"), "engineer version\n").unwrap();
-        git_ok(&worktree_dir, &["add", "conflict.txt"]);
-        git_ok(&worktree_dir, &["commit", "-m", "engineer change"]);
-
-        std::fs::write(repo.join("conflict.txt"), "main version\n").unwrap();
-        git_ok(&repo, &["add", "conflict.txt"]);
-        git_ok(&repo, &["commit", "-m", "main change"]);
-
-        let result = merge_engineer_branch(&repo, "eng-2").unwrap();
-        assert!(matches!(result, MergeOutcome::RebaseConflict(_)));
-
-        let status = git(&worktree_dir, &["status", "--porcelain"]);
-        assert!(status.status.success());
-    }
-
-    #[test]
-    fn merge_rebase_conflict_aborts_rebase_state() {
-        let (_tmp, repo, worktree_dir, _team_config_dir) = setup_rebase_conflict_repo("eng-4");
-
-        let result = merge_engineer_branch(&repo, "eng-4").unwrap();
-
-        assert!(matches!(result, MergeOutcome::RebaseConflict(_)));
-        assert!(
-            !git(&worktree_dir, &["rev-parse", "--verify", "REBASE_HEAD"])
-                .status
-                .success()
-        );
-    }
-
-    #[test]
-    fn merge_with_dirty_main_returns_merge_failure() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-3");
-        let team_config_dir = repo.join(".batty").join("team_config");
-
-        std::fs::write(repo.join("journal.md"), "base\n").unwrap();
-        git_ok(&repo, &["add", "journal.md"]);
-        git_ok(&repo, &["commit", "-m", "add journal"]);
-
-        setup_engineer_worktree(&repo, &worktree_dir, "eng-3", &team_config_dir).unwrap();
-
-        std::fs::write(worktree_dir.join("journal.md"), "engineer version\n").unwrap();
-        git_ok(&worktree_dir, &["add", "journal.md"]);
-        git_ok(&worktree_dir, &["commit", "-m", "engineer update"]);
-
-        std::fs::write(repo.join("journal.md"), "dirty main\n").unwrap();
-
-        let result = merge_engineer_branch(&repo, "eng-3").unwrap();
-        match result {
-            MergeOutcome::MergeFailure(stderr) => {
-                assert!(
-                    stderr.contains("would be overwritten by merge")
-                        || stderr.contains("Please commit your changes or stash them"),
-                    "unexpected merge failure stderr: {stderr}"
-                );
-            }
-            other => panic!("expected merge failure outcome, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn merge_failure_retains_engineer_branch_for_manual_recovery() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-3");
-
-        std::fs::write(repo.join("journal.md"), "base\n").unwrap();
-        git_ok(&repo, &["add", "journal.md"]);
-        git_ok(&repo, &["commit", "-m", "add journal"]);
-
-        setup_engineer_worktree(&repo, &worktree_dir, "eng-3", &team_config_dir).unwrap();
-
-        std::fs::write(worktree_dir.join("journal.md"), "engineer version\n").unwrap();
-        git_ok(&worktree_dir, &["add", "journal.md"]);
-        git_ok(&worktree_dir, &["commit", "-m", "engineer update"]);
-
-        std::fs::write(repo.join("journal.md"), "dirty main\n").unwrap();
-
-        let result = merge_engineer_branch(&repo, "eng-3").unwrap();
-
-        assert!(matches!(result, MergeOutcome::MergeFailure(_)));
-        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-3");
-        assert!(
-            git(&repo, &["rev-parse", "--verify", "eng-3"])
-                .status
-                .success()
-        );
+    fn auto_merge_daemon(repo: &Path, policy: AutoMergePolicy) -> crate::team::daemon::TeamDaemon {
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ];
+        let mut daemon = make_test_daemon(repo, members);
+        daemon.config.team_config.workflow_policy.auto_merge = policy;
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+        daemon
     }
 
     #[test]
@@ -1248,7 +501,7 @@ mod tests {
         let engineer = MemberInstance {
             name: "eng-1".to_string(),
             role_name: "eng-1".to_string(),
-            role_type: super::super::config::RoleType::Engineer,
+            role_type: crate::team::config::RoleType::Engineer,
             agent: Some("claude".to_string()),
             prompt: None,
             reports_to: Some("manager".to_string()),
@@ -1275,7 +528,7 @@ mod tests {
         let engineer = MemberInstance {
             name: "eng-1".to_string(),
             role_name: "eng-1".to_string(),
-            role_type: super::super::config::RoleType::Engineer,
+            role_type: crate::team::config::RoleType::Engineer,
             agent: Some("claude".to_string()),
             prompt: None,
             reports_to: None,
@@ -1309,7 +562,7 @@ mod tests {
         let engineer = MemberInstance {
             name: "eng-1".to_string(),
             role_name: "eng-1".to_string(),
-            role_type: super::super::config::RoleType::Engineer,
+            role_type: crate::team::config::RoleType::Engineer,
             agent: Some("claude".to_string()),
             prompt: None,
             reports_to: None,
@@ -1355,7 +608,7 @@ mod tests {
         let manager = MemberInstance {
             name: "manager".to_string(),
             role_name: "manager".to_string(),
-            role_type: super::super::config::RoleType::Manager,
+            role_type: crate::team::config::RoleType::Manager,
             agent: Some("claude".to_string()),
             prompt: None,
             reports_to: None,
@@ -1364,7 +617,7 @@ mod tests {
         let engineer = MemberInstance {
             name: "eng-1".to_string(),
             role_name: "eng-1".to_string(),
-            role_type: super::super::config::RoleType::Engineer,
+            role_type: crate::team::config::RoleType::Engineer,
             agent: Some("claude".to_string()),
             prompt: None,
             reports_to: Some("manager".to_string()),
@@ -1573,7 +826,7 @@ mod tests {
             MemberInstance {
                 name: "manager".to_string(),
                 role_name: "manager".to_string(),
-                role_type: super::super::config::RoleType::Manager,
+                role_type: crate::team::config::RoleType::Manager,
                 agent: Some("claude".to_string()),
                 prompt: None,
                 reports_to: None,
@@ -1582,7 +835,7 @@ mod tests {
             MemberInstance {
                 name: "eng-1".to_string(),
                 role_name: "eng-1".to_string(),
-                role_type: super::super::config::RoleType::Engineer,
+                role_type: crate::team::config::RoleType::Engineer,
                 agent: Some("claude".to_string()),
                 prompt: None,
                 reports_to: Some("manager".to_string()),
@@ -1639,9 +892,9 @@ mod tests {
 
         let timing_log = repo.join(".batty").join("test_timing.jsonl");
         for task_id in 1..=5 {
-            super::super::artifact::record_test_timing(
+            crate::team::artifact::record_test_timing(
                 &timing_log,
-                &super::super::artifact::TestTimingRecord {
+                &crate::team::artifact::TestTimingRecord {
                     task_id,
                     engineer: "eng-1".to_string(),
                     branch: format!("eng-1/task-{task_id}"),
@@ -1666,7 +919,7 @@ mod tests {
         let engineer = MemberInstance {
             name: "eng-1".to_string(),
             role_name: "eng-1".to_string(),
-            role_type: super::super::config::RoleType::Engineer,
+            role_type: crate::team::config::RoleType::Engineer,
             agent: Some("claude".to_string()),
             prompt: None,
             reports_to: None,
@@ -1694,201 +947,6 @@ mod tests {
         let timings = read_test_timing_log(&timing_log).unwrap();
         assert_eq!(timings.len(), 6);
         assert!(timings.last().unwrap().regression_detected);
-    }
-
-    #[test]
-    fn reset_clears_task_branch() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-reset");
-
-        prepare_engineer_assignment_worktree(
-            &repo,
-            &worktree_dir,
-            "eng-reset",
-            "eng-reset/task-99",
-            &team_config_dir,
-        )
-        .unwrap();
-
-        std::fs::write(worktree_dir.join("done.txt"), "work done\n").unwrap();
-        git_ok(&worktree_dir, &["add", "done.txt"]);
-        git_ok(&worktree_dir, &["commit", "-m", "task work"]);
-
-        // Merge the task branch into main so it's considered merged.
-        git_ok(&repo, &["merge", "eng-reset/task-99", "--no-edit"]);
-
-        reset_engineer_worktree(&repo, "eng-reset").unwrap();
-
-        // Verify on base branch.
-        assert_eq!(
-            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
-            engineer_base_branch_name("eng-reset")
-        );
-        // Verify task branch is deleted.
-        assert!(
-            !git(&repo, &["rev-parse", "--verify", "eng-reset/task-99"])
-                .status
-                .success(),
-            "merged task branch should have been deleted"
-        );
-    }
-
-    #[test]
-    fn reset_handles_uncommitted_changes_on_base_branch() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-dirty");
-        let base = engineer_base_branch_name("eng-dirty");
-
-        // Set up worktree on the base branch (not a task branch).
-        setup_engineer_worktree(&repo, &worktree_dir, &base, &team_config_dir).unwrap();
-
-        // Leave uncommitted staged and unstaged changes.
-        std::fs::write(worktree_dir.join("staged.txt"), "staged\n").unwrap();
-        git_ok(&worktree_dir, &["add", "staged.txt"]);
-        std::fs::write(worktree_dir.join("unstaged.txt"), "unstaged\n").unwrap();
-
-        // Reset should succeed — base branch is safe to mutate even when dirty.
-        reset_engineer_worktree(&repo, "eng-dirty").unwrap();
-
-        assert_eq!(
-            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
-            base
-        );
-        // Worktree should be clean after reset.
-        let status = git_stdout(&worktree_dir, &["status", "--porcelain"]);
-        let tracked_changes: Vec<&str> = status
-            .lines()
-            .filter(|line| !line.starts_with("?? .batty/"))
-            .collect();
-        assert!(
-            tracked_changes.is_empty(),
-            "worktree should be clean after reset, got: {:?}",
-            tracked_changes
-        );
-    }
-
-    #[test]
-    fn reset_skips_when_dirty_task_branch() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-dirty-task");
-
-        prepare_engineer_assignment_worktree(
-            &repo,
-            &worktree_dir,
-            "eng-dirty-task",
-            "eng-dirty-task/task-88",
-            &team_config_dir,
-        )
-        .unwrap();
-
-        // Leave uncommitted staged changes on a task branch.
-        std::fs::write(worktree_dir.join("staged.txt"), "staged\n").unwrap();
-        git_ok(&worktree_dir, &["add", "staged.txt"]);
-
-        // Reset should skip — worktree is dirty on a task branch.
-        reset_engineer_worktree(&repo, "eng-dirty-task").unwrap();
-
-        // Worktree should remain on the task branch with changes intact.
-        assert_eq!(
-            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
-            "eng-dirty-task/task-88"
-        );
-        assert!(worktree_dir.join("staged.txt").exists());
-    }
-
-    #[test]
-    fn reset_handles_detached_head() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-detach");
-
-        setup_engineer_worktree(&repo, &worktree_dir, "eng-detach", &team_config_dir).unwrap();
-
-        // Create a commit and detach HEAD.
-        std::fs::write(worktree_dir.join("file.txt"), "content\n").unwrap();
-        git_ok(&worktree_dir, &["add", "file.txt"]);
-        git_ok(&worktree_dir, &["commit", "-m", "a commit"]);
-        let commit_sha = git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
-        git_ok(&worktree_dir, &["checkout", &commit_sha]);
-
-        // Verify we are in detached HEAD state.
-        assert_eq!(
-            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
-            "HEAD"
-        );
-
-        // Reset should still check out the base branch.
-        reset_engineer_worktree(&repo, "eng-detach").unwrap();
-
-        assert_eq!(
-            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
-            engineer_base_branch_name("eng-detach")
-        );
-    }
-
-    fn production_unwrap_expect_count(source: &str) -> usize {
-        let prod = if let Some(pos) = source.find("\n#[cfg(test)]\nmod tests") {
-            &source[..pos]
-        } else {
-            source
-        };
-        prod.lines()
-            .filter(|line| {
-                let trimmed = line.trim();
-                !trimmed.starts_with("#[cfg(test)]")
-                    && (trimmed.contains(".unwrap(") || trimmed.contains(".expect("))
-            })
-            .count()
-    }
-
-    #[test]
-    fn production_merge_has_no_unwrap_or_expect_calls() {
-        let src = include_str!("merge.rs");
-        assert_eq!(
-            production_unwrap_expect_count(src),
-            0,
-            "production merge.rs should avoid unwrap/expect"
-        );
-    }
-
-    // --- Auto-merge integration tests ---
-
-    use crate::team::config::AutoMergePolicy;
-    use crate::team::events::read_events;
-
-    /// Helper: set up a repo + worktree with a small clean diff (one .txt file).
-    fn setup_auto_merge_repo(
-        engineer: &str,
-    ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-auto-merge-test");
-        write_task_file(&repo, 42, "auto-merge-task");
-
-        let team_config_dir = repo.join(".batty").join("team_config");
-        let worktree_dir = repo.join(".batty").join("worktrees").join(engineer);
-        setup_engineer_worktree(&repo, &worktree_dir, engineer, &team_config_dir).unwrap();
-
-        // Create a small change in the worktree
-        std::fs::write(worktree_dir.join("note.txt"), "done\n").unwrap();
-        git_ok(&worktree_dir, &["add", "note.txt"]);
-        git_ok(&worktree_dir, &["commit", "-m", "add note"]);
-
-        (tmp, repo, worktree_dir)
-    }
-
-    fn auto_merge_daemon(repo: &Path, policy: AutoMergePolicy) -> super::super::daemon::TeamDaemon {
-        let members = vec![
-            manager_member("manager", None),
-            engineer_member("eng-1", Some("manager"), true),
-        ];
-        let mut daemon = make_test_daemon(repo, members);
-        daemon.config.team_config.workflow_policy.auto_merge = policy;
-        daemon.set_active_task_for_test("eng-1", 42);
-        daemon.set_member_state_for_test("eng-1", MemberState::Working);
-        daemon
     }
 
     #[test]
@@ -1958,9 +1016,6 @@ mod tests {
 
         handle_engineer_completion(&mut daemon, "eng-1").unwrap();
 
-        // Task should NOT be merged — routed to manual review.
-        // The active task stays set (we only clear on merge success or rejection).
-        // Manager should have received a review message.
         let manager_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
         assert!(
@@ -2070,89 +1125,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn merge_fails_when_project_root_not_on_main() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-off");
-
-        setup_engineer_worktree(&repo, &worktree_dir, "eng-off", &team_config_dir).unwrap();
-
-        std::fs::write(worktree_dir.join("feature.txt"), "engineer work\n").unwrap();
-        git_ok(&worktree_dir, &["add", "feature.txt"]);
-        git_ok(&worktree_dir, &["commit", "-m", "engineer feature"]);
-
-        // Move project root off main onto a detached HEAD.
-        git_ok(&repo, &["checkout", "--detach", "HEAD"]);
-
-        let result = merge_engineer_branch(&repo, "eng-off").unwrap();
-        // Should attempt to checkout main — detached HEAD means checkout succeeds
-        // and merge proceeds normally. The key fix is that it TRIES to checkout.
-        // But if we create a scenario where checkout fails, we get MergeFailure.
-        match result {
-            MergeOutcome::Success => {
-                // checkout main succeeded, merge proceeded — verify we're on main
-                let branch = git_stdout(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
-                assert_eq!(branch, "main");
-            }
-            MergeOutcome::MergeFailure(msg) => {
-                assert!(
-                    msg.contains("not 'main'"),
-                    "expected branch mismatch message, got: {msg}"
-                );
-            }
-            other => panic!("expected Success or MergeFailure, got {other:?}"),
-        }
+    fn production_unwrap_expect_count(source: &str) -> usize {
+        let prod = if let Some(pos) = source.find("\n#[cfg(test)]\nmod tests") {
+            &source[..pos]
+        } else {
+            source
+        };
+        prod.lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                !trimmed.starts_with("#[cfg(test)]")
+                    && (trimmed.contains(".unwrap(") || trimmed.contains(".expect("))
+            })
+            .count()
     }
 
     #[test]
-    fn merge_succeeds_when_project_root_on_main() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-ok");
-
-        setup_engineer_worktree(&repo, &worktree_dir, "eng-ok", &team_config_dir).unwrap();
-
-        std::fs::write(worktree_dir.join("feature.txt"), "work\n").unwrap();
-        git_ok(&worktree_dir, &["add", "feature.txt"]);
-        git_ok(&worktree_dir, &["commit", "-m", "engineer work"]);
-
-        // project root stays on main (the default) — merge should succeed
+    fn production_merge_completion_has_no_unwrap_or_expect_calls() {
+        let src = include_str!("completion.rs");
         assert_eq!(
-            git_stdout(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]),
-            "main"
+            production_unwrap_expect_count(src),
+            0,
+            "production completion.rs should avoid unwrap/expect"
         );
-
-        let result = merge_engineer_branch(&repo, "eng-ok").unwrap();
-        assert!(matches!(result, MergeOutcome::Success));
-        assert!(repo.join("feature.txt").exists());
-    }
-
-    #[test]
-    fn reset_worktree_skips_when_dirty_task_branch() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "batty-merge-test");
-        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-wip");
-
-        prepare_engineer_assignment_worktree(
-            &repo,
-            &worktree_dir,
-            "eng-wip",
-            "eng-wip/88",
-            &team_config_dir,
-        )
-        .unwrap();
-
-        // Create uncommitted changes on the task branch.
-        std::fs::write(worktree_dir.join("wip.txt"), "work in progress\n").unwrap();
-        git_ok(&worktree_dir, &["add", "wip.txt"]);
-
-        // reset_engineer_worktree should skip (not error) when dirty on task branch.
-        reset_engineer_worktree(&repo, "eng-wip").unwrap();
-
-        // Verify the worktree was NOT reset — still on task branch with changes.
-        let branch = current_worktree_branch(&worktree_dir).unwrap();
-        assert_eq!(branch, "eng-wip/88");
-        assert!(worktree_dir.join("wip.txt").exists());
     }
 }
