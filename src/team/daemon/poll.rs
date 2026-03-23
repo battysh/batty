@@ -1,0 +1,216 @@
+//! Main daemon poll loop — signal handling, subsystem sequencing, heartbeat.
+
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+use tracing::{debug, info, warn};
+
+use super::hot_reload::HotReloadMonitor;
+use super::{TeamDaemon, standup, status};
+use crate::tmux;
+
+impl TeamDaemon {
+    /// Run the daemon loop. Blocks until the session is killed or an error occurs.
+    ///
+    /// If `resume` is true, agents are launched with session-resume flags
+    /// (`claude --resume <session-id>` / `codex resume --last`) instead of fresh starts.
+    pub fn run(&mut self, resume: bool) -> Result<()> {
+        self.record_daemon_started();
+        self.acknowledge_hot_reload_marker();
+        info!(session = %self.config.session, resume, "daemon started");
+        self.record_orchestrator_action(format!(
+            "runtime: orchestrator started (mode={}, resume={resume})",
+            self.config.team_config.workflow_mode.as_str()
+        ));
+
+        // Install signal handler so we log clean shutdowns
+        let shutdown_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag_clone = shutdown_flag.clone();
+        if let Err(e) = ctrlc::set_handler(move || {
+            flag_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        }) {
+            warn!(error = %e, "failed to install signal handler");
+        }
+
+        self.run_startup_preflight()?;
+
+        // Spawn agents in all panes
+        self.spawn_all_agents(resume)?;
+        if resume {
+            self.restore_runtime_state();
+        }
+        self.persist_runtime_state(false)?;
+
+        let started_at = Instant::now();
+        let heartbeat_interval = Duration::from_secs(300); // 5 minutes
+        let mut last_heartbeat = Instant::now();
+        let mut hot_reload = match HotReloadMonitor::for_current_exe() {
+            Ok(monitor) => Some(monitor),
+            Err(error) => {
+                warn!(error = %error, "failed to initialize daemon hot-reload monitor");
+                None
+            }
+        };
+
+        // Main polling loop
+        let shutdown_reason;
+        loop {
+            // Check for signal-based shutdown
+            if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                shutdown_reason = "signal";
+                info!("received shutdown signal");
+                break;
+            }
+
+            if !tmux::session_exists(&self.config.session) {
+                shutdown_reason = "session_gone";
+                info!("tmux session gone, shutting down");
+                break;
+            }
+
+            // -- Recoverable subsystems: log-and-skip with consecutive-failure tracking --
+            self.run_recoverable_step("poll_watchers", |daemon| daemon.poll_watchers());
+            self.run_recoverable_step("restart_dead_members", |daemon| {
+                daemon.restart_dead_members()
+            });
+            self.run_recoverable_step("sync_launch_state_session_ids", |daemon| {
+                daemon.sync_launch_state_session_ids()
+            });
+            self.run_recoverable_step("drain_legacy_command_queue", |daemon| {
+                daemon.drain_legacy_command_queue()
+            });
+
+            // -- Critical subsystems: errors logged but no consecutive-failure tracking --
+            self.run_loop_step("deliver_inbox_messages", |daemon| {
+                daemon.deliver_inbox_messages()
+            });
+            self.run_loop_step("retry_failed_deliveries", |daemon| {
+                daemon.retry_failed_deliveries()
+            });
+
+            // -- Recoverable subsystems --
+            self.run_recoverable_step("maybe_intervene_triage_backlog", |daemon| {
+                daemon.maybe_intervene_triage_backlog()
+            });
+            self.run_recoverable_step("maybe_intervene_owned_tasks", |daemon| {
+                daemon.maybe_intervene_owned_tasks()
+            });
+            self.run_recoverable_step("maybe_intervene_review_backlog", |daemon| {
+                daemon.maybe_intervene_review_backlog()
+            });
+            self.run_recoverable_step("maybe_escalate_stale_reviews", |daemon| {
+                daemon.maybe_escalate_stale_reviews()
+            });
+            self.run_recoverable_step("maybe_auto_unblock_blocked_tasks", |daemon| {
+                daemon.maybe_auto_unblock_blocked_tasks()
+            });
+
+            // -- Critical subsystems --
+            self.run_loop_step("reconcile_active_tasks", |daemon| {
+                daemon.reconcile_active_tasks()
+            });
+            self.run_loop_step("maybe_auto_dispatch", |daemon| daemon.maybe_auto_dispatch());
+            self.run_recoverable_step("maybe_recycle_cron_tasks", |daemon| {
+                daemon.maybe_recycle_cron_tasks()
+            });
+
+            // -- Recoverable subsystems --
+            self.run_recoverable_step("maybe_intervene_manager_dispatch_gap", |daemon| {
+                daemon.maybe_intervene_manager_dispatch_gap()
+            });
+            self.run_recoverable_step("maybe_intervene_architect_utilization", |daemon| {
+                daemon.maybe_intervene_architect_utilization()
+            });
+            self.run_recoverable_step("maybe_intervene_board_replenishment", |daemon| {
+                daemon.maybe_intervene_board_replenishment()
+            });
+            self.run_recoverable_step("maybe_detect_pipeline_starvation", |daemon| {
+                daemon.maybe_detect_pipeline_starvation()
+            });
+
+            // -- Recoverable with catch_unwind (panic-safe) --
+            self.run_recoverable_step_with_catch_unwind("process_telegram_queue", |daemon| {
+                daemon.process_telegram_queue()
+            });
+            self.run_recoverable_step("maybe_fire_nudges", |daemon| daemon.maybe_fire_nudges());
+            self.run_recoverable_step("check_backend_health", |daemon| {
+                daemon.check_backend_health()
+            });
+            self.run_recoverable_step("maybe_reconcile_stale_worktrees", |daemon| {
+                daemon.maybe_reconcile_stale_worktrees()
+            });
+            self.run_recoverable_step("check_worktree_staleness", |daemon| {
+                daemon.check_worktree_staleness()
+            });
+            self.run_recoverable_step("maybe_warn_uncommitted_work", |daemon| {
+                daemon.maybe_warn_uncommitted_work()
+            });
+            self.run_recoverable_step_with_catch_unwind("maybe_generate_standup", |daemon| {
+                let generated =
+                    standup::maybe_generate_standup(standup::StandupGenerationContext {
+                        project_root: &daemon.config.project_root,
+                        team_config: &daemon.config.team_config,
+                        members: &daemon.config.members,
+                        watchers: &daemon.watchers,
+                        states: &daemon.states,
+                        pane_map: &daemon.config.pane_map,
+                        telegram_bot: daemon.telegram_bot.as_ref(),
+                        paused_standups: &daemon.paused_standups,
+                        last_standup: &mut daemon.last_standup,
+                        backend_health: &daemon.backend_health,
+                    })?;
+                for recipient in generated {
+                    daemon.record_standup_generated(&recipient);
+                }
+                Ok(())
+            });
+            self.run_recoverable_step("maybe_rotate_board", |daemon| daemon.maybe_rotate_board());
+            self.run_recoverable_step("maybe_auto_archive", |daemon| daemon.maybe_auto_archive());
+            self.run_recoverable_step_with_catch_unwind("maybe_generate_retrospective", |daemon| {
+                daemon.maybe_generate_retrospective()
+            });
+            self.run_recoverable_step("maybe_notify_failure_patterns", |daemon| {
+                daemon.maybe_notify_failure_patterns()
+            });
+            self.run_recoverable_step("maybe_reload_binary", |daemon| {
+                daemon.maybe_hot_reload_binary(hot_reload.as_mut())
+            });
+            status::update_pane_status_labels(status::PaneStatusLabelUpdateContext {
+                project_root: &self.config.project_root,
+                members: &self.config.members,
+                pane_map: &self.config.pane_map,
+                states: &self.states,
+                nudges: &self.nudges,
+                last_standup: &self.last_standup,
+                paused_standups: &self.paused_standups,
+                standup_interval_for_member: |member_name| {
+                    standup::standup_interval_for_member_name(
+                        &self.config.team_config,
+                        &self.config.members,
+                        member_name,
+                    )
+                },
+            });
+
+            // Periodic heartbeat
+            if last_heartbeat.elapsed() >= heartbeat_interval {
+                let uptime = started_at.elapsed().as_secs();
+                self.record_daemon_heartbeat(uptime);
+                if let Err(error) = self.persist_runtime_state(false) {
+                    warn!(error = %error, "failed to persist daemon checkpoint");
+                }
+                debug!(uptime_secs = uptime, "daemon heartbeat");
+                last_heartbeat = Instant::now();
+            }
+
+            std::thread::sleep(self.poll_interval);
+        }
+
+        let uptime = started_at.elapsed().as_secs();
+        if let Err(error) = self.persist_runtime_state(true) {
+            warn!(error = %error, "failed to persist final daemon checkpoint");
+        }
+        self.record_daemon_stopped(shutdown_reason, uptime);
+        Ok(())
+    }
+}
