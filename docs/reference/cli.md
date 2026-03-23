@@ -486,6 +486,9 @@ Options:
       --from <FROM>
           Copy team config from $HOME/.batty/templates/<name>/
 
+      --agent <AGENT>
+          Default agent backend for all roles (claude, codex, kiro)
+
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 
