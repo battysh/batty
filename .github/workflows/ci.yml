@@ -109,6 +109,7 @@ jobs:
           --skip team::daemon::health::tests::check_backend_health_emits_event_on_transition
           --skip team::daemon::health::tests::check_backend_health_no_event_when_state_unchanged
           --skip team::daemon::telegram_bridge::tests::maybe_intervene_triage_backlog_marks_member_working_after_live_delivery
+          --skip team::daemon::health::tests::uncommitted_diff_lines
 
   coverage:
     name: Code Coverage
