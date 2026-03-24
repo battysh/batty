@@ -2,6 +2,125 @@
 
 All notable changes to Batty are documented here.
 
+## 0.7.0 — 2026-03-24
+
+Architecture release replacing tmux-direct agent management with a
+process-per-agent shim runtime. Every agent now runs inside its own PTY-owning
+subprocess (`batty shim`), communicates over a typed socketpair protocol, and
+uses a vt100 virtual screen for sub-second state classification. Tmux becomes a
+display-only surface. 33 shim-related commits, 5,120 lines of new shim code,
+2,421 tests passing.
+
+### Agent Shim Architecture
+
+- **`batty shim` subcommand** — standalone agent container process that owns a
+  PTY, runs a vt100 virtual terminal, and communicates with the daemon over a
+  Unix socketpair using newline-delimited JSON.
+- **Typed socketpair protocol** — 7 Commands (`SendMessage`, `CaptureScreen`,
+  `GetState`, `Resize`, `Shutdown`, `Kill`, `Ping`) and 10 Events (`Ready`,
+  `StateChanged`, `Completion`, `Died`, `ContextExhausted`, `ScreenCapture`,
+  `State`, `Pong`, `Warning`, `Error`). Fully serializable with serde.
+- **Screen classifiers** — per-backend state classification from vt100 screen
+  content: `classify_claude`, `classify_codex`, `classify_kiro`,
+  `classify_generic`. Detects Idle, Working, Prompting, and Error states
+  without polling tmux.
+- **PTY log writer** — agent PTY output forwarded to log files and piped into
+  tmux panes via `tail -f`, making tmux a read-only display layer.
+- **`AgentHandle` abstraction** — daemon manages agents through handles backed
+  by socketpair file descriptors, replacing direct tmux pane manipulation.
+
+### JSONL Session Tracking
+
+- **Claude tracker** — parses Claude's `~/.claude/projects/` session JSONL for
+  conversation turns, token usage, and tool calls. Merge priority: screen
+  classification wins over tracker data.
+- **Codex tracker** — parses Codex session output for task progress. Merge
+  priority: tracker data wins over screen classification.
+- **Tracker-classifier fusion** — combined signal improves state accuracy,
+  especially for detecting context exhaustion and stalled agents.
+
+### Chat Frontend
+
+- **`batty chat` command** — interactive shim frontend for manual agent
+  interaction. Connects to a running shim's socketpair and renders state
+  changes, completions, and screen captures in the terminal.
+
+### Agent Lifecycle
+
+- **Crash recovery** — shim detects agent process death, emits `Died` event
+  with exit code and last terminal lines, enabling daemon-side restart.
+- **Context exhaustion detection** — classifiers recognize context-limit
+  signals per backend; shim emits `ContextExhausted` event for automatic
+  session rotation.
+- **Graceful shutdown** — `Shutdown` command with configurable timeout allows
+  agents to finish current work before termination. `Kill` command for
+  immediate termination.
+- **Ping/Pong health monitoring** — daemon sends periodic `Ping` commands;
+  shim responds with `Pong`. Missed pongs trigger stall warnings and
+  eventual restart.
+
+### Message Queuing
+
+- **Shim-side message queue** — messages arriving while the agent is in
+  Working state are buffered (depth 16, FIFO). Queue drains automatically
+  when the agent transitions to Idle. Oldest messages dropped when queue is
+  full, with tracing warnings.
+
+### Daemon Integration
+
+- **Shim-based agent spawning** — daemon launches agents as `batty shim`
+  subprocesses connected via socketpair, replacing tmux `send-keys` injection.
+- **Event-driven polling** — daemon reads shim events from socketpair file
+  descriptors instead of polling tmux pane content on 5-second cycles.
+- **`use_shim` config flag** — opt-in migration path in team.yaml; legacy
+  tmux-direct path removed after full migration.
+
+### Doctor
+
+- **Shim health checks** — `batty doctor` validates shim process liveness,
+  socketpair connectivity, and PTY state for all running agents.
+
+### Legacy Removal
+
+- **Removed tmux-direct agent management** — `inject_message`,
+  `inject_standup`, `poll_watchers`, `restart_dead_members`, and
+  `reset_context_keys` deleted from daemon and delivery modules.
+- **Removed `AgentAdapter` tmux methods** — `reset_context_keys` removed
+  from the backend trait interface.
+- **Net code reduction** — legacy tmux agent management code removed,
+  offset by new shim modules.
+
+### Performance
+
+- **Sub-second state detection** — vt100 screen classification runs on every
+  PTY write, replacing the previous 5-second tmux capture-pane polling cycle.
+- **Debounce tuning** — classifier debounce prevents spurious state
+  transitions during rapid terminal output. Benchmarks added for
+  classification throughput.
+
+### Testing
+
+- **E2E shim validation suite** — integration tests exercising the full
+  shim lifecycle: spawn, classify, deliver, complete, shutdown.
+- **Shim delivery routing tests** — verify message delivery through
+  socketpair protocol end-to-end.
+- **Performance benchmarks** — classification throughput benchmarks in
+  `src/shim/bench.rs`.
+- **2,421 unit tests passing** — up from 2,381 in v0.6.0.
+
+### Documentation
+
+- **CLI reference updated** — `batty shim` and `batty chat` subcommands
+  documented.
+- **Config reference updated** — shim lifecycle config fields
+  (`use_shim`, `shim_ping_interval_secs`, `shim_stall_threshold_secs`)
+  documented.
+- **Getting-started guide refreshed** — updated for shim-based workflow.
+- **Agent shim spec and v0.7.0 roadmap** — design spec and POC published
+  in `planning/`.
+
+---
+
 ## 0.6.0 — 2026-03-23
 
 Major release adding Grafana monitoring, agent backend abstraction,
