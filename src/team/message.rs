@@ -1,4 +1,4 @@
-//! Team message types and tmux injection.
+//! Team message types and command queue management.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -6,23 +6,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-
-use crate::tmux;
-
-/// The end-of-message marker used by paste verification and stuck detection.
-const END_MARKER: &str = "--- end message ---";
-/// Maximum polls when waiting for paste to appear in the pane.
-const PASTE_VERIFY_MAX_POLLS: u32 = 10;
-/// Interval between paste verification polls (milliseconds).
-const PASTE_VERIFY_POLL_MS: u64 = 200;
-/// Number of pane lines to capture when verifying paste landed.
-const PASTE_VERIFY_CAPTURE_LINES: u32 = 30;
-/// Maximum Enter-key submission attempts when message appears stuck.
-const SUBMIT_MAX_ATTEMPTS: u32 = 3;
-/// Delay between Enter retries when checking for stuck messages (milliseconds).
-const SUBMIT_RETRY_DELAY_MS: u64 = 800;
-/// Number of pane lines captured to detect a stuck message.
-const STUCK_CAPTURE_LINES: u32 = 5;
 
 /// A message in the command queue.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,91 +23,6 @@ pub enum QueuedCommand {
         engineer: String,
         task: String,
     },
-}
-
-/// Inject a text message into a tmux pane.
-///
-/// Uses load-buffer + paste-buffer for reliable delivery of long/special
-/// content, then polls the pane to confirm the paste landed before
-/// sending Enter. If the message appears stuck (end marker still at
-/// the bottom of the pane), Enter is retried up to [`SUBMIT_MAX_ATTEMPTS`].
-pub fn inject_message(pane_id: &str, from: &str, message: &str) -> Result<()> {
-    let formatted = format!(
-        "\n--- Message from {from} ---\n{message}\n{END_MARKER}\nTo reply, run: batty send {from} \"<your response>\"\n"
-    );
-
-    // Send a pre-injection Enter to wake up idle agents whose prompt may be stuck
-    // (e.g., Claude Code with unsent input in the prompt buffer)
-    let _ = tmux::send_keys(pane_id, "", true);
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    paste_message_with_retry(pane_id, &formatted)?;
-
-    // Wait for the paste to appear in the pane before sending Enter.
-    // This replaces a fixed delay with active verification, avoiding the race
-    // where Enter arrives before the paste buffer is processed.
-    if !wait_for_paste(pane_id) {
-        // Paste not confirmed — fall back to length-proportional delay.
-        let delay_ms = 500 + (formatted.len() as u64 / 100) * 50;
-        std::thread::sleep(std::time::Duration::from_millis(delay_ms.min(3000)));
-    }
-
-    // Submit the pasted text with Enter, retrying if the message is stuck.
-    submit_with_retry(pane_id)?;
-
-    Ok(())
-}
-
-/// Poll the pane capture until the end marker appears, confirming that the
-/// paste-buffer operation completed in the terminal.
-fn wait_for_paste(pane_id: &str) -> bool {
-    for _ in 0..PASTE_VERIFY_MAX_POLLS {
-        std::thread::sleep(std::time::Duration::from_millis(PASTE_VERIFY_POLL_MS));
-        if let Ok(capture) = tmux::capture_pane_recent(pane_id, PASTE_VERIFY_CAPTURE_LINES) {
-            if capture.contains(END_MARKER) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Send Enter to submit the pasted message. After each attempt, check whether
-/// the message is stuck (end marker still visible in the bottom few lines of
-/// the pane). If stuck, resend Enter. Up to [`SUBMIT_MAX_ATTEMPTS`] tries.
-fn submit_with_retry(pane_id: &str) -> Result<()> {
-    for attempt in 0..SUBMIT_MAX_ATTEMPTS {
-        tmux::send_keys(pane_id, "", true)?;
-
-        if attempt < SUBMIT_MAX_ATTEMPTS - 1 {
-            std::thread::sleep(std::time::Duration::from_millis(SUBMIT_RETRY_DELAY_MS));
-            let capture =
-                tmux::capture_pane_recent(pane_id, STUCK_CAPTURE_LINES).unwrap_or_default();
-            if !is_message_stuck_in_capture(&capture) {
-                break;
-            }
-            // Message still visible at bottom — Enter was likely lost, retry.
-        }
-    }
-    Ok(())
-}
-
-/// Check whether a short pane capture contains the message end marker,
-/// indicating the message was pasted but not yet submitted (stuck).
-pub(crate) fn is_message_stuck_in_capture(capture: &str) -> bool {
-    capture.contains(END_MARKER)
-}
-
-fn paste_message_with_retry(pane_id: &str, formatted: &str) -> Result<()> {
-    tmux::load_buffer(formatted)?;
-    match tmux::paste_buffer(pane_id) {
-        Ok(()) => Ok(()),
-        Err(error) if error.to_string().contains("no buffer batty-inject") => {
-            tmux::load_buffer(formatted)?;
-            tmux::paste_buffer(pane_id)
-        }
-        Err(error) => Err(error),
-    }
 }
 
 /// Write a command to the queue file.
@@ -372,99 +270,6 @@ mod tests {
         .unwrap();
         let commands = drain_command_queue(&queue).unwrap();
         assert_eq!(commands.len(), 1);
-    }
-
-    #[test]
-    #[serial]
-    #[cfg_attr(not(feature = "integration"), ignore)]
-    fn test_inject_message_empty_message_writes_message_wrapper_to_pane() {
-        let session = "batty-test-message-empty";
-        let mut delivered = false;
-
-        for _attempt in 0..3 {
-            let _ = crate::tmux::kill_session(session);
-
-            let tmp = tempfile::tempdir().unwrap();
-            let log_path = tmp.path().join("message-empty.log");
-
-            crate::tmux::create_session(session, "cat", &[], "/tmp").unwrap();
-            let pane_id = crate::tmux::pane_id(session).unwrap();
-            crate::tmux::setup_pipe_pane(&pane_id, &log_path).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(200));
-
-            inject_message(&pane_id, "manager", "").unwrap();
-            let content = (0..30)
-                .find_map(|_| {
-                    let content = std::fs::read_to_string(&log_path).unwrap_or_default();
-                    let ready = content.contains("--- Message from manager ---")
-                        && content.contains("--- end message ---")
-                        && content.contains("batty send manager");
-                    if ready {
-                        Some(content)
-                    } else {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        None
-                    }
-                })
-                .unwrap_or_else(|| std::fs::read_to_string(&log_path).unwrap_or_default());
-
-            if content.contains("--- Message from manager ---")
-                && content.contains("--- end message ---")
-                && content.contains("batty send manager")
-            {
-                delivered = true;
-                crate::tmux::kill_session(session).unwrap();
-                break;
-            }
-
-            crate::tmux::kill_session(session).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-
-        assert!(delivered, "expected wrapped empty message to reach pane");
-    }
-
-    #[test]
-    #[serial]
-    #[cfg_attr(not(feature = "integration"), ignore)]
-    fn test_inject_message_long_special_message_preserves_content() {
-        let session = format!("batty-test-message-special-{}", std::process::id());
-        let _ = crate::tmux::kill_session(&session);
-
-        let tmp = tempfile::tempdir().unwrap();
-        let log_path = tmp.path().join("message-special.log");
-        let repeated = "x".repeat(600);
-        let long_message = format!(
-            "symbols: !@#$%^&*()[]{{}}<>?/\\\\|~`'\" {}\nline-2",
-            repeated
-        );
-
-        crate::tmux::create_session(&session, "cat", &[], "/tmp").unwrap();
-        crate::tmux::setup_pipe_pane(&session, &log_path).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
-        inject_message(&session, "architect", &long_message).unwrap();
-        let content = (0..30)
-            .find_map(|_| {
-                let content = std::fs::read_to_string(&log_path).unwrap_or_default();
-                let ready = content.contains("--- Message from architect ---")
-                    && content.contains("symbols: !@#$%^&*()[]{}<>?/\\\\|~`'\"")
-                    && content.contains("line-2");
-                if ready {
-                    Some(content)
-                } else {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    None
-                }
-            })
-            .unwrap_or_else(|| std::fs::read_to_string(&log_path).unwrap_or_default());
-        assert!(content.contains("--- Message from architect ---"));
-        assert!(content.contains("symbols: !@#$%^&*()[]{}<>?/\\\\|~`'\""));
-        assert!(content.contains(&"x".repeat(200)));
-        assert!(content.contains("line-2"));
-        assert!(content.contains("batty send architect"));
-
-        crate::tmux::kill_session(&session).unwrap();
     }
 
     #[test]
@@ -839,80 +644,4 @@ mod tests {
         assert!(json.contains("\"type\":\"assign\""), "got: {json}");
     }
 
-    // ── inject_message Enter-key reliability tests ──
-
-    #[test]
-    fn injection_sequence_sends_enter_after_paste() {
-        // The formatted message must contain END_MARKER so wait_for_paste()
-        // can confirm the paste landed before Enter is sent.
-        let formatted = format!(
-            "\n--- Message from manager ---\nhello\n{}\nTo reply, run: batty send manager \"<your response>\"\n",
-            super::END_MARKER
-        );
-        assert!(
-            formatted.contains(super::END_MARKER),
-            "formatted message must contain the end marker used by paste verification"
-        );
-        // END_MARKER must appear before the final line so the capture window
-        // can reliably find it in the bottom N lines of the pane.
-        let marker_pos = formatted.rfind(super::END_MARKER).unwrap();
-        assert!(
-            marker_pos < formatted.len() - 1,
-            "end marker must not be the very last byte"
-        );
-    }
-
-    #[test]
-    fn verification_detects_stuck_message() {
-        // When the end marker is in the bottom capture, the message is stuck.
-        let stuck_capture =
-            "some output\n--- end message ---\nTo reply, run: batty send mgr \"<resp>\"";
-        assert!(
-            super::is_message_stuck_in_capture(stuck_capture),
-            "should detect stuck message when end marker is present"
-        );
-
-        // When the capture shows agent activity (no end marker), not stuck.
-        let active_capture = "Working on task...\n$ cargo test\nrunning 5 tests";
-        assert!(
-            !super::is_message_stuck_in_capture(active_capture),
-            "should not flag agent activity as stuck"
-        );
-    }
-
-    #[test]
-    fn retry_enter_on_stuck_detection() {
-        // Empty capture — message was consumed, not stuck.
-        assert!(
-            !super::is_message_stuck_in_capture(""),
-            "empty capture must not be stuck"
-        );
-
-        // Agent prompt only — not stuck.
-        assert!(
-            !super::is_message_stuck_in_capture("> "),
-            "agent prompt alone must not be stuck"
-        );
-
-        // Partial marker doesn't trigger stuck detection.
-        assert!(
-            !super::is_message_stuck_in_capture("--- end mess"),
-            "partial marker must not trigger stuck detection"
-        );
-
-        // Full end marker present — stuck.
-        assert!(
-            super::is_message_stuck_in_capture("text\n--- end message ---\nreply hint"),
-            "full end marker must trigger stuck detection"
-        );
-
-        // Multiple lines of agent output after the marker — still detected
-        // because the helper only checks presence, and caller limits capture
-        // to STUCK_CAPTURE_LINES (bottom 5 lines) to avoid false positives.
-        let capture_with_marker = "line1\nline2\n--- end message ---\nTo reply\nmore output";
-        assert!(
-            super::is_message_stuck_in_capture(capture_with_marker),
-            "end marker anywhere in the short capture means stuck"
-        );
-    }
 }
