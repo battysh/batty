@@ -217,6 +217,12 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                     };
 
                     if let Some(new) = new_state {
+                        // Only reset debounce timer on actual state transitions.
+                        // This prevents the timer from being reset by no-op
+                        // classifications (e.g., Unknown during command output),
+                        // which would cause prompt detection to be debounced
+                        // when the prompt arrives shortly after.
+                        inner.last_classify_at = now;
                         let summary = inner.last_n_lines(5);
                         inner.state = new;
                         inner.state_changed_at = Instant::now();
