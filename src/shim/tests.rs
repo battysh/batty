@@ -180,7 +180,10 @@ mod tests {
         let evt = wait_for_event(&mut ch, Duration::from_secs(5), |e| {
             matches!(e, Event::Pong)
         });
-        assert!(evt.is_some(), "shim should still be responsive after resize");
+        assert!(
+            evt.is_some(),
+            "shim should still be responsive after resize"
+        );
 
         ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
     }
@@ -255,7 +258,10 @@ mod tests {
         let err = wait_for_event(&mut ch, Duration::from_secs(3), |e| {
             matches!(e, Event::Error { .. })
         });
-        assert!(err.is_some(), "should receive Error when sending while working");
+        assert!(
+            err.is_some(),
+            "should receive Error when sending while working"
+        );
 
         // Wait for the original command to complete
         let _ = wait_for_completion(&mut ch, Duration::from_secs(10));
