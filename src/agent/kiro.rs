@@ -174,7 +174,10 @@ mod tests {
         let cmd = adapter
             .launch_command("batty-architect", false, false, None)
             .unwrap();
-        assert_eq!(cmd, "exec kiro chat --trust-all-tools --agent batty-architect");
+        assert_eq!(
+            cmd,
+            "exec kiro chat --trust-all-tools --agent batty-architect"
+        );
     }
 
     #[test]
@@ -199,7 +202,8 @@ mod tests {
     #[test]
     fn write_agent_config_creates_json() {
         let tmp = tempfile::tempdir().unwrap();
-        let name = write_kiro_agent_config("architect", "You are an architect", tmp.path()).unwrap();
+        let name =
+            write_kiro_agent_config("architect", "You are an architect", tmp.path()).unwrap();
         assert_eq!(name, "batty-architect");
         let config_path = tmp.path().join(".kiro/agents/batty-architect.json");
         assert!(config_path.exists());
