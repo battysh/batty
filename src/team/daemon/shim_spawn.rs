@@ -93,7 +93,14 @@ pub(in crate::team) fn spawn_shim(
     }
 
     let parent_channel = Channel::new(parent_sock);
-    let handle = AgentHandle::new(member_name.to_string(), parent_channel, child_pid);
+    let handle = AgentHandle::new(
+        member_name.to_string(),
+        parent_channel,
+        child_pid,
+        agent_type.to_string(),
+        agent_cmd.to_string(),
+        work_dir.to_path_buf(),
+    );
 
     debug!(
         member = member_name,
