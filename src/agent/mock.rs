@@ -25,7 +25,6 @@ pub enum MockCall {
     FormatInput {
         response: String,
     },
-    ResetContextKeys,
     LaunchCommand {
         prompt: String,
         idle: bool,
@@ -143,11 +142,6 @@ impl AgentAdapter for MockBackend {
             response: response.to_string(),
         });
         format!("{response}{}", self.config.format_input_suffix)
-    }
-
-    fn reset_context_keys(&self) -> Vec<(String, bool)> {
-        self.record(MockCall::ResetContextKeys);
-        vec![("/clear".to_string(), true)]
     }
 
     fn launch_command(
@@ -327,7 +321,7 @@ mod tests {
 
     #[test]
     fn restart_triggers_correctly() {
-        // Restart flow: reset_context_keys + launch_command with resume flag.
+        // Restart flow: launch_command with resume flag.
         let mock = MockBackend::new(MockConfig {
             supports_resume: true,
             session_id: Some("sess-42".to_string()),
@@ -335,11 +329,7 @@ mod tests {
             ..MockConfig::default()
         });
 
-        // Phase 1: reset context
-        let keys = mock.reset_context_keys();
-        assert!(!keys.is_empty());
-
-        // Phase 2: relaunch with resume
+        // Relaunch with resume
         assert!(mock.supports_resume());
         let sid = mock.new_session_id().unwrap();
         assert_eq!(sid, "sess-42");
@@ -350,7 +340,6 @@ mod tests {
 
         // Verify call sequence
         let calls = mock.calls();
-        assert!(calls.contains(&MockCall::ResetContextKeys));
         assert!(calls.contains(&MockCall::SupportsResume));
         assert!(calls.contains(&MockCall::NewSessionId));
     }
@@ -484,7 +473,6 @@ mod tests {
             let _ = adapter.format_input("yes");
             let _ = adapter.instruction_candidates();
             let _ = adapter.wrap_launch_prompt("prompt");
-            let _ = adapter.reset_context_keys();
             let _ = adapter.new_session_id();
             let _ = adapter.supports_resume();
         }

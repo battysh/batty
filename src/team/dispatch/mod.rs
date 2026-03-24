@@ -64,7 +64,6 @@ impl TeamDaemon {
         engineer: &str,
         task: &str,
         task_id: Option<u32>,
-        reset_context: bool,
         emit_task_assigned: bool,
     ) -> Result<AssignmentLaunch> {
         info!(engineer, task, "assigning task");
@@ -130,16 +129,6 @@ impl TeamDaemon {
         } else {
             self.config.project_root.clone()
         };
-
-        if reset_context {
-            let adapter = agent::adapter_from_name(agent_name);
-            if let Some(adapter) = &adapter {
-                for (keys, enter) in adapter.reset_context_keys() {
-                    tmux::send_keys(&pane_id, &keys, enter)?;
-                    std::thread::sleep(Duration::from_millis(500));
-                }
-            }
-        }
 
         self.ensure_member_pane_cwd(engineer, &pane_id, &work_dir)?;
 
@@ -340,7 +329,7 @@ impl TeamDaemon {
         task: &str,
         task_id: Option<u32>,
     ) -> Result<AssignmentLaunch> {
-        self.launch_task_assignment(engineer, task, task_id, true, true)
+        self.launch_task_assignment(engineer, task, task_id, true)
     }
 
     pub(super) fn maybe_auto_dispatch(&mut self) -> Result<()> {
