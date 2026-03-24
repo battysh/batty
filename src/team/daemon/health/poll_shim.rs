@@ -223,10 +223,7 @@ impl TeamDaemon {
                 }
             }
 
-            Event::Warning {
-                message,
-                idle_secs,
-            } => {
+            Event::Warning { message, idle_secs } => {
                 info!(
                     member = member_name,
                     idle_secs,
@@ -257,10 +254,7 @@ impl TeamDaemon {
             )
         };
 
-        info!(
-            member = member_name,
-            "auto-respawning shim after crash"
-        );
+        info!(member = member_name, "auto-respawning shim after crash");
 
         let new_handle = super::super::shim_spawn::spawn_shim(
             member_name,
@@ -269,7 +263,8 @@ impl TeamDaemon {
             &work_dir,
             None,
         )?;
-        self.shim_handles.insert(member_name.to_string(), new_handle);
+        self.shim_handles
+            .insert(member_name.to_string(), new_handle);
         self.emit_event(TeamEvent::pane_respawned(member_name));
         self.record_orchestrator_action(format!(
             "lifecycle: auto-respawned shim for {} after crash",
@@ -331,10 +326,7 @@ impl TeamDaemon {
         let idle_info = idle_secs
             .map(|s| format!(" (idle for {}s)", s))
             .unwrap_or_default();
-        let body = format!(
-            "Shim warning for {}{}: {}",
-            member_name, idle_info, message
-        );
+        let body = format!("Shim warning for {}{}: {}", member_name, idle_info, message);
 
         if let Some(manager_name) = manager {
             if let Err(error) = self.queue_message("daemon", &manager_name, &body) {
@@ -549,9 +541,7 @@ mod tests {
 
         let messages = inbox::pending_messages(&inbox_root, "manager").unwrap();
         assert!(
-            messages
-                .iter()
-                .any(|msg| msg.body.contains("Shim warning")),
+            messages.iter().any(|msg| msg.body.contains("Shim warning")),
             "manager should receive stall warning"
         );
     }

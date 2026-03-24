@@ -41,9 +41,7 @@ impl TeamDaemon {
                 if secs_since_pong > timeout_secs {
                     warn!(
                         member = name.as_str(),
-                        secs_since_pong,
-                        timeout_secs,
-                        "shim handle stale — no Pong within timeout"
+                        secs_since_pong, timeout_secs, "shim handle stale — no Pong within timeout"
                     );
                     self.record_orchestrator_action(format!(
                         "health: shim {} stale (no Pong for {}s, timeout={}s)",
@@ -82,10 +80,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    fn insert_handle_with_channel(
-        daemon: &mut TeamDaemon,
-        name: &str,
-    ) -> Channel {
+    fn insert_handle_with_channel(daemon: &mut TeamDaemon, name: &str) -> Channel {
         let (parent, child) = protocol::socketpair().unwrap();
         let parent_channel = Channel::new(parent);
         let child_channel = Channel::new(child);
@@ -108,11 +103,7 @@ mod tests {
         let mut child = insert_handle_with_channel(&mut daemon, "eng-1");
 
         // Record a Pong so the handle isn't brand new
-        daemon
-            .shim_handles
-            .get_mut("eng-1")
-            .unwrap()
-            .record_pong();
+        daemon.shim_handles.get_mut("eng-1").unwrap().record_pong();
         daemon
             .shim_handles
             .get_mut("eng-1")
@@ -172,11 +163,8 @@ mod tests {
         let _child = insert_handle_with_channel(&mut daemon, "eng-1");
 
         // Set last_pong_at to far in the past (beyond the 120s timeout)
-        daemon
-            .shim_handles
-            .get_mut("eng-1")
-            .unwrap()
-            .last_pong_at = Some(Instant::now() - Duration::from_secs(300));
+        daemon.shim_handles.get_mut("eng-1").unwrap().last_pong_at =
+            Some(Instant::now() - Duration::from_secs(300));
         daemon
             .shim_handles
             .get_mut("eng-1")

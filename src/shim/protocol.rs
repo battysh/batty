@@ -480,10 +480,7 @@ mod tests {
         sender.send(&evt).unwrap();
         let received: Event = receiver.recv::<Event>().unwrap().unwrap();
         match received {
-            Event::Warning {
-                message,
-                idle_secs,
-            } => {
+            Event::Warning { message, idle_secs } => {
                 assert_eq!(message, "no screen change");
                 assert_eq!(idle_secs, Some(300));
             }
