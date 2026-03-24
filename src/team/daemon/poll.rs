@@ -70,6 +70,9 @@ impl TeamDaemon {
 
             // -- Recoverable subsystems: log-and-skip with consecutive-failure tracking --
             self.run_recoverable_step("poll_watchers", |daemon| daemon.poll_watchers());
+            if self.config.team_config.use_shim {
+                self.run_recoverable_step("poll_shim_handles", |daemon| daemon.poll_shim_handles());
+            }
             self.run_recoverable_step("restart_dead_members", |daemon| {
                 daemon.restart_dead_members()
             });
@@ -204,6 +207,23 @@ impl TeamDaemon {
             }
 
             std::thread::sleep(self.poll_interval);
+        }
+
+        // Shut down all shim subprocesses
+        if !self.shim_handles.is_empty() {
+            info!(
+                count = self.shim_handles.len(),
+                "sending shutdown to shim subprocesses"
+            );
+            let names: Vec<String> = self.shim_handles.keys().cloned().collect();
+            for name in &names {
+                if let Some(handle) = self.shim_handles.get_mut(name) {
+                    if let Err(error) = handle.send_shutdown(10) {
+                        warn!(member = name.as_str(), error = %error, "failed to send shim shutdown");
+                        let _ = handle.send_kill();
+                    }
+                }
+            }
         }
 
         let uptime = started_at.elapsed().as_secs();

@@ -18,6 +18,7 @@ use anyhow::{Context, Result};
 
 mod checks;
 mod context_exhaustion;
+mod poll_shim;
 mod poll_watchers;
 mod preflight;
 mod restart;
