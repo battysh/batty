@@ -72,6 +72,10 @@ pub enum Event {
         since_secs: u64,
     },
     Pong,
+    Warning {
+        message: String,
+        idle_secs: Option<u64>,
+    },
     Error {
         command: String,
         reason: String,
@@ -458,6 +462,30 @@ mod tests {
             Event::Error { command, reason } => {
                 assert_eq!(command, "SendMessage");
                 assert_eq!(reason, "agent busy");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_event_warning() {
+        let (a, b) = socketpair().unwrap();
+        let mut sender = Channel::new(a);
+        let mut receiver = Channel::new(b);
+
+        let evt = Event::Warning {
+            message: "no screen change".into(),
+            idle_secs: Some(300),
+        };
+        sender.send(&evt).unwrap();
+        let received: Event = receiver.recv::<Event>().unwrap().unwrap();
+        match received {
+            Event::Warning {
+                message,
+                idle_secs,
+            } => {
+                assert_eq!(message, "no screen change");
+                assert_eq!(idle_secs, Some(300));
             }
             _ => panic!("wrong variant"),
         }

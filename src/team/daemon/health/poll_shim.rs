@@ -1,6 +1,6 @@
 //! Shim event polling: reads events from shim channels, updates AgentHandle
 //! state, and triggers existing daemon flows (completion, context exhaustion,
-//! pane death).
+//! pane death, health monitoring, and stale detection).
 
 use anyhow::Result;
 use tracing::{debug, info, warn};
@@ -162,12 +162,18 @@ impl TeamDaemon {
                     member_name, exit_code, last_lines
                 ));
 
-                if let Err(error) = self.handle_pane_death(member_name) {
-                    warn!(
-                        member = member_name,
-                        error = %error,
-                        "shim death respawn handling failed"
-                    );
+                if self.config.team_config.auto_respawn_on_crash {
+                    self.record_member_crashed(member_name, true);
+                    if let Err(error) = self.handle_shim_crash_respawn(member_name) {
+                        warn!(
+                            member = member_name,
+                            error = %error,
+                            "shim crash respawn failed"
+                        );
+                    }
+                } else {
+                    self.record_member_crashed(member_name, false);
+                    self.escalate_shim_crash(member_name, exit_code);
                 }
             }
 
@@ -183,8 +189,16 @@ impl TeamDaemon {
                     "shim reports context exhaustion"
                 );
 
+                // Send Shutdown to the exhausted shim before respawning
                 if let Some(handle) = self.shim_handles.get_mut(member_name) {
                     handle.apply_state_change(ShimState::ContextExhausted);
+                    if let Err(error) = handle.send_shutdown(5) {
+                        debug!(
+                            member = member_name,
+                            error = %error,
+                            "failed to send shutdown to context-exhausted shim"
+                        );
+                    }
                 }
 
                 self.record_context_exhausted(member_name, task_id, None);
@@ -204,6 +218,22 @@ impl TeamDaemon {
 
             Event::Pong => {
                 debug!(member = member_name, "shim pong received");
+                if let Some(handle) = self.shim_handles.get_mut(member_name) {
+                    handle.record_pong();
+                }
+            }
+
+            Event::Warning {
+                message,
+                idle_secs,
+            } => {
+                info!(
+                    member = member_name,
+                    idle_secs,
+                    message = message.as_str(),
+                    "shim warning: potential stall"
+                );
+                self.surface_shim_stall_warning(member_name, &message, idle_secs);
             }
 
             Event::ScreenCapture { .. } | Event::State { .. } | Event::Error { .. } => {
@@ -212,6 +242,113 @@ impl TeamDaemon {
         }
 
         Ok(())
+    }
+
+    /// Respawn a shim after a crash when auto_respawn_on_crash is enabled.
+    fn handle_shim_crash_respawn(&mut self, member_name: &str) -> Result<()> {
+        let (agent_type, agent_cmd, work_dir) = {
+            let Some(handle) = self.shim_handles.get(member_name) else {
+                return Ok(());
+            };
+            (
+                handle.agent_type.clone(),
+                handle.agent_cmd.clone(),
+                handle.work_dir.clone(),
+            )
+        };
+
+        info!(
+            member = member_name,
+            "auto-respawning shim after crash"
+        );
+
+        let new_handle = super::super::shim_spawn::spawn_shim(
+            member_name,
+            &agent_type,
+            &agent_cmd,
+            &work_dir,
+            None,
+        )?;
+        self.shim_handles.insert(member_name.to_string(), new_handle);
+        self.emit_event(TeamEvent::pane_respawned(member_name));
+        self.record_orchestrator_action(format!(
+            "lifecycle: auto-respawned shim for {} after crash",
+            member_name
+        ));
+        Ok(())
+    }
+
+    /// Escalate a crash to the manager when auto_respawn_on_crash is disabled.
+    fn escalate_shim_crash(&mut self, member_name: &str, exit_code: Option<i32>) {
+        let manager = self
+            .config
+            .members
+            .iter()
+            .find(|m| m.name == member_name)
+            .and_then(|m| m.reports_to.clone());
+
+        let body = format!(
+            "Agent {} crashed (exit_code={:?}). Auto-respawn is disabled.\n\
+             Please investigate and restart manually, or enable auto_respawn_on_crash in team.yaml.",
+            member_name, exit_code,
+        );
+
+        if let Some(manager_name) = manager {
+            if let Err(error) = self.queue_message("daemon", &manager_name, &body) {
+                warn!(
+                    member = member_name,
+                    manager = manager_name.as_str(),
+                    error = %error,
+                    "failed to escalate crash to manager"
+                );
+            }
+        } else {
+            warn!(
+                member = member_name,
+                "shim crashed but no manager to escalate to"
+            );
+        }
+        self.record_orchestrator_action(format!(
+            "lifecycle: escalated crash for {} (no auto-respawn)",
+            member_name
+        ));
+    }
+
+    /// Surface a shim stall warning to the manager via the nudge system.
+    fn surface_shim_stall_warning(
+        &mut self,
+        member_name: &str,
+        message: &str,
+        idle_secs: Option<u64>,
+    ) {
+        let manager = self
+            .config
+            .members
+            .iter()
+            .find(|m| m.name == member_name)
+            .and_then(|m| m.reports_to.clone());
+
+        let idle_info = idle_secs
+            .map(|s| format!(" (idle for {}s)", s))
+            .unwrap_or_default();
+        let body = format!(
+            "Shim warning for {}{}: {}",
+            member_name, idle_info, message
+        );
+
+        if let Some(manager_name) = manager {
+            if let Err(error) = self.queue_message("daemon", &manager_name, &body) {
+                warn!(
+                    member = member_name,
+                    error = %error,
+                    "failed to surface stall warning to manager"
+                );
+            }
+        }
+        self.record_orchestrator_action(format!(
+            "lifecycle: stall warning for {}{}: {}",
+            member_name, idle_info, message
+        ));
     }
 }
 
@@ -222,7 +359,22 @@ impl TeamDaemon {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::team::test_support::TestDaemonBuilder;
+    use crate::team::test_support::{TestDaemonBuilder, engineer_member, manager_member};
+
+    fn insert_mock_handle(daemon: &mut TeamDaemon, name: &str) -> crate::shim::protocol::Channel {
+        let (parent, child) = crate::shim::protocol::socketpair().unwrap();
+        let channel = crate::shim::protocol::Channel::new(parent);
+        let handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            name.into(),
+            channel,
+            999,
+            "claude".into(),
+            "claude".into(),
+            std::path::PathBuf::from("/tmp/test"),
+        );
+        daemon.shim_handles.insert(name.to_string(), handle);
+        crate::shim::protocol::Channel::new(child)
+    }
 
     #[test]
     fn poll_shim_handles_empty_is_noop() {
@@ -236,13 +388,7 @@ mod tests {
     fn handle_shim_event_ready_sets_idle_state() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
-
-        // Insert a mock handle
-        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
-        let channel = crate::shim::protocol::Channel::new(parent);
-        let handle =
-            crate::team::daemon::agent_handle::AgentHandle::new("eng-1".into(), channel, 999, "claude".into(), "claude".into(), std::path::PathBuf::from("/tmp/test"));
-        daemon.shim_handles.insert("eng-1".to_string(), handle);
+        insert_mock_handle(&mut daemon, "eng-1");
 
         daemon.handle_shim_event("eng-1", Event::Ready).unwrap();
 
@@ -254,12 +400,7 @@ mod tests {
     fn handle_shim_event_state_changed_to_working() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
-
-        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
-        let channel = crate::shim::protocol::Channel::new(parent);
-        let handle =
-            crate::team::daemon::agent_handle::AgentHandle::new("eng-1".into(), channel, 999, "claude".into(), "claude".into(), std::path::PathBuf::from("/tmp/test"));
-        daemon.shim_handles.insert("eng-1".to_string(), handle);
+        insert_mock_handle(&mut daemon, "eng-1");
 
         daemon
             .handle_shim_event(
@@ -280,12 +421,7 @@ mod tests {
     fn handle_shim_event_completion_sets_idle() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
-
-        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
-        let channel = crate::shim::protocol::Channel::new(parent);
-        let handle =
-            crate::team::daemon::agent_handle::AgentHandle::new("eng-1".into(), channel, 999, "claude".into(), "claude".into(), std::path::PathBuf::from("/tmp/test"));
-        daemon.shim_handles.insert("eng-1".to_string(), handle);
+        insert_mock_handle(&mut daemon, "eng-1");
 
         daemon
             .handle_shim_event(
@@ -306,12 +442,7 @@ mod tests {
     fn handle_shim_event_died_marks_dead() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
-
-        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
-        let channel = crate::shim::protocol::Channel::new(parent);
-        let handle =
-            crate::team::daemon::agent_handle::AgentHandle::new("eng-1".into(), channel, 999, "claude".into(), "claude".into(), std::path::PathBuf::from("/tmp/test"));
-        daemon.shim_handles.insert("eng-1".to_string(), handle);
+        insert_mock_handle(&mut daemon, "eng-1");
 
         daemon
             .handle_shim_event(
@@ -327,15 +458,43 @@ mod tests {
     }
 
     #[test]
+    fn handle_shim_event_died_escalates_when_no_auto_respawn() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "manager").unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), false),
+            ])
+            .build();
+        insert_mock_handle(&mut daemon, "eng-1");
+
+        daemon
+            .handle_shim_event(
+                "eng-1",
+                Event::Died {
+                    exit_code: Some(137),
+                    last_lines: "killed".into(),
+                },
+            )
+            .unwrap();
+
+        // Verify escalation message was sent to manager
+        let messages = inbox::pending_messages(&inbox_root, "manager").unwrap();
+        assert!(
+            messages.iter().any(|msg| msg.body.contains("crashed")),
+            "manager should receive crash escalation"
+        );
+    }
+
+    #[test]
     fn handle_shim_event_context_exhausted() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
-
-        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
-        let channel = crate::shim::protocol::Channel::new(parent);
-        let handle =
-            crate::team::daemon::agent_handle::AgentHandle::new("eng-1".into(), channel, 999, "claude".into(), "claude".into(), std::path::PathBuf::from("/tmp/test"));
-        daemon.shim_handles.insert("eng-1".to_string(), handle);
+        insert_mock_handle(&mut daemon, "eng-1");
 
         daemon
             .handle_shim_event(
@@ -351,17 +510,49 @@ mod tests {
     }
 
     #[test]
-    fn handle_shim_event_pong_is_noop() {
+    fn handle_shim_event_pong_records_timestamp() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+        insert_mock_handle(&mut daemon, "eng-1");
 
-        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
-        let channel = crate::shim::protocol::Channel::new(parent);
-        let handle =
-            crate::team::daemon::agent_handle::AgentHandle::new("eng-1".into(), channel, 999, "claude".into(), "claude".into(), std::path::PathBuf::from("/tmp/test"));
-        daemon.shim_handles.insert("eng-1".to_string(), handle);
+        assert!(daemon.shim_handles["eng-1"].last_pong_at.is_none());
 
-        // Should not panic or error
         daemon.handle_shim_event("eng-1", Event::Pong).unwrap();
+
+        assert!(daemon.shim_handles["eng-1"].last_pong_at.is_some());
+    }
+
+    #[test]
+    fn handle_shim_event_warning_surfaces_to_manager() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "manager").unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), false),
+            ])
+            .build();
+        insert_mock_handle(&mut daemon, "eng-1");
+
+        daemon
+            .handle_shim_event(
+                "eng-1",
+                Event::Warning {
+                    message: "no screen change detected".into(),
+                    idle_secs: Some(300),
+                },
+            )
+            .unwrap();
+
+        let messages = inbox::pending_messages(&inbox_root, "manager").unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|msg| msg.body.contains("Shim warning")),
+            "manager should receive stall warning"
+        );
     }
 }
