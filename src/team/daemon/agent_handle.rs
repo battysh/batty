@@ -5,6 +5,7 @@
 //! orchestrator side of the socketpair channel, the child process, and the
 //! last known shim state.
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::shim::protocol::{Channel, Command, Event, ShimState};
@@ -21,17 +22,36 @@ pub(in crate::team) struct AgentHandle {
     pub state: ShimState,
     /// When the state last changed.
     pub state_changed_at: Instant,
+    /// When the last Pong was received (None until first Pong).
+    pub last_pong_at: Option<Instant>,
+    /// Agent type for respawning (e.g. "claude", "codex").
+    pub agent_type: String,
+    /// Agent command for respawning.
+    pub agent_cmd: String,
+    /// Working directory for respawning.
+    pub work_dir: PathBuf,
 }
 
 impl AgentHandle {
     /// Create a new handle for a freshly spawned shim.
-    pub fn new(id: String, channel: Channel, child_pid: u32) -> Self {
+    pub fn new(
+        id: String,
+        channel: Channel,
+        child_pid: u32,
+        agent_type: String,
+        agent_cmd: String,
+        work_dir: PathBuf,
+    ) -> Self {
         Self {
             id,
             channel,
             child_pid,
             state: ShimState::Starting,
             state_changed_at: Instant::now(),
+            last_pong_at: None,
+            agent_type,
+            agent_cmd,
+            work_dir,
         }
     }
 
@@ -75,6 +95,21 @@ impl AgentHandle {
         self.channel.send(&Command::Kill)
     }
 
+    /// Send a ping to the shim for health monitoring.
+    pub fn send_ping(&mut self) -> anyhow::Result<()> {
+        self.channel.send(&Command::Ping)
+    }
+
+    /// Record that a Pong was received.
+    pub fn record_pong(&mut self) {
+        self.last_pong_at = Some(Instant::now());
+    }
+
+    /// Seconds since last Pong, or None if no Pong received yet.
+    pub fn secs_since_last_pong(&self) -> Option<u64> {
+        self.last_pong_at.map(|t| t.elapsed().as_secs())
+    }
+
     /// Try to receive an event from the shim (non-blocking via timeout).
     /// Returns Ok(None) on EOF or timeout.
     pub fn try_recv_event(&mut self) -> anyhow::Result<Option<Event>> {
@@ -101,7 +136,14 @@ mod tests {
         let (parent_sock, child_sock) = socketpair().unwrap();
         let parent_channel = Channel::new(parent_sock);
         let child_channel = Channel::new(child_sock);
-        let handle = AgentHandle::new("eng-1-1".into(), parent_channel, 12345);
+        let handle = AgentHandle::new(
+            "eng-1-1".into(),
+            parent_channel,
+            12345,
+            "claude".into(),
+            "claude".into(),
+            PathBuf::from("/tmp/test"),
+        );
         (handle, child_channel)
     }
 
@@ -114,6 +156,10 @@ mod tests {
         assert!(!handle.is_ready());
         assert!(!handle.is_working());
         assert!(!handle.is_terminal());
+        assert!(handle.last_pong_at.is_none());
+        assert_eq!(handle.agent_type, "claude");
+        assert_eq!(handle.agent_cmd, "claude");
+        assert_eq!(handle.work_dir, PathBuf::from("/tmp/test"));
     }
 
     #[test]
@@ -222,5 +268,25 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         handle.apply_state_change(ShimState::Idle);
         assert!(handle.state_changed_at > first);
+    }
+
+    #[test]
+    fn send_ping_delivers_command() {
+        let (mut handle, mut child) = make_test_handle();
+        handle.send_ping().unwrap();
+
+        let cmd: Command = child.recv().unwrap().unwrap();
+        assert!(matches!(cmd, Command::Ping));
+    }
+
+    #[test]
+    fn record_pong_sets_last_pong_at() {
+        let (mut handle, _child) = make_test_handle();
+        assert!(handle.last_pong_at.is_none());
+        assert!(handle.secs_since_last_pong().is_none());
+
+        handle.record_pong();
+        assert!(handle.last_pong_at.is_some());
+        assert_eq!(handle.secs_since_last_pong(), Some(0));
     }
 }
