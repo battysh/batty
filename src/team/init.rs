@@ -1066,67 +1066,67 @@ mod tests {
         let map = doc.as_mapping().unwrap();
 
         assert_eq!(
-            map.get(&serde_yaml::Value::String("orchestrator_pane".into()))
+            map.get(serde_yaml::Value::String("orchestrator_pane".into()))
                 .and_then(|v| v.as_bool()),
             Some(false)
         );
 
         let board = map
-            .get(&serde_yaml::Value::String("board".into()))
+            .get(serde_yaml::Value::String("board".into()))
             .unwrap()
             .as_mapping()
             .unwrap();
         assert_eq!(
             board
-                .get(&serde_yaml::Value::String("auto_dispatch".into()))
+                .get(serde_yaml::Value::String("auto_dispatch".into()))
                 .and_then(|v| v.as_bool()),
             Some(true)
         );
 
         let automation = map
-            .get(&serde_yaml::Value::String("automation".into()))
+            .get(serde_yaml::Value::String("automation".into()))
             .unwrap()
             .as_mapping()
             .unwrap();
         assert_eq!(
             automation
-                .get(&serde_yaml::Value::String("timeout_nudges".into()))
+                .get(serde_yaml::Value::String("timeout_nudges".into()))
                 .and_then(|v| v.as_bool()),
             Some(false)
         );
         assert_eq!(
             automation
-                .get(&serde_yaml::Value::String("standups".into()))
+                .get(serde_yaml::Value::String("standups".into()))
                 .and_then(|v| v.as_bool()),
             Some(false)
         );
 
         let standup = map
-            .get(&serde_yaml::Value::String("standup".into()))
+            .get(serde_yaml::Value::String("standup".into()))
             .unwrap()
             .as_mapping()
             .unwrap();
         assert_eq!(
             standup
-                .get(&serde_yaml::Value::String("interval_secs".into()))
+                .get(serde_yaml::Value::String("interval_secs".into()))
                 .and_then(|v| v.as_u64()),
             Some(999)
         );
 
         let workflow_policy = map
-            .get(&serde_yaml::Value::String("workflow_policy".into()))
+            .get(serde_yaml::Value::String("workflow_policy".into()))
             .unwrap()
             .as_mapping()
             .unwrap();
         assert_eq!(
             workflow_policy
-                .get(&serde_yaml::Value::String("stall_threshold_secs".into()))
+                .get(serde_yaml::Value::String("stall_threshold_secs".into()))
                 .and_then(|v| v.as_u64()),
             Some(123)
         );
         assert_eq!(
             workflow_policy
-                .get(&serde_yaml::Value::String(
+                .get(serde_yaml::Value::String(
                     "review_nudge_threshold_secs".into()
                 ))
                 .and_then(|v| v.as_u64()),
@@ -1134,19 +1134,19 @@ mod tests {
         );
         assert_eq!(
             workflow_policy
-                .get(&serde_yaml::Value::String("review_timeout_secs".into()))
+                .get(serde_yaml::Value::String("review_timeout_secs".into()))
                 .and_then(|v| v.as_u64()),
             Some(789)
         );
 
         let auto_merge = workflow_policy
-            .get(&serde_yaml::Value::String("auto_merge".into()))
+            .get(serde_yaml::Value::String("auto_merge".into()))
             .unwrap()
             .as_mapping()
             .unwrap();
         assert_eq!(
             auto_merge
-                .get(&serde_yaml::Value::String("enabled".into()))
+                .get(serde_yaml::Value::String("enabled".into()))
                 .and_then(|v| v.as_bool()),
             Some(true)
         );
