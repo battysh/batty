@@ -10,7 +10,6 @@ use super::{
 use crate::team::config::RoleType;
 use crate::team::daemon::TeamDaemon;
 use crate::team::inbox;
-use crate::team::message;
 use crate::tmux;
 
 impl TeamDaemon {
@@ -168,43 +167,38 @@ impl TeamDaemon {
                 continue;
             }
 
-            let Some(pane_id) = self.config.pane_map.get(&delivery.recipient).cloned() else {
-                self.escalate_failed_delivery(&delivery)?;
-                continue;
-            };
-
             delivery.attempts += 1;
             delivery.last_attempt = now;
             info!(
                 recipient = %delivery.recipient,
                 from = %delivery.from,
                 attempts = delivery.attempts,
-                "retrying failed live delivery"
+                "retrying failed delivery via shim"
             );
 
-            let injected = match message::inject_message(&pane_id, &delivery.from, &delivery.body) {
-                Ok(()) => true,
-                Err(error) => {
-                    warn!(
-                        recipient = %delivery.recipient,
-                        from = %delivery.from,
-                        attempts = delivery.attempts,
-                        error = %error,
-                        "failed to re-inject message during delivery retry"
-                    );
+            // Retry via shim channel
+            let delivered = if let Some(handle) = self.shim_handles.get_mut(&delivery.recipient) {
+                if handle.is_ready() {
+                    match handle.send_message(&delivery.from, &delivery.body) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            warn!(
+                                recipient = %delivery.recipient,
+                                from = %delivery.from,
+                                error = %error,
+                                "shim retry delivery failed"
+                            );
+                            false
+                        }
+                    }
+                } else {
                     false
                 }
+            } else {
+                false
             };
 
-            if injected
-                && self.verify_message_delivered(
-                    &delivery.from,
-                    &delivery.recipient,
-                    &delivery.body,
-                    3,
-                    false,
-                )
-            {
+            if delivered {
                 continue;
             }
 
@@ -946,12 +940,13 @@ mod tests {
     }
 
     #[test]
-    fn retry_failed_deliveries_escalates_without_pane() {
+    fn retry_failed_deliveries_escalates_without_shim_handle() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
-        // Remove pane mapping for eng-1 so retry has no pane target
-        daemon.config.pane_map.clear();
-        let mut delivery = FailedDelivery::new("eng-1", "manager", "no pane msg");
+        // No shim handle for eng-1 — retry delivery will fail
+        let mut delivery = FailedDelivery::new("eng-1", "manager", "no shim msg");
+        // Set attempts to max - 1 so the next retry exhausts the limit and escalates
+        delivery.attempts = FAILED_DELIVERY_MAX_ATTEMPTS - 1;
         delivery.last_attempt =
             Instant::now() - FAILED_DELIVERY_RETRY_DELAY - Duration::from_secs(1);
         daemon.failed_deliveries.push(delivery);

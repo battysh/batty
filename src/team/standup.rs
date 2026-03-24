@@ -15,7 +15,6 @@ use super::telegram::TelegramBot;
 use super::watcher::SessionWatcher;
 use super::{pause_marker_path, team_config_dir};
 use crate::task;
-use crate::tmux;
 
 const REVIEW_POLICY_MAX_CHARS: usize = 2_000;
 
@@ -322,12 +321,18 @@ pub(crate) fn maybe_generate_standup(context: StandupGenerationContext<'_>) -> R
                 }
             }
             _ => {
-                if let Some(pane_id) = pane_map.get(&recipient.name) {
-                    if let Err(error) = inject_standup(pane_id, &report) {
-                        warn!(member = %recipient.name, error = %error, "failed to inject standup");
-                    } else {
+                // Non-telegram, non-file standups: write to file as fallback
+                // (tmux pane injection was removed with the tmux-direct code path)
+                match write_standup_file(project_root, &report) {
+                    Ok(path) => {
+                        tracing::info!(member = %recipient.name, path = %path.display(), "standup written to file (fallback)");
                         generated_recipients.push(recipient.name.clone());
                     }
+                    Err(error) => warn!(
+                        member = %recipient.name,
+                        error = %error,
+                        "failed to write standup file"
+                    ),
                 }
             }
         }
@@ -420,16 +425,6 @@ pub(crate) fn snapshot_timer_state(
         .iter()
         .map(|(member, instant)| (member.clone(), instant.elapsed().as_secs()))
         .collect()
-}
-
-/// Inject standup text into a pane via load-buffer + paste-buffer.
-pub fn inject_standup(pane_id: &str, standup: &str) -> Result<()> {
-    tmux::load_buffer(standup)?;
-    tmux::paste_buffer(pane_id)?;
-    // paste-buffer needs a moment to complete before we press Enter
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    tmux::send_keys(pane_id, "", true)?;
-    Ok(())
 }
 
 /// Write standup text to a timestamped Markdown file under `.batty/standups/`.
