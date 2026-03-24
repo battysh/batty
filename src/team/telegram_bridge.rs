@@ -374,6 +374,7 @@ mod tests {
                 last_uncommitted_warn: HashMap::new(),
                 pending_delivery_queue: HashMap::new(),
                 shim_handles: HashMap::new(),
+            last_shim_health_check: Instant::now(),
             };
 
             backdate_idle_grace(&mut daemon, "scientist");
@@ -503,6 +504,7 @@ mod tests {
             last_uncommitted_warn: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
             shim_handles: HashMap::new(),
+            last_shim_health_check: Instant::now(),
         };
 
         let root = inbox::inboxes_root(tmp.path());
@@ -647,6 +649,7 @@ mod tests {
             last_uncommitted_warn: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
             shim_handles: HashMap::new(),
+            last_shim_health_check: Instant::now(),
         };
 
         assert_eq!(daemon.automation_sender_for("eng-1"), "lead");
