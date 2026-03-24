@@ -61,45 +61,42 @@ impl TeamDaemon {
             return self.deliver_channel_message(from, recipient, body);
         }
 
-        // Shim delivery path: when use_shim is enabled and we have a handle for
-        // this recipient, deliver via the structured shim channel.
-        if self.config.team_config.use_shim {
-            if let Some(handle) = self.shim_handles.get_mut(recipient) {
-                if handle.is_ready() {
-                    match handle.send_message(from, body) {
-                        Ok(()) => {
-                            info!(from, to = recipient, "delivered message via shim channel");
-                            self.record_message_routed(from, recipient);
-                            return Ok(MessageDelivery::LivePane);
-                        }
-                        Err(error) => {
-                            warn!(
-                                from,
-                                to = recipient,
-                                error = %error,
-                                "shim channel delivery failed; falling through to inbox"
-                            );
-                        }
+        // Shim delivery path: deliver via the structured shim channel.
+        if let Some(handle) = self.shim_handles.get_mut(recipient) {
+            if handle.is_ready() {
+                match handle.send_message(from, body) {
+                    Ok(()) => {
+                        info!(from, to = recipient, "delivered message via shim channel");
+                        self.record_message_routed(from, recipient);
+                        return Ok(MessageDelivery::LivePane);
                     }
-                } else if !handle.is_terminal() {
-                    info!(
-                        from,
-                        to = recipient,
-                        state = %handle.state,
-                        "shim agent not ready; deferring to pending queue"
-                    );
-                    self.pending_delivery_queue
-                        .entry(recipient.to_string())
-                        .or_default()
-                        .push(PendingMessage {
-                            from: from.to_string(),
-                            body: body.to_string(),
-                            queued_at: Instant::now(),
-                        });
-                    return Ok(MessageDelivery::DeferredPending);
+                    Err(error) => {
+                        warn!(
+                            from,
+                            to = recipient,
+                            error = %error,
+                            "shim channel delivery failed; falling through to inbox"
+                        );
+                    }
                 }
-                // Terminal state falls through to inbox
+            } else if !handle.is_terminal() {
+                info!(
+                    from,
+                    to = recipient,
+                    state = %handle.state,
+                    "shim agent not ready; deferring to pending queue"
+                );
+                self.pending_delivery_queue
+                    .entry(recipient.to_string())
+                    .or_default()
+                    .push(PendingMessage {
+                        from: from.to_string(),
+                        body: body.to_string(),
+                        queued_at: Instant::now(),
+                    });
+                return Ok(MessageDelivery::DeferredPending);
             }
+            // Terminal state falls through to inbox
         }
 
         let known_recipient = self.config.pane_map.contains_key(recipient)
@@ -113,74 +110,7 @@ impl TeamDaemon {
             return Ok(MessageDelivery::SkippedUnknownRecipient);
         }
 
-        if let Some(pane_id) = self.config.pane_map.get(recipient).cloned() {
-            // Readiness gate: check for the agent prompt before injecting.
-            if !self.check_agent_ready(recipient, &pane_id) {
-                // If the agent has *never* been ready (still starting up), buffer
-                // in the pending queue — these will be drained when readiness is
-                // confirmed.  If the agent was previously ready, fall through to
-                // inbox delivery (existing behaviour for transient unreadiness).
-                let never_been_ready = self
-                    .watchers
-                    .get(recipient)
-                    .is_some_and(|w| !w.is_ready_for_delivery());
-                if never_been_ready {
-                    info!(
-                        from,
-                        to = recipient,
-                        pane_id = pane_id.as_str(),
-                        "agent still starting; deferring to pending queue"
-                    );
-                    self.pending_delivery_queue
-                        .entry(recipient.to_string())
-                        .or_default()
-                        .push(PendingMessage {
-                            from: from.to_string(),
-                            body: body.to_string(),
-                            queued_at: Instant::now(),
-                        });
-                    return Ok(MessageDelivery::DeferredPending);
-                }
-                info!(
-                    from,
-                    to = recipient,
-                    pane_id = pane_id.as_str(),
-                    "agent not ready after timeout; deferring to inbox"
-                );
-                // Fall through to inbox delivery below.
-            } else {
-                match message::inject_message(&pane_id, from, body) {
-                    Ok(()) => {
-                        self.record_message_routed(from, recipient);
-                        let capture_lines = self.delivery_capture_lines_for(recipient);
-                        self.verify_message_delivered_with_lines(
-                            from,
-                            recipient,
-                            body,
-                            3,
-                            true,
-                            capture_lines,
-                        );
-                        return Ok(MessageDelivery::LivePane);
-                    }
-                    Err(error) => {
-                        warn!(
-                            from,
-                            to = recipient,
-                            pane_id = pane_id.as_str(),
-                            error = %error,
-                            "live message delivery failed; queueing to inbox"
-                        );
-                        let _typed_error = DeliveryError::PaneInject {
-                            recipient: recipient.to_string(),
-                            pane_id,
-                            detail: error.to_string(),
-                        };
-                    }
-                }
-            }
-        }
-
+        // All delivery falls through to inbox when shim channel is unavailable.
         let root = inbox::inboxes_root(&self.config.project_root);
         let msg = inbox::InboxMessage::new_send(from, recipient, body);
         inbox::deliver_to_inbox(&root, &msg).map_err(|error| DeliveryError::InboxQueue {
@@ -300,8 +230,18 @@ impl TeamDaemon {
                 let is_send = matches!(msg.msg_type, inbox::MessageType::Send);
                 let delivery_result = match msg.msg_type {
                     inbox::MessageType::Send => {
-                        info!(from = %msg.from, to = %name, id = %msg.id, "delivering inbox message");
-                        message::inject_message(&pane_id, &msg.from, &msg.body)
+                        info!(from = %msg.from, to = %name, id = %msg.id, "delivering inbox message via shim");
+                        if let Some(handle) = self.shim_handles.get_mut(name) {
+                            if handle.is_ready() {
+                                handle.send_message(&msg.from, &msg.body).map(|()| ())
+                            } else {
+                                // Not ready — leave in inbox for next poll
+                                continue;
+                            }
+                        } else {
+                            // No shim handle — skip, leave in inbox
+                            continue;
+                        }
                     }
                     inbox::MessageType::Assign => {
                         info!(to = %name, id = %msg.id, "delivering inbox assignment");
@@ -1102,6 +1042,19 @@ mod tests {
         assert!(!watcher.is_ready_for_delivery());
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
+        // Insert a shim handle in Starting state so the pending queue path is triggered
+        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+        let channel = crate::shim::protocol::Channel::new(parent);
+        let handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "eng-1".into(),
+            channel,
+            999,
+            "codex".into(),
+            "codex".into(),
+            std::path::PathBuf::from("/tmp/test"),
+        );
+        daemon.shim_handles.insert("eng-1".to_string(), handle);
+
         let result = daemon
             .deliver_message("manager", "eng-1", "task assignment")
             .unwrap();
@@ -1175,6 +1128,19 @@ mod tests {
         let watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
+        // Insert a shim handle in Starting state so the pending queue path is triggered
+        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+        let channel = crate::shim::protocol::Channel::new(parent);
+        let handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "eng-1".into(),
+            channel,
+            999,
+            "codex".into(),
+            "codex".into(),
+            std::path::PathBuf::from("/tmp/test"),
+        );
+        daemon.shim_handles.insert("eng-1".to_string(), handle);
+
         for i in 1..=3u32 {
             let result = daemon
                 .deliver_message("manager", "eng-1", &format!("msg-{i}"))
@@ -1189,6 +1155,8 @@ mod tests {
         assert_eq!(queue[2].body, "msg-3");
 
         daemon.watchers.get_mut("eng-1").unwrap().confirm_ready();
+        // Remove the shim handle so drain falls through to inbox delivery
+        daemon.shim_handles.remove("eng-1");
         daemon.drain_pending_queue("eng-1").unwrap();
 
         assert!(
@@ -1218,6 +1186,19 @@ mod tests {
         assert!(!watcher.is_ready_for_delivery());
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
+        // Insert a shim handle in Starting state so the pending queue path is triggered
+        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+        let channel = crate::shim::protocol::Channel::new(parent);
+        let handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "eng-1".into(),
+            channel,
+            999,
+            "codex".into(),
+            "codex".into(),
+            std::path::PathBuf::from("/tmp/test"),
+        );
+        daemon.shim_handles.insert("eng-1".to_string(), handle);
+
         let result = daemon
             .deliver_message("manager", "eng-1", "Task #42: implement feature")
             .unwrap();
@@ -1244,6 +1225,8 @@ mod tests {
                 .is_ready_for_delivery()
         );
 
+        // Remove shim handle so drain falls through to inbox delivery
+        daemon.shim_handles.remove("eng-1");
         daemon.drain_pending_queue("eng-1").unwrap();
 
         assert!(
@@ -1339,12 +1322,12 @@ mod tests {
     }
 
     #[test]
-    fn shim_delivery_falls_through_when_use_shim_false() {
+    fn shim_delivery_used_regardless_of_use_shim_flag() {
         let tmp = tempfile::tempdir().unwrap();
         inbox::init_inbox(&inbox::inboxes_root(tmp.path()), "eng-1").unwrap();
 
         let mut daemon = empty_legacy_daemon(&tmp);
-        // use_shim defaults to false — shim path should be skipped
+        // use_shim defaults to false — shim delivery still attempted if handle exists
 
         let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
         let channel = crate::shim::protocol::Channel::new(parent);
@@ -1359,10 +1342,9 @@ mod tests {
         handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
         daemon.shim_handles.insert("eng-1".to_string(), handle);
 
-        // With use_shim=false, should skip the shim path entirely
+        // Shim delivery is always attempted when a handle exists, regardless of use_shim flag
         let result = daemon.deliver_message("manager", "eng-1", "hello");
         assert!(result.is_ok());
-        // eng-1 is not in pane_map either, so it becomes unknown
-        assert_eq!(result.unwrap(), MessageDelivery::SkippedUnknownRecipient);
+        assert_eq!(result.unwrap(), MessageDelivery::LivePane);
     }
 }
