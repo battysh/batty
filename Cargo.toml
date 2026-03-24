@@ -60,6 +60,12 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 regex = "1"
 sha2 = "0.10"
 
+# PTY (agent shim)
+portable-pty = "0.8"
+
+# Virtual terminal emulator (agent shim screen classification)
+vt100 = "0.15"
+
 # Error handling
 anyhow = "1"
 thiserror = "2"
