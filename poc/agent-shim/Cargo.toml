@@ -1,0 +1,34 @@
+[package]
+name = "agent-shim"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "POC: Agent shim process — wraps an AI CLI behind a message interface"
+
+[[bin]]
+name = "agent-shim"
+path = "src/main.rs"
+
+[dependencies]
+# PTY
+portable-pty = "0.8"
+
+# Virtual terminal emulator (headless, replaces tmux capture-pane)
+vt100 = "0.15"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Serialization (protocol messages)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Error handling
+anyhow = "1"
+
+# Unix socketpair
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
