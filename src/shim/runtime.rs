@@ -1,5 +1,8 @@
 //! The shim process: owns a PTY, runs an agent CLI, classifies state,
 //! communicates with the orchestrator via a Channel on fd 3.
+//!
+//! Raw PTY output is also streamed to a log file so tmux display panes can
+//! `tail -F` it and render agent output in real time.
 
 use std::io::{Read, Write as IoWrite};
 use std::path::PathBuf;
@@ -11,6 +14,7 @@ use portable_pty::{CommandBuilder, PtySize};
 
 use super::classifier::{self, AgentType, ScreenVerdict};
 use super::protocol::{Channel, Command, Event, ShimState};
+use super::pty_log::PtyLogWriter;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -41,6 +45,9 @@ pub struct ShimArgs {
     pub cwd: PathBuf,
     pub rows: u16,
     pub cols: u16,
+    /// Optional path for the PTY log file. When set, raw PTY output is
+    /// streamed to this file so tmux display panes can `tail -F` it.
+    pub pty_log_path: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -154,18 +161,33 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
         agent_type: args.agent_type,
     }));
 
+    // -- PTY log writer (optional) --
+    let pty_log: Option<Mutex<PtyLogWriter>> = args
+        .pty_log_path
+        .as_deref()
+        .map(|p| PtyLogWriter::new(p).context("failed to create PTY log"))
+        .transpose()?
+        .map(Mutex::new);
+    let pty_log = pty_log.map(Arc::new);
+
     // Channel for sending events (cloned for PTY reader thread)
     let mut cmd_channel = channel;
     let mut evt_channel = cmd_channel.try_clone().context("failed to clone channel")?;
 
     // -- PTY reader thread: reads agent output, feeds vt100, detects state --
     let inner_pty = Arc::clone(&inner);
+    let log_handle = pty_log.clone();
     let pty_handle = std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
             match pty_reader.read(&mut buf) {
                 Ok(0) => break, // EOF — agent closed PTY
                 Ok(n) => {
+                    // Stream raw bytes to PTY log for tmux display panes
+                    if let Some(ref log) = log_handle {
+                        let _ = log.lock().unwrap().write(&buf[..n]);
+                    }
+
                     let mut inner = inner_pty.lock().unwrap();
                     inner.parser.process(&buf[..n]);
 

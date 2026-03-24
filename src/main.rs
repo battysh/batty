@@ -867,6 +867,7 @@ fn main() -> Result<()> {
             cwd,
             rows,
             cols,
+            pty_log_path,
         } => {
             use batty_cli::shim;
             use std::os::unix::io::FromRawFd;
@@ -886,6 +887,7 @@ fn main() -> Result<()> {
                 cwd: PathBuf::from(cwd),
                 rows,
                 cols,
+                pty_log_path: pty_log_path.map(PathBuf::from),
             };
 
             shim::runtime::run(args, channel)?;

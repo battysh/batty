@@ -7,7 +7,7 @@
 use std::io::{self, BufRead, Write};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
@@ -58,7 +58,7 @@ pub fn parse_special(input: &str) -> Option<SpecialCommand> {
 // Chat entry point
 // ---------------------------------------------------------------------------
 
-pub fn run(agent_type: AgentType, cmd: &str, cwd: &PathBuf) -> Result<()> {
+pub fn run(agent_type: AgentType, cmd: &str, cwd: &Path) -> Result<()> {
     // -- Create socketpair --
     let (parent_sock, child_sock) = protocol::socketpair().context("socketpair failed")?;
 

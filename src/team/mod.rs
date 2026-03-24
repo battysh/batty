@@ -123,6 +123,18 @@ pub(crate) fn orchestrator_ansi_log_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("orchestrator.ansi.log")
 }
 
+/// Directory containing per-agent PTY log files written by the shim.
+#[allow(dead_code)] // Public API for future shim-mode daemon integration
+pub(crate) fn shim_logs_dir(project_root: &Path) -> PathBuf {
+    project_root.join(".batty").join("shim-logs")
+}
+
+/// Path to an individual agent's PTY log file.
+#[allow(dead_code)] // Public API for future shim-mode daemon integration
+pub(crate) fn shim_log_path(project_root: &Path, agent_id: &str) -> PathBuf {
+    shim_logs_dir(project_root).join(format!("{agent_id}.pty.log"))
+}
+
 fn assignment_results_dir(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("assignment_results")
 }
@@ -267,6 +279,24 @@ mod tests {
         let result =
             wait_for_assignment_result(tmp.path(), "missing", Duration::from_millis(10)).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn shim_logs_dir_path() {
+        let root = Path::new("/tmp/project");
+        assert_eq!(
+            shim_logs_dir(root),
+            PathBuf::from("/tmp/project/.batty/shim-logs")
+        );
+    }
+
+    #[test]
+    fn shim_log_path_includes_agent_id() {
+        let root = Path::new("/tmp/project");
+        assert_eq!(
+            shim_log_path(root, "eng-1-1"),
+            PathBuf::from("/tmp/project/.batty/shim-logs/eng-1-1.pty.log")
+        );
     }
 
     /// Count unwrap()/expect() calls in production code (before `#[cfg(test)] mod tests`).
