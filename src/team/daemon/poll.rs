@@ -5,8 +5,10 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use tracing::{debug, info, warn};
 
+use super::config_reload::ConfigReloadMonitor;
 use super::hot_reload::HotReloadMonitor;
 use super::{TeamDaemon, standup, status};
+use crate::team;
 use crate::tmux;
 
 impl TeamDaemon {
@@ -48,6 +50,14 @@ impl TeamDaemon {
             Ok(monitor) => Some(monitor),
             Err(error) => {
                 warn!(error = %error, "failed to initialize daemon hot-reload monitor");
+                None
+            }
+        };
+        let config_path = team::team_config_path(&self.config.project_root);
+        let mut config_reload = match ConfigReloadMonitor::new(&config_path) {
+            Ok(monitor) => Some(monitor),
+            Err(error) => {
+                warn!(error = %error, "failed to initialize config reload monitor");
                 None
             }
         };
@@ -172,6 +182,9 @@ impl TeamDaemon {
             });
             self.run_recoverable_step("maybe_reload_binary", |daemon| {
                 daemon.maybe_hot_reload_binary(hot_reload.as_mut())
+            });
+            self.run_recoverable_step("maybe_reload_config", |daemon| {
+                daemon.maybe_hot_reload_config(config_reload.as_mut())
             });
             status::update_pane_status_labels(status::PaneStatusLabelUpdateContext {
                 project_root: &self.config.project_root,

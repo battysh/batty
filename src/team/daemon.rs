@@ -58,6 +58,8 @@ use dispatch::DispatchQueueEntry;
 pub(super) mod agent_handle;
 #[path = "daemon/automation.rs"]
 mod automation;
+#[path = "daemon/config_reload.rs"]
+mod config_reload;
 #[path = "dispatch/mod.rs"]
 mod dispatch;
 #[path = "daemon/error_handling.rs"]
@@ -74,6 +76,8 @@ mod interventions;
 mod launcher;
 #[path = "daemon/poll.rs"]
 mod poll;
+#[path = "daemon/reconcile.rs"]
+mod reconcile;
 #[path = "daemon/shim_spawn.rs"]
 mod shim_spawn;
 #[path = "daemon/shim_state.rs"]

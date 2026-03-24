@@ -398,6 +398,27 @@ impl TeamEvent {
             ..Self::base("worktree_reconciled")
         }
     }
+
+    /// Emitted when the daemon reconciles a topology change.
+    ///
+    /// `reason` contains a human-readable summary (e.g. "+2 added, -1 removed").
+    pub fn topology_changed(added: u32, removed: u32, reason: &str) -> Self {
+        Self {
+            working_members: Some(added),
+            total_members: Some(removed),
+            reason: Some(reason.into()),
+            ..Self::base("topology_changed")
+        }
+    }
+
+    /// Emitted when an agent is removed during a scale-down.
+    pub fn agent_removed(role: &str, reason: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            reason: Some(reason.into()),
+            ..Self::base("agent_removed")
+        }
+    }
 }
 
 pub struct EventSink {
