@@ -81,6 +81,7 @@ mod telemetry;
 
 #[cfg(test)]
 use self::dispatch::normalized_assignment_dir;
+use self::helpers::{extract_nudge_section, role_prompt_path};
 use self::hot_reload::consume_hot_reload_marker;
 #[cfg(test)]
 use self::hot_reload::{

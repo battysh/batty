@@ -448,7 +448,7 @@ roles:
     fn known_agent_names_includes_all_backends() {
         assert!(KNOWN_AGENT_NAMES.contains(&"claude"));
         assert!(KNOWN_AGENT_NAMES.contains(&"codex"));
-        assert!(KNOWN_AGENT_NAMES.contains(&"kiro"));
+        assert!(KNOWN_AGENT_NAMES.contains(&"kiro-cli"));
     }
 
     #[test]
