@@ -217,6 +217,25 @@ fn shell_single_quote(value: &str) -> String {
     value.replace('\'', "'\"'\"'")
 }
 
+/// Build a shell command that displays a shim's PTY log in a tmux pane.
+///
+/// Uses `tail -n 200 -F` (capital F) so it follows the file even after
+/// rotation/truncation. The pane becomes a read-only view of the agent's
+/// terminal output.
+pub fn display_pane_command(log_path: &Path) -> String {
+    format!(
+        "bash -lc 'touch {path}; exec tail -n 200 -F {path}'",
+        path = shell_single_quote(log_path.to_string_lossy().as_ref())
+    )
+}
+
+/// Respawn a tmux pane as a display-only viewer of a shim PTY log file.
+pub fn respawn_as_display_pane(pane_target: &str, log_path: &Path) -> Result<()> {
+    let cmd = display_pane_command(log_path);
+    crate::tmux::respawn_pane(pane_target, &cmd)?;
+    Ok(())
+}
+
 fn split_off_current_member_pct(total_slots: usize) -> u32 {
     (((1.0 / total_slots as f64) * 100.0).round() as u32).clamp(10, 90)
 }
@@ -1589,5 +1608,23 @@ roles:
         assert_eq!(zones[0].members.len(), 3);
         // Remaining 3 go to last zone
         assert_eq!(zones[1].members.len(), 3);
+    }
+
+    #[test]
+    fn display_pane_command_simple_path() {
+        let path = std::path::PathBuf::from("/tmp/shim-logs/eng-1.pty.log");
+        let cmd = display_pane_command(&path);
+        assert!(cmd.contains("tail -n 200 -F"));
+        assert!(cmd.contains("/tmp/shim-logs/eng-1.pty.log"));
+        assert!(cmd.starts_with("bash -lc"));
+    }
+
+    #[test]
+    fn display_pane_command_escapes_single_quotes() {
+        let path = std::path::PathBuf::from("/tmp/it's a log.pty.log");
+        let cmd = display_pane_command(&path);
+        // Single quote should be escaped for shell safety
+        assert!(!cmd.contains("it's"));
+        assert!(cmd.contains("tail -n 200 -F"));
     }
 }
