@@ -44,6 +44,7 @@ Commands:
   cost             Estimate current run cost from agent session files
   doctor           Dump diagnostic state from Batty state files
   metrics          Show consolidated telemetry dashboard (tasks, cycle time, rates, agents)
+  chat             Interactive chat with an agent via the shim protocol
   telemetry        Query the telemetry database for agent and task metrics
   help             Print this message or the help of the given subcommand(s)
 
@@ -248,6 +249,67 @@ Options:
 
   -h, --help
           Print help
+```
+
+## `batty chat`
+
+Interactive chat with an agent via the shim protocol
+
+```text
+Interactive chat with an agent via the shim protocol
+
+Usage: batty chat [OPTIONS]
+
+Options:
+      --agent-type <AGENT_TYPE>
+          Agent type: claude, codex, kiro, generic
+
+          [default: generic]
+
+      --cmd <CMD>
+          Shell command to launch the agent CLI (auto-detected from agent type if omitted)
+
+      --cwd <CWD>
+          Working directory for the agent
+
+          [default: .]
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+`batty chat` spawns a shim subprocess and presents a readline-style prompt
+for sending messages to the agent. The shim manages the PTY, classifies agent
+state (starting, idle, working, dead, context_exhausted), and streams
+structured events back to the chat frontend.
+
+Special commands available at the `you> ` prompt:
+
+| Command    | Description                              |
+| ---------- | ---------------------------------------- |
+| `:quit`    | Shut down the agent and exit             |
+| `:q`       | Alias for `:quit`                        |
+| `:screen`  | Capture and display the agent's screen   |
+| `:state`   | Show current agent state and duration    |
+| `:ping`    | Send a ping and wait for pong            |
+
+### Examples
+
+```sh
+# Chat with Claude (auto-detected command)
+batty chat --agent-type claude
+
+# Chat with Codex
+batty chat --agent-type codex
+
+# Use a custom command
+batty chat --agent-type generic --cmd "python3 -i"
+
+# Set the working directory
+batty chat --agent-type claude --cwd /path/to/project
 ```
 
 ## `batty completions`

@@ -66,6 +66,41 @@ roles:
     instances: 3
 ```
 
+## Shim Mode (team.yaml)
+
+The shim runtime spawns each agent as a `batty shim` subprocess instead of
+running it directly in a tmux pane. The shim owns the PTY, classifies agent
+state, and communicates with the daemon via a structured socket protocol.
+Tmux is used only for display (each pane tails the shim's PTY log).
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `use_shim` | boolean | `false` | When `true`, agents are spawned as shim subprocesses. The shim manages the PTY, state classification, and message delivery over a structured channel. |
+
+### Example
+
+```yaml
+name: my-team
+use_shim: true
+
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+    instances: 1
+  - name: eng
+    role_type: engineer
+    agent: codex
+    instances: 3
+```
+
+When `use_shim` is enabled:
+
+- Each agent runs inside a `batty shim` process with its own PTY
+- Agent state (starting, idle, working, dead, context_exhausted) is detected automatically via screen classification
+- Raw PTY output is streamed to a log file at `.batty/shim_logs/<agent-id>.log` for tmux display panes to tail
+- The daemon communicates with each shim over a Unix socketpair using length-prefixed JSON messages
+
 ## Default Template
 
 ```toml

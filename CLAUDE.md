@@ -10,8 +10,9 @@ See `planning/architecture.md` for the system design and `planning/dev-philosoph
 
 - **Language:** Rust
 - **CLI framework:** clap
-- **Terminal runtime:** tmux (pane layout, output capture, input injection, status bar, session persistence)
-- **PTY support:** portable-pty is retained as supporting infrastructure, but tmux is the primary runtime
+- **Terminal runtime:** tmux (pane layout, display-only surfaces when shim mode is active, session persistence)
+- **Agent shim:** PTY-owning subprocess per agent, screen classification, structured socketpair protocol (`src/shim/`)
+- **PTY support:** portable-pty (used by shim runtime for agent PTY management)
 - **Async runtime:** tokio
 - **Config format:** YAML (`.batty/team_config/team.yaml`)
 - **Board format:** Markdown tasks with YAML frontmatter
@@ -21,6 +22,7 @@ See `planning/architecture.md` for the system design and `planning/dev-philosoph
 
 ```text
 src/               # Rust source
+  shim/            # Agent shim runtime (PTY, state classifier, protocol, chat)
 docs/              # User and reference documentation
 assets/            # Static assets (images, demos)
 scripts/           # Utility scripts
