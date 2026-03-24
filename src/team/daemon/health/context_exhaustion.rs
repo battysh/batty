@@ -88,7 +88,7 @@ impl TeamDaemon {
 
         let assignment = Self::restart_assignment_message(&task);
         let launch =
-            self.launch_task_assignment(member_name, &assignment, Some(task.id), false, false)?;
+            self.launch_task_assignment(member_name, &assignment, Some(task.id), false)?;
         let mut restart_notice = format!(
             "Restarted after context exhaustion. Continue task #{} from the current worktree state.",
             task.id
