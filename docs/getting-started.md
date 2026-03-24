@@ -63,6 +63,31 @@ batty init --template squad --agent claude
 
 Supported backends include `claude`, `codex`, and `kiro`. You can override individual roles later in `team.yaml`.
 
+## Agent Runtime: Shim Mode
+
+By default, Batty launches agent CLIs directly inside tmux panes. When
+`use_shim: true` is set in `team.yaml`, agents run as shim subprocesses
+instead. Each shim owns a PTY, classifies agent state automatically, and
+communicates with the daemon over a structured socket protocol. Tmux panes
+become display-only surfaces that tail the shim's PTY log.
+
+Shim mode is recommended for production use because it provides reliable
+state detection, structured message delivery, and graceful shutdown. Add
+this to your `team.yaml`:
+
+```yaml
+use_shim: true
+```
+
+You can also chat with a single agent interactively using the shim protocol:
+
+```sh
+batty chat --agent-type claude
+```
+
+See [Configuration Reference](reference/config.md) for details on shim-related
+config fields.
+
 ## Configure
 
 Edit `.batty/team_config/team.yaml`. Start with `name`, `layout`, `roles`, `use_worktrees`, and the `automation` block.
