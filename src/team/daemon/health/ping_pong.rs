@@ -7,7 +7,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use super::super::*;
 
