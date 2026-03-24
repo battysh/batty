@@ -39,7 +39,7 @@ pub enum Command {
 // Events (sent FROM the shim)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event")]
 pub enum Event {
     Ready,
