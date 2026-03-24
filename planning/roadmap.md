@@ -2,16 +2,17 @@
 
 ## Thesis
 
-Developers need a way to run teams of AI agents that coordinate, communicate, and ship code autonomously. Batty implements this as a hierarchical agent command system with a process-per-agent shim architecture and tmux as the visual monitoring layer.
+Developers need a way to describe what they want built and have a team of AI agents autonomously plan, execute, and deliver it. Batty implements this as a goal-directed agent command system: the user describes intent, the architect operationalizes it, and a dynamically-scaled team executes through structured workflow.
 
 ## Principles
 
+- Goal-directed by default. The user describes what they want; the architect figures out how.
 - The shim is the agent runtime. Each agent runs inside a dedicated shim process that owns its PTY, detects its state, and communicates via structured messages.
-- tmux is the display layer. Humans see agent output in tmux panes, but all agent IO flows through shims.
-- Compose, don't monolith. shim + kanban-md + BYO agents.
+- The console TUI is the primary interface. Chat with the architect, view the board, peek at agents — all without tmux knowledge.
+- Dynamic topology. The architect scales engineers up/down as the work evolves. No static configuration required.
+- Compose, don't monolith. shim + kanban-md + ratatui + BYO agents.
 - Ship fast. Validate with real projects before adding complexity.
 - Markdown as backend. Files in, files out, git tracks everything.
-- Hierarchy creates focus. Architect thinks, manager coordinates, engineers build.
 
 ---
 
@@ -356,14 +357,67 @@ Remove legacy code and validate the complete system.
 
 ---
 
+## Goal-Directed Architecture with Console TUI (In Progress — v0.8.0)
+
+Replace the pre-configured-team-then-execute model with a goal-directed conversational interface backed by a console TUI. The user describes what they want, the architect operationalizes it, dynamically scales the team, and drives execution through assessment cycles.
+
+**Motivation:** Batty v0.7.0 is a powerful execution engine, but requires users to pre-configure topology, populate boards, and navigate tmux. This phase makes Batty conversational: `batty` opens a chat with the architect, who creates the plan, scales the team, and measures progress against the goal — all from a single terminal interface.
+
+**PRD:** `planning/prd-goal-directed-tui.md`
+
+### Wave 1: Foundation (T-351, T-352, T-353)
+
+Build the three independent foundations that everything else depends on.
+
+- **Goal spec and evaluation** — `goal.yaml` schema (description, criteria with automated/agent/human types, budget, constraints). `batty eval` CLI command runs automated criteria and reports results. Architect creates goal.yaml from conversation. (`T-351`)
+- **Dynamic topology** — `batty scale engineers N`, `batty scale add-manager <name>`, `batty scale remove-manager <name>` commands. Daemon hot-reloads team.yaml on change: diff running state, spawn/kill shims, update routing. Graceful removal (finish current task before kill). (`T-352`)
+- **Daemon console socket** — Unix socket server at `.batty/console.sock`. Protocol: ChatMessage, AgentStatusUpdate, PtyData, SystemEvent, TopologyCommand. Multiple simultaneous console connections. Length-prefixed JSON framing. (`T-353`)
+
+**Exit:** `batty eval` measures goal progress. `batty scale` dynamically adds/removes agents. Daemon serves console connections via socket.
+
+### Wave 2: TUI and Architect Brain (T-354, T-355, T-356, T-357)
+
+Build the console TUI and the goal-directed architect intelligence.
+
+- **TUI skeleton and chat view** — ratatui application with tab-based views (Chat/Board/Agents/Peek), hotkey switching, status bar. Chat view: scrollable message history, input line, system events inline. Connects to daemon console socket. (`T-354`, depends on T-353)
+- **Agents view** — live-updating table of agents (name, role, state, current task, inbox count, health age). Aggregate metrics in footer (throughput, review queue, goal progress). Enter to peek. (`T-355`, depends on T-354)
+- **Architect goal-directed prompt and assessment loop** — rewrite architect system prompt for goal-directed operation. Assessment cycle: evaluate → strategize → decompose → configure topology → execute → re-evaluate. Architect creates goal.yaml, populates board, issues `batty scale` commands. Triggered after cycle completion or on timer. (`T-356`, depends on T-351, T-352)
+- **Board view** — launches kanban-md TUI as subprocess, returns to batty TUI on exit. Board path from daemon. Human can create/edit/move tasks directly. (`T-357`, depends on T-354)
+
+**Exit:** `batty` opens the TUI. Chat with architect works. Agents view shows live status. Board view opens kanban-md. Architect autonomously drives goal through assessment cycles with dynamic scaling.
+
+### Wave 3: Polish and Connectivity (T-358, T-359, T-360)
+
+Add terminal viewing, session management, and cross-interface sync.
+
+- **Agent peek view** — stream PTY log bytes from shim through daemon socket, render with ANSI colors in ratatui. Auto-scroll. Hotkey 1-9 or Enter from agents view. Read-only. (`T-358`, depends on T-354, T-353)
+- **Detach/reattach** — `q` detaches console (daemon keeps running). `batty` reattaches. On reattach, architect provides status summary of what happened while detached. Multiple simultaneous consoles. (`T-359`, depends on T-354, T-353)
+- **Telegram-console sync** — messages from Telegram appear in console chat and vice versa. Both frontends see the same conversation. System events in both. (`T-360`, depends on T-354)
+
+**Exit:** Full TUI with all 4 views. Agent peek shows live terminal output. Detach/reattach works. Telegram and console are synchronized.
+
+### Wave 4: Persistence and Budget (T-361, T-362)
+
+Make the system resumable and budget-aware.
+
+- **Resume state persistence** — on stop: persist goal.yaml, team.yaml, board, conversation history (last N messages), cycle metrics to `.batty/resume/`. On restart: respawn architect with context, respawn team, architect summarizes progress and continues. (`T-361`, depends on T-356)
+- **Budget tracking and cycle history** — track compute spend (time-based or API-derived estimate). Display in TUI status bar. Structured cycle history log (tasks completed, metrics, strategy changes). Architect factors budget into strategy. (`T-362`, depends on T-356, T-354)
+
+**Exit:** Stop and restart preserves full context. Budget tracked and visible. Cycle history informs strategy.
+
+**Success criteria for v0.8.0:** A user types `batty`, describes a goal, and the system autonomously plans, scales, executes, and measures progress. The TUI provides chat, board, agent status, and terminal peek without tmux knowledge. Detach/reattach preserves context.
+
+---
+
 ## Tech Stack
 
 | Layer | Choice |
 |---|---|
 | Core | Rust (clap + tokio) |
 | Agent Runtime | Shim (portable-pty + vt100) |
-| Display | tmux |
-| Config | YAML (team) + TOML (project) |
+| Human Interface | Console TUI (ratatui) |
+| Display (legacy) | tmux (optional, for PTY log tailing) |
+| Config | YAML (team + goal) |
 | Tasks | Markdown kanban board |
 | Logs | JSON lines |
 | Comms | Telegram (optional) |
@@ -377,6 +431,7 @@ Remove legacy code and validate the complete system.
 - ~~dispatch.rs ~700 lines~~ — stable.
 - All modules now under 2,300 lines after decomposition wave (#312–#321).
 - ~~tmux as agent runtime~~ — replaced by shim architecture (v0.7.0). tmux retained as display layer only.
+- Console TUI adds ratatui dependency and a new daemon socket server — scope must be kept tight to avoid sprawl.
 
 ## Risks
 
@@ -385,3 +440,6 @@ Remove legacy code and validate the complete system.
 3. **Context limits** — long-running agents hit context windows. Mitigated by focused task scoping, fresh agent sessions per task, and shim ContextExhausted event detection.
 4. **Coordination overhead** — multi-agent communication adds latency. Mitigated by keeping the hierarchy shallow and messages concise.
 5. **Shim complexity** — the shim adds a new process boundary. Mitigated by the typed channel protocol, comprehensive integration tests, and the validated POC.
+6. **Architect prompt quality** — goal-directed prompts need careful engineering for consistent strategy. Mitigated by iteration on prompt + assessment loop design.
+7. **TUI scope creep** — TUI development can sprawl. Mitigated by delegating board to kanban-md and keeping other views minimal (chat=text, agents=table, peek=log stream).
+8. **Hot-reload complexity** — dynamically adding/removing agents during execution. Mitigated by graceful shutdown for removed agents and clean init for new agents.
