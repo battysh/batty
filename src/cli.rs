@@ -226,6 +226,49 @@ pub enum Command {
         command: TelemetryCommand,
     },
 
+    /// Interactive chat with an agent via the shim protocol
+    Chat {
+        /// Agent type: claude, codex, kiro, generic
+        #[arg(long, default_value = "generic")]
+        agent_type: String,
+
+        /// Shell command to launch the agent CLI (auto-detected from agent type if omitted)
+        #[arg(long)]
+        cmd: Option<String>,
+
+        /// Working directory for the agent
+        #[arg(long, default_value = ".")]
+        cwd: String,
+    },
+
+    /// Internal: run a shim process (spawned by `batty chat` or orchestrator)
+    #[command(hide = true)]
+    Shim {
+        /// Unique agent identifier
+        #[arg(long)]
+        id: String,
+
+        /// Agent type: claude, codex, kiro, generic
+        #[arg(long)]
+        agent_type: String,
+
+        /// Shell command to launch the agent CLI
+        #[arg(long)]
+        cmd: String,
+
+        /// Working directory for the agent
+        #[arg(long)]
+        cwd: String,
+
+        /// Terminal rows
+        #[arg(long, default_value = "50")]
+        rows: u16,
+
+        /// Terminal columns
+        #[arg(long, default_value = "220")]
+        cols: u16,
+    },
+
     /// Internal: run the daemon loop (spawned by `batty start`)
     #[command(hide = true)]
     Daemon {

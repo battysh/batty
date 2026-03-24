@@ -260,7 +260,7 @@ fn classify_generic(content: &str) -> ScreenVerdict {
 
     for line in &recent_nonempty {
         let trimmed = line.trim();
-        // Shell prompts: ends with "$ " or "$", or "% " or "%", or "> "
+        // Shell prompts: ends with "$ " or "$", or "% " or "%", or "> " or ">"
         if trimmed.ends_with("$ ")
             || trimmed.ends_with('$')
             || trimmed.ends_with("% ")

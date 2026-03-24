@@ -841,6 +841,58 @@ fn main() -> Result<()> {
             }
         }
 
+        Command::Chat {
+            agent_type,
+            cmd,
+            cwd,
+        } => {
+            use batty_cli::shim;
+
+            let at: shim::classifier::AgentType = agent_type
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!(e))?;
+
+            let cmd = cmd.unwrap_or_else(|| shim::chat::default_cmd(at).to_string());
+
+            let cwd = PathBuf::from(&cwd)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(&cwd));
+
+            shim::chat::run(at, &cmd, &cwd)?;
+        }
+
+        Command::Shim {
+            id,
+            agent_type,
+            cmd,
+            cwd,
+            rows,
+            cols,
+        } => {
+            use batty_cli::shim;
+            use std::os::unix::io::FromRawFd;
+            use std::os::unix::net::UnixStream;
+
+            let at: shim::classifier::AgentType = agent_type
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!(e))?;
+
+            // Recover the channel socket from fd 3 (inherited from parent).
+            let stream = unsafe { UnixStream::from_raw_fd(3) };
+            let channel = shim::protocol::Channel::new(stream);
+
+            let args = shim::runtime::ShimArgs {
+                id,
+                agent_type: at,
+                cmd,
+                cwd: PathBuf::from(cwd),
+                rows,
+                cols,
+            };
+
+            shim::runtime::run(args, channel)?;
+        }
+
         Command::Daemon {
             project_root,
             resume,
