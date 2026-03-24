@@ -1142,3 +1142,30 @@ roles:
     assert!(names.contains(&"kiro"));
     assert!(names.contains(&"codex"));
 }
+
+#[test]
+fn use_shim_defaults_to_false() {
+    let config: TeamConfig = serde_yaml::from_str(minimal_yaml()).unwrap();
+    assert!(!config.use_shim);
+}
+
+#[test]
+fn use_shim_parsed_when_true() {
+    let yaml = r#"
+name: shim-team
+use_shim: true
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+    instances: 1
+    talks_to: [engineer]
+  - name: engineer
+    role_type: engineer
+    agent: claude
+    instances: 1
+    talks_to: [architect]
+"#;
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(config.use_shim);
+}
