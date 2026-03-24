@@ -1244,4 +1244,86 @@ mod tests {
         assert_eq!(inbox_msgs[0].body, "Task #42: implement feature");
         assert_eq!(inbox_msgs[0].from, "manager");
     }
+
+    // -- Shim delivery tests --
+
+    #[test]
+    fn shim_delivery_sends_via_channel_when_ready() {
+        let tmp = tempfile::tempdir().unwrap();
+        inbox::init_inbox(&inbox::inboxes_root(tmp.path()), "eng-1").unwrap();
+
+        let mut daemon = empty_legacy_daemon(&tmp);
+        daemon.config.team_config.use_shim = true;
+
+        // Create a shim handle in idle state
+        let (parent, mut child) = crate::shim::protocol::socketpair().unwrap();
+        let channel = crate::shim::protocol::Channel::new(parent);
+        let mut handle =
+            crate::team::daemon::agent_handle::AgentHandle::new("eng-1".into(), channel, 999);
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("eng-1".to_string(), handle);
+
+        let result = daemon.deliver_message("manager", "eng-1", "do the thing");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), MessageDelivery::LivePane);
+
+        // Verify the command arrived on the child side
+        let cmd: crate::shim::protocol::Command = crate::shim::protocol::Channel::new(child)
+            .recv()
+            .unwrap()
+            .unwrap();
+        match cmd {
+            crate::shim::protocol::Command::SendMessage { from, body, .. } => {
+                assert_eq!(from, "manager");
+                assert_eq!(body, "do the thing");
+            }
+            _ => panic!("expected SendMessage"),
+        }
+    }
+
+    #[test]
+    fn shim_delivery_defers_when_not_ready() {
+        let tmp = tempfile::tempdir().unwrap();
+        inbox::init_inbox(&inbox::inboxes_root(tmp.path()), "eng-1").unwrap();
+
+        let mut daemon = empty_legacy_daemon(&tmp);
+        daemon.config.team_config.use_shim = true;
+
+        // Create a shim handle still in Starting state
+        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+        let channel = crate::shim::protocol::Channel::new(parent);
+        let handle =
+            crate::team::daemon::agent_handle::AgentHandle::new("eng-1".into(), channel, 999);
+        daemon.shim_handles.insert("eng-1".to_string(), handle);
+
+        let result = daemon.deliver_message("manager", "eng-1", "wait for me");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), MessageDelivery::DeferredPending);
+
+        let queue = daemon.pending_delivery_queue.get("eng-1").unwrap();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].body, "wait for me");
+    }
+
+    #[test]
+    fn shim_delivery_falls_through_when_use_shim_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        inbox::init_inbox(&inbox::inboxes_root(tmp.path()), "eng-1").unwrap();
+
+        let mut daemon = empty_legacy_daemon(&tmp);
+        // use_shim defaults to false — shim path should be skipped
+
+        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+        let channel = crate::shim::protocol::Channel::new(parent);
+        let mut handle =
+            crate::team::daemon::agent_handle::AgentHandle::new("eng-1".into(), channel, 999);
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("eng-1".to_string(), handle);
+
+        // With use_shim=false, should skip the shim path entirely
+        let result = daemon.deliver_message("manager", "eng-1", "hello");
+        assert!(result.is_ok());
+        // eng-1 is not in pane_map either, so it becomes unknown
+        assert_eq!(result.unwrap(), MessageDelivery::SkippedUnknownRecipient);
+    }
 }
