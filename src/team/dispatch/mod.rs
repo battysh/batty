@@ -18,6 +18,7 @@ mod tests;
 
 use super::super::events::TeamEvent;
 use super::super::task_loop::prepare_engineer_assignment_worktree;
+use super::super::task_loop::prepare_multi_repo_assignment_worktree;
 use super::launcher::{
     canonical_agent_name, new_member_session_id, strip_nudge_section, write_launch_script,
 };
@@ -84,7 +85,7 @@ impl TeamDaemon {
 
         let team_config_dir = self.config.project_root.join(".batty").join("team_config");
         let use_worktrees =
-            self.is_git_repo && member.as_ref().map(|m| m.use_worktrees).unwrap_or(false);
+            (self.is_git_repo || self.is_multi_repo) && member.as_ref().map(|m| m.use_worktrees).unwrap_or(false);
         if !use_worktrees {
             debug!(
                 member = %engineer,
@@ -107,6 +108,15 @@ impl TeamDaemon {
                     "skipping worktree prep — engineer is working with active task, protecting uncommitted changes"
                 );
                 work_dir
+            } else if self.is_multi_repo {
+                prepare_multi_repo_assignment_worktree(
+                    &self.config.project_root,
+                    &work_dir,
+                    engineer,
+                    task_branch,
+                    &team_config_dir,
+                    &self.sub_repo_names,
+                )?
             } else {
                 prepare_engineer_assignment_worktree(
                     &self.config.project_root,

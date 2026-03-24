@@ -205,6 +205,57 @@ pub(crate) fn prepare_engineer_assignment_worktree(
     Ok(worktree_dir.to_path_buf())
 }
 
+/// Set up worktrees for a multi-repo project. Creates one git worktree per
+/// sub-repo inside `worktree_dir`, mirroring the original directory layout.
+pub(crate) fn setup_multi_repo_worktree(
+    project_root: &Path,
+    worktree_dir: &Path,
+    branch_name: &str,
+    team_config_dir: &Path,
+    sub_repo_names: &[String],
+) -> Result<PathBuf> {
+    std::fs::create_dir_all(worktree_dir)
+        .with_context(|| format!("failed to create {}", worktree_dir.display()))?;
+
+    for repo_name in sub_repo_names {
+        let repo_root = project_root.join(repo_name);
+        let sub_wt = worktree_dir.join(repo_name);
+        setup_engineer_worktree(&repo_root, &sub_wt, branch_name, team_config_dir)?;
+    }
+
+    ensure_engineer_worktree_links(worktree_dir, team_config_dir)?;
+    Ok(worktree_dir.to_path_buf())
+}
+
+/// Prepare worktrees for a multi-repo task assignment. Creates task branches
+/// in every sub-repo so the engineer can work across all of them.
+pub(crate) fn prepare_multi_repo_assignment_worktree(
+    project_root: &Path,
+    worktree_dir: &Path,
+    engineer_name: &str,
+    task_branch: &str,
+    team_config_dir: &Path,
+    sub_repo_names: &[String],
+) -> Result<PathBuf> {
+    std::fs::create_dir_all(worktree_dir)
+        .with_context(|| format!("failed to create {}", worktree_dir.display()))?;
+
+    for repo_name in sub_repo_names {
+        let repo_root = project_root.join(repo_name);
+        let sub_wt = worktree_dir.join(repo_name);
+        prepare_engineer_assignment_worktree(
+            &repo_root,
+            &sub_wt,
+            engineer_name,
+            task_branch,
+            team_config_dir,
+        )?;
+    }
+
+    ensure_engineer_worktree_links(worktree_dir, team_config_dir)?;
+    Ok(worktree_dir.to_path_buf())
+}
+
 fn ensure_engineer_worktree_health(
     project_root: &Path,
     worktree_dir: &Path,

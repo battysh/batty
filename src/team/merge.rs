@@ -108,7 +108,13 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     let board_dir_str = board_dir.to_string_lossy().to_string();
     let manager_name = daemon.manager_name(engineer);
 
-    if commits_ahead_of_main(&worktree_dir)? == 0 {
+    let total_commits = if daemon.is_multi_repo {
+        multi_repo_commits_ahead_of_main(&worktree_dir, &daemon.sub_repo_names)?
+    } else {
+        commits_ahead_of_main(&worktree_dir)?
+    };
+
+    if total_commits == 0 {
         // Do NOT clear active task or set idle — the engineer still owns this task.
         // Clearing would orphan the board task in-progress with no engineer tracking it.
         let msg = "Completion rejected: your branch has no commits ahead of main. Commit your changes before reporting done again.";
@@ -121,8 +127,13 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         return Ok(());
     }
 
-    let task_branch = current_worktree_branch(&worktree_dir)?;
+    let task_branch = if daemon.is_multi_repo {
+        multi_repo_task_branch(&worktree_dir, &daemon.sub_repo_names)?
+    } else {
+        current_worktree_branch(&worktree_dir)?
+    };
     let test_started = Instant::now();
+    // For multi-repo, run tests from the engineer's worktree root (parent of sub-repos)
     let (tests_passed, output_truncated) = run_tests_in_worktree(&worktree_dir)?;
     let test_duration_ms = test_started.elapsed().as_millis() as u64;
     if tests_passed {
@@ -231,7 +242,11 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         let lock =
             MergeLock::acquire(daemon.project_root()).context("failed to acquire merge lock")?;
 
-        match merge_engineer_branch(daemon.project_root(), engineer)? {
+        match if daemon.is_multi_repo {
+            merge_multi_repo_engineer_branch(daemon.project_root(), engineer, &daemon.sub_repo_names)?
+        } else {
+            merge_engineer_branch(daemon.project_root(), engineer)?
+        } {
             MergeOutcome::Success => {
                 drop(lock);
 
@@ -530,6 +545,127 @@ pub(crate) fn merge_engineer_branch(
     Ok(MergeOutcome::Success)
 }
 
+/// Merge engineer branches across all sub-repos in a multi-repo project.
+pub(crate) fn merge_multi_repo_engineer_branch(
+    project_root: &Path,
+    engineer_name: &str,
+    sub_repo_names: &[String],
+) -> Result<MergeOutcome> {
+    for repo_name in sub_repo_names {
+        let repo_root = project_root.join(repo_name);
+        let sub_wt = project_root
+            .join(".batty")
+            .join("worktrees")
+            .join(engineer_name)
+            .join(repo_name);
+        if !sub_wt.exists() {
+            continue;
+        }
+        // Check if there are commits to merge in this sub-repo
+        if commits_ahead_of_main(&sub_wt).unwrap_or(0) == 0 {
+            continue;
+        }
+        match merge_engineer_branch_in_repo(&repo_root, &sub_wt, engineer_name)? {
+            MergeOutcome::Success => {}
+            other => return Ok(other),
+        }
+    }
+
+    // Reset all sub-repo worktrees after successful merge
+    for repo_name in sub_repo_names {
+        let repo_root = project_root.join(repo_name);
+        if let Err(e) = reset_engineer_worktree_in_repo(&repo_root, engineer_name, repo_name) {
+            warn!(
+                engineer = engineer_name,
+                repo = repo_name,
+                error = %e,
+                "worktree reset failed after multi-repo merge"
+            );
+        }
+    }
+
+    Ok(MergeOutcome::Success)
+}
+
+/// Merge a single sub-repo's engineer worktree branch into main.
+fn merge_engineer_branch_in_repo(
+    repo_root: &Path,
+    worktree_dir: &Path,
+    engineer_name: &str,
+) -> Result<MergeOutcome> {
+    let branch = current_worktree_branch(worktree_dir)?;
+    info!(engineer = engineer_name, branch = %branch, repo = %repo_root.display(), "merging sub-repo worktree branch");
+
+    let main_branch = current_worktree_branch(repo_root)?;
+    if main_branch != "main" {
+        let checkout = run_git_with_context(
+            repo_root,
+            &["checkout", "main"],
+            "checkout main in sub-repo before merge",
+        )?;
+        if !checkout.status.success() {
+            let stderr = String::from_utf8_lossy(&checkout.stderr).trim().to_string();
+            return Ok(MergeOutcome::MergeFailure(format!(
+                "sub-repo {} on '{main_branch}', checkout main failed: {stderr}",
+                repo_root.display()
+            )));
+        }
+    }
+
+    let rebase = run_git_with_context(
+        worktree_dir,
+        &["rebase", "main"],
+        &format!("rebase '{branch}' onto main in {}", repo_root.display()),
+    )?;
+    if !rebase.status.success() {
+        let stderr = String::from_utf8_lossy(&rebase.stderr).trim().to_string();
+        let _ = run_git_with_context(worktree_dir, &["rebase", "--abort"], "abort rebase");
+        return Ok(MergeOutcome::RebaseConflict(format!(
+            "rebase conflict in {}: {stderr}",
+            repo_root.display()
+        )));
+    }
+
+    let output = run_git_with_context(
+        repo_root,
+        &["merge", &branch, "--no-edit"],
+        &format!("merge '{branch}' into main in {}", repo_root.display()),
+    )?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Ok(MergeOutcome::MergeFailure(format!(
+            "merge failed in {}: {stderr}",
+            repo_root.display()
+        )));
+    }
+
+    println!(
+        "Merged branch '{branch}' from {engineer_name} in {}",
+        repo_root.file_name().unwrap_or_default().to_string_lossy()
+    );
+    Ok(MergeOutcome::Success)
+}
+
+fn reset_engineer_worktree_in_repo(
+    repo_root: &Path,
+    engineer_name: &str,
+    repo_name: &str,
+) -> Result<()> {
+    let worktree_dir = repo_root
+        .parent()
+        .unwrap_or(repo_root)
+        .join(".batty")
+        .join("worktrees")
+        .join(engineer_name)
+        .join(repo_name);
+    if !worktree_dir.exists() {
+        return Ok(());
+    }
+    let base_branch = engineer_base_branch_name(engineer_name);
+    checkout_worktree_branch_from_main(&worktree_dir, &base_branch)?;
+    Ok(())
+}
+
 pub(crate) fn reset_engineer_worktree(project_root: &Path, engineer_name: &str) -> Result<()> {
     let worktree_dir = project_root
         .join(".batty")
@@ -716,6 +852,36 @@ fn commits_ahead_of_main(worktree_dir: &Path) -> Result<u32> {
             stdout.trim()
         )
     })
+}
+
+/// For multi-repo: sum commits ahead of main across all sub-repo worktrees.
+fn multi_repo_commits_ahead_of_main(worktree_dir: &Path, sub_repo_names: &[String]) -> Result<u32> {
+    let mut total = 0u32;
+    for name in sub_repo_names {
+        let sub_wt = worktree_dir.join(name);
+        if sub_wt.exists() {
+            total += commits_ahead_of_main(&sub_wt).unwrap_or(0);
+        }
+    }
+    Ok(total)
+}
+
+/// For multi-repo: get the task branch from the first sub-repo that has commits.
+fn multi_repo_task_branch(worktree_dir: &Path, sub_repo_names: &[String]) -> Result<String> {
+    for name in sub_repo_names {
+        let sub_wt = worktree_dir.join(name);
+        if sub_wt.exists() && commits_ahead_of_main(&sub_wt).unwrap_or(0) > 0 {
+            return current_worktree_branch(&sub_wt);
+        }
+    }
+    // Fall back to first existing sub-repo
+    for name in sub_repo_names {
+        let sub_wt = worktree_dir.join(name);
+        if sub_wt.exists() {
+            return current_worktree_branch(&sub_wt);
+        }
+    }
+    bail!("no sub-repo worktrees found in {}", worktree_dir.display())
 }
 
 fn now_unix() -> u64 {
