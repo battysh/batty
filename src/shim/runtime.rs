@@ -4,6 +4,7 @@
 //! Raw PTY output is also streamed to a log file so tmux display panes can
 //! `tail -F` it and render agent output in real time.
 
+use std::collections::VecDeque;
 use std::io::{Read, Write as IoWrite};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -30,6 +31,9 @@ const POLL_INTERVAL_MS: u64 = 250;
 /// Max time to wait for agent to show its first prompt (secs).
 const READY_TIMEOUT_SECS: u64 = 120;
 
+/// Maximum number of messages that can be queued while the agent is working.
+const MAX_QUEUE_DEPTH: usize = 16;
+
 // ---------------------------------------------------------------------------
 // Args (parsed from CLI in main.rs, passed here)
 // ---------------------------------------------------------------------------
@@ -48,6 +52,17 @@ pub struct ShimArgs {
 }
 
 // ---------------------------------------------------------------------------
+// Queued message (buffered while agent is Working)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct QueuedMessage {
+    from: String,
+    body: String,
+    message_id: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Shared state between PTY reader thread and command handler thread
 // ---------------------------------------------------------------------------
 
@@ -59,6 +74,9 @@ struct ShimInner {
     pre_injection_content: String,
     pending_message_id: Option<String>,
     agent_type: AgentType,
+    /// Messages queued while the agent is in Working state.
+    /// Drained FIFO on Working→Idle transitions.
+    message_queue: VecDeque<QueuedMessage>,
 }
 
 impl ShimInner {
@@ -154,6 +172,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
         pre_injection_content: String::new(),
         pending_message_id: None,
         agent_type: args.agent_type,
+        message_queue: VecDeque::new(),
     }));
 
     // -- PTY log writer (optional) --
@@ -165,6 +184,9 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
         .map(Mutex::new);
     let pty_log = pty_log.map(Arc::new);
 
+    // Wrap PTY writer in Arc<Mutex> so both threads can write
+    let pty_writer = Arc::new(Mutex::new(pty_writer));
+
     // Channel for sending events (cloned for PTY reader thread)
     let mut cmd_channel = channel;
     let mut evt_channel = cmd_channel.try_clone().context("failed to clone channel")?;
@@ -172,6 +194,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
     // -- PTY reader thread: reads agent output, feeds vt100, detects state --
     let inner_pty = Arc::clone(&inner);
     let log_handle = pty_log.clone();
+    let pty_writer_pty = Arc::clone(&pty_writer);
     let pty_handle = std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
@@ -225,6 +248,36 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                         let current_content = inner.screen_contents();
                         let msg_id = inner.pending_message_id.take();
 
+                        // On terminal states, drain the queue
+                        let drain_errors =
+                            if new == ShimState::Dead || new == ShimState::ContextExhausted {
+                                drain_queue_errors(&mut inner.message_queue, new)
+                            } else {
+                                Vec::new()
+                            };
+
+                        // On Working→Idle, check for queued messages to inject
+                        let queued_msg = if old_state == ShimState::Working
+                            && new == ShimState::Idle
+                            && !inner.message_queue.is_empty()
+                        {
+                            inner.message_queue.pop_front()
+                        } else {
+                            None
+                        };
+
+                        // If we're injecting a queued message, stay in Working
+                        if let Some(ref msg) = queued_msg {
+                            inner.pre_injection_content = inner.screen_contents();
+                            inner.pending_message_id = msg.message_id.clone();
+                            inner.state = ShimState::Working;
+                            inner.state_changed_at = Instant::now();
+                        }
+
+                        let queue_depth = inner.message_queue.len();
+
+                        drop(inner); // release lock before I/O
+
                         let events = build_transition_events(
                             old_state,
                             new,
@@ -234,12 +287,41 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                             msg_id,
                         );
 
-                        drop(inner); // release lock before I/O
-
                         for event in events {
                             if evt_channel.send(&event).is_err() {
                                 return; // orchestrator disconnected
                             }
+                        }
+
+                        // Send drain errors for terminal states
+                        for event in drain_errors {
+                            if evt_channel.send(&event).is_err() {
+                                return;
+                            }
+                        }
+
+                        // Inject queued message into PTY
+                        if let Some(msg) = queued_msg {
+                            let formatted = format!("{}\n", msg.body);
+                            let mut writer = pty_writer_pty.lock().unwrap();
+                            if let Err(e) = writer.write_all(formatted.as_bytes()) {
+                                let _ = evt_channel.send(&Event::Error {
+                                    command: "SendMessage".into(),
+                                    reason: format!("PTY write failed for queued message: {e}"),
+                                });
+                            } else {
+                                writer.flush().ok();
+                            }
+
+                            // Emit StateChanged Idle→Working for the queued message
+                            let _ = evt_channel.send(&Event::StateChanged {
+                                from: ShimState::Idle,
+                                to: ShimState::Working,
+                                summary: format!(
+                                    "delivering queued message ({} remaining)",
+                                    queue_depth
+                                ),
+                            });
                         }
                     }
                 }
@@ -252,6 +334,9 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
         let last_lines = inner.last_n_lines(10);
         let old = inner.state;
         inner.state = ShimState::Dead;
+
+        // Drain any remaining queued messages
+        let drain_errors = drain_queue_errors(&mut inner.message_queue, ShimState::Dead);
         drop(inner);
 
         let _ = evt_channel.send(&Event::StateChanged {
@@ -264,11 +349,14 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
             exit_code: None,
             last_lines,
         });
+
+        for event in drain_errors {
+            let _ = evt_channel.send(&event);
+        }
     });
 
     // -- Main thread: handle commands from orchestrator --
     let inner_cmd = Arc::clone(&inner);
-    let pty_writer = Arc::new(Mutex::new(pty_writer));
 
     // Wait for Ready (Starting → Idle transition) with timeout
     let start = Instant::now();
@@ -321,7 +409,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
 
         match cmd {
             Command::SendMessage {
-                from: _,
+                from,
                 body,
                 message_id,
             } => {
@@ -356,10 +444,49 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                         })?;
                     }
                     ShimState::Working => {
-                        cmd_channel.send(&Event::Error {
-                            command: "SendMessage".into(),
-                            reason: "agent is working, cannot accept message".into(),
-                        })?;
+                        // Queue the message for delivery when agent returns to Idle
+                        if inner.message_queue.len() >= MAX_QUEUE_DEPTH {
+                            let dropped = inner.message_queue.pop_front();
+                            let dropped_id = dropped.as_ref().and_then(|m| m.message_id.clone());
+                            inner.message_queue.push_back(QueuedMessage {
+                                from,
+                                body,
+                                message_id,
+                            });
+                            let depth = inner.message_queue.len();
+                            drop(inner);
+
+                            cmd_channel.send(&Event::Error {
+                                command: "SendMessage".into(),
+                                reason: format!(
+                                    "message queue full ({MAX_QUEUE_DEPTH}), dropped oldest message{}",
+                                    dropped_id
+                                        .map(|id| format!(" (id: {id})"))
+                                        .unwrap_or_default(),
+                                ),
+                            })?;
+                            cmd_channel.send(&Event::Warning {
+                                message: format!(
+                                    "message queued while agent working (depth: {depth})"
+                                ),
+                                idle_secs: None,
+                            })?;
+                        } else {
+                            inner.message_queue.push_back(QueuedMessage {
+                                from,
+                                body,
+                                message_id,
+                            });
+                            let depth = inner.message_queue.len();
+                            drop(inner);
+
+                            cmd_channel.send(&Event::Warning {
+                                message: format!(
+                                    "message queued while agent working (depth: {depth})"
+                                ),
+                                idle_secs: None,
+                            })?;
+                        }
                     }
                     other => {
                         cmd_channel.send(&Event::Error {
@@ -447,6 +574,30 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
 
     pty_handle.join().ok();
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Drain the message queue, emitting Error events for each dropped message
+// ---------------------------------------------------------------------------
+
+fn drain_queue_errors(
+    queue: &mut VecDeque<QueuedMessage>,
+    terminal_state: ShimState,
+) -> Vec<Event> {
+    let mut events = Vec::new();
+    while let Some(msg) = queue.pop_front() {
+        events.push(Event::Error {
+            command: "SendMessage".into(),
+            reason: format!(
+                "agent entered {} state, queued message dropped{}",
+                terminal_state,
+                msg.message_id
+                    .map(|id| format!(" (id: {id})"))
+                    .unwrap_or_default(),
+            ),
+        });
+    }
+    events
 }
 
 // ---------------------------------------------------------------------------
@@ -645,5 +796,147 @@ mod tests {
         );
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], Event::StateChanged { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Message queue tests
+    // -----------------------------------------------------------------------
+
+    fn make_queued_msg(id: &str, body: &str) -> QueuedMessage {
+        QueuedMessage {
+            from: "user".into(),
+            body: body.into(),
+            message_id: Some(id.into()),
+        }
+    }
+
+    #[test]
+    fn queue_enqueue_basic() {
+        let mut queue: VecDeque<QueuedMessage> = VecDeque::new();
+        queue.push_back(make_queued_msg("m1", "hello"));
+        queue.push_back(make_queued_msg("m2", "world"));
+        assert_eq!(queue.len(), 2);
+    }
+
+    #[test]
+    fn queue_fifo_order() {
+        let mut queue: VecDeque<QueuedMessage> = VecDeque::new();
+        queue.push_back(make_queued_msg("m1", "first"));
+        queue.push_back(make_queued_msg("m2", "second"));
+        queue.push_back(make_queued_msg("m3", "third"));
+
+        let msg = queue.pop_front().unwrap();
+        assert_eq!(msg.message_id.as_deref(), Some("m1"));
+        assert_eq!(msg.body, "first");
+
+        let msg = queue.pop_front().unwrap();
+        assert_eq!(msg.message_id.as_deref(), Some("m2"));
+        assert_eq!(msg.body, "second");
+
+        let msg = queue.pop_front().unwrap();
+        assert_eq!(msg.message_id.as_deref(), Some("m3"));
+        assert_eq!(msg.body, "third");
+
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn queue_overflow_drops_oldest() {
+        let mut queue: VecDeque<QueuedMessage> = VecDeque::new();
+
+        // Fill to MAX_QUEUE_DEPTH
+        for i in 0..MAX_QUEUE_DEPTH {
+            queue.push_back(make_queued_msg(&format!("m{i}"), &format!("msg {i}")));
+        }
+        assert_eq!(queue.len(), MAX_QUEUE_DEPTH);
+
+        // Overflow: drop oldest, add new
+        assert!(queue.len() >= MAX_QUEUE_DEPTH);
+        let dropped = queue.pop_front().unwrap();
+        assert_eq!(dropped.message_id.as_deref(), Some("m0")); // oldest dropped
+        queue.push_back(make_queued_msg("m_new", "new message"));
+        assert_eq!(queue.len(), MAX_QUEUE_DEPTH);
+
+        // First item should now be m1 (m0 was dropped)
+        let first = queue.pop_front().unwrap();
+        assert_eq!(first.message_id.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn drain_queue_errors_empty() {
+        let mut queue: VecDeque<QueuedMessage> = VecDeque::new();
+        let events = drain_queue_errors(&mut queue, ShimState::Dead);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn drain_queue_errors_with_messages() {
+        let mut queue: VecDeque<QueuedMessage> = VecDeque::new();
+        queue.push_back(make_queued_msg("m1", "hello"));
+        queue.push_back(make_queued_msg("m2", "world"));
+        queue.push_back(QueuedMessage {
+            from: "user".into(),
+            body: "no id".into(),
+            message_id: None,
+        });
+
+        let events = drain_queue_errors(&mut queue, ShimState::Dead);
+        assert_eq!(events.len(), 3);
+        assert!(queue.is_empty());
+
+        // All should be Error events
+        for event in &events {
+            assert!(matches!(event, Event::Error { .. }));
+        }
+
+        // First error should mention the message_id
+        if let Event::Error { reason, .. } = &events[0] {
+            assert!(reason.contains("dead"));
+            assert!(reason.contains("m1"));
+        }
+
+        // Third error (no message_id) should not contain "(id:"
+        if let Event::Error { reason, .. } = &events[2] {
+            assert!(!reason.contains("(id:"));
+        }
+    }
+
+    #[test]
+    fn drain_queue_errors_context_exhausted() {
+        let mut queue: VecDeque<QueuedMessage> = VecDeque::new();
+        queue.push_back(make_queued_msg("m1", "hello"));
+
+        let events = drain_queue_errors(&mut queue, ShimState::ContextExhausted);
+        assert_eq!(events.len(), 1);
+        if let Event::Error { reason, .. } = &events[0] {
+            assert!(reason.contains("context_exhausted"));
+        }
+    }
+
+    #[test]
+    fn queued_message_preserves_fields() {
+        let msg = QueuedMessage {
+            from: "manager".into(),
+            body: "do this task".into(),
+            message_id: Some("msg-42".into()),
+        };
+        assert_eq!(msg.from, "manager");
+        assert_eq!(msg.body, "do this task");
+        assert_eq!(msg.message_id.as_deref(), Some("msg-42"));
+    }
+
+    #[test]
+    fn queued_message_none_id() {
+        let msg = QueuedMessage {
+            from: "user".into(),
+            body: "anonymous".into(),
+            message_id: None,
+        };
+        assert!(msg.message_id.is_none());
+    }
+
+    #[test]
+    fn max_queue_depth_is_16() {
+        assert_eq!(MAX_QUEUE_DEPTH, 16);
     }
 }
