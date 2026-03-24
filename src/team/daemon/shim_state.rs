@@ -71,6 +71,7 @@ impl TeamDaemon {
 
     /// Load saved shim state and respawn shim handles.
     /// Returns the number of handles restored.
+    #[allow(dead_code)] // Called from start flow when shim mode is fully wired
     pub(in crate::team) fn restore_shim_state(&mut self) -> Result<usize> {
         let path = shim_state_path(&self.config.project_root);
         if !path.exists() {
@@ -122,6 +123,7 @@ impl TeamDaemon {
 }
 
 /// Load saved shim state without spawning (for inspection/testing).
+#[allow(dead_code)] // Used by tests and future status/inspection commands
 pub fn load_shim_state(project_root: &Path) -> Result<ShimStateFile> {
     let path = shim_state_path(project_root);
     if !path.exists() {
