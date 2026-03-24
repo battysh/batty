@@ -1043,7 +1043,7 @@ mod tests {
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
         // Insert a shim handle in Starting state so the pending queue path is triggered
-        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+        let (parent, child) = crate::shim::protocol::socketpair().unwrap();
         let channel = crate::shim::protocol::Channel::new(parent);
         let handle = crate::team::daemon::agent_handle::AgentHandle::new(
             "eng-1".into(),
@@ -1129,7 +1129,7 @@ mod tests {
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
         // Insert a shim handle in Starting state so the pending queue path is triggered
-        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+        let (parent, child) = crate::shim::protocol::socketpair().unwrap();
         let channel = crate::shim::protocol::Channel::new(parent);
         let handle = crate::team::daemon::agent_handle::AgentHandle::new(
             "eng-1".into(),
@@ -1187,7 +1187,7 @@ mod tests {
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
         // Insert a shim handle in Starting state so the pending queue path is triggered
-        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+        let (parent, child) = crate::shim::protocol::socketpair().unwrap();
         let channel = crate::shim::protocol::Channel::new(parent);
         let handle = crate::team::daemon::agent_handle::AgentHandle::new(
             "eng-1".into(),
@@ -1260,7 +1260,7 @@ mod tests {
         daemon.config.team_config.use_shim = true;
 
         // Create a shim handle in idle state
-        let (parent, mut child) = crate::shim::protocol::socketpair().unwrap();
+        let (parent, child) = crate::shim::protocol::socketpair().unwrap();
         let channel = crate::shim::protocol::Channel::new(parent);
         let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
             "eng-1".into(),
@@ -1300,7 +1300,7 @@ mod tests {
         daemon.config.team_config.use_shim = true;
 
         // Create a shim handle still in Starting state
-        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+        let (parent, child) = crate::shim::protocol::socketpair().unwrap();
         let channel = crate::shim::protocol::Channel::new(parent);
         let handle = crate::team::daemon::agent_handle::AgentHandle::new(
             "eng-1".into(),
@@ -1329,7 +1329,7 @@ mod tests {
         let mut daemon = empty_legacy_daemon(&tmp);
         // use_shim defaults to false — shim delivery still attempted if handle exists
 
-        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+        let (parent, child) = crate::shim::protocol::socketpair().unwrap();
         let channel = crate::shim::protocol::Channel::new(parent);
         let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
             "eng-1".into(),

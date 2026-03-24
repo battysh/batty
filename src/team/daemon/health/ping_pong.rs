@@ -74,7 +74,7 @@ impl TeamDaemon {
 #[cfg(test)]
 mod tests {
     use super::super::super::*;
-    use crate::shim::protocol::{self, Channel, Command, Event, ShimState};
+    use crate::shim::protocol::{self, Channel, Command, ShimState};
     use crate::team::daemon::agent_handle::AgentHandle;
     use crate::team::test_support::TestDaemonBuilder;
     use std::path::PathBuf;
@@ -124,7 +124,7 @@ mod tests {
     fn shim_health_check_skips_when_interval_not_elapsed() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
-        let mut child = insert_handle_with_channel(&mut daemon, "eng-1");
+        let child = insert_handle_with_channel(&mut daemon, "eng-1");
         daemon
             .shim_handles
             .get_mut("eng-1")
