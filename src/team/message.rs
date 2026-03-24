@@ -120,8 +120,6 @@ pub fn command_queue_path(project_root: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
-
     #[test]
     fn send_command_roundtrip() {
         let cmd = QueuedCommand::Send {
