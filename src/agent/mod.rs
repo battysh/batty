@@ -153,11 +153,7 @@ pub trait AgentAdapter: Send + Sync {
 }
 
 /// Known agent backend names (primary aliases only).
-pub const KNOWN_AGENT_NAMES: &[&str] = &[
-    "claude",
-    "codex",
-    "kiro-cli",
-];
+pub const KNOWN_AGENT_NAMES: &[&str] = &["claude", "codex", "kiro-cli"];
 
 /// Look up an agent adapter by name.
 ///
