@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod bench;
 pub mod chat;
 pub mod classifier;
 pub mod protocol;
