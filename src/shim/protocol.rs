@@ -164,6 +164,14 @@ impl Channel {
         Ok(Some(msg))
     }
 
+    /// Set a read timeout on the underlying socket.
+    /// After this, `recv()` will return an error if no data arrives
+    /// within the given duration (instead of blocking forever).
+    pub fn set_read_timeout(&mut self, timeout: Option<std::time::Duration>) -> anyhow::Result<()> {
+        self.stream.set_read_timeout(timeout)?;
+        Ok(())
+    }
+
     /// Clone the underlying fd for use in a second thread.
     pub fn try_clone(&self) -> anyhow::Result<Self> {
         Ok(Self {
