@@ -848,9 +848,8 @@ fn main() -> Result<()> {
         } => {
             use batty_cli::shim;
 
-            let at: shim::classifier::AgentType = agent_type
-                .parse()
-                .map_err(|e: String| anyhow::anyhow!(e))?;
+            let at: shim::classifier::AgentType =
+                agent_type.parse().map_err(|e: String| anyhow::anyhow!(e))?;
 
             let cmd = cmd.unwrap_or_else(|| shim::chat::default_cmd(at).to_string());
 
@@ -873,9 +872,8 @@ fn main() -> Result<()> {
             use std::os::unix::io::FromRawFd;
             use std::os::unix::net::UnixStream;
 
-            let at: shim::classifier::AgentType = agent_type
-                .parse()
-                .map_err(|e: String| anyhow::anyhow!(e))?;
+            let at: shim::classifier::AgentType =
+                agent_type.parse().map_err(|e: String| anyhow::anyhow!(e))?;
 
             // Recover the channel socket from fd 3 (inherited from parent).
             let stream = unsafe { UnixStream::from_raw_fd(3) };

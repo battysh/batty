@@ -155,15 +155,17 @@ pub fn run(agent_type: AgentType, cmd: &str, cwd: &PathBuf) -> Result<()> {
     let (event_tx, event_rx) = std::sync::mpsc::channel::<Event>();
 
     // Background thread: read events from shim
-    let recv_handle = std::thread::spawn(move || loop {
-        match recv_ch.recv::<Event>() {
-            Ok(Some(evt)) => {
-                if event_tx.send(evt).is_err() {
-                    break; // main thread dropped receiver
+    let recv_handle = std::thread::spawn(move || {
+        loop {
+            match recv_ch.recv::<Event>() {
+                Ok(Some(evt)) => {
+                    if event_tx.send(evt).is_err() {
+                        break; // main thread dropped receiver
+                    }
                 }
+                Ok(None) => break, // shim closed
+                Err(_) => break,
             }
-            Ok(None) => break, // shim closed
-            Err(_) => break,
         }
     });
 
@@ -304,7 +306,10 @@ mod tests {
 
     #[test]
     fn default_cmd_claude() {
-        assert_eq!(default_cmd(AgentType::Claude), "claude --dangerously-skip-permissions");
+        assert_eq!(
+            default_cmd(AgentType::Claude),
+            "claude --dangerously-skip-permissions"
+        );
     }
 
     #[test]
