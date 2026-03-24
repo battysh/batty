@@ -61,6 +61,47 @@ impl TeamDaemon {
             return self.deliver_channel_message(from, recipient, body);
         }
 
+        // Shim delivery path: when use_shim is enabled and we have a handle for
+        // this recipient, deliver via the structured shim channel.
+        if self.config.team_config.use_shim {
+            if let Some(handle) = self.shim_handles.get_mut(recipient) {
+                if handle.is_ready() {
+                    match handle.send_message(from, body) {
+                        Ok(()) => {
+                            info!(from, to = recipient, "delivered message via shim channel");
+                            self.record_message_routed(from, recipient);
+                            return Ok(MessageDelivery::LivePane);
+                        }
+                        Err(error) => {
+                            warn!(
+                                from,
+                                to = recipient,
+                                error = %error,
+                                "shim channel delivery failed; falling through to inbox"
+                            );
+                        }
+                    }
+                } else if !handle.is_terminal() {
+                    info!(
+                        from,
+                        to = recipient,
+                        state = %handle.state,
+                        "shim agent not ready; deferring to pending queue"
+                    );
+                    self.pending_delivery_queue
+                        .entry(recipient.to_string())
+                        .or_default()
+                        .push(PendingMessage {
+                            from: from.to_string(),
+                            body: body.to_string(),
+                            queued_at: Instant::now(),
+                        });
+                    return Ok(MessageDelivery::DeferredPending);
+                }
+                // Terminal state falls through to inbox
+            }
+        }
+
         let known_recipient = self.config.pane_map.contains_key(recipient)
             || self
                 .config
