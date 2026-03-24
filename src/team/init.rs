@@ -321,13 +321,13 @@ fn apply_init_overrides(yaml: &str, ov: &InitOverrides) -> String {
 
     if ov.use_worktrees.is_some() || ov.nudge_interval_secs.is_some() {
         if let Some(roles) = map
-            .get_mut(&serde_yaml::Value::String("roles".to_string()))
+            .get_mut(serde_yaml::Value::String("roles".to_string()))
             .and_then(|v| v.as_sequence_mut())
         {
             for role in roles.iter_mut() {
                 if let Some(m) = role.as_mapping_mut() {
                     let role_type = m
-                        .get(&serde_yaml::Value::String("role_type".to_string()))
+                        .get(serde_yaml::Value::String("role_type".to_string()))
                         .and_then(|v| v.as_str())
                         .map(str::to_owned);
 

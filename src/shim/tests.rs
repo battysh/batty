@@ -26,6 +26,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             rows: 24,
             cols: 80,
+            pty_log_path: None,
         };
 
         std::thread::spawn(move || {
