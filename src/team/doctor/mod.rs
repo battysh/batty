@@ -11,6 +11,7 @@ use super::standup::MemberState;
 
 mod checks;
 pub(super) mod cleanup;
+mod shim_checks;
 mod util;
 
 use checks::{
@@ -20,6 +21,7 @@ use checks::{
 use cleanup::{
     apply_cleanup_plan, detect_cleanup_plan, render_cleanup_plan, render_cleanup_summary,
 };
+use shim_checks::build_shim_checks;
 use util::{
     file_size, launch_state_path, load_daemon_state, load_launch_state, load_team_config,
     prompt_yes_no, short_prompt_hash,
@@ -115,7 +117,7 @@ impl CleanupPlan {
 }
 
 pub fn run(project_root: &Path, fix: bool, yes: bool) -> Result<String> {
-    let mut report = build_report(project_root)?;
+    let mut report = build_report(project_root, fix)?;
     if !fix {
         return Ok(report);
     }
@@ -145,7 +147,7 @@ pub fn run(project_root: &Path, fix: bool, yes: bool) -> Result<String> {
     Ok(format!("\n{}", render_cleanup_summary(&summary)))
 }
 
-pub fn build_report(project_root: &Path) -> Result<String> {
+pub fn build_report(project_root: &Path, fix: bool) -> Result<String> {
     let launch_state = load_launch_state(&launch_state_path(project_root))?;
     let daemon_state = load_daemon_state(&super::daemon_state_path(project_root))?;
     let team_config = load_team_config(project_root)?;
@@ -160,6 +162,12 @@ pub fn build_report(project_root: &Path) -> Result<String> {
     let board_dependency_graph = build_board_dependency_graph(project_root);
     let performance_checks = build_performance_checks(project_root);
     let orphan_test_sessions = crate::tmux::list_sessions_with_prefix("batty-test-");
+    let use_shim = team_config.as_ref().is_some_and(|c| c.use_shim);
+    let shim_checks = if use_shim {
+        Some(build_shim_checks(project_root, fix))
+    } else {
+        None
+    };
     let log_sizes = vec![
         LogSize {
             name: "daemon.log",
@@ -190,6 +198,7 @@ pub fn build_report(project_root: &Path) -> Result<String> {
         board_dependency_graph: &board_dependency_graph,
         performance_checks: &performance_checks,
         orphan_test_sessions: &orphan_test_sessions,
+        shim_checks: shim_checks.as_ref(),
         log_sizes: &log_sizes,
     }))
 }
@@ -204,6 +213,7 @@ struct DoctorReportData<'a> {
     board_dependency_graph: &'a [String],
     performance_checks: &'a [CheckLine],
     orphan_test_sessions: &'a [String],
+    shim_checks: Option<&'a shim_checks::ShimHealthReport>,
     log_sizes: &'a [LogSize],
 }
 
@@ -218,6 +228,7 @@ fn render_report(report: DoctorReportData<'_>) -> String {
         board_dependency_graph,
         performance_checks,
         orphan_test_sessions,
+        shim_checks,
         log_sizes,
     } = report;
     let mut out = String::new();
@@ -363,6 +374,22 @@ fn render_report(report: DoctorReportData<'_>) -> String {
         }
     }
     out.push('\n');
+
+    if let Some(shim_report) = shim_checks {
+        out.push_str("== Shim Health ==\n");
+        for check in &shim_report.checks {
+            out.push_str(&format!(
+                "{}: {}\n",
+                match check.level {
+                    CheckLevel::Pass => "PASS",
+                    CheckLevel::Warn => "WARN",
+                    CheckLevel::Fail => "FAIL",
+                },
+                check.message
+            ));
+        }
+        out.push('\n');
+    }
 
     out.push_str("== Log Sizes ==\n");
     for log in log_sizes {
@@ -584,7 +611,7 @@ roles:
         )
         .unwrap();
 
-        let report = build_report(tmp.path()).unwrap();
+        let report = build_report(tmp.path(), false).unwrap();
 
         assert!(report.contains("== Launch State =="));
         assert!(report.contains("== Daemon State =="));
@@ -606,7 +633,7 @@ roles:
     fn test_doctor_handles_missing_files() {
         let tmp = tempfile::tempdir().unwrap();
 
-        let report = build_report(tmp.path()).unwrap();
+        let report = build_report(tmp.path(), false).unwrap();
 
         assert!(report.contains("== Launch State =="));
         assert!(report.contains("(missing)"));
@@ -650,7 +677,7 @@ roles:
         git_ok(&worktree_path, &["add", "feature.txt"]);
         git_ok(&worktree_path, &["commit", "-m", "task work"]);
 
-        let report = build_report(tmp.path()).unwrap();
+        let report = build_report(tmp.path(), false).unwrap();
 
         assert!(report.contains("== Board-Git Consistency =="));
         assert!(report.contains("== Board Dependency Graph =="));
@@ -682,7 +709,7 @@ roles:
         )
         .unwrap();
 
-        let report = build_report(tmp.path()).unwrap();
+        let report = build_report(tmp.path(), false).unwrap();
 
         assert!(report.contains("== Performance Regression =="));
         assert!(report.contains("WARN: latest merge test runtime regressed on task #6"));
@@ -710,7 +737,7 @@ roles:
         )
         .unwrap();
 
-        let report = build_report(tmp.path()).unwrap();
+        let report = build_report(tmp.path(), false).unwrap();
 
         assert!(report.contains(
             "PASS: latest merge test runtime is 1100 ms vs rolling 5-merge average 1000 ms"
@@ -729,7 +756,7 @@ roles:
             Some(".batty/worktrees/eng-1-3"),
         );
 
-        let report = build_report(tmp.path()).unwrap();
+        let report = build_report(tmp.path(), false).unwrap();
 
         assert!(report.contains("WARN: task #69 declares missing branch 'eng-1-3/task-69'"));
         assert!(report.contains("WARN: task #69 declares missing worktree"));
@@ -783,7 +810,7 @@ roles:
             ],
         );
 
-        let report = build_report(tmp.path()).unwrap();
+        let report = build_report(tmp.path(), false).unwrap();
 
         assert!(report.contains("WARN: task #69 worktree"));
         assert!(report.contains("has uncommitted changes"));
@@ -801,7 +828,7 @@ roles:
         write_dependency_task(tmp.path(), 11, "Active dependency", "in-progress", &[]);
         write_dependency_task(tmp.path(), 12, "Consumer task", "todo", &[10, 11, 99]);
 
-        let report = build_report(tmp.path()).unwrap();
+        let report = build_report(tmp.path(), false).unwrap();
 
         assert!(report.contains("== Board Dependency Graph =="));
         assert!(report.contains("#12 [todo] Consumer task"));
@@ -816,9 +843,101 @@ roles:
         write_dependency_task(tmp.path(), 20, "Task 20", "todo", &[21]);
         write_dependency_task(tmp.path(), 21, "Task 21", "todo", &[20]);
 
-        let report = build_report(tmp.path()).unwrap();
+        let report = build_report(tmp.path(), false).unwrap();
 
         assert!(report.contains("Circular dependencies:"));
         assert!(report.contains("  WARN: #20 -> #21 -> #20"));
+    }
+
+    #[test]
+    fn doctor_report_includes_shim_health_when_use_shim_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let team_dir = tmp.path().join(".batty").join("team_config");
+        fs::create_dir_all(&team_dir).unwrap();
+        fs::write(
+            team_dir.join("team.yaml"),
+            r#"
+name: test
+use_shim: true
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: manager
+    role_type: manager
+    agent: codex
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    use_worktrees: true
+"#,
+        )
+        .unwrap();
+        fs::write(team_dir.join("architect.md"), "Architect prompt").unwrap();
+        fs::write(team_dir.join("manager.md"), "Manager prompt").unwrap();
+        fs::write(team_dir.join("engineer.md"), "Engineer prompt").unwrap();
+
+        let report = build_report(tmp.path(), false).unwrap();
+
+        assert!(
+            report.contains("== Shim Health =="),
+            "report should contain shim health section"
+        );
+        assert!(report.contains("PTY creation"));
+        assert!(report.contains("socketpair"));
+        assert!(report.contains("vt100 parser"));
+        assert!(report.contains("shim-logs"));
+        assert!(report.contains("classifier claude"));
+        assert!(report.contains("classifier codex"));
+        assert!(report.contains("classifier kiro"));
+        assert!(report.contains("classifier generic"));
+    }
+
+    #[test]
+    fn doctor_report_skips_shim_health_when_use_shim_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_team_config(tmp.path());
+
+        let report = build_report(tmp.path(), false).unwrap();
+
+        assert!(
+            !report.contains("== Shim Health =="),
+            "report should not contain shim health section when use_shim is false"
+        );
+    }
+
+    #[test]
+    fn doctor_report_skips_shim_health_when_no_team_config() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let report = build_report(tmp.path(), false).unwrap();
+
+        assert!(!report.contains("== Shim Health =="));
+    }
+
+    #[test]
+    fn doctor_fix_creates_shim_logs_when_use_shim_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let team_dir = tmp.path().join(".batty").join("team_config");
+        fs::create_dir_all(&team_dir).unwrap();
+        fs::write(
+            team_dir.join("team.yaml"),
+            r#"
+name: test
+use_shim: true
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+"#,
+        )
+        .unwrap();
+        fs::write(team_dir.join("architect.md"), "Architect prompt").unwrap();
+
+        let report = build_report(tmp.path(), true).unwrap();
+
+        assert!(report.contains("== Shim Health =="));
+        assert!(report.contains("shim-logs directory: created by --fix"));
+        assert!(tmp.path().join(".batty").join("shim-logs").is_dir());
     }
 }
