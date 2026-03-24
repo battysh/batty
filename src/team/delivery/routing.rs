@@ -818,10 +818,10 @@ mod tests {
                 cost: Default::default(),
                 grafana: Default::default(),
                 use_shim: false,
-                    auto_respawn_on_crash: false,
-                    shim_health_check_interval_secs: 60,
-                    shim_health_timeout_secs: 120,
-                    shim_shutdown_timeout_secs: 30,
+                auto_respawn_on_crash: false,
+                shim_health_check_interval_secs: 60,
+                shim_health_timeout_secs: 120,
+                shim_shutdown_timeout_secs: 30,
                 event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 retro_min_duration_secs: 60,
                 roles,
@@ -1279,8 +1279,14 @@ mod tests {
         // Create a shim handle in idle state
         let (parent, mut child) = crate::shim::protocol::socketpair().unwrap();
         let channel = crate::shim::protocol::Channel::new(parent);
-        let mut handle =
-            crate::team::daemon::agent_handle::AgentHandle::new("eng-1".into(), channel, 999, "claude".into(), "claude".into(), std::path::PathBuf::from("/tmp/test"));
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "eng-1".into(),
+            channel,
+            999,
+            "claude".into(),
+            "claude".into(),
+            std::path::PathBuf::from("/tmp/test"),
+        );
         handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
         daemon.shim_handles.insert("eng-1".to_string(), handle);
 
@@ -1313,8 +1319,14 @@ mod tests {
         // Create a shim handle still in Starting state
         let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
         let channel = crate::shim::protocol::Channel::new(parent);
-        let handle =
-            crate::team::daemon::agent_handle::AgentHandle::new("eng-1".into(), channel, 999, "claude".into(), "claude".into(), std::path::PathBuf::from("/tmp/test"));
+        let handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "eng-1".into(),
+            channel,
+            999,
+            "claude".into(),
+            "claude".into(),
+            std::path::PathBuf::from("/tmp/test"),
+        );
         daemon.shim_handles.insert("eng-1".to_string(), handle);
 
         let result = daemon.deliver_message("manager", "eng-1", "wait for me");
@@ -1336,8 +1348,14 @@ mod tests {
 
         let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
         let channel = crate::shim::protocol::Channel::new(parent);
-        let mut handle =
-            crate::team::daemon::agent_handle::AgentHandle::new("eng-1".into(), channel, 999, "claude".into(), "claude".into(), std::path::PathBuf::from("/tmp/test"));
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "eng-1".into(),
+            channel,
+            999,
+            "claude".into(),
+            "claude".into(),
+            std::path::PathBuf::from("/tmp/test"),
+        );
         handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
         daemon.shim_handles.insert("eng-1".to_string(), handle);
 
