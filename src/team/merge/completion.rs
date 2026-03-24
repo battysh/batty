@@ -4,9 +4,10 @@
 //! Validates commits, runs tests, evaluates auto-merge policy, performs the
 //! merge, and handles retries and escalation.
 
+use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use crate::team::artifact::append_test_timing_record;
@@ -14,9 +15,12 @@ use crate::team::artifact::append_test_timing_record;
 use crate::team::artifact::read_test_timing_log;
 use crate::team::auto_merge::{self, AutoMergeDecision};
 use crate::team::daemon::TeamDaemon;
-use crate::team::task_loop::{current_worktree_branch, read_task_title, run_tests_in_worktree};
+use crate::team::task_loop::{
+    checkout_worktree_branch_from_main, current_worktree_branch, engineer_base_branch_name,
+    read_task_title, run_tests_in_worktree,
+};
 
-use super::git_ops::{commits_ahead_of_main, now_unix};
+use super::git_ops::{commits_ahead_of_main, now_unix, run_git_with_context};
 use super::lock::{MergeLock, MergeOutcome};
 use super::operations::merge_engineer_branch;
 
