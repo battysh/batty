@@ -76,6 +76,8 @@ mod launcher;
 mod poll;
 #[path = "daemon/shim_spawn.rs"]
 mod shim_spawn;
+#[path = "daemon/shim_state.rs"]
+mod shim_state;
 #[path = "daemon/state.rs"]
 mod state;
 #[path = "telegram_bridge.rs"]

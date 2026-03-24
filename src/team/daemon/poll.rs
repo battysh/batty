@@ -209,21 +209,12 @@ impl TeamDaemon {
             std::thread::sleep(self.poll_interval);
         }
 
-        // Shut down all shim subprocesses
-        if !self.shim_handles.is_empty() {
-            info!(
-                count = self.shim_handles.len(),
-                "sending shutdown to shim subprocesses"
-            );
-            let names: Vec<String> = self.shim_handles.keys().cloned().collect();
-            for name in &names {
-                if let Some(handle) = self.shim_handles.get_mut(name) {
-                    if let Err(error) = handle.send_shutdown(10) {
-                        warn!(member = name.as_str(), error = %error, "failed to send shim shutdown");
-                        let _ = handle.send_kill();
-                    }
-                }
-            }
+        // Graceful shutdown of all shim subprocesses
+        self.shutdown_all_shims();
+
+        // Save shim state for session resume
+        if let Err(error) = self.save_shim_state() {
+            warn!(error = %error, "failed to save shim state for resume");
         }
 
         let uptime = started_at.elapsed().as_secs();
@@ -232,5 +223,79 @@ impl TeamDaemon {
         }
         self.record_daemon_stopped(shutdown_reason, uptime);
         Ok(())
+    }
+
+    /// Send Shutdown to all active shim handles, wait for exit, fall back to Kill.
+    fn shutdown_all_shims(&mut self) {
+        if self.shim_handles.is_empty() {
+            return;
+        }
+
+        let timeout_secs = self.config.team_config.shim_shutdown_timeout_secs;
+        info!(
+            count = self.shim_handles.len(),
+            timeout_secs,
+            "sending graceful shutdown to shim subprocesses"
+        );
+
+        // Phase 1: Send Shutdown command to all handles
+        let names: Vec<String> = self.shim_handles.keys().cloned().collect();
+        for name in &names {
+            if let Some(handle) = self.shim_handles.get_mut(name) {
+                if handle.is_terminal() {
+                    continue;
+                }
+                if let Err(error) = handle.send_shutdown(timeout_secs) {
+                    warn!(
+                        member = name.as_str(),
+                        error = %error,
+                        "failed to send shim shutdown, sending kill"
+                    );
+                    let _ = handle.send_kill();
+                }
+            }
+        }
+
+        // Phase 2: Wait for child processes to exit within the timeout
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs as u64);
+        let mut pids: Vec<(String, u32)> = names
+            .iter()
+            .filter_map(|name| {
+                self.shim_handles
+                    .get(name)
+                    .filter(|h| !h.is_terminal())
+                    .map(|h| (name.clone(), h.child_pid))
+            })
+            .collect();
+
+        while !pids.is_empty() && Instant::now() < deadline {
+            pids.retain(|(name, pid)| {
+                // Check if process still alive via kill(0)
+                let alive = unsafe { libc::kill(*pid as i32, 0) } == 0;
+                if !alive {
+                    debug!(member = name.as_str(), pid, "shim process exited cleanly");
+                }
+                alive
+            });
+            if !pids.is_empty() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+
+        // Phase 3: Force-kill any survivors
+        for (name, pid) in &pids {
+            warn!(
+                member = name.as_str(),
+                pid,
+                "shim did not exit within timeout, sending Kill"
+            );
+            if let Some(handle) = self.shim_handles.get_mut(name) {
+                let _ = handle.send_kill();
+            }
+            // Also send SIGKILL directly
+            unsafe {
+                libc::kill(*pid as i32, libc::SIGKILL);
+            }
+        }
     }
 }
