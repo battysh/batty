@@ -305,14 +305,94 @@ Each pane's supervision (prompt detection, input formatting, health checks, rest
 
 The constraint: all backends in a team share the same board, message format, and workflow policies. Backend differences are confined to the pane-level lifecycle (how to launch, how to detect state, how to restart). The daemon's poll loop treats every agent identically through the trait interface.
 
+## Agent Shim Abstraction
+
+The agent shim is a standalone process that wraps a single AI coding CLI (Claude Code, Codex, Kiro, or any interactive terminal program) behind a message-oriented interface. It replaces tmux-based agent management (capture-pane polling, paste-buffer injection) with a clean process abstraction that the daemon controls via structured messages over a socketpair.
+
+### Why the Shim
+
+The tmux-based agent management accumulated three fundamental problems:
+
+1. **Polling latency** — tmux capture-pane runs on a 5-second poll cycle. The shim detects state changes within milliseconds via live vt100 parsing.
+2. **Injection fragility** — tmux paste-buffer injection is a multi-step protocol (load-buffer → paste-buffer → retry) that fails silently. The shim writes directly to the PTY master — a single syscall.
+3. **Tight coupling** — the watcher module, screen classifier, JSONL tracker, and tmux interactions are interleaved across multiple modules. The shim encapsulates all agent IO behind a typed channel protocol.
+
+### Shim Architecture
+
+```
+Daemon (batty start)
+    │
+    ├── fork/exec → batty shim --id eng-1 --agent-type claude --cmd "claude ..." --cwd /path
+    │   └── fd 3: socketpair(SEQPACKET) — bidirectional Command/Event channel
+    │
+    ├── fork/exec → batty shim --id eng-2 --agent-type codex --cmd "codex ..." --cwd /path
+    │   └── fd 3: socketpair(SEQPACKET)
+    │
+    └── fork/exec → batty shim --id eng-3 --agent-type claude --cmd "claude ..." --cwd /path
+        └── fd 3: socketpair(SEQPACKET)
+```
+
+Each shim is a child process of the daemon. It owns the agent's PTY, a headless vt100 terminal emulator, and per-agent-type state classifiers. The daemon holds an `AgentHandle` per shim — a child process handle and a bidirectional channel. No tmux, no screen-scraping, no filesystem coordination.
+
+### What the Shim Owns
+
+- **PTY lifecycle** — creates master/slave PTY pair via portable-pty, spawns agent CLI on the slave side
+- **Virtual screen** — vt100 crate provides a headless terminal emulator. All PTY output is parsed into a cell grid identical to what a real terminal would display. Change detection uses FNV-1a hashing.
+- **State classification** — per-agent-type classifiers (Claude, Codex, Kiro, Generic) detect idle prompts, working indicators, and context exhaustion patterns from the virtual screen
+- **Message injection** — direct write to PTY master. One syscall, no paste-buffer dance.
+- **Response extraction** — diffs pre-injection and post-completion screen content to extract the agent's response
+- **JSONL session tracking** — optional sidecar that tails Claude/Codex session files for enhanced state signals
+
+### What Stays Outside the Shim
+
+- Workflow policy (dispatch rules, review gates, merge logic)
+- Topology and routing (who talks to whom)
+- Board operations (kanban state)
+- Automation (nudges, standups, retros, interventions)
+- Telegram bridge
+- CLI user interface
+
+### Protocol
+
+The daemon sends Commands (`SendMessage`, `CaptureScreen`, `GetState`, `Resize`, `Shutdown`, `Kill`, `Ping`) and receives Events (`Ready`, `StateChanged`, `Completion`, `Died`, `ContextExhausted`, `ScreenCapture`, `State`, `Pong`, `Error`, `Warning`). All messages are JSON-serialized over a Unix socketpair with message boundaries.
+
+### State Machine
+
+```
+Starting → Ready → Idle ⇄ Working → Dead
+                     │                ↑
+                     └──→ ContextExhausted
+```
+
+State transitions emit events immediately. The daemon reacts to events rather than polling — enabling sub-second response to agent completion, crashes, and context exhaustion.
+
+### Tmux as Display Layer
+
+Tmux remains for visual monitoring. Each shim writes raw PTY output (including ANSI escape sequences) to a log file. Tmux panes run `tail -f` on these logs, so `batty attach` shows live agent output. Tmux is read-only display; the shim owns all agent IO.
+
+### Configuration
+
+Shim mode is enabled in team.yaml:
+
+```yaml
+use_shim: true   # default: true (shim mode)
+                  # false: legacy tmux-direct mode (deprecated)
+```
+
+The transition path supports both modes simultaneously during migration. Once shim mode is validated, legacy tmux-direct management will be removed.
+
+Detailed specification: `planning/shim-spec.md`. POC: `poc/agent-shim/`.
+
 ## Key Design Decisions
 
-**Why tmux?** Output capture (pipe-pane), input injection (send-keys/paste-buffer), status bar, panes, session persistence — all for free. No custom terminal code.
+**Why the shim over tmux?** Tmux was the right starting point — it provided output capture, input injection, status bar, and session persistence for free. But as the system scaled, tmux became the #1 source of operational fragility: 5-second poll latency, silent paste-buffer failures, and tight coupling between supervision and terminal management. The shim provides the same capabilities with millisecond latency, reliable message delivery, and clean separation of concerns. Tmux remains as a display layer.
 
 **Why YAML org chart?** One file defines the entire team topology. Easy to version, easy to change, easy to reason about.
 
-**Why daemon?** Continuous background monitoring enables reactive behaviors (status tracking, message delivery, Telegram relay) without blocking the CLI.
+**Why daemon?** Continuous background monitoring enables reactive behaviors (status tracking, message delivery, Telegram relay) without blocking the CLI. With the shim, the daemon becomes event-driven rather than poll-driven.
 
 **Why inbox-based messaging?** Decouples sender from receiver. Messages queue up and deliver when the target agent is ready. Prevents message loss during agent restarts.
 
 **Why separate architect/manager/engineer?** Strategy, tactics, and execution are different skills. Splitting them prevents scope creep and evaluation bias. Each role has a focused prompt template.
+
+**Why socketpair over named sockets?** Inherited file descriptors require no filesystem coordination, no discovery protocol, and no cleanup. The channel exists exactly as long as the parent-child relationship exists.

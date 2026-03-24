@@ -2,12 +2,13 @@
 
 ## Thesis
 
-Developers need a way to run teams of AI agents that coordinate, communicate, and ship code autonomously. Batty implements this as a hierarchical agent command system on top of tmux.
+Developers need a way to run teams of AI agents that coordinate, communicate, and ship code autonomously. Batty implements this as a hierarchical agent command system with a process-per-agent shim architecture and tmux as the visual monitoring layer.
 
 ## Principles
 
-- tmux is the runtime. Not a stopgap — the permanent architecture.
-- Compose, don't monolith. tmux + kanban-md + BYO agents.
+- The shim is the agent runtime. Each agent runs inside a dedicated shim process that owns its PTY, detects its state, and communicates via structured messages.
+- tmux is the display layer. Humans see agent output in tmux panes, but all agent IO flows through shims.
+- Compose, don't monolith. shim + kanban-md + BYO agents.
 - Ship fast. Validate with real projects before adding complexity.
 - Markdown as backend. Files in, files out, git tracks everything.
 - Hierarchy creates focus. Architect thinks, manager coordinates, engineers build.
@@ -305,12 +306,63 @@ Reduce crash surface in production paths. Make every failure diagnosable.
 
 ---
 
+## Agent Shim (In Progress — v0.7.0)
+
+Replace tmux-based agent management with a process-per-agent shim architecture. The shim wraps each AI coding CLI behind a message-oriented interface, eliminating tmux capture-pane polling, paste-buffer injection fragility, and the tight coupling between supervision and terminal management.
+
+**Motivation:** Tmux served as the original agent runtime because it provided output capture, input injection, and session persistence for free. But as batty scaled to multi-agent teams, tmux became the primary source of operational fragility: 5-second poll latency masked state changes, paste-buffer injection failed silently, and screen-scraping required agent-specific classifiers entangled with tmux internals. The shim provides sub-second state detection, reliable direct-PTY message delivery, and clean encapsulation of all agent IO behind a typed channel protocol.
+
+**POC:** Validated in `poc/agent-shim/`. Protocol types, all 4 classifiers, PTY management, vt100 virtual screen, state machine, message injection, and response extraction are implemented and tested.
+
+**Spec:** `planning/shim-spec.md`
+
+### Wave 1: Shim Core (T-336, T-337)
+
+Move POC into production and prove it works end-to-end.
+
+- **Integrate shim into main crate** — protocol types, classifiers, shim runtime as modules under `src/`. `batty shim` subcommand as the entry point the daemon will fork/exec. Wire dependencies: portable-pty, vt100, libc. (`T-336`)
+- **Chat frontend and integration tests** — `batty chat` command for interactive shim usage. Integration tests with real PTY (bash): send commands, verify completions, test state transitions, message queuing. (`T-337`)
+
+**Exit:** `batty shim` runs as a standalone process. `batty chat` provides interactive access. Integration tests validate core mechanics with real PTY interaction.
+
+### Wave 2: Daemon Adoption (T-338, T-339)
+
+Wire the daemon to manage agents through shims instead of tmux.
+
+- **Spawn agents as shim subprocesses** — daemon creates socketpair, fork/execs `batty shim` per agent, manages via AgentHandle (channel + process). Message delivery through shim channel. State detection via shim events. Readiness gate via Ready event. Coexists with legacy tmux mode via config flag. (`T-338`)
+- **Tmux as display layer** — shims write raw PTY output to log files. Tmux panes run `tail -f` for visual monitoring. `batty attach` shows live output. Status bar driven by shim events. (`T-339`)
+
+**Exit:** The daemon operates agents through shims. `batty attach` shows live output. `batty status` reports agent states from shim events. Legacy mode available via `use_shim: false`.
+
+### Wave 3: Lifecycle & Fidelity (T-340, T-341)
+
+Handle the full operational lifecycle and enhance state detection.
+
+- **Agent lifecycle via shim events** — crash recovery (Died events → respawn), context exhaustion handling (ContextExhausted → restart with task summary), graceful shutdown (Shutdown command propagation), health monitoring (Ping/Pong), stale detection (Warning events), session resume. (`T-340`)
+- **JSONL session tracking** — port Claude/Codex JSONL trackers into shim classifiers. Merge priority: screen > tracker for Claude, tracker > screen for Codex completion. Graceful degradation when session files unavailable. (`T-341`)
+
+**Exit:** Full agent lifecycle handled through shim events. JSONL tracking enhances state detection for Claude and Codex. Crash recovery and context exhaustion are automated.
+
+### Wave 4: Cleanup & Validation (T-342, T-343)
+
+Remove legacy code and validate the complete system.
+
+- **Remove tmux-direct agent management** — delete watcher module, tmux capture-pane polling, paste-buffer injection, legacy compatibility path. Keep tmux for display. Dead code audit. (`T-342`)
+- **End-to-end validation** — full multi-agent team run with shim backend. Mixed backends (Claude + Codex). Test dispatch, review, merge, crash recovery, context exhaustion, session resume. Performance validation (state detection latency). (`T-343`)
+
+**Exit:** Legacy agent management code removed. Multi-agent team operates correctly through shims. State detection latency improved from 5-second poll cycles to sub-second event delivery.
+
+**Success criteria for v0.7.0:** A multi-agent team run completes autonomously with shim backend, with no regressions vs. tmux-direct mode and measurably better state detection latency.
+
+---
+
 ## Tech Stack
 
 | Layer | Choice |
 |---|---|
 | Core | Rust (clap + tokio) |
-| Runtime | tmux |
+| Agent Runtime | Shim (portable-pty + vt100) |
+| Display | tmux |
 | Config | YAML (team) + TOML (project) |
 | Tasks | Markdown kanban board |
 | Logs | JSON lines |
@@ -324,10 +376,12 @@ Reduce crash surface in production paths. Make every failure diagnosable.
 - ~~interventions.rs ~2,400 lines~~ — decomposed into 7 submodules.
 - ~~dispatch.rs ~700 lines~~ — stable.
 - All modules now under 2,300 lines after decomposition wave (#312–#321).
+- ~~tmux as agent runtime~~ — replaced by shim architecture (v0.7.0). tmux retained as display layer only.
 
 ## Risks
 
 1. **Agent reliability** — coding agents produce inconsistent output. Mitigated by test gating and manager review.
-2. **Message delivery** — tmux paste injection can fail if pane is in wrong state. Mitigated by daemon retry and status checking.
-3. **Context limits** — long-running agents hit context windows. Mitigated by focused task scoping and fresh agent sessions per task.
+2. ~~**Message delivery** — tmux paste injection can fail if pane is in wrong state.~~ Resolved by shim direct-PTY write.
+3. **Context limits** — long-running agents hit context windows. Mitigated by focused task scoping, fresh agent sessions per task, and shim ContextExhausted event detection.
 4. **Coordination overhead** — multi-agent communication adds latency. Mitigated by keeping the hierarchy shallow and messages concise.
+5. **Shim complexity** — the shim adds a new process boundary. Mitigated by the typed channel protocol, comprehensive integration tests, and the validated POC.
