@@ -143,43 +143,28 @@ fn collect_init_overrides() -> Result<team::InitOverrides> {
     println!("── Orchestrator ──────────────────────────────────────────");
     println!("The orchestrator is a dedicated tmux pane that runs automated");
     println!("triage, review routing, dispatch-gap recovery, and standups.");
-    ov.orchestrator_pane = Some(confirm(
-        "Enable orchestrator pane?",
-        true,
-    )?);
+    ov.orchestrator_pane = Some(confirm("Enable orchestrator pane?", true)?);
 
     println!();
     println!("── Board & Dispatch ──────────────────────────────────────");
     println!("Auto-dispatch automatically assigns todo tasks from the board");
     println!("to idle engineers without manual intervention.");
-    ov.auto_dispatch = Some(confirm(
-        "Enable auto-dispatch of board tasks?",
-        true,
-    )?);
+    ov.auto_dispatch = Some(confirm("Enable auto-dispatch of board tasks?", true)?);
 
     println!();
     println!("── Engineer Worktrees ────────────────────────────────────");
     println!("When enabled, each engineer gets an isolated git worktree.");
     println!("New task assignments create a fresh branch in that worktree,");
     println!("keeping engineers from stepping on each other's changes.");
-    ov.use_worktrees = Some(confirm(
-        "Enable git worktrees for engineers?",
-        true,
-    )?);
+    ov.use_worktrees = Some(confirm("Enable git worktrees for engineers?", true)?);
 
     println!();
     println!("── Automation: Nudges & Standups ─────────────────────────");
     println!("Timeout nudges ping agents that appear stuck or idle for too long.");
-    ov.timeout_nudges = Some(confirm(
-        "Enable timeout nudges?",
-        true,
-    )?);
+    ov.timeout_nudges = Some(confirm("Enable timeout nudges?", true)?);
 
     println!("Standups periodically ask agents to report their status.");
-    ov.standups = Some(confirm(
-        "Enable periodic standups?",
-        true,
-    )?);
+    ov.standups = Some(confirm("Enable periodic standups?", true)?);
 
     println!();
     println!("── Automation: Interventions ──────────────────────────────");
@@ -187,28 +172,17 @@ fn collect_init_overrides() -> Result<team::InitOverrides> {
     println!();
 
     println!("Triage: auto-routes new tasks to the right manager/engineer.");
-    ov.triage_interventions = Some(confirm(
-        "Enable triage interventions?",
-        true,
-    )?);
+    ov.triage_interventions = Some(confirm("Enable triage interventions?", true)?);
 
     println!("Review: nudges reviewers and escalates stale reviews.");
-    ov.review_interventions = Some(confirm(
-        "Enable review interventions?",
-        true,
-    )?);
+    ov.review_interventions = Some(confirm("Enable review interventions?", true)?);
 
     println!("Owned-task recovery: re-dispatches tasks stuck on a dead agent.");
-    ov.owned_task_interventions = Some(confirm(
-        "Enable owned-task recovery?",
-        true,
-    )?);
+    ov.owned_task_interventions = Some(confirm("Enable owned-task recovery?", true)?);
 
     println!("Manager dispatch: nudges managers when todo tasks pile up.");
-    ov.manager_dispatch_interventions = Some(confirm(
-        "Enable manager dispatch interventions?",
-        true,
-    )?);
+    ov.manager_dispatch_interventions =
+        Some(confirm("Enable manager dispatch interventions?", true)?);
 
     println!("Architect utilization: nudges the architect when engineers are idle.");
     ov.architect_utilization_interventions = Some(confirm(
@@ -220,10 +194,7 @@ fn collect_init_overrides() -> Result<team::InitOverrides> {
     println!("── Auto-Merge ───────────────────────────────────────────");
     println!("When enabled, completed engineer branches that pass tests and");
     println!("score above a confidence threshold are merged automatically.");
-    ov.auto_merge_enabled = Some(confirm(
-        "Enable auto-merge?",
-        false,
-    )?);
+    ov.auto_merge_enabled = Some(confirm("Enable auto-merge?", false)?);
 
     println!();
     println!("── Timing (seconds) ─────────────────────────────────────");

@@ -3,10 +3,10 @@
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
-use super::super::*;
 use super::super::helpers::{
     board_dir, ensure_board_initialized, ensure_kanban_available, ensure_tmux_session_ready,
 };
+use super::super::*;
 use super::STARTUP_PREFLIGHT_RESPAWN_DELAY;
 
 impl TeamDaemon {

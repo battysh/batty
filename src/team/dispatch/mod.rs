@@ -85,8 +85,8 @@ impl TeamDaemon {
             .unwrap_or("claude");
 
         let team_config_dir = self.config.project_root.join(".batty").join("team_config");
-        let use_worktrees =
-            (self.is_git_repo || self.is_multi_repo) && member.as_ref().map(|m| m.use_worktrees).unwrap_or(false);
+        let use_worktrees = (self.is_git_repo || self.is_multi_repo)
+            && member.as_ref().map(|m| m.use_worktrees).unwrap_or(false);
         if !use_worktrees {
             debug!(
                 member = %engineer,

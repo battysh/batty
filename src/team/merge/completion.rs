@@ -173,7 +173,11 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
             MergeLock::acquire(daemon.project_root()).context("failed to acquire merge lock")?;
 
         match if daemon.is_multi_repo {
-            merge_multi_repo_engineer_branch(daemon.project_root(), engineer, &daemon.sub_repo_names)?
+            merge_multi_repo_engineer_branch(
+                daemon.project_root(),
+                engineer,
+                &daemon.sub_repo_names,
+            )?
         } else {
             merge_engineer_branch(daemon.project_root(), engineer)?
         } {
@@ -375,7 +379,6 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     Ok(())
 }
 
-
 /// Merge engineer branches across all sub-repos in a multi-repo project.
 pub(crate) fn merge_multi_repo_engineer_branch(
     project_root: &Path,
@@ -537,7 +540,6 @@ fn record_merge_test_timing(
 
     Ok(())
 }
-
 
 /// For multi-repo: sum commits ahead of main across all sub-repo worktrees.
 fn multi_repo_commits_ahead_of_main(worktree_dir: &Path, sub_repo_names: &[String]) -> Result<u32> {

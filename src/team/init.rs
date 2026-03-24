@@ -214,12 +214,7 @@ fn apply_init_overrides(yaml: &str, ov: &InitOverrides) -> String {
         None => return yaml.to_string(),
     };
 
-    fn set_bool(
-        map: &mut serde_yaml::Mapping,
-        section: &str,
-        key: &str,
-        val: Option<bool>,
-    ) {
+    fn set_bool(map: &mut serde_yaml::Mapping, section: &str, key: &str, val: Option<bool>) {
         if let Some(v) = val {
             let sec = map
                 .entry(serde_yaml::Value::String(section.to_string()))
@@ -1131,7 +1126,9 @@ mod tests {
         );
         assert_eq!(
             workflow_policy
-                .get(&serde_yaml::Value::String("review_nudge_threshold_secs".into()))
+                .get(&serde_yaml::Value::String(
+                    "review_nudge_threshold_secs".into()
+                ))
                 .and_then(|v| v.as_u64()),
             Some(456)
         );
