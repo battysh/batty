@@ -207,6 +207,12 @@ pub enum Command {
     /// Estimate current run cost from agent session files
     Cost,
 
+    /// Dynamically scale team topology (add/remove agents)
+    Scale {
+        #[command(subcommand)]
+        command: ScaleCommand,
+    },
+
     /// Dump diagnostic state from Batty state files
     Doctor {
         /// Remove orphan branches and worktrees after confirmation
@@ -510,6 +516,27 @@ pub enum ReviewAction {
 pub enum AutoMergeAction {
     Enable,
     Disable,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ScaleCommand {
+    /// Set engineer instance count (scales up or down)
+    Engineers {
+        /// Target number of engineers per manager
+        count: u32,
+    },
+    /// Add a new manager role
+    AddManager {
+        /// Name for the new manager role
+        name: String,
+    },
+    /// Remove a manager role
+    RemoveManager {
+        /// Name of the manager role to remove
+        name: String,
+    },
+    /// Show current topology (instance counts)
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
