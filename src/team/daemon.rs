@@ -175,6 +175,7 @@ pub struct TeamDaemon {
 }
 
 impl TeamDaemon {
+    #[allow(dead_code)]
     pub(super) fn watcher_mut(&mut self, name: &str) -> Result<&mut SessionWatcher> {
         self.watchers
             .get_mut(name)
