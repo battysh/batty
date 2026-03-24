@@ -212,6 +212,7 @@ mod tests {
                 layout: None,
                 cost: Default::default(),
                 grafana: Default::default(),
+                use_shim: false,
                 event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 retro_min_duration_secs: 60,
                 roles: vec![RoleDef {
@@ -307,6 +308,7 @@ mod tests {
                         layout: None,
                         cost: Default::default(),
                         grafana: Default::default(),
+                        use_shim: false,
                         event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                         retro_min_duration_secs: 60,
                         roles: Vec::new(),
@@ -363,6 +365,7 @@ mod tests {
                 last_health_check: Instant::now(),
                 last_uncommitted_warn: HashMap::new(),
                 pending_delivery_queue: HashMap::new(),
+                shim_handles: HashMap::new(),
             };
 
             backdate_idle_grace(&mut daemon, "scientist");
@@ -439,6 +442,7 @@ mod tests {
                     layout: None,
                     cost: Default::default(),
                     grafana: Default::default(),
+                    use_shim: false,
                     event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                     retro_min_duration_secs: 60,
                     roles: Vec::new(),
@@ -486,6 +490,7 @@ mod tests {
             last_health_check: Instant::now(),
             last_uncommitted_warn: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
+            shim_handles: HashMap::new(),
         };
 
         let root = inbox::inboxes_root(tmp.path());
@@ -549,6 +554,7 @@ mod tests {
                     layout: None,
                     cost: Default::default(),
                     grafana: Default::default(),
+                    use_shim: false,
                     event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                     retro_min_duration_secs: 60,
                     roles: Vec::new(),
@@ -624,6 +630,7 @@ mod tests {
             last_health_check: Instant::now(),
             last_uncommitted_warn: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
+            shim_handles: HashMap::new(),
         };
 
         assert_eq!(daemon.automation_sender_for("eng-1"), "lead");
@@ -891,6 +898,7 @@ mod tests {
                 layout: None,
                 cost: Default::default(),
                 grafana: Default::default(),
+                use_shim: false,
                 event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 retro_min_duration_secs: 60,
                 roles: Vec::new(),
@@ -924,6 +932,7 @@ mod tests {
                 layout: None,
                 cost: Default::default(),
                 grafana: Default::default(),
+                use_shim: false,
                 event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 retro_min_duration_secs: 60,
                 roles: Vec::new(),
@@ -1113,6 +1122,7 @@ mod tests {
                 layout: None,
                 cost: Default::default(),
                 grafana: Default::default(),
+                use_shim: false,
                 event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 retro_min_duration_secs: 60,
                 roles: Vec::new(),

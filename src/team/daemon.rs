@@ -54,6 +54,8 @@ use crate::agent::{self, BackendHealth};
 use crate::tmux;
 use dispatch::DispatchQueueEntry;
 
+#[path = "daemon/agent_handle.rs"]
+pub(super) mod agent_handle;
 #[path = "daemon/automation.rs"]
 mod automation;
 #[path = "dispatch/mod.rs"]
@@ -162,6 +164,8 @@ pub struct TeamDaemon {
     /// Messages deferred because the target agent was still starting.
     /// Drained automatically when the agent transitions to ready.
     pub(super) pending_delivery_queue: HashMap<String, Vec<PendingMessage>>,
+    /// Per-agent shim handles (only populated when `use_shim` is true).
+    pub(super) shim_handles: HashMap<String, agent_handle::AgentHandle>,
 }
 
 impl TeamDaemon {
@@ -325,6 +329,7 @@ impl TeamDaemon {
             last_health_check: Instant::now() - Duration::from_secs(3600),
             last_uncommitted_warn: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
+            shim_handles: HashMap::new(),
         })
     }
 

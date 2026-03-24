@@ -40,6 +40,11 @@ pub struct TeamConfig {
     pub cost: CostConfig,
     #[serde(default)]
     pub grafana: GrafanaConfig,
+    /// When true, agents are spawned as shim subprocesses instead of
+    /// directly in tmux panes. The shim manages PTY, state classification,
+    /// and message delivery over a structured channel.
+    #[serde(default)]
+    pub use_shim: bool,
     #[serde(default = "default_event_log_max_bytes")]
     pub event_log_max_bytes: u64,
     #[serde(default = "default_retro_min_duration_secs")]

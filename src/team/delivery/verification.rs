@@ -477,6 +477,7 @@ mod tests {
                     layout: None,
                     cost: Default::default(),
                     grafana: Default::default(),
+                    use_shim: false,
                     event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                     retro_min_duration_secs: 60,
                     roles: Vec::new(),
@@ -524,6 +525,7 @@ mod tests {
             last_health_check: Instant::now(),
             last_uncommitted_warn: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
+            shim_handles: HashMap::new(),
         }
     }
 
@@ -574,6 +576,7 @@ mod tests {
                     layout: None,
                     cost: Default::default(),
                     grafana: Default::default(),
+                    use_shim: false,
                     event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                     retro_min_duration_secs: 60,
                     roles: Vec::new(),
