@@ -210,7 +210,7 @@ impl TeamDaemon {
                 continue;
             }
 
-            let Some(pane_id) = self.config.pane_map.get(name).cloned() else {
+            let Some(_pane_id) = self.config.pane_map.get(name).cloned() else {
                 continue;
             };
 
@@ -233,7 +233,7 @@ impl TeamDaemon {
                         info!(from = %msg.from, to = %name, id = %msg.id, "delivering inbox message via shim");
                         if let Some(handle) = self.shim_handles.get_mut(name) {
                             if handle.is_ready() {
-                                handle.send_message(&msg.from, &msg.body).map(|()| ())
+                                handle.send_message(&msg.from, &msg.body)
                             } else {
                                 // Not ready — leave in inbox for next poll
                                 continue;

@@ -10,6 +10,7 @@ use super::{CONTEXT_RESTART_COOLDOWN, format_checkpoint_section};
 
 impl TeamDaemon {
     /// Handle a stalled agent — no output change for longer than the configured threshold.
+    #[allow(dead_code)]
     pub(in super::super) fn handle_stalled_agent(
         &mut self,
         member_name: &str,
@@ -91,8 +92,7 @@ impl TeamDaemon {
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         let assignment = Self::restart_assignment_message(&task);
-        let launch =
-            self.launch_task_assignment(member_name, &assignment, Some(task.id), false)?;
+        let launch = self.launch_task_assignment(member_name, &assignment, Some(task.id), false)?;
         let mut restart_notice = format!(
             "Restarted after stall ({}s no output). Continue task #{} from the current worktree state.",
             stall_secs, task.id
@@ -121,6 +121,7 @@ impl TeamDaemon {
     }
 
     /// Escalate a stalled agent to its manager after max restarts exceeded.
+    #[allow(dead_code)]
     fn escalate_stalled_agent(
         &mut self,
         member: &MemberInstance,
@@ -157,6 +158,7 @@ impl TeamDaemon {
     }
 
     /// Count prior stall restarts for a given task from the event log.
+    #[allow(dead_code)]
     pub(in super::super) fn stall_restart_count(&self, task_id: u32) -> Result<u32> {
         let events_path = self
             .config

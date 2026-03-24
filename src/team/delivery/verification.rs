@@ -290,6 +290,7 @@ impl TeamDaemon {
         false
     }
 
+    #[allow(dead_code)]
     pub(in crate::team) fn verify_message_delivered_with_lines(
         &mut self,
         from: &str,
@@ -367,6 +368,7 @@ impl TeamDaemon {
     /// be stalled waiting for an agent to start. If the agent isn't ready,
     /// the message is deferred to inbox and will be picked up by
     /// `deliver_inbox_messages` once the watcher confirms readiness.
+    #[allow(dead_code)]
     pub(in crate::team) fn check_agent_ready(&mut self, recipient: &str, pane_id: &str) -> bool {
         // Fast path: watcher already confirmed readiness (prompt seen during poll).
         if self
@@ -396,6 +398,7 @@ impl TeamDaemon {
     /// Returns the appropriate capture line count for delivery verification.
     /// Agents that recently became ready get a larger window to account for
     /// startup output pushing the delivery marker further up the scrollback.
+    #[allow(dead_code)]
     pub(in crate::team) fn delivery_capture_lines_for(&self, recipient: &str) -> u32 {
         let recently_ready = self
             .watchers
