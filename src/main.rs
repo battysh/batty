@@ -966,6 +966,10 @@ fn main() -> Result<()> {
             team::cost::show_cost(&root)?;
         }
 
+        Command::Scale { command } => {
+            team::scale::run(&root, command)?;
+        }
+
         Command::Doctor { fix, yes } => {
             print!("{}", team::doctor::run(&root, fix, yes)?);
         }
