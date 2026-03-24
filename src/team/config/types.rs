@@ -45,6 +45,19 @@ pub struct TeamConfig {
     /// and message delivery over a structured channel.
     #[serde(default)]
     pub use_shim: bool,
+    /// When true and `use_shim` is enabled, crashed agents are automatically
+    /// respawned instead of escalating to the manager.
+    #[serde(default)]
+    pub auto_respawn_on_crash: bool,
+    /// Interval in seconds between Ping health checks sent to shim handles.
+    #[serde(default = "default_shim_health_check_interval_secs")]
+    pub shim_health_check_interval_secs: u64,
+    /// Seconds without a Pong response before a shim handle is considered stale.
+    #[serde(default = "default_shim_health_timeout_secs")]
+    pub shim_health_timeout_secs: u64,
+    /// Seconds to wait for graceful shutdown before sending Kill.
+    #[serde(default = "default_shim_shutdown_timeout_secs")]
+    pub shim_shutdown_timeout_secs: u32,
     #[serde(default = "default_event_log_max_bytes")]
     pub event_log_max_bytes: u64,
     #[serde(default = "default_retro_min_duration_secs")]
@@ -516,4 +529,16 @@ fn default_event_log_max_bytes() -> u64 {
 
 fn default_retro_min_duration_secs() -> u64 {
     60
+}
+
+fn default_shim_health_check_interval_secs() -> u64 {
+    60
+}
+
+fn default_shim_health_timeout_secs() -> u64 {
+    120
+}
+
+fn default_shim_shutdown_timeout_secs() -> u32 {
+    30
 }
