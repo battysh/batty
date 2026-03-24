@@ -170,6 +170,8 @@ pub struct TeamDaemon {
     pub(super) pending_delivery_queue: HashMap<String, Vec<PendingMessage>>,
     /// Per-agent shim handles (only populated when `use_shim` is true).
     pub(super) shim_handles: HashMap<String, agent_handle::AgentHandle>,
+    /// When the last shim health check (Ping) was sent.
+    pub(super) last_shim_health_check: Instant,
 }
 
 impl TeamDaemon {
@@ -334,6 +336,7 @@ impl TeamDaemon {
             last_uncommitted_warn: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
             shim_handles: HashMap::new(),
+            last_shim_health_check: Instant::now(),
         })
     }
 

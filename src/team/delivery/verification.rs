@@ -530,6 +530,7 @@ mod tests {
             last_uncommitted_warn: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
             shim_handles: HashMap::new(),
+            last_shim_health_check: Instant::now(),
         }
     }
 

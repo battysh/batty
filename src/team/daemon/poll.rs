@@ -72,6 +72,9 @@ impl TeamDaemon {
             self.run_recoverable_step("poll_watchers", |daemon| daemon.poll_watchers());
             if self.config.team_config.use_shim {
                 self.run_recoverable_step("poll_shim_handles", |daemon| daemon.poll_shim_handles());
+                self.run_recoverable_step("shim_health_check", |daemon| {
+                    daemon.shim_health_check()
+                });
             }
             self.run_recoverable_step("restart_dead_members", |daemon| {
                 daemon.restart_dead_members()
