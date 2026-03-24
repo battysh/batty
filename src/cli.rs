@@ -267,6 +267,10 @@ pub enum Command {
         /// Terminal columns
         #[arg(long, default_value = "220")]
         cols: u16,
+
+        /// Path to write raw PTY output for tmux display panes
+        #[arg(long)]
+        pty_log_path: Option<String>,
     },
 
     /// Internal: run the daemon loop (spawned by `batty start`)
