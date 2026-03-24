@@ -7,6 +7,7 @@ pub mod events;
 pub mod log;
 pub mod paths;
 pub mod prompt;
+pub mod shim;
 pub mod task;
 pub mod team;
 pub mod tmux;
