@@ -30,9 +30,6 @@ const POLL_INTERVAL_MS: u64 = 250;
 /// Max time to wait for agent to show its first prompt (secs).
 const READY_TIMEOUT_SECS: u64 = 120;
 
-/// Minimum ms between screen classifications (debounce rapid PTY output).
-const CLASSIFY_DEBOUNCE_MS: u64 = 100;
-
 // ---------------------------------------------------------------------------
 // Args (parsed from CLI in main.rs, passed here)
 // ---------------------------------------------------------------------------
@@ -59,7 +56,6 @@ struct ShimInner {
     state: ShimState,
     state_changed_at: Instant,
     last_screen_hash: u64,
-    last_classify_at: Instant,
     pre_injection_content: String,
     pending_message_id: Option<String>,
     agent_type: AgentType,
@@ -155,7 +151,6 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
         state: ShimState::Starting,
         state_changed_at: Instant::now(),
         last_screen_hash: 0,
-        last_classify_at: Instant::now(),
         pre_injection_content: String::new(),
         pending_message_id: None,
         agent_type: args.agent_type,
@@ -191,21 +186,18 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                     let mut inner = inner_pty.lock().unwrap();
                     inner.parser.process(&buf[..n]);
 
-                    // Debounced classification
-                    let now = Instant::now();
-                    if now.duration_since(inner.last_classify_at).as_millis()
-                        < CLASSIFY_DEBOUNCE_MS as u128
-                    {
-                        continue;
-                    }
-
+                    // Classify when the screen content actually changes.
+                    // The content hash avoids redundant classifications —
+                    // no time-based debounce because it causes the PTY
+                    // reader to block on the next read and miss state
+                    // transitions when the prompt arrives shortly after
+                    // preceding output.
                     let content = inner.parser.screen().contents();
                     let hash = content_hash(&content);
                     if hash == inner.last_screen_hash {
                         continue; // no visual change
                     }
                     inner.last_screen_hash = hash;
-                    inner.last_classify_at = now;
 
                     let verdict = classifier::classify(inner.agent_type, inner.parser.screen());
                     let old_state = inner.state;

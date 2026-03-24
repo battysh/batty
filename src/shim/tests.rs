@@ -14,7 +14,20 @@ mod tests {
     use crate::shim::protocol::{self, Channel, Command, Event, ShimState};
     use crate::shim::runtime::ShimArgs;
 
+    /// Check if an error is a read timeout (WouldBlock/TimedOut).
+    fn is_timeout_error(e: &anyhow::Error) -> bool {
+        if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
+            matches!(
+                io_err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+        } else {
+            false
+        }
+    }
+
     /// Helper: spawn a shim with bash in a background thread, return the parent channel.
+    /// Sets a 500ms read timeout so recv() doesn't block forever.
     fn spawn_bash_shim() -> Channel {
         let (parent_sock, child_sock) = protocol::socketpair().unwrap();
         let channel = Channel::new(child_sock);
@@ -22,7 +35,7 @@ mod tests {
         let args = ShimArgs {
             id: "test-agent".into(),
             agent_type: crate::shim::classifier::AgentType::Generic,
-            cmd: "bash".into(),
+            cmd: "bash --norc --noprofile".into(),
             cwd: PathBuf::from("/tmp"),
             rows: 24,
             cols: 80,
@@ -33,22 +46,25 @@ mod tests {
             crate::shim::runtime::run(args, channel).ok();
         });
 
-        Channel::new(parent_sock)
+        let mut ch = Channel::new(parent_sock);
+        ch.set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        ch
     }
 
-    /// Wait for a Ready event (with timeout).
+    /// Wait for a Ready event (with timeout). Handles read timeouts by retrying.
     fn wait_for_ready(ch: &mut Channel) -> bool {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             if std::time::Instant::now() > deadline {
                 return false;
             }
-            // Set a read timeout on the underlying stream
             match ch.recv::<Event>() {
                 Ok(Some(Event::Ready)) => return true,
                 Ok(Some(Event::StateChanged { .. })) => continue,
                 Ok(Some(_)) => continue,
                 Ok(None) => return false,
+                Err(e) if is_timeout_error(&e) => continue,
                 Err(_) => return false,
             }
         }
@@ -64,8 +80,9 @@ mod tests {
             match ch.recv::<Event>() {
                 Ok(Some(evt @ Event::Completion { .. })) => return Some(evt),
                 Ok(Some(Event::Died { .. })) => return None,
-                Ok(Some(_)) => continue, // StateChanged, etc.
+                Ok(Some(_)) => continue,
                 Ok(None) => return None,
+                Err(e) if is_timeout_error(&e) => continue,
                 Err(_) => return None,
             }
         }
@@ -85,6 +102,7 @@ mod tests {
                 Ok(Some(ref evt)) if matcher(evt) => return Some(evt.clone()),
                 Ok(Some(_)) => continue,
                 Ok(None) => return None,
+                Err(e) if is_timeout_error(&e) => continue,
                 Err(_) => return None,
             }
         }
@@ -136,8 +154,14 @@ mod tests {
             matches!(e, Event::Died { .. })
         });
         assert!(evt.is_some(), "did not receive Died event");
+        // The PTY reader detects death via EOF, not waitpid, so exit_code
+        // is None (the child process status isn't collected by the shim).
         if let Some(Event::Died { exit_code, .. }) = evt {
-            assert_eq!(exit_code, Some(0).or(None)); // bash exit 0 or None
+            assert!(
+                exit_code.is_none() || exit_code == Some(0),
+                "exit_code should be None or 0, got: {:?}",
+                exit_code,
+            );
         }
     }
 
@@ -314,7 +338,10 @@ mod tests {
             crate::shim::runtime::run(args, channel).ok();
         });
 
-        Channel::new(parent_sock)
+        let mut ch = Channel::new(parent_sock);
+        ch.set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        ch
     }
 
     /// Helper: spawn a shim with a PTY log path.
@@ -322,7 +349,7 @@ mod tests {
         let args = ShimArgs {
             id: id.into(),
             agent_type: crate::shim::classifier::AgentType::Generic,
-            cmd: "bash".into(),
+            cmd: "bash --norc --noprofile".into(),
             cwd: PathBuf::from("/tmp"),
             rows: 24,
             cols: 80,
@@ -336,7 +363,7 @@ mod tests {
         let args = ShimArgs {
             id: id.into(),
             agent_type: crate::shim::classifier::AgentType::Generic,
-            cmd: "bash".into(),
+            cmd: "bash --norc --noprofile".into(),
             cwd: PathBuf::from("/tmp"),
             rows: 24,
             cols: 80,
@@ -356,6 +383,7 @@ mod tests {
             match ch.recv::<Event>() {
                 Ok(Some(evt)) => events.push(evt),
                 Ok(None) => break,
+                Err(e) if is_timeout_error(&e) => continue,
                 Err(_) => break,
             }
         }
@@ -518,7 +546,8 @@ mod tests {
         assert!(wait_for_ready(&mut ch), "shim did not become ready");
 
         // Send full screen capture (no line limit)
-        ch.send(&Command::CaptureScreen { last_n_lines: None }).unwrap();
+        ch.send(&Command::CaptureScreen { last_n_lines: None })
+            .unwrap();
 
         let evt = wait_for_event(&mut ch, Duration::from_secs(5), |e| {
             matches!(e, Event::ScreenCapture { .. })
@@ -530,7 +559,10 @@ mod tests {
             cursor_col,
         }) = evt
         {
-            assert!(!content.is_empty(), "full screen capture should not be empty");
+            assert!(
+                !content.is_empty(),
+                "full screen capture should not be empty"
+            );
             // Cursor should be at a valid position
             assert!(cursor_row < 24, "cursor_row out of bounds: {cursor_row}");
             assert!(cursor_col < 80, "cursor_col out of bounds: {cursor_col}");
@@ -663,8 +695,7 @@ mod tests {
 
         // Should get Died or EOF
         let events = collect_events(&mut ch, Duration::from_secs(10));
-        let has_death = events.iter().any(|e| matches!(e, Event::Died { .. }))
-            || events.is_empty(); // EOF = channel closed
+        let has_death = events.iter().any(|e| matches!(e, Event::Died { .. })) || events.is_empty(); // EOF = channel closed
         assert!(has_death, "Kill should terminate the shim");
     }
 
@@ -752,10 +783,7 @@ mod tests {
             .unwrap();
 
             let evt = wait_for_completion(&mut ch, Duration::from_secs(10));
-            assert!(
-                evt.is_some(),
-                "should receive Completion for command {i}"
-            );
+            assert!(evt.is_some(), "should receive Completion for command {i}");
             if let Some(Event::Completion {
                 response,
                 message_id,
@@ -789,7 +817,7 @@ mod tests {
         let args = ShimArgs {
             id: "lifecycle-test".into(),
             agent_type: crate::shim::classifier::AgentType::Generic,
-            cmd: "bash".into(),
+            cmd: "bash --norc --noprofile".into(),
             cwd: PathBuf::from("/tmp"),
             rows: 24,
             cols: 80,
@@ -801,6 +829,8 @@ mod tests {
         });
 
         let mut ch = Channel::new(parent_sock);
+        ch.set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
 
         // Track state manually (as AgentHandle would)
         let mut state = ShimState::Starting;
@@ -818,7 +848,10 @@ mod tests {
                 Ok(Some(Event::StateChanged { to, .. })) => {
                     state = to;
                 }
-                _ => continue,
+                Ok(Some(_)) => continue,
+                Ok(None) => break,
+                Err(e) if is_timeout_error(&e) => continue,
+                Err(_) => break,
             }
         }
         assert!(got_ready, "should receive Ready");
@@ -860,7 +893,10 @@ mod tests {
                         break;
                     }
                 }
-                _ => continue,
+                Ok(Some(_)) => continue,
+                Ok(None) => break,
+                Err(e) if is_timeout_error(&e) => continue,
+                Err(_) => break,
             }
         }
         assert!(got_completion, "should receive Completion");
