@@ -1279,7 +1279,7 @@ mod tests {
         let (parent, mut child) = crate::shim::protocol::socketpair().unwrap();
         let channel = crate::shim::protocol::Channel::new(parent);
         let mut handle =
-            crate::team::daemon::agent_handle::AgentHandle::new("eng-1".into(), channel, 999);
+            crate::team::daemon::agent_handle::AgentHandle::new("eng-1".into(), channel, 999, "claude".into(), "claude".into(), std::path::PathBuf::from("/tmp/test"));
         handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
         daemon.shim_handles.insert("eng-1".to_string(), handle);
 
@@ -1313,7 +1313,7 @@ mod tests {
         let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
         let channel = crate::shim::protocol::Channel::new(parent);
         let handle =
-            crate::team::daemon::agent_handle::AgentHandle::new("eng-1".into(), channel, 999);
+            crate::team::daemon::agent_handle::AgentHandle::new("eng-1".into(), channel, 999, "claude".into(), "claude".into(), std::path::PathBuf::from("/tmp/test"));
         daemon.shim_handles.insert("eng-1".to_string(), handle);
 
         let result = daemon.deliver_message("manager", "eng-1", "wait for me");
@@ -1336,7 +1336,7 @@ mod tests {
         let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
         let channel = crate::shim::protocol::Channel::new(parent);
         let mut handle =
-            crate::team::daemon::agent_handle::AgentHandle::new("eng-1".into(), channel, 999);
+            crate::team::daemon::agent_handle::AgentHandle::new("eng-1".into(), channel, 999, "claude".into(), "claude".into(), std::path::PathBuf::from("/tmp/test"));
         handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
         daemon.shim_handles.insert("eng-1".to_string(), handle);
 
