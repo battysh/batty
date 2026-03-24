@@ -56,8 +56,8 @@ impl TeamDaemon {
         }
 
         let path = shim_state_path(&self.config.project_root);
-        let json = serde_json::to_string_pretty(&state)
-            .context("failed to serialize shim state")?;
+        let json =
+            serde_json::to_string_pretty(&state).context("failed to serialize shim state")?;
         std::fs::write(&path, json)
             .with_context(|| format!("failed to write shim state to {}", path.display()))?;
 
@@ -79,8 +79,8 @@ impl TeamDaemon {
 
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read shim state from {}", path.display()))?;
-        let state: ShimStateFile = serde_json::from_str(&content)
-            .with_context(|| "failed to parse shim state file")?;
+        let state: ShimStateFile =
+            serde_json::from_str(&content).with_context(|| "failed to parse shim state file")?;
 
         let mut restored = 0;
         for (name, persisted) in &state.handles {

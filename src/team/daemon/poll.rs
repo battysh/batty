@@ -72,9 +72,7 @@ impl TeamDaemon {
             self.run_recoverable_step("poll_watchers", |daemon| daemon.poll_watchers());
             if self.config.team_config.use_shim {
                 self.run_recoverable_step("poll_shim_handles", |daemon| daemon.poll_shim_handles());
-                self.run_recoverable_step("shim_health_check", |daemon| {
-                    daemon.shim_health_check()
-                });
+                self.run_recoverable_step("shim_health_check", |daemon| daemon.shim_health_check());
             }
             self.run_recoverable_step("restart_dead_members", |daemon| {
                 daemon.restart_dead_members()
@@ -237,8 +235,7 @@ impl TeamDaemon {
         let timeout_secs = self.config.team_config.shim_shutdown_timeout_secs;
         info!(
             count = self.shim_handles.len(),
-            timeout_secs,
-            "sending graceful shutdown to shim subprocesses"
+            timeout_secs, "sending graceful shutdown to shim subprocesses"
         );
 
         // Phase 1: Send Shutdown command to all handles
@@ -289,8 +286,7 @@ impl TeamDaemon {
         for (name, pid) in &pids {
             warn!(
                 member = name.as_str(),
-                pid,
-                "shim did not exit within timeout, sending Kill"
+                pid, "shim did not exit within timeout, sending Kill"
             );
             if let Some(handle) = self.shim_handles.get_mut(name) {
                 let _ = handle.send_kill();
