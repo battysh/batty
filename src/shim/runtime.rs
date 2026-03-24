@@ -155,7 +155,12 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
         state: ShimState::Starting,
         state_changed_at: Instant::now(),
         last_screen_hash: 0,
-        last_classify_at: Instant::now(),
+        // Initialize in the past so the first PTY read is never debounced.
+        // Without this, a fast-starting agent whose prompt arrives within
+        // CLASSIFY_DEBOUNCE_MS of init will never be classified (the read
+        // thread skips classification, then blocks waiting for more output
+        // that never comes).
+        last_classify_at: Instant::now() - std::time::Duration::from_secs(1),
         pre_injection_content: String::new(),
         pending_message_id: None,
         agent_type: args.agent_type,
@@ -205,7 +210,6 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                         continue; // no visual change
                     }
                     inner.last_screen_hash = hash;
-                    inner.last_classify_at = now;
 
                     let verdict = classifier::classify(inner.agent_type, inner.parser.screen());
                     let old_state = inner.state;
@@ -225,6 +229,12 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                     };
 
                     if let Some(new) = new_state {
+                        // Only reset debounce timer on actual state transitions.
+                        // This prevents the timer from being reset by no-op
+                        // classifications (e.g., Unknown during command output),
+                        // which would cause prompt detection to be debounced
+                        // when the prompt arrives shortly after.
+                        inner.last_classify_at = now;
                         let summary = inner.last_n_lines(5);
                         inner.state = new;
                         inner.state_changed_at = Instant::now();
