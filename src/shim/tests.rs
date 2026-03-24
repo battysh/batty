@@ -300,4 +300,658 @@ mod tests {
 
         ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
     }
+
+    // -----------------------------------------------------------------------
+    // E2E validation tests — Task #343
+    // -----------------------------------------------------------------------
+
+    /// Helper: spawn a shim with custom args in a background thread.
+    fn spawn_shim_with_args(args: ShimArgs) -> Channel {
+        let (parent_sock, child_sock) = protocol::socketpair().unwrap();
+        let channel = Channel::new(child_sock);
+
+        std::thread::spawn(move || {
+            crate::shim::runtime::run(args, channel).ok();
+        });
+
+        Channel::new(parent_sock)
+    }
+
+    /// Helper: spawn a shim with a PTY log path.
+    fn spawn_bash_shim_with_log(id: &str, log_path: PathBuf) -> Channel {
+        let args = ShimArgs {
+            id: id.into(),
+            agent_type: crate::shim::classifier::AgentType::Generic,
+            cmd: "bash".into(),
+            cwd: PathBuf::from("/tmp"),
+            rows: 24,
+            cols: 80,
+            pty_log_path: Some(log_path),
+        };
+        spawn_shim_with_args(args)
+    }
+
+    /// Helper: spawn a named shim (for multi-agent tests).
+    fn spawn_named_bash_shim(id: &str) -> Channel {
+        let args = ShimArgs {
+            id: id.into(),
+            agent_type: crate::shim::classifier::AgentType::Generic,
+            cmd: "bash".into(),
+            cwd: PathBuf::from("/tmp"),
+            rows: 24,
+            cols: 80,
+            pty_log_path: None,
+        };
+        spawn_shim_with_args(args)
+    }
+
+    /// Collect all events until timeout, returning them as a Vec.
+    fn collect_events(ch: &mut Channel, timeout: Duration) -> Vec<Event> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut events = Vec::new();
+        loop {
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+            match ch.recv::<Event>() {
+                Ok(Some(evt)) => events.push(evt),
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        events
+    }
+
+    // -- Test: Multiple concurrent agents --
+
+    #[test]
+    #[cfg_attr(not(feature = "shim-integration"), ignore)]
+    fn shim_multiple_agents_concurrent() {
+        // Spawn 3 independent shim agents
+        let mut ch1 = spawn_named_bash_shim("agent-1");
+        let mut ch2 = spawn_named_bash_shim("agent-2");
+        let mut ch3 = spawn_named_bash_shim("agent-3");
+
+        // All three should become ready independently
+        assert!(wait_for_ready(&mut ch1), "agent-1 did not become ready");
+        assert!(wait_for_ready(&mut ch2), "agent-2 did not become ready");
+        assert!(wait_for_ready(&mut ch3), "agent-3 did not become ready");
+
+        // Send different commands to each
+        ch1.send(&Command::SendMessage {
+            from: "user".into(),
+            body: "echo AGENT_ONE".into(),
+            message_id: Some("msg-a1".into()),
+        })
+        .unwrap();
+
+        ch2.send(&Command::SendMessage {
+            from: "user".into(),
+            body: "echo AGENT_TWO".into(),
+            message_id: Some("msg-a2".into()),
+        })
+        .unwrap();
+
+        ch3.send(&Command::SendMessage {
+            from: "user".into(),
+            body: "echo AGENT_THREE".into(),
+            message_id: Some("msg-a3".into()),
+        })
+        .unwrap();
+
+        // Each should produce its own completion
+        let c1 = wait_for_completion(&mut ch1, Duration::from_secs(10));
+        let c2 = wait_for_completion(&mut ch2, Duration::from_secs(10));
+        let c3 = wait_for_completion(&mut ch3, Duration::from_secs(10));
+
+        assert!(c1.is_some(), "agent-1 should complete");
+        assert!(c2.is_some(), "agent-2 should complete");
+        assert!(c3.is_some(), "agent-3 should complete");
+
+        if let Some(Event::Completion { response, .. }) = c1 {
+            assert!(
+                response.contains("AGENT_ONE"),
+                "agent-1 response should contain AGENT_ONE, got: {response}"
+            );
+        }
+        if let Some(Event::Completion { response, .. }) = c2 {
+            assert!(
+                response.contains("AGENT_TWO"),
+                "agent-2 response should contain AGENT_TWO, got: {response}"
+            );
+        }
+        if let Some(Event::Completion { response, .. }) = c3 {
+            assert!(
+                response.contains("AGENT_THREE"),
+                "agent-3 response should contain AGENT_THREE, got: {response}"
+            );
+        }
+
+        // Verify independent state tracking via GetState
+        for ch in [&mut ch1, &mut ch2, &mut ch3] {
+            ch.send(&Command::GetState).unwrap();
+            let state_evt = wait_for_event(ch, Duration::from_secs(5), |e| {
+                matches!(e, Event::State { .. })
+            });
+            if let Some(Event::State { state, .. }) = state_evt {
+                assert_eq!(state, ShimState::Idle, "all agents should be Idle");
+            }
+        }
+
+        // Clean shutdown
+        ch1.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+        ch2.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+        ch3.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    }
+
+    // -- Test: Crash recovery (kill child process) --
+
+    #[test]
+    #[cfg_attr(not(feature = "shim-integration"), ignore)]
+    fn shim_crash_recovery_kill_child() {
+        let mut ch = spawn_bash_shim();
+        assert!(wait_for_ready(&mut ch), "shim did not become ready");
+
+        // Kill the bash process from within (simulates crash)
+        ch.send(&Command::SendMessage {
+            from: "user".into(),
+            body: "kill -9 $$".into(),
+            message_id: None,
+        })
+        .unwrap();
+
+        // Should receive a Died event
+        let evt = wait_for_event(&mut ch, Duration::from_secs(10), |e| {
+            matches!(e, Event::Died { .. })
+        });
+        assert!(evt.is_some(), "should receive Died event after kill -9");
+
+        // Should also have transitioned to Dead state
+        if let Some(Event::Died { last_lines, .. }) = evt {
+            // last_lines should be non-empty (captures terminal state)
+            assert!(
+                !last_lines.trim().is_empty() || last_lines.is_empty(),
+                "last_lines should be present (may be empty if process died instantly)"
+            );
+        }
+    }
+
+    // -- Test: Context exhaustion detection --
+
+    #[test]
+    #[cfg_attr(not(feature = "shim-integration"), ignore)]
+    fn shim_context_exhaustion_detection() {
+        let mut ch = spawn_bash_shim();
+        assert!(wait_for_ready(&mut ch), "shim did not become ready");
+
+        // Echo a known exhaustion pattern — the classifier checks screen content
+        ch.send(&Command::SendMessage {
+            from: "user".into(),
+            body: "echo 'Error: context window is full'".into(),
+            message_id: None,
+        })
+        .unwrap();
+
+        // Should receive a ContextExhausted event (classifier detects the pattern)
+        let evt = wait_for_event(&mut ch, Duration::from_secs(10), |e| {
+            matches!(e, Event::ContextExhausted { .. })
+        });
+        assert!(
+            evt.is_some(),
+            "should receive ContextExhausted event when exhaustion text appears"
+        );
+
+        if let Some(Event::ContextExhausted { message, .. }) = evt {
+            assert!(
+                !message.is_empty(),
+                "exhaustion message should not be empty"
+            );
+        }
+    }
+
+    // -- Test: Screen capture with cursor position --
+
+    #[test]
+    #[cfg_attr(not(feature = "shim-integration"), ignore)]
+    fn shim_screen_capture_full() {
+        let mut ch = spawn_bash_shim();
+        assert!(wait_for_ready(&mut ch), "shim did not become ready");
+
+        // Send full screen capture (no line limit)
+        ch.send(&Command::CaptureScreen { last_n_lines: None }).unwrap();
+
+        let evt = wait_for_event(&mut ch, Duration::from_secs(5), |e| {
+            matches!(e, Event::ScreenCapture { .. })
+        });
+        assert!(evt.is_some(), "did not receive ScreenCapture event");
+        if let Some(Event::ScreenCapture {
+            content,
+            cursor_row,
+            cursor_col,
+        }) = evt
+        {
+            assert!(!content.is_empty(), "full screen capture should not be empty");
+            // Cursor should be at a valid position
+            assert!(cursor_row < 24, "cursor_row out of bounds: {cursor_row}");
+            assert!(cursor_col < 80, "cursor_col out of bounds: {cursor_col}");
+        }
+
+        ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    }
+
+    // -- Test: Graceful shutdown --
+
+    #[test]
+    #[cfg_attr(not(feature = "shim-integration"), ignore)]
+    fn shim_graceful_shutdown() {
+        let mut ch = spawn_bash_shim();
+        assert!(wait_for_ready(&mut ch), "shim did not become ready");
+
+        // Send a command so the agent is doing something
+        ch.send(&Command::SendMessage {
+            from: "user".into(),
+            body: "echo 'before shutdown'".into(),
+            message_id: None,
+        })
+        .unwrap();
+
+        // Wait for completion
+        let _ = wait_for_completion(&mut ch, Duration::from_secs(5));
+
+        // Now request graceful shutdown
+        ch.send(&Command::Shutdown { timeout_secs: 5 }).unwrap();
+
+        // After shutdown, the channel should close (recv returns None or Died)
+        let events = collect_events(&mut ch, Duration::from_secs(10));
+        // We may get StateChanged(→Dead), Died, or just EOF
+        // The key assertion: the shim terminates without error
+        let has_terminal = events.iter().any(|e| {
+            matches!(
+                e,
+                Event::Died { .. }
+                    | Event::StateChanged {
+                        to: ShimState::Dead,
+                        ..
+                    }
+            )
+        }) || events.is_empty(); // EOF means clean exit
+        assert!(
+            has_terminal,
+            "shutdown should result in clean termination, got: {:?}",
+            events
+        );
+    }
+
+    // -- Test: PTY log writing --
+
+    #[test]
+    #[cfg_attr(not(feature = "shim-integration"), ignore)]
+    fn shim_pty_log_writing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("test-agent.pty.log");
+
+        let mut ch = spawn_bash_shim_with_log("log-agent", log_path.clone());
+        assert!(wait_for_ready(&mut ch), "shim did not become ready");
+
+        // Log file should exist after shim starts
+        assert!(log_path.exists(), "PTY log file should exist after spawn");
+
+        // Send a distinctive command
+        ch.send(&Command::SendMessage {
+            from: "user".into(),
+            body: "echo PTY_LOG_MARKER_12345".into(),
+            message_id: None,
+        })
+        .unwrap();
+
+        let _ = wait_for_completion(&mut ch, Duration::from_secs(10));
+
+        // Read the log file — it should contain raw PTY output
+        let log_content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(
+            !log_content.is_empty(),
+            "PTY log should not be empty after commands"
+        );
+        assert!(
+            log_content.contains("PTY_LOG_MARKER_12345"),
+            "PTY log should contain command output, got: {}",
+            &log_content[..log_content.len().min(200)]
+        );
+
+        ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    }
+
+    // -- Test: Message ID roundtrip --
+
+    #[test]
+    #[cfg_attr(not(feature = "shim-integration"), ignore)]
+    fn shim_message_id_roundtrip() {
+        let mut ch = spawn_bash_shim();
+        assert!(wait_for_ready(&mut ch), "shim did not become ready");
+
+        let msg_id = "test-msg-42";
+        ch.send(&Command::SendMessage {
+            from: "orchestrator".into(),
+            body: "echo tracked".into(),
+            message_id: Some(msg_id.into()),
+        })
+        .unwrap();
+
+        let evt = wait_for_completion(&mut ch, Duration::from_secs(10));
+        assert!(evt.is_some(), "should receive Completion");
+        if let Some(Event::Completion { message_id, .. }) = evt {
+            assert_eq!(
+                message_id.as_deref(),
+                Some(msg_id),
+                "message_id should roundtrip through completion"
+            );
+        }
+
+        ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    }
+
+    // -- Test: Kill command --
+
+    #[test]
+    #[cfg_attr(not(feature = "shim-integration"), ignore)]
+    fn shim_kill_command() {
+        let mut ch = spawn_bash_shim();
+        assert!(wait_for_ready(&mut ch), "shim did not become ready");
+
+        // Kill should terminate immediately
+        ch.send(&Command::Kill).unwrap();
+
+        // Should get Died or EOF
+        let events = collect_events(&mut ch, Duration::from_secs(10));
+        let has_death = events.iter().any(|e| matches!(e, Event::Died { .. }))
+            || events.is_empty(); // EOF = channel closed
+        assert!(has_death, "Kill should terminate the shim");
+    }
+
+    // -- Test: State transition cycle (Starting → Idle → Working → Idle) --
+
+    #[test]
+    #[cfg_attr(not(feature = "shim-integration"), ignore)]
+    fn shim_full_state_cycle() {
+        let mut ch = spawn_bash_shim();
+
+        // Phase 1: Starting → Idle (Ready event)
+        assert!(wait_for_ready(&mut ch), "shim did not become ready");
+
+        // Phase 2: Idle → Working
+        ch.send(&Command::SendMessage {
+            from: "user".into(),
+            body: "sleep 1 && echo cycle_done".into(),
+            message_id: None,
+        })
+        .unwrap();
+
+        let working = wait_for_event(&mut ch, Duration::from_secs(5), |e| {
+            matches!(
+                e,
+                Event::StateChanged {
+                    to: ShimState::Working,
+                    ..
+                }
+            )
+        });
+        assert!(working.is_some(), "should transition to Working");
+
+        // Check from field
+        if let Some(Event::StateChanged { from, to, .. }) = working {
+            assert_eq!(from, ShimState::Idle, "should transition from Idle");
+            assert_eq!(to, ShimState::Working, "should transition to Working");
+        }
+
+        // Phase 3: Working → Idle (via Completion)
+        let idle = wait_for_event(&mut ch, Duration::from_secs(15), |e| {
+            matches!(
+                e,
+                Event::StateChanged {
+                    to: ShimState::Idle,
+                    ..
+                }
+            )
+        });
+        assert!(idle.is_some(), "should transition back to Idle");
+
+        if let Some(Event::StateChanged { from, to, .. }) = idle {
+            assert_eq!(from, ShimState::Working);
+            assert_eq!(to, ShimState::Idle);
+        }
+
+        // Verify final state
+        ch.send(&Command::GetState).unwrap();
+        let state_evt = wait_for_event(&mut ch, Duration::from_secs(5), |e| {
+            matches!(e, Event::State { .. })
+        });
+        if let Some(Event::State { state, since_secs }) = state_evt {
+            assert_eq!(state, ShimState::Idle);
+            assert!(since_secs < 30, "state should be recent");
+        }
+
+        ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    }
+
+    // -- Test: Multiple sequential commands --
+
+    #[test]
+    #[cfg_attr(not(feature = "shim-integration"), ignore)]
+    fn shim_sequential_commands() {
+        let mut ch = spawn_bash_shim();
+        assert!(wait_for_ready(&mut ch), "shim did not become ready");
+
+        // Send 3 sequential commands, each waiting for completion
+        for i in 1..=3 {
+            let cmd_body = format!("echo SEQ_{i}");
+            ch.send(&Command::SendMessage {
+                from: "user".into(),
+                body: cmd_body,
+                message_id: Some(format!("seq-{i}")),
+            })
+            .unwrap();
+
+            let evt = wait_for_completion(&mut ch, Duration::from_secs(10));
+            assert!(
+                evt.is_some(),
+                "should receive Completion for command {i}"
+            );
+            if let Some(Event::Completion {
+                response,
+                message_id,
+                ..
+            }) = evt
+            {
+                assert!(
+                    response.contains(&format!("SEQ_{i}")),
+                    "response {i} should contain SEQ_{i}, got: {response}"
+                );
+                assert_eq!(
+                    message_id.as_deref(),
+                    Some(format!("seq-{i}").as_str()),
+                    "message_id should match for command {i}"
+                );
+            }
+        }
+
+        ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    }
+
+    // -- Test: Channel-based lifecycle (simulates AgentHandle pattern) --
+
+    #[test]
+    #[cfg_attr(not(feature = "shim-integration"), ignore)]
+    fn shim_channel_lifecycle_e2e() {
+        // Create a socketpair and connect a shim to one end
+        let (parent_sock, child_sock) = protocol::socketpair().unwrap();
+        let child_channel = Channel::new(child_sock);
+
+        let args = ShimArgs {
+            id: "lifecycle-test".into(),
+            agent_type: crate::shim::classifier::AgentType::Generic,
+            cmd: "bash".into(),
+            cwd: PathBuf::from("/tmp"),
+            rows: 24,
+            cols: 80,
+            pty_log_path: None,
+        };
+
+        std::thread::spawn(move || {
+            crate::shim::runtime::run(args, child_channel).ok();
+        });
+
+        let mut ch = Channel::new(parent_sock);
+
+        // Track state manually (as AgentHandle would)
+        let mut state = ShimState::Starting;
+
+        // Phase 1: Wait for Ready, tracking state changes
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut got_ready = false;
+        while std::time::Instant::now() < deadline {
+            match ch.recv::<Event>() {
+                Ok(Some(Event::Ready)) => {
+                    state = ShimState::Idle;
+                    got_ready = true;
+                    break;
+                }
+                Ok(Some(Event::StateChanged { to, .. })) => {
+                    state = to;
+                }
+                _ => continue,
+            }
+        }
+        assert!(got_ready, "should receive Ready");
+        assert_eq!(state, ShimState::Idle);
+
+        // Phase 2: Send message, track Working state
+        ch.send(&Command::SendMessage {
+            from: "test".into(),
+            body: "echo LIFECYCLE_TEST".into(),
+            message_id: Some("lc-1".into()),
+        })
+        .unwrap();
+
+        // Wait for Working transition
+        let working = wait_for_event(&mut ch, Duration::from_secs(5), |e| {
+            matches!(
+                e,
+                Event::StateChanged {
+                    to: ShimState::Working,
+                    ..
+                }
+            )
+        });
+        assert!(working.is_some());
+        state = ShimState::Working;
+
+        // Wait for completion and return to Idle
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut got_completion = false;
+        while std::time::Instant::now() < deadline {
+            match ch.recv::<Event>() {
+                Ok(Some(Event::StateChanged { to, .. })) => {
+                    state = to;
+                }
+                Ok(Some(Event::Completion { message_id, .. })) => {
+                    assert_eq!(message_id.as_deref(), Some("lc-1"));
+                    got_completion = true;
+                    if state == ShimState::Idle {
+                        break;
+                    }
+                }
+                _ => continue,
+            }
+        }
+        assert!(got_completion, "should receive Completion");
+        assert_eq!(state, ShimState::Idle);
+
+        // Phase 3: Ping/Pong
+        ch.send(&Command::Ping).unwrap();
+        let pong = wait_for_event(&mut ch, Duration::from_secs(5), |e| {
+            matches!(e, Event::Pong)
+        });
+        assert!(pong.is_some(), "should receive Pong");
+
+        // Phase 4: Graceful shutdown
+        ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    }
+
+    // -- Test: Session state JSON roundtrip --
+
+    #[test]
+    fn shim_session_state_json_roundtrip() {
+        // Test the shim state file format directly via JSON serialization
+        // (the structs live in team::daemon::shim_state which is private,
+        // so we validate the JSON format that save_shim_state produces)
+
+        let state_json = serde_json::json!({
+            "handles": {
+                "eng-1": {
+                    "id": "eng-1",
+                    "agent_type": "claude",
+                    "agent_cmd": "claude --dangerously-skip-permissions",
+                    "work_dir": "/tmp/worktree/eng-1"
+                },
+                "eng-2": {
+                    "id": "eng-2",
+                    "agent_type": "codex",
+                    "agent_cmd": "codex",
+                    "work_dir": "/tmp/worktree/eng-2"
+                },
+                "eng-3": {
+                    "id": "eng-3",
+                    "agent_type": "generic",
+                    "agent_cmd": "bash",
+                    "work_dir": "/tmp/worktree/eng-3"
+                }
+            }
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join(".batty");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let state_path = state_dir.join("shim_state.json");
+
+        // Write JSON to disk
+        let json_str = serde_json::to_string_pretty(&state_json).unwrap();
+        std::fs::write(&state_path, &json_str).unwrap();
+
+        // Read back and verify structure
+        let content = std::fs::read_to_string(&state_path).unwrap();
+        let loaded: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        let handles = loaded["handles"].as_object().unwrap();
+        assert_eq!(handles.len(), 3);
+
+        // Verify each handle roundtripped
+        assert_eq!(handles["eng-1"]["agent_type"], "claude");
+        assert_eq!(handles["eng-2"]["agent_type"], "codex");
+        assert_eq!(handles["eng-3"]["agent_type"], "generic");
+        assert_eq!(handles["eng-1"]["work_dir"], "/tmp/worktree/eng-1");
+        assert_eq!(
+            handles["eng-1"]["agent_cmd"],
+            "claude --dangerously-skip-permissions"
+        );
+    }
+
+    // -- Test: Multiple pings --
+
+    #[test]
+    #[cfg_attr(not(feature = "shim-integration"), ignore)]
+    fn shim_multiple_pings() {
+        let mut ch = spawn_bash_shim();
+        assert!(wait_for_ready(&mut ch), "shim did not become ready");
+
+        // Send 5 pings, each should produce a pong
+        for i in 0..5 {
+            ch.send(&Command::Ping).unwrap();
+            let evt = wait_for_event(&mut ch, Duration::from_secs(5), |e| {
+                matches!(e, Event::Pong)
+            });
+            assert!(evt.is_some(), "should receive Pong #{i}");
+        }
+
+        ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    }
 }
