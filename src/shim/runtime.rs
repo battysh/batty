@@ -57,6 +57,7 @@ pub struct ShimArgs {
 
 #[derive(Debug, Clone)]
 struct QueuedMessage {
+    #[allow(dead_code)]
     from: String,
     body: String,
     message_id: Option<String>,

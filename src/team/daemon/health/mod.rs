@@ -37,6 +37,7 @@ fn format_checkpoint_section(cp_content: &str) -> String {
 }
 
 impl TeamDaemon {
+    #[allow(dead_code)]
     pub(super) fn handle_pane_death(&mut self, member_name: &str) -> Result<()> {
         self.restart_member(member_name)
     }

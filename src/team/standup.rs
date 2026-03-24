@@ -196,6 +196,7 @@ pub(crate) struct StandupGenerationContext<'a> {
     pub(crate) members: &'a [MemberInstance],
     pub(crate) watchers: &'a HashMap<String, SessionWatcher>,
     pub(crate) states: &'a HashMap<String, MemberState>,
+    #[allow(dead_code)]
     pub(crate) pane_map: &'a HashMap<String, String>,
     pub(crate) telegram_bot: Option<&'a TelegramBot>,
     pub(crate) paused_standups: &'a HashSet<String>,
@@ -210,7 +211,7 @@ pub(crate) fn maybe_generate_standup(context: StandupGenerationContext<'_>) -> R
         members,
         watchers,
         states,
-        pane_map,
+        pane_map: _,
         telegram_bot,
         paused_standups,
         last_standup,

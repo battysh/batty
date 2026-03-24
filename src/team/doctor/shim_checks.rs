@@ -20,13 +20,13 @@ pub(super) struct ShimHealthReport {
 /// Run all shim health checks. Returns check lines to be rendered in the
 /// doctor report. When `fix` is true, attempts to create missing directories.
 pub(super) fn build_shim_checks(project_root: &Path, fix: bool) -> ShimHealthReport {
-    let mut checks = Vec::new();
-
-    checks.push(check_pty_creation());
-    checks.push(check_socketpair());
-    checks.push(check_vt100_sanity());
-    checks.push(check_shim_log_dir(project_root, fix));
-    checks.push(check_shim_binary());
+    let mut checks = vec![
+        check_pty_creation(),
+        check_socketpair(),
+        check_vt100_sanity(),
+        check_shim_log_dir(project_root, fix),
+        check_shim_binary(),
+    ];
     checks.extend(check_agent_classifiers());
 
     ShimHealthReport { checks }

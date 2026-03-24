@@ -206,6 +206,7 @@ impl TeamDaemon {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(super) fn persist_member_launch_identity(
         &self,
         member_name: &str,

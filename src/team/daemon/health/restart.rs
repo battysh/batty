@@ -8,6 +8,7 @@ use tracing::warn;
 use super::super::*;
 
 impl TeamDaemon {
+    #[allow(dead_code)]
     pub(in super::super) fn restart_dead_members(&mut self) -> Result<()> {
         let member_names: Vec<String> = self.config.pane_map.keys().cloned().collect();
         for name in member_names {
@@ -25,6 +26,7 @@ impl TeamDaemon {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(in super::super) fn restart_member(&mut self, member_name: &str) -> Result<()> {
         let Some(member) = self
             .config

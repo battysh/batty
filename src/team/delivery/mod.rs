@@ -9,6 +9,7 @@ use crate::tmux;
 pub(super) const DELIVERY_VERIFICATION_CAPTURE_LINES: u32 = 50;
 /// Increased capture window for agents that recently became ready, to account
 /// for startup output pushing the delivery marker further up the scrollback.
+#[allow(dead_code)]
 pub(super) const DELIVERY_VERIFICATION_CAPTURE_LINES_RECENTLY_READY: u32 = 100;
 pub(super) const FAILED_DELIVERY_RETRY_DELAY: Duration = Duration::from_secs(30);
 pub(super) const FAILED_DELIVERY_MAX_ATTEMPTS: u32 = 3;
