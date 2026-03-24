@@ -96,8 +96,16 @@ fn content_hash(s: &str) -> u64 {
 /// `channel` is the pre-connected socket to the orchestrator (fd 3 or
 /// from a socketpair).
 pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
-    let rows = if args.rows > 0 { args.rows } else { DEFAULT_ROWS };
-    let cols = if args.cols > 0 { args.cols } else { DEFAULT_COLS };
+    let rows = if args.rows > 0 {
+        args.rows
+    } else {
+        DEFAULT_ROWS
+    };
+    let cols = if args.cols > 0 {
+        args.cols
+    } else {
+        DEFAULT_COLS
+    };
 
     // -- Create PTY --
     let pty_system = portable_pty::native_pty_system();
@@ -187,9 +195,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                         (ShimState::Working, ScreenVerdict::AgentWorking) => None,
                         (_, ScreenVerdict::ContextExhausted) => Some(ShimState::ContextExhausted),
                         (_, ScreenVerdict::Unknown) => None,
-                        (ShimState::Idle, ScreenVerdict::AgentWorking) => {
-                            Some(ShimState::Working)
-                        }
+                        (ShimState::Idle, ScreenVerdict::AgentWorking) => Some(ShimState::Working),
                         (ShimState::Starting, ScreenVerdict::AgentWorking) => {
                             Some(ShimState::Working)
                         }
@@ -285,7 +291,10 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
         let cmd = match cmd_channel.recv::<Command>() {
             Ok(Some(c)) => c,
             Ok(None) => {
-                eprintln!("[shim {}] orchestrator disconnected, shutting down", args.id);
+                eprintln!(
+                    "[shim {}] orchestrator disconnected, shutting down",
+                    args.id
+                );
                 child.kill().ok();
                 break;
             }
@@ -401,8 +410,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                     writer.write_all(b"\x03").ok(); // Ctrl-C
                     writer.flush().ok();
                 }
-                let deadline =
-                    Instant::now() + std::time::Duration::from_secs(timeout_secs as u64);
+                let deadline = Instant::now() + std::time::Duration::from_secs(timeout_secs as u64);
                 loop {
                     if Instant::now() > deadline {
                         child.kill().ok();
