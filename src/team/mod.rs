@@ -227,6 +227,27 @@ pub(crate) fn now_unix() -> u64 {
         .as_secs()
 }
 
+/// Overrides collected from the interactive init wizard.
+#[derive(Debug, Default)]
+pub struct InitOverrides {
+    pub orchestrator_pane: Option<bool>,
+    pub auto_dispatch: Option<bool>,
+    pub use_worktrees: Option<bool>,
+    pub timeout_nudges: Option<bool>,
+    pub standups: Option<bool>,
+    pub triage_interventions: Option<bool>,
+    pub review_interventions: Option<bool>,
+    pub owned_task_interventions: Option<bool>,
+    pub manager_dispatch_interventions: Option<bool>,
+    pub architect_utilization_interventions: Option<bool>,
+    pub auto_merge_enabled: Option<bool>,
+    pub standup_interval_secs: Option<u64>,
+    pub nudge_interval_secs: Option<u64>,
+    pub stall_threshold_secs: Option<u64>,
+    pub review_nudge_threshold_secs: Option<u64>,
+    pub review_timeout_secs: Option<u64>,
+}
+
 /// Scaffold `.batty/team_config/` with default team.yaml and prompt templates.
 pub fn init_team(
     project_root: &Path,
@@ -234,6 +255,18 @@ pub fn init_team(
     project_name: Option<&str>,
     agent: Option<&str>,
     force: bool,
+) -> Result<Vec<PathBuf>> {
+    init_team_with_overrides(project_root, template, project_name, agent, force, None)
+}
+
+/// Scaffold with optional interactive overrides applied to the template YAML.
+pub fn init_team_with_overrides(
+    project_root: &Path,
+    template: &str,
+    project_name: Option<&str>,
+    agent: Option<&str>,
+    force: bool,
+    overrides: Option<&InitOverrides>,
 ) -> Result<Vec<PathBuf>> {
     let config_dir = team_config_dir(project_root);
     std::fs::create_dir_all(&config_dir)
@@ -270,6 +303,9 @@ pub fn init_team(
         yaml_content = yaml_content
             .replace("agent: claude", &format!("agent: {agent}"))
             .replace("agent: codex", &format!("agent: {agent}"));
+    }
+    if let Some(ov) = overrides {
+        yaml_content = apply_init_overrides(&yaml_content, ov);
     }
     std::fs::write(&yaml_path, &yaml_content)
         .with_context(|| format!("failed to write {}", yaml_path.display()))?;
@@ -377,6 +413,185 @@ pub fn init_team(
 
     info!(dir = %config_dir.display(), files = created.len(), "scaffolded team config");
     Ok(created)
+}
+
+/// Apply interactive overrides to template YAML content via text replacement.
+///
+/// Works by parsing the YAML, mutating the relevant fields, and re-serializing.
+/// Falls back to the original content if parsing fails.
+fn apply_init_overrides(yaml: &str, ov: &InitOverrides) -> String {
+    let mut doc: serde_yaml::Value = match serde_yaml::from_str(yaml) {
+        Ok(v) => v,
+        Err(_) => return yaml.to_string(),
+    };
+    let map = match doc.as_mapping_mut() {
+        Some(m) => m,
+        None => return yaml.to_string(),
+    };
+
+    fn set_bool(
+        map: &mut serde_yaml::Mapping,
+        section: &str,
+        key: &str,
+        val: Option<bool>,
+    ) {
+        if let Some(v) = val {
+            let sec = map
+                .entry(serde_yaml::Value::String(section.to_string()))
+                .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+            if let Some(m) = sec.as_mapping_mut() {
+                m.insert(
+                    serde_yaml::Value::String(key.to_string()),
+                    serde_yaml::Value::Bool(v),
+                );
+            }
+        }
+    }
+
+    fn set_u64(
+        map: &mut serde_yaml::Mapping,
+        section: &str,
+        key: &str,
+        val: Option<u64>,
+    ) {
+        if let Some(v) = val {
+            let sec = map
+                .entry(serde_yaml::Value::String(section.to_string()))
+                .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+            if let Some(m) = sec.as_mapping_mut() {
+                m.insert(
+                    serde_yaml::Value::String(key.to_string()),
+                    serde_yaml::Value::Number(serde_yaml::Number::from(v)),
+                );
+            }
+        }
+    }
+
+    // Top-level
+    if let Some(v) = ov.orchestrator_pane {
+        map.insert(
+            serde_yaml::Value::String("orchestrator_pane".to_string()),
+            serde_yaml::Value::Bool(v),
+        );
+    }
+
+    // Board
+    set_bool(map, "board", "auto_dispatch", ov.auto_dispatch);
+
+    // Standup
+    set_u64(map, "standup", "interval_secs", ov.standup_interval_secs);
+
+    // Automation toggles
+    set_bool(map, "automation", "timeout_nudges", ov.timeout_nudges);
+    set_bool(map, "automation", "standups", ov.standups);
+    set_bool(
+        map,
+        "automation",
+        "triage_interventions",
+        ov.triage_interventions,
+    );
+    set_bool(
+        map,
+        "automation",
+        "review_interventions",
+        ov.review_interventions,
+    );
+    set_bool(
+        map,
+        "automation",
+        "owned_task_interventions",
+        ov.owned_task_interventions,
+    );
+    set_bool(
+        map,
+        "automation",
+        "manager_dispatch_interventions",
+        ov.manager_dispatch_interventions,
+    );
+    set_bool(
+        map,
+        "automation",
+        "architect_utilization_interventions",
+        ov.architect_utilization_interventions,
+    );
+
+    // Workflow policy
+    set_u64(
+        map,
+        "workflow_policy",
+        "stall_threshold_secs",
+        ov.stall_threshold_secs,
+    );
+    set_u64(
+        map,
+        "workflow_policy",
+        "review_nudge_threshold_secs",
+        ov.review_nudge_threshold_secs,
+    );
+    set_u64(
+        map,
+        "workflow_policy",
+        "review_timeout_secs",
+        ov.review_timeout_secs,
+    );
+
+    // Auto-merge
+    if let Some(v) = ov.auto_merge_enabled {
+        let sec = map
+            .entry(serde_yaml::Value::String("workflow_policy".to_string()))
+            .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+        if let Some(wp) = sec.as_mapping_mut() {
+            let am = wp
+                .entry(serde_yaml::Value::String("auto_merge".to_string()))
+                .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+            if let Some(m) = am.as_mapping_mut() {
+                m.insert(
+                    serde_yaml::Value::String("enabled".to_string()),
+                    serde_yaml::Value::Bool(v),
+                );
+            }
+        }
+    }
+
+    // Per-role overrides: use_worktrees and nudge_interval_secs
+    if ov.use_worktrees.is_some() || ov.nudge_interval_secs.is_some() {
+        if let Some(roles) = map
+            .get_mut(&serde_yaml::Value::String("roles".to_string()))
+            .and_then(|v| v.as_sequence_mut())
+        {
+            for role in roles.iter_mut() {
+                if let Some(m) = role.as_mapping_mut() {
+                    let is_engineer = m
+                        .get(&serde_yaml::Value::String("role_type".to_string()))
+                        .and_then(|v| v.as_str())
+                        == Some("engineer");
+                    let is_architect = m
+                        .get(&serde_yaml::Value::String("role_type".to_string()))
+                        .and_then(|v| v.as_str())
+                        == Some("architect");
+
+                    if is_engineer {
+                        if let Some(v) = ov.use_worktrees {
+                            m.insert(
+                                serde_yaml::Value::String("use_worktrees".to_string()),
+                                serde_yaml::Value::Bool(v),
+                            );
+                        }
+                    }
+                    if is_architect {
+                        if let Some(v) = ov.nudge_interval_secs {
+                            m.insert(
+                                serde_yaml::Value::String("nudge_interval_secs".to_string()),
+                                serde_yaml::Value::Number(serde_yaml::Number::from(v)),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    serde_yaml::to_string(&doc).unwrap_or_else(|_| yaml.to_string())
 }
 
 pub fn list_available_templates() -> Result<Vec<String>> {
@@ -2147,7 +2362,21 @@ pub fn purge_inbox(
 /// Merge an engineer's worktree branch.
 pub fn merge_worktree(project_root: &Path, engineer: &str) -> Result<()> {
     let engineer = resolve_member_name(project_root, engineer)?;
-    match merge::merge_engineer_branch(project_root, &engineer)? {
+    let is_git = git_cmd::is_git_repo(project_root);
+    let outcome = if !is_git {
+        let subs = git_cmd::discover_sub_repos(project_root);
+        if subs.is_empty() {
+            bail!("project root is not a git repository and has no git sub-repos");
+        }
+        let names: Vec<String> = subs
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        merge::merge_multi_repo_engineer_branch(project_root, &engineer, &names)?
+    } else {
+        merge::merge_engineer_branch(project_root, &engineer)?
+    };
+    match outcome {
         merge::MergeOutcome::Success => Ok(()),
         merge::MergeOutcome::RebaseConflict(stderr) => {
             bail!("merge blocked by rebase conflict: {stderr}")
@@ -4040,5 +4269,134 @@ roles:
         // Should only count events from the latest daemon_started.
         assert_eq!(summary.tasks_completed, 1);
         assert!(summary.runtime_secs >= 1799 && summary.runtime_secs <= 1801);
+    }
+
+    #[test]
+    fn apply_init_overrides_sets_fields() {
+        let yaml = include_str!("templates/team_simple.yaml");
+        let ov = InitOverrides {
+            orchestrator_pane: Some(false),
+            auto_dispatch: Some(true),
+            use_worktrees: Some(false),
+            timeout_nudges: Some(false),
+            standups: Some(false),
+            auto_merge_enabled: Some(true),
+            standup_interval_secs: Some(999),
+            stall_threshold_secs: Some(123),
+            review_nudge_threshold_secs: Some(456),
+            review_timeout_secs: Some(789),
+            nudge_interval_secs: Some(555),
+            ..Default::default()
+        };
+        let result = apply_init_overrides(yaml, &ov);
+        let doc: serde_yaml::Value = serde_yaml::from_str(&result).unwrap();
+        let map = doc.as_mapping().unwrap();
+
+        assert_eq!(
+            map.get(&serde_yaml::Value::String("orchestrator_pane".into()))
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+
+        let board = map
+            .get(&serde_yaml::Value::String("board".into()))
+            .unwrap()
+            .as_mapping()
+            .unwrap();
+        assert_eq!(
+            board
+                .get(&serde_yaml::Value::String("auto_dispatch".into()))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        let automation = map
+            .get(&serde_yaml::Value::String("automation".into()))
+            .unwrap()
+            .as_mapping()
+            .unwrap();
+        assert_eq!(
+            automation
+                .get(&serde_yaml::Value::String("timeout_nudges".into()))
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            automation
+                .get(&serde_yaml::Value::String("standups".into()))
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+
+        let standup = map
+            .get(&serde_yaml::Value::String("standup".into()))
+            .unwrap()
+            .as_mapping()
+            .unwrap();
+        assert_eq!(
+            standup
+                .get(&serde_yaml::Value::String("interval_secs".into()))
+                .and_then(|v| v.as_u64()),
+            Some(999)
+        );
+
+        let wp = map
+            .get(&serde_yaml::Value::String("workflow_policy".into()))
+            .unwrap()
+            .as_mapping()
+            .unwrap();
+        assert_eq!(
+            wp.get(&serde_yaml::Value::String("stall_threshold_secs".into()))
+                .and_then(|v| v.as_u64()),
+            Some(123)
+        );
+        assert_eq!(
+            wp.get(&serde_yaml::Value::String("review_nudge_threshold_secs".into()))
+                .and_then(|v| v.as_u64()),
+            Some(456)
+        );
+        assert_eq!(
+            wp.get(&serde_yaml::Value::String("review_timeout_secs".into()))
+                .and_then(|v| v.as_u64()),
+            Some(789)
+        );
+
+        let am = wp
+            .get(&serde_yaml::Value::String("auto_merge".into()))
+            .unwrap()
+            .as_mapping()
+            .unwrap();
+        assert_eq!(
+            am.get(&serde_yaml::Value::String("enabled".into()))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        // Check per-role overrides
+        let roles = map
+            .get(&serde_yaml::Value::String("roles".into()))
+            .unwrap()
+            .as_sequence()
+            .unwrap();
+        for role in roles {
+            let m = role.as_mapping().unwrap();
+            let rt = m
+                .get(&serde_yaml::Value::String("role_type".into()))
+                .and_then(|v| v.as_str());
+            if rt == Some("engineer") {
+                assert_eq!(
+                    m.get(&serde_yaml::Value::String("use_worktrees".into()))
+                        .and_then(|v| v.as_bool()),
+                    Some(false)
+                );
+            }
+            if rt == Some("architect") {
+                assert_eq!(
+                    m.get(&serde_yaml::Value::String("nudge_interval_secs".into()))
+                        .and_then(|v| v.as_u64()),
+                    Some(555)
+                );
+            }
+        }
     }
 }

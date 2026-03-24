@@ -418,7 +418,7 @@ impl TeamDaemon {
     /// Detect engineer worktrees still on branches that have been merged to main.
     /// For idle engineers with no active task, auto-reset to their base branch.
     pub(super) fn maybe_reconcile_stale_worktrees(&mut self) -> Result<()> {
-        if !self.is_git_repo {
+        if !self.is_git_repo && !self.is_multi_repo {
             return Ok(());
         }
 

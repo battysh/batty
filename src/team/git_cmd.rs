@@ -68,6 +68,26 @@ pub fn is_git_repo(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Discover immediate child directories that are git repositories.
+/// Returns an empty vec if `path` is itself a git repo or has no git children.
+pub fn discover_sub_repos(path: &Path) -> Vec<PathBuf> {
+    let entries = match std::fs::read_dir(path) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut repos: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy();
+            !name.starts_with('.') && is_git_repo(p)
+        })
+        .collect();
+    repos.sort();
+    repos
+}
+
 pub fn run_git(repo_dir: &Path, args: &[&str]) -> Result<GitOutput, GitError> {
     let output = run_git_with_status(repo_dir, args)?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();

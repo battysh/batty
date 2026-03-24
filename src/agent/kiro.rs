@@ -7,6 +7,8 @@
 
 use std::path::Path;
 
+use uuid::Uuid;
+
 use crate::agent::{AgentAdapter, SpawnConfig};
 use crate::prompt::PromptPatterns;
 
@@ -114,6 +116,10 @@ impl AgentAdapter for KiroCliAdapter {
         }
     }
 
+    fn new_session_id(&self) -> Option<String> {
+        Some(Uuid::new_v4().to_string())
+    }
+
     fn health_check(&self) -> super::BackendHealth {
         super::check_binary_available(&self.program)
     }
@@ -206,9 +212,11 @@ mod tests {
     }
 
     #[test]
-    fn new_session_id_returns_none() {
+    fn new_session_id_returns_uuid() {
         let adapter = KiroCliAdapter::new(None);
-        assert!(adapter.new_session_id().is_none());
+        let sid = adapter.new_session_id();
+        assert!(sid.is_some());
+        assert!(!sid.unwrap().is_empty());
     }
 
     #[test]

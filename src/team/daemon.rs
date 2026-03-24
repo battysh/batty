@@ -122,6 +122,10 @@ pub struct TeamDaemon {
     pub(super) review_nudge_sent: HashSet<u32>,
     pub(super) poll_interval: Duration,
     pub(super) is_git_repo: bool,
+    /// True when the project root is not a git repo but contains git sub-repos.
+    pub(super) is_multi_repo: bool,
+    /// Cached list of sub-repo directory names (relative to project root) for multi-repo projects.
+    pub(super) sub_repo_names: Vec<String>,
     /// Consecutive error counts per recoverable subsystem name.
     pub(super) subsystem_error_counts: HashMap<String, u32>,
     pub(super) auto_merge_overrides: HashMap<u32, bool>,
@@ -261,7 +265,26 @@ impl TeamDaemon {
     /// Create a new daemon from resolved config and layout.
     pub fn new(config: DaemonConfig) -> Result<Self> {
         let is_git_repo = super::git_cmd::is_git_repo(&config.project_root);
-        if !is_git_repo {
+        let (is_multi_repo, sub_repo_names) = if is_git_repo {
+            (false, Vec::new())
+        } else {
+            let subs = super::git_cmd::discover_sub_repos(&config.project_root);
+            if subs.is_empty() {
+                (false, Vec::new())
+            } else {
+                let names: Vec<String> = subs
+                    .iter()
+                    .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .collect();
+                info!(
+                    sub_repos = ?names,
+                    "Detected multi-repo project with {} sub-repos",
+                    names.len()
+                );
+                (true, names)
+            }
+        };
+        if !is_git_repo && !is_multi_repo {
             info!("Project is not a git repository \u{2014} git operations disabled");
         }
 
@@ -381,6 +404,8 @@ impl TeamDaemon {
             review_nudge_sent: HashSet::new(),
             poll_interval: Duration::from_secs(5),
             is_git_repo,
+            is_multi_repo,
+            sub_repo_names,
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
@@ -726,7 +751,7 @@ impl TeamDaemon {
     }
 
     pub(super) fn member_uses_worktrees(&self, engineer: &str) -> bool {
-        if !self.is_git_repo {
+        if !self.is_git_repo && !self.is_multi_repo {
             return false;
         }
         self.config

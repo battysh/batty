@@ -8,7 +8,7 @@ use batty_cli::{
     team,
 };
 use clap::Parser;
-use dialoguer::{Input, Select};
+use dialoguer::{Confirm, Input, Select};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::debug;
@@ -121,6 +121,145 @@ fn count_board_list_rows(output: &str) -> usize {
         .count()
 }
 
+fn confirm(prompt: &str, default: bool) -> Result<bool> {
+    Ok(Confirm::new()
+        .with_prompt(prompt)
+        .default(default)
+        .interact()?)
+}
+
+fn input_u64(prompt: &str, default: u64) -> Result<u64> {
+    let s: String = Input::new()
+        .with_prompt(prompt)
+        .default(default.to_string())
+        .interact_text()?;
+    Ok(s.parse::<u64>().unwrap_or(default))
+}
+
+fn collect_init_overrides() -> Result<team::InitOverrides> {
+    let mut ov = team::InitOverrides::default();
+
+    println!();
+    println!("── Orchestrator ──────────────────────────────────────────");
+    println!("The orchestrator is a dedicated tmux pane that runs automated");
+    println!("triage, review routing, dispatch-gap recovery, and standups.");
+    ov.orchestrator_pane = Some(confirm(
+        "Enable orchestrator pane?",
+        true,
+    )?);
+
+    println!();
+    println!("── Board & Dispatch ──────────────────────────────────────");
+    println!("Auto-dispatch automatically assigns todo tasks from the board");
+    println!("to idle engineers without manual intervention.");
+    ov.auto_dispatch = Some(confirm(
+        "Enable auto-dispatch of board tasks?",
+        true,
+    )?);
+
+    println!();
+    println!("── Engineer Worktrees ────────────────────────────────────");
+    println!("When enabled, each engineer gets an isolated git worktree.");
+    println!("New task assignments create a fresh branch in that worktree,");
+    println!("keeping engineers from stepping on each other's changes.");
+    ov.use_worktrees = Some(confirm(
+        "Enable git worktrees for engineers?",
+        true,
+    )?);
+
+    println!();
+    println!("── Automation: Nudges & Standups ─────────────────────────");
+    println!("Timeout nudges ping agents that appear stuck or idle for too long.");
+    ov.timeout_nudges = Some(confirm(
+        "Enable timeout nudges?",
+        true,
+    )?);
+
+    println!("Standups periodically ask agents to report their status.");
+    ov.standups = Some(confirm(
+        "Enable periodic standups?",
+        true,
+    )?);
+
+    println!();
+    println!("── Automation: Interventions ──────────────────────────────");
+    println!("These are daemon-driven actions that keep the team moving.");
+    println!();
+
+    println!("Triage: auto-routes new tasks to the right manager/engineer.");
+    ov.triage_interventions = Some(confirm(
+        "Enable triage interventions?",
+        true,
+    )?);
+
+    println!("Review: nudges reviewers and escalates stale reviews.");
+    ov.review_interventions = Some(confirm(
+        "Enable review interventions?",
+        true,
+    )?);
+
+    println!("Owned-task recovery: re-dispatches tasks stuck on a dead agent.");
+    ov.owned_task_interventions = Some(confirm(
+        "Enable owned-task recovery?",
+        true,
+    )?);
+
+    println!("Manager dispatch: nudges managers when todo tasks pile up.");
+    ov.manager_dispatch_interventions = Some(confirm(
+        "Enable manager dispatch interventions?",
+        true,
+    )?);
+
+    println!("Architect utilization: nudges the architect when engineers are idle.");
+    ov.architect_utilization_interventions = Some(confirm(
+        "Enable architect utilization interventions?",
+        true,
+    )?);
+
+    println!();
+    println!("── Auto-Merge ───────────────────────────────────────────");
+    println!("When enabled, completed engineer branches that pass tests and");
+    println!("score above a confidence threshold are merged automatically.");
+    ov.auto_merge_enabled = Some(confirm(
+        "Enable auto-merge?",
+        false,
+    )?);
+
+    println!();
+    println!("── Timing (seconds) ─────────────────────────────────────");
+    println!("These control how often the daemon checks on agents and reviews.");
+    println!();
+
+    ov.standup_interval_secs = Some(input_u64(
+        "Standup interval (secs, how often agents report status)",
+        600,
+    )?);
+
+    ov.nudge_interval_secs = Some(input_u64(
+        "Architect nudge interval (secs, idle ping for architect)",
+        900,
+    )?);
+
+    ov.stall_threshold_secs = Some(input_u64(
+        "Stall threshold (secs, agent considered stuck after this)",
+        300,
+    )?);
+
+    ov.review_nudge_threshold_secs = Some(input_u64(
+        "Review nudge threshold (secs, reviewer gets a reminder)",
+        1800,
+    )?);
+
+    ov.review_timeout_secs = Some(input_u64(
+        "Review timeout (secs, stale review gets escalated)",
+        7200,
+    )?);
+
+    println!();
+
+    Ok(ov)
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     setup_tracing(cli.verbose);
@@ -163,7 +302,16 @@ fn main() -> Result<()> {
                     .interact()?;
                 let agent = agents[agent_idx];
 
-                team::init_team(&root, template_name, Some(&project_name), Some(agent), force)?
+                let overrides = collect_init_overrides()?;
+
+                team::init_team_with_overrides(
+                    &root,
+                    template_name,
+                    Some(&project_name),
+                    Some(agent),
+                    force,
+                    Some(&overrides),
+                )?
             };
             println!("Initialized team config ({} files):", created.len());
             for path in &created {

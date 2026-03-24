@@ -1,4 +1,5 @@
 use super::*;
+use crate::team::task_loop::setup_multi_repo_worktree;
 use tracing::debug;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -29,6 +30,14 @@ impl TeamDaemon {
             return self.config.project_root.clone();
         }
 
+        if !self.is_git_repo && !self.is_multi_repo {
+            debug!(
+                member = %member.name,
+                "Skipping worktree setup: not a git or multi-repo project"
+            );
+            return self.config.project_root.clone();
+        }
+
         let team_config_dir = self.config.project_root.join(".batty").join("team_config");
         let wt_dir = self
             .config
@@ -37,12 +46,25 @@ impl TeamDaemon {
             .join("worktrees")
             .join(&member.name);
         let branch_name = engineer_base_branch_name(&member.name);
-        match setup_engineer_worktree(
-            &self.config.project_root,
-            &wt_dir,
-            &branch_name,
-            &team_config_dir,
-        ) {
+
+        let result = if self.is_multi_repo {
+            setup_multi_repo_worktree(
+                &self.config.project_root,
+                &wt_dir,
+                &branch_name,
+                &team_config_dir,
+                &self.sub_repo_names,
+            )
+        } else {
+            setup_engineer_worktree(
+                &self.config.project_root,
+                &wt_dir,
+                &branch_name,
+                &team_config_dir,
+            )
+        };
+
+        match result {
             Ok(path) => path,
             Err(error) => {
                 warn!(
@@ -501,7 +523,9 @@ fn default_codex_sessions_root() -> PathBuf {
 fn session_id_exists(agent_name: &str, session_id: &str) -> bool {
     match agent_name {
         "codex-cli" => codex_session_id_exists_in(&default_codex_sessions_root(), session_id),
-        "kiro-cli" => false,
+        // Kiro doesn't write session files; the ID is only used for
+        // launch-state bookkeeping so we always consider it valid.
+        "kiro-cli" => !session_id.is_empty(),
         _ => claude_session_id_exists_in(&default_claude_projects_root(), session_id),
     }
 }
@@ -563,7 +587,10 @@ fn resolve_member_launch_session(
     }
 
     if agent_name == "kiro-cli" {
-        return (false, None);
+        // Kiro doesn't support resume but still needs a session_id for
+        // launch-state tracking and delivery machinery.
+        let session_id = new_member_session_id(agent_name);
+        return (false, session_id);
     }
 
     let Some(session_id) = new_member_session_id(agent_name) else {
@@ -1250,7 +1277,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_member_launch_session_never_resumes_kiro_without_session_support() {
+    fn resolve_member_launch_session_kiro_gets_fresh_session_id() {
         let previous = LaunchIdentity {
             agent: "kiro-cli".to_string(),
             prompt: "same prompt".to_string(),
@@ -1261,7 +1288,7 @@ mod tests {
             resolve_member_launch_session("kiro-cli", Some(&previous), true, true, false);
 
         assert!(!resume);
-        assert!(session_id.is_none());
+        assert!(session_id.is_some());
     }
 
     #[test]

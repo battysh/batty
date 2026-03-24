@@ -1065,6 +1065,8 @@ mod tests {
             review_nudge_sent: HashSet::new(),
             poll_interval: Duration::from_secs(5),
             is_git_repo: false,
+            is_multi_repo: false,
+            sub_repo_names: Vec::new(),
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),

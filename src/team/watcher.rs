@@ -460,6 +460,15 @@ pub fn is_at_agent_prompt(capture: &str) -> bool {
         }
     }
 
+    // Kiro CLI shows "Thinking..." with a spinner while working. If we see
+    // this in the recent lines, the agent is busy even if the prompt is
+    // visible further up.
+    for line in &recent_non_empty_lines(capture, 4) {
+        if is_kiro_thinking(line) {
+            return false;
+        }
+    }
+
     for line in &trimmed {
         let l = line.trim();
         // Claude Code idle prompt
@@ -585,11 +594,17 @@ fn looks_like_claude_spinner_status(line: &str) -> bool {
 
 fn looks_like_kiro_spinner_status(line: &str) -> bool {
     let trimmed = line.trim().to_ascii_lowercase();
-    (trimmed.contains("kiro") || trimmed.contains("agent"))
+    // Match "kiro thinking" / "agent thinking" style lines
+    if (trimmed.contains("kiro") || trimmed.contains("agent"))
         && (trimmed.contains("thinking")
             || trimmed.contains("planning")
             || trimmed.contains("applying")
             || trimmed.contains("working"))
+    {
+        return true;
+    }
+    // Match bare spinner lines like "⠋ Thinking..." from kiro-cli
+    is_kiro_thinking(line)
 }
 
 fn is_live_interrupt_footer(line: &str) -> bool {
@@ -598,6 +613,16 @@ fn is_live_interrupt_footer(line: &str) -> bool {
         || trimmed.contains("esc to inter")
         || trimmed.contains("esc to in…")
         || trimmed.contains("esc to in...")
+}
+
+/// Detect kiro-cli's "Thinking..." spinner lines (e.g. "⠋ Thinking...").
+fn is_kiro_thinking(line: &str) -> bool {
+    let trimmed = line.trim();
+    // Strip leading spinner character (braille pattern U+2800..U+28FF)
+    let rest = trimmed
+        .strip_prefix(|c: char| ('\u{2800}'..='\u{28FF}').contains(&c))
+        .unwrap_or(trimmed);
+    rest.trim().starts_with("Thinking")
 }
 
 fn capture_contains_context_exhaustion(capture: &str) -> bool {
