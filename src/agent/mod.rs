@@ -294,7 +294,7 @@ mod tests {
         let kiro = adapter_from_name("kiro").unwrap();
         assert!(claude.new_session_id().is_some());
         assert!(codex.new_session_id().is_none());
-        assert!(kiro.new_session_id().is_none());
+        assert!(kiro.new_session_id().is_some());
     }
 
     #[test]
