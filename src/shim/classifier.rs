@@ -266,6 +266,7 @@ fn classify_generic(content: &str) -> ScreenVerdict {
             || trimmed.ends_with("% ")
             || trimmed.ends_with('%')
             || trimmed.ends_with("> ")
+            || trimmed.ends_with('>')
         {
             return ScreenVerdict::AgentIdle;
         }
