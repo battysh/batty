@@ -59,11 +59,6 @@ impl AgentAdapter for CodexCliAdapter {
         format!("{response}\n")
     }
 
-    fn reset_context_keys(&self) -> Vec<(String, bool)> {
-        // Codex: send Ctrl-C to kill, then relaunch
-        vec![("C-c".to_string(), false)]
-    }
-
     fn launch_command(
         &self,
         prompt: &str,
