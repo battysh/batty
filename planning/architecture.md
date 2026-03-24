@@ -2,23 +2,26 @@
 
 ## Overview
 
-Hierarchical agent team running in a single tmux session. A YAML-defined org chart (architect, managers, engineers) with daemon-managed communication, status monitoring, and task routing.
+Goal-directed agent team with a conversational interface. The user describes what they want built; the architect operationalizes it, dynamically scales a team of agents, and drives execution through assessment cycles — all visible through a console TUI or Telegram.
 
 ```
-┌── tmux session: batty ─────────────────────────────────────────┐
-│  ┌─ Architect ──────┐  ┌─ Manager ──────────────────────────┐  │
-│  │  Strategic pane   │  │  Tactical pane                     │  │
-│  │  Owns roadmap +   │  │  Owns kanban board, assigns tasks, │  │
-│  │  architecture     │  │  supervises engineers               │  │
-│  └──────────────────┘  └────────────────────────────────────┘  │
-│  ┌─ Engineer 1 ─────┐  ┌─ Engineer 2 ─┐  ┌─ Engineer 3 ─┐    │
-│  │  Coding agent     │  │  Coding agent │  │  Coding agent │    │
-│  │  (Claude/Codex)   │  │              │  │              │    │
-│  └──────────────────┘  └──────────────┘  └──────────────┘    │
-├──────────────────────────────────────────────────────────────────┤
-│  batty daemon (background): message routing, pane monitoring,   │
-│  status tracking, Telegram bridge, event logging                │
-└──────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│  Console TUI  or  Telegram                      │ ← human interface
+│  (chat, board, agents, peek)                    │
+└──────────────┬──────────────────────────────────┘
+               │ Unix socket (.batty/console.sock)
+┌──────────────▼──────────────────────────────────┐
+│  Daemon (orchestrator)                          │ ← always running
+│  - Manages shim lifecycle                       │
+│  - Routes messages between agents               │
+│  - Handles topology changes (hot-reload)        │
+│  - Serves console connections                   │
+│  - Persists state for resume                    │
+└───┬─────┬─────┬─────┬─────┬─────────────────────┘
+    │     │     │     │     │
+  ┌─▼──┐ ┌▼──┐ ┌▼──┐ ┌▼──┐ ┌▼──┐
+  │arch│ │mgr│ │e-1│ │e-2│ │e-3│  ← shim processes
+  └────┘ └───┘ └───┘ └───┘ └───┘
 ```
 
 ## Three Roles
@@ -396,3 +399,44 @@ Detailed specification: `planning/shim-spec.md`. POC: `poc/agent-shim/`.
 **Why separate architect/manager/engineer?** Strategy, tactics, and execution are different skills. Splitting them prevents scope creep and evaluation bias. Each role has a focused prompt template.
 
 **Why socketpair over named sockets?** Inherited file descriptors require no filesystem coordination, no discovery protocol, and no cleanup. The channel exists exactly as long as the parent-child relationship exists.
+
+## Goal-Directed Architecture
+
+Batty v0.8.0 introduces goal-directed operation: the user describes what they want built, and the architect autonomously plans, scales, executes, and measures progress.
+
+### Startup Flow
+
+1. User runs `batty` — daemon starts (or attaches to existing), console TUI opens
+2. If fresh start: architect asks "What would you like to build?", user describes intent
+3. Architect creates `goal.yaml` (description, measurable criteria, budget, constraints)
+4. Architect generates board tasks, issues `batty scale engineers N`, work begins
+5. If resume: daemon loads saved state, architect summarizes progress since last attach
+
+### Goal Specification
+
+Goals are stored in `.batty/goal.yaml` with measurable criteria:
+
+- **Automated criteria** — shell commands with pass/fail targets (e.g., `cargo test` exits 0)
+- **Agent review criteria** — architect evaluates code quality each cycle
+- **Human criteria** — user approves milestones via chat
+
+### Assessment Loop
+
+The architect runs a continuous cycle: assess (run eval criteria) → strategize (identify highest-leverage work) → decompose (create board tasks) → configure (scale topology) → execute (team works) → evaluate (re-run criteria). This cycle repeats until the goal is met or budget is exhausted.
+
+### Dynamic Topology
+
+The architect controls team shape through `batty scale` commands that modify team.yaml. The daemon watches for changes, diffs against running state, and spawns/kills shims to match. Agents being removed finish their current task first (graceful removal).
+
+## Console TUI
+
+The console TUI (ratatui) replaces tmux as the primary human interface. Four views:
+
+- **Chat** — bidirectional conversation with the architect. System events inline.
+- **Board** — delegates to kanban-md TUI subprocess. Human can edit tasks directly.
+- **Agents** — live status table of all agents with metrics.
+- **Peek** — read-only live terminal output from a specific agent's shim PTY log.
+
+The TUI connects to the daemon via a Unix socket at `.batty/console.sock`. Multiple consoles can connect simultaneously. The console can be detached (`q`) and reattached (`batty`) — the daemon keeps running.
+
+Telegram remains an alternative frontend for the chat view. Messages from either interface appear in both.
