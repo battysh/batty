@@ -9,6 +9,7 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 
@@ -23,8 +24,8 @@ use super::protocol::{self, Channel, Event};
 pub fn default_cmd(agent_type: AgentType) -> &'static str {
     match agent_type {
         AgentType::Claude => "claude --dangerously-skip-permissions",
-        AgentType::Codex => "codex",
-        AgentType::Kiro => "kiro",
+        AgentType::Codex => "codex --dangerously-bypass-approvals-and-sandbox",
+        AgentType::Kiro => "kiro-cli",
         AgentType::Generic => "bash",
     }
 }
@@ -108,6 +109,7 @@ pub fn run(agent_type: AgentType, cmd: &str, cwd: &Path) -> Result<()> {
     let mut send_ch = Channel::new(parent_sock);
     let mut recv_ch = send_ch.try_clone().context("failed to clone channel")?;
 
+    let t_start = Instant::now();
     eprintln!(
         "[chat] shim spawned (pid {}), waiting for agent to become ready...",
         child.id()
@@ -117,14 +119,22 @@ pub fn run(agent_type: AgentType, cmd: &str, cwd: &Path) -> Result<()> {
     loop {
         match recv_ch.recv::<Event>()? {
             Some(Event::Ready) => {
-                eprintln!("[chat] agent is ready. Type a message and press Enter.");
+                eprintln!(
+                    "[chat] agent is ready ({:.1}s). Type a message and press Enter.",
+                    t_start.elapsed().as_secs_f64()
+                );
                 eprintln!(
                     "[chat] Type :quit to exit, :screen to capture screen, :state to query state.\n"
                 );
                 break;
             }
             Some(Event::StateChanged { from, to, .. }) => {
-                eprintln!("[chat] state: {} \u{2192} {}", from, to);
+                eprintln!(
+                    "[chat] state: {} \u{2192} {} (+{:.1}s)",
+                    from,
+                    to,
+                    t_start.elapsed().as_secs_f64()
+                );
             }
             Some(Event::Error { reason, .. }) => {
                 eprintln!("[chat] error during startup: {reason}");
@@ -232,6 +242,7 @@ pub fn run(agent_type: AgentType, cmd: &str, cwd: &Path) -> Result<()> {
         }
 
         // -- Send message to agent --
+        let t_send = Instant::now();
         send_ch.send(&protocol::Command::SendMessage {
             from: "user".into(),
             body: input.to_string(),
@@ -247,17 +258,28 @@ pub fn run(agent_type: AgentType, cmd: &str, cwd: &Path) -> Result<()> {
                     last_lines,
                     ..
                 }) => {
-                    if !response.is_empty() {
-                        println!("\n{response}");
+                    let elapsed = t_send.elapsed();
+                    let text = if !response.is_empty() {
+                        response.trim_end().to_string()
                     } else if !last_lines.is_empty() {
-                        println!("\n{last_lines}");
+                        last_lines.trim_end().to_string()
                     } else {
-                        println!("\n[agent completed with no visible output]");
+                        String::new()
+                    };
+                    if text.is_empty() {
+                        eprintln!(
+                            "\n[completed in {:.1}s with no visible output]",
+                            elapsed.as_secs_f64()
+                        );
+                    } else {
+                        println!("\n{text}");
+                        eprintln!("[{:.1}s]", elapsed.as_secs_f64());
                     }
                     got_completion = true;
                 }
                 Ok(Event::StateChanged { from, to, .. }) => {
-                    eprint!("[{from} \u{2192} {to}] ");
+                    let elapsed = t_send.elapsed();
+                    eprint!("[{from} \u{2192} {to} +{:.1}s] ", elapsed.as_secs_f64());
                     io::stderr().flush().ok();
                 }
                 Ok(Event::Died {
@@ -314,12 +336,15 @@ mod tests {
 
     #[test]
     fn default_cmd_codex() {
-        assert_eq!(default_cmd(AgentType::Codex), "codex");
+        assert_eq!(
+            default_cmd(AgentType::Codex),
+            "codex --dangerously-bypass-approvals-and-sandbox"
+        );
     }
 
     #[test]
     fn default_cmd_kiro() {
-        assert_eq!(default_cmd(AgentType::Kiro), "kiro");
+        assert_eq!(default_cmd(AgentType::Kiro), "kiro-cli");
     }
 
     #[test]
