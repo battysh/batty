@@ -148,13 +148,15 @@ fn classify_claude(content: &str) -> ScreenVerdict {
         }
     }
 
-    // Check for idle prompt: ❯ followed by whitespace or EOL
+    // Check for idle prompt: ❯ followed by ONLY whitespace or EOL.
+    // Reject ❯ followed by alphanumeric content (e.g., dialog menu items
+    // like "❯ 1. Yes, I trust this folder").
     for line in &recent_nonempty {
         let trimmed = line.trim();
         for &prompt_char in CLAUDE_PROMPT_CHARS {
             if trimmed.starts_with(prompt_char) {
                 let after = &trimmed[prompt_char.len_utf8()..];
-                if after.is_empty() || after.starts_with(|c: char| c.is_whitespace()) {
+                if after.trim().is_empty() {
                     return ScreenVerdict::AgentIdle;
                 }
             }
@@ -162,6 +164,37 @@ fn classify_claude(content: &str) -> ScreenVerdict {
     }
 
     ScreenVerdict::Unknown
+}
+
+// ---------------------------------------------------------------------------
+// Startup dialog detection (for auto-dismiss during startup)
+// ---------------------------------------------------------------------------
+
+/// Patterns that indicate an agent trust/consent dialog requiring auto-dismiss.
+/// Shared across agent types — both Claude and Codex show trust dialogs.
+const STARTUP_DIALOG_PATTERNS: &[&str] = &[
+    // Claude
+    "is this a project you created",
+    "quick safety check",
+    "enter to confirm",
+    "yes, i trust this folder",
+    // Codex
+    "do you trust the contents",
+    "press enter to continue",
+    "yes, continue",
+    "working with untrusted contents",
+];
+
+/// Detect known startup dialogs that should be auto-dismissed by the shim.
+/// Works for Claude, Codex, and other agents that show trust prompts.
+pub fn detect_startup_dialog(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    STARTUP_DIALOG_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
+/// Legacy alias for backward compatibility in tests.
+pub fn detect_claude_dialog(content: &str) -> bool {
+    detect_startup_dialog(content)
 }
 
 fn looks_like_claude_spinner(line: &str) -> bool {
@@ -188,13 +221,25 @@ fn classify_codex(content: &str) -> ScreenVerdict {
         .copied()
         .collect();
 
-    // Codex prompt: › followed by whitespace or EOL
+    // Check for Codex working/loading indicators before idle check.
+    // "esc to interrupt" means Codex is actively working or loading.
+    for line in &recent_nonempty {
+        let lower = line.trim().to_lowercase();
+        if lower.contains("esc to interrupt")
+            || lower.contains("starting mcp")
+            || lower.contains("executing")
+        {
+            return ScreenVerdict::AgentWorking;
+        }
+    }
+
+    // Codex prompt: › at the start of a recent line.
+    // Codex shows placeholder text after › (e.g., "› Explain this codebase")
+    // which is greyed-out suggestion text — still idle.
+    // Only idle when no working indicators are present.
     for line in &recent_nonempty {
         let trimmed = line.trim();
-        if trimmed.starts_with('\u{203A}')
-            && (trimmed.len() <= '\u{203A}'.len_utf8()
-                || trimmed['\u{203A}'.len_utf8()..].starts_with(|c: char| c.is_whitespace()))
-        {
+        if trimmed.starts_with('\u{203A}') {
             return ScreenVerdict::AgentIdle;
         }
     }
@@ -216,28 +261,52 @@ fn classify_kiro(content: &str) -> ScreenVerdict {
         .copied()
         .collect();
 
-    // Check for working indicators first
+    // Check for working/loading indicators first
     for line in &recent_nonempty {
-        let lower = line.to_lowercase();
-        if (lower.contains("kiro") || lower.contains("agent"))
-            && (lower.contains("thinking")
-                || lower.contains("planning")
-                || lower.contains("applying")
-                || lower.contains("working"))
+        let lower = line.trim().to_lowercase();
+        // Kiro-cli uses ● spinner during initialization and ⠉/⠋ braille
+        // spinners during processing
+        if lower.contains("initializing")
+            || lower.contains("esc to interrupt")
+            || lower.contains("thinking")
+            || lower.contains("planning")
+            || lower.contains("applying")
         {
             return ScreenVerdict::AgentWorking;
         }
     }
 
+    // Kiro-cli prompt: "ask a question, or describe a task"
+    // This is the placeholder text shown when kiro-cli is idle.
+    let lower_content = content.to_lowercase();
+    if lower_content.contains("ask a question") || lower_content.contains("describe a task") {
+        return ScreenVerdict::AgentIdle;
+    }
+
     // Kiro prompts: Kiro>, kiro>, Kiro >, kiro >, or bare >
+    // Only match when the prompt has no typed content after it.
     for line in &recent_nonempty {
         let trimmed = line.trim();
-        if trimmed == ">"
-            || trimmed.ends_with("> ")
-            || trimmed.to_lowercase().starts_with("kiro>")
-            || trimmed.to_lowercase().starts_with("kiro >")
-        {
+        let lower = trimmed.to_lowercase();
+        if trimmed == ">" || trimmed == "> " {
             return ScreenVerdict::AgentIdle;
+        }
+        if lower.starts_with("kiro>") {
+            let after = &trimmed["kiro>".len()..];
+            if after.trim().is_empty() {
+                return ScreenVerdict::AgentIdle;
+            }
+        } else if lower.starts_with("kiro >") {
+            let after = &trimmed["kiro >".len()..];
+            if after.trim().is_empty() {
+                return ScreenVerdict::AgentIdle;
+            }
+        }
+        if trimmed.ends_with("> ") || trimmed.ends_with('>') {
+            let before_gt = trimmed.trim_end_matches(|c| c == '>' || c == ' ');
+            if before_gt.len() < trimmed.len() {
+                return ScreenVerdict::AgentIdle;
+            }
         }
     }
 
@@ -374,6 +443,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn codex_idle_with_placeholder() {
+        // Codex shows placeholder text after › — still idle
+        let parser = make_screen("Output\n\u{203A} Explain this codebase\n");
+        assert_eq!(
+            classify(AgentType::Codex, parser.screen()),
+            ScreenVerdict::AgentIdle,
+            "placeholder text after › should be Idle"
+        );
+    }
+
     // -- Kiro --
 
     #[test]
@@ -495,6 +575,63 @@ mod tests {
         assert_eq!(AgentType::Codex.to_string(), "codex");
         assert_eq!(AgentType::Kiro.to_string(), "kiro");
         assert_eq!(AgentType::Generic.to_string(), "generic");
+    }
+
+    #[test]
+    fn claude_dialog_not_idle() {
+        // Trust dialog with ❯ as selection indicator — NOT an idle prompt
+        let parser = make_screen(
+            "Quick safety check: Is this a project you created or one you trust?\n\n\
+             \u{276F} 1. Yes, I trust this folder\n\
+             2. No, exit\n\n\
+             Enter to confirm \u{00B7} Esc to cancel\n",
+        );
+        assert_ne!(
+            classify(AgentType::Claude, parser.screen()),
+            ScreenVerdict::AgentIdle,
+            "trust dialog should NOT be classified as Idle"
+        );
+    }
+
+    #[test]
+    fn claude_dialog_detected() {
+        let content = "Quick safety check: Is this a project you created or one you trust?\n\
+                       \u{276F} 1. Yes, I trust this folder\n\
+                       Enter to confirm";
+        assert!(
+            detect_claude_dialog(content),
+            "should detect Claude trust dialog"
+        );
+    }
+
+    #[test]
+    fn claude_dialog_not_detected_normal() {
+        let content = "Some response\n\u{276F} ";
+        assert!(
+            !detect_claude_dialog(content),
+            "normal prompt should not trigger dialog detection"
+        );
+    }
+
+    #[test]
+    fn codex_dialog_detected() {
+        let content = "Do you trust the contents of this directory?\n\
+                       \u{203A} 1. Yes, continue\n\
+                       Press enter to continue";
+        assert!(
+            detect_startup_dialog(content),
+            "should detect Codex trust dialog"
+        );
+    }
+
+    #[test]
+    fn claude_idle_with_trailing_spaces() {
+        // ❯ followed by multiple spaces — still idle
+        let parser = make_screen("Output\n\u{276F}    ");
+        assert_eq!(
+            classify(AgentType::Claude, parser.screen()),
+            ScreenVerdict::AgentIdle
+        );
     }
 
     #[test]
