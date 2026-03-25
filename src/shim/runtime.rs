@@ -28,11 +28,52 @@ const SCROLLBACK_LINES: usize = 5000;
 /// How often to check for state changes when no PTY output arrives (ms).
 const POLL_INTERVAL_MS: u64 = 250;
 
+/// Minimum time to stay in Working state before allowing transition to Idle (ms).
+/// Prevents false Working→Idle from the message echo appearing before the agent
+/// starts processing. Kept short (300ms) to avoid missing fast responses from
+/// agents like Kiro-cli whose idle prompt disappears quickly during processing.
+const WORKING_DWELL_MS: u64 = 300;
+
 /// Max time to wait for agent to show its first prompt (secs).
 const READY_TIMEOUT_SECS: u64 = 120;
 
 /// Maximum number of messages that can be queued while the agent is working.
 const MAX_QUEUE_DEPTH: usize = 16;
+
+/// Write body bytes to the PTY in small chunks with micro-delays, then
+/// send the Enter sequence. This prevents TUI agents with synchronized
+/// output from losing characters during screen redraw cycles.
+fn pty_write_paced(
+    pty_writer: &Arc<Mutex<Box<dyn std::io::Write + Send>>>,
+    body: &[u8],
+    enter: &[u8],
+) -> std::io::Result<()> {
+    // Write in chunks of 4 bytes with 5ms between chunks.
+    // This gives the TUI time to process input between redraws.
+    for chunk in body.chunks(4) {
+        let mut writer = pty_writer.lock().unwrap();
+        writer.write_all(chunk)?;
+        writer.flush()?;
+        drop(writer);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // Pause before Enter to let the TUI finish rendering the typed text
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let mut writer = pty_writer.lock().unwrap();
+    writer.write_all(enter)?;
+    writer.flush()?;
+    Ok(())
+}
+
+/// Returns the Enter key sequence for the given agent type.
+/// Most TUI agents run in raw mode and need \r (CR) for Enter.
+/// Generic/bash uses canonical mode and needs \n (LF).
+fn enter_seq(agent_type: AgentType) -> &'static str {
+    match agent_type {
+        AgentType::Generic => "\n",
+        _ => "\r", // Claude, Codex, Kiro — raw-mode TUIs
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Args (parsed from CLI in main.rs, passed here)
@@ -78,6 +119,12 @@ struct ShimInner {
     /// Messages queued while the agent is in Working state.
     /// Drained FIFO on Working→Idle transitions.
     message_queue: VecDeque<QueuedMessage>,
+    /// Number of dialogs auto-dismissed during startup (capped to prevent loops).
+    dialogs_dismissed: u8,
+    /// Last screen content captured while the agent was in Working state.
+    /// Used for response extraction when TUI agents redraw the screen
+    /// before the Working→Idle transition is detected.
+    last_working_screen: String,
 }
 
 impl ShimInner {
@@ -174,6 +221,8 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
         pending_message_id: None,
         agent_type: args.agent_type,
         message_queue: VecDeque::new(),
+        dialogs_dismissed: 0,
+        last_working_screen: String::new(),
     }));
 
     // -- PTY log writer (optional) --
@@ -226,9 +275,23 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                     let verdict = classifier::classify(inner.agent_type, inner.parser.screen());
                     let old_state = inner.state;
 
+                    // Track screen content during Working state for response
+                    // extraction. TUI agents may redraw the screen before the
+                    // Working→Idle transition, wiping the response content.
+                    if old_state == ShimState::Working {
+                        inner.last_working_screen = content.clone();
+                    }
+
+                    // Enforce minimum dwell time in Working state to avoid
+                    // false Working→Idle from the message echo before the
+                    // agent starts processing.
+                    let working_too_short = old_state == ShimState::Working
+                        && inner.state_changed_at.elapsed().as_millis() < WORKING_DWELL_MS as u128;
+
                     let new_state = match (old_state, verdict) {
                         (ShimState::Starting, ScreenVerdict::AgentIdle) => Some(ShimState::Idle),
                         (ShimState::Idle, ScreenVerdict::AgentIdle) => None,
+                        (ShimState::Working, ScreenVerdict::AgentIdle) if working_too_short => None,
                         (ShimState::Working, ScreenVerdict::AgentIdle) => Some(ShimState::Idle),
                         (ShimState::Working, ScreenVerdict::AgentWorking) => None,
                         (_, ScreenVerdict::ContextExhausted) => Some(ShimState::ContextExhausted),
@@ -247,6 +310,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
 
                         let pre_content = inner.pre_injection_content.clone();
                         let current_content = inner.screen_contents();
+                        let working_screen = inner.last_working_screen.clone();
                         let msg_id = inner.pending_message_id.take();
 
                         // On terminal states, drain the queue
@@ -276,6 +340,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                         }
 
                         let queue_depth = inner.message_queue.len();
+                        let agent_type_for_enter = inner.agent_type;
 
                         drop(inner); // release lock before I/O
 
@@ -285,6 +350,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                             &summary,
                             &pre_content,
                             &current_content,
+                            &working_screen,
                             msg_id,
                         );
 
@@ -303,15 +369,16 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
 
                         // Inject queued message into PTY
                         if let Some(msg) = queued_msg {
-                            let formatted = format!("{}\n", msg.body);
-                            let mut writer = pty_writer_pty.lock().unwrap();
-                            if let Err(e) = writer.write_all(formatted.as_bytes()) {
+                            let enter = enter_seq(agent_type_for_enter);
+                            if let Err(e) = pty_write_paced(
+                                &pty_writer_pty,
+                                msg.body.as_bytes(),
+                                enter.as_bytes(),
+                            ) {
                                 let _ = evt_channel.send(&Event::Error {
                                     command: "SendMessage".into(),
                                     reason: format!("PTY write failed for queued message: {e}"),
                                 });
-                            } else {
-                                writer.flush().ok();
                             }
 
                             // Emit StateChanged Idle→Working for the queued message
@@ -359,12 +426,36 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
     // -- Main thread: handle commands from orchestrator --
     let inner_cmd = Arc::clone(&inner);
 
-    // Wait for Ready (Starting → Idle transition) with timeout
+    // Wait for Ready (Starting → Idle transition) with timeout.
+    // During startup, auto-dismiss known dialogs (e.g., Claude's trust prompt)
+    // by sending Enter (\r) to the PTY.
     let start = Instant::now();
     loop {
-        let state = inner_cmd.lock().unwrap().state;
+        let mut inner = inner_cmd.lock().unwrap();
+        let state = inner.state;
         match state {
             ShimState::Starting => {
+                // Auto-dismiss known startup dialogs (trust prompts, etc.)
+                if inner.dialogs_dismissed < 10 {
+                    let content = inner.screen_contents();
+                    if classifier::detect_startup_dialog(&content) {
+                        let attempt = inner.dialogs_dismissed + 1;
+                        let enter = enter_seq(inner.agent_type);
+                        inner.dialogs_dismissed = attempt;
+                        drop(inner);
+                        eprintln!(
+                            "[shim {}] auto-dismissing startup dialog (attempt {attempt})",
+                            args.id
+                        );
+                        let mut writer = pty_writer.lock().unwrap();
+                        writer.write_all(enter.as_bytes()).ok();
+                        writer.flush().ok();
+                        std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+                        continue;
+                    }
+                }
+                drop(inner);
+
                 if start.elapsed().as_secs() > READY_TIMEOUT_SECS {
                     let last = inner_cmd.lock().unwrap().last_n_lines(10);
                     cmd_channel.send(&Event::Error {
@@ -380,11 +471,31 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                 std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
             }
             ShimState::Dead => {
+                drop(inner);
                 return Ok(());
             }
-            _ => {
+            ShimState::Idle => {
+                drop(inner);
                 cmd_channel.send(&Event::Ready)?;
                 break;
+            }
+            _ => {
+                // Working or other transitional state during startup —
+                // agent is still loading/initializing, keep waiting.
+                drop(inner);
+                if start.elapsed().as_secs() > READY_TIMEOUT_SECS {
+                    let last = inner_cmd.lock().unwrap().last_n_lines(10);
+                    cmd_channel.send(&Event::Error {
+                        command: "startup".into(),
+                        reason: format!(
+                            "agent did not reach idle within {}s (state: {}). Last lines:\n{}",
+                            READY_TIMEOUT_SECS, state, last,
+                        ),
+                    })?;
+                    child.kill().ok();
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
             }
         }
     }
@@ -420,17 +531,23 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                         inner.pre_injection_content = inner.screen_contents();
                         inner.pending_message_id = message_id;
 
-                        let formatted = format!("{}\n", body);
-                        let mut writer = pty_writer.lock().unwrap();
-                        if let Err(e) = writer.write_all(formatted.as_bytes()) {
-                            drop(inner);
+                        let enter = enter_seq(inner.agent_type);
+                        drop(inner);
+                        // Write body char-by-char with micro-delays for TUI
+                        // agents that use synchronized output. Bulk writes
+                        // get interleaved with screen redraws, losing chars.
+                        if let Err(e) =
+                            pty_write_paced(&pty_writer, body.as_bytes(), enter.as_bytes())
+                        {
                             cmd_channel.send(&Event::Error {
                                 command: "SendMessage".into(),
                                 reason: format!("PTY write failed: {e}"),
                             })?;
+                            let mut inner = inner_cmd.lock().unwrap();
+                            // Restore state on failure
                             continue;
                         }
-                        writer.flush().ok();
+                        let mut inner = inner_cmd.lock().unwrap();
 
                         let old = inner.state;
                         inner.state = ShimState::Working;
@@ -611,6 +728,7 @@ fn build_transition_events(
     summary: &str,
     pre_injection_content: &str,
     current_content: &str,
+    last_working_screen: &str,
     message_id: Option<String>,
 ) -> Vec<Event> {
     let mut events = vec![Event::StateChanged {
@@ -619,9 +737,17 @@ fn build_transition_events(
         summary: summary.to_string(),
     }];
 
-    // Working → Idle = completion
-    if from == ShimState::Working && to == ShimState::Idle {
-        let response = extract_response(pre_injection_content, current_content);
+    // Working → Idle = completion, but only if a message was actually pending.
+    // Skip Completion for transitions caused by agent startup/loading (e.g.,
+    // MCP server init) where no user message was injected.
+    if from == ShimState::Working && to == ShimState::Idle && !pre_injection_content.is_empty() {
+        // Try diffing against current screen first; if empty (TUI agents
+        // redraw to idle before we capture), fall back to the last screen
+        // seen during Working state.
+        let mut response = extract_response(pre_injection_content, current_content);
+        if response.is_empty() && !last_working_screen.is_empty() {
+            response = extract_response(pre_injection_content, last_working_screen);
+        }
         events.push(Event::Completion {
             message_id,
             response,
@@ -641,7 +767,8 @@ fn build_transition_events(
 }
 
 /// Extract the agent's response by diffing pre-injection and post-completion
-/// screen content.
+/// screen content. Strips known TUI chrome (horizontal rules, status bars,
+/// prompt lines) so callers get clean response text.
 fn extract_response(pre: &str, current: &str) -> String {
     let pre_lines: Vec<&str> = pre.lines().collect();
     let cur_lines: Vec<&str> = current.lines().collect();
@@ -660,19 +787,151 @@ fn extract_response(pre: &str, current: &str) -> String {
         return String::new();
     }
 
+    // Filter out TUI chrome, then strip trailing empty/prompt lines
+    let filtered: Vec<&str> = response_lines
+        .iter()
+        .filter(|line| !is_tui_chrome(line))
+        .copied()
+        .collect();
+
+    if filtered.is_empty() {
+        return String::new();
+    }
+
     // Strip trailing empty lines and prompt lines
-    let mut end = response_lines.len();
-    while end > 0 && response_lines[end - 1].trim().is_empty() {
+    let mut end = filtered.len();
+    while end > 0 && filtered[end - 1].trim().is_empty() {
         end -= 1;
     }
-    while end > 0 && is_prompt_line(response_lines[end - 1].trim()) {
+    while end > 0 && is_prompt_line(filtered[end - 1].trim()) {
         end -= 1;
     }
-    while end > 0 && response_lines[end - 1].trim().is_empty() {
+    while end > 0 && filtered[end - 1].trim().is_empty() {
         end -= 1;
     }
 
-    response_lines[..end].join("\n")
+    // Strip leading lines that echo the user's input (❯ followed by text)
+    let mut start = 0;
+    while start < end {
+        let trimmed = filtered[start].trim();
+        if trimmed.is_empty() {
+            start += 1;
+        } else if trimmed.starts_with('\u{276F}')
+            && !trimmed['\u{276F}'.len_utf8()..].trim().is_empty()
+        {
+            // Echoed user input line
+            start += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Strip Claude's output bullet markers (⏺) from the start of lines
+    let cleaned: Vec<String> = filtered[start..end]
+        .iter()
+        .map(|line| strip_claude_bullets(line))
+        .collect();
+
+    cleaned.join("\n")
+}
+
+/// Strip Claude's ⏺ (U+23FA) output bullet marker from the start of a line.
+fn strip_claude_bullets(line: &str) -> String {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('\u{23FA}') {
+        let after = &trimmed['\u{23FA}'.len_utf8()..];
+        // Preserve original leading whitespace minus the bullet
+        let leading = line.len() - line.trim_start().len();
+        format!("{}{}", &" ".repeat(leading), after.trim_start())
+    } else {
+        line.to_string()
+    }
+}
+
+/// Detect TUI chrome lines that should be stripped from responses.
+/// Matches horizontal rules, status bars, and other decorative elements
+/// common in Claude, Codex, and Kiro TUI output.
+fn is_tui_chrome(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false; // keep empty lines (stripped separately)
+    }
+
+    // Horizontal rules: lines made entirely of box-drawing characters
+    if trimmed.chars().all(|c| {
+        matches!(
+            c,
+            '─' | '━'
+                | '═'
+                | '╌'
+                | '╍'
+                | '┄'
+                | '┅'
+                | '╶'
+                | '╴'
+                | '╸'
+                | '╺'
+                | '│'
+                | '┃'
+                | '╎'
+                | '╏'
+                | '┊'
+                | '┋'
+        )
+    }) {
+        return true;
+    }
+
+    // Claude status bar: ⏵⏵ bypass permissions, shift+tab, model info
+    if trimmed.contains("\u{23F5}\u{23F5}") || trimmed.contains("bypass permissions") {
+        return true;
+    }
+    if trimmed.contains("shift+tab") && trimmed.len() < 80 {
+        return true;
+    }
+
+    // Claude cost/token summary line
+    if trimmed.starts_with('$') && trimmed.contains("token") {
+        return true;
+    }
+
+    // Braille art (Kiro logo, Codex box drawings) — lines with mostly braille chars
+    let braille_count = trimmed
+        .chars()
+        .filter(|c| ('\u{2800}'..='\u{28FF}').contains(c))
+        .count();
+    if braille_count > 5 {
+        return true;
+    }
+
+    // Kiro welcome/status text
+    let lower = trimmed.to_lowercase();
+    if lower.contains("welcome to the new kiro") || lower.contains("/feedback command") {
+        return true;
+    }
+
+    // Kiro status bar
+    if lower.starts_with("kiro") && lower.contains('\u{25D4}') {
+        // "Kiro · auto · ◔ 0%"
+        return true;
+    }
+
+    // Codex welcome box
+    if trimmed.starts_with('╭') || trimmed.starts_with('╰') || trimmed.starts_with('│') {
+        return true;
+    }
+
+    // Codex tips/warnings
+    if lower.starts_with("tip:") || (trimmed.starts_with('⚠') && lower.contains("limit")) {
+        return true;
+    }
+
+    // Kiro/Codex prompt placeholders
+    if lower.contains("ask a question") || lower.contains("describe a task") {
+        return true;
+    }
+
+    false
 }
 
 fn is_prompt_line(line: &str) -> bool {
@@ -763,6 +1022,7 @@ mod tests {
             "summary",
             "pre\n$ ",
             "pre\nhello\n$ ",
+            "",
             Some("msg-1".into()),
         );
         assert_eq!(events.len(), 2);
@@ -778,6 +1038,7 @@ mod tests {
             "summary",
             "",
             "",
+            "",
             None,
         );
         // StateChanged + ContextExhausted (no Completion since it's not Idle)
@@ -791,6 +1052,7 @@ mod tests {
             ShimState::Starting,
             ShimState::Idle,
             "summary",
+            "",
             "",
             "",
             None,
@@ -939,5 +1201,103 @@ mod tests {
     #[test]
     fn max_queue_depth_is_16() {
         assert_eq!(MAX_QUEUE_DEPTH, 16);
+    }
+
+    // -----------------------------------------------------------------------
+    // TUI chrome stripping tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn is_tui_chrome_horizontal_rule() {
+        assert!(is_tui_chrome("────────────────────────────────────"));
+        assert!(is_tui_chrome("  ─────────  "));
+        assert!(is_tui_chrome("━━━━━━━━━━━━━━━━━━━━"));
+    }
+
+    #[test]
+    fn is_tui_chrome_status_bar() {
+        assert!(is_tui_chrome(
+            "  \u{23F5}\u{23F5} bypass permissions on (shift+tab to toggle)"
+        ));
+        assert!(is_tui_chrome("  bypass permissions on"));
+        assert!(is_tui_chrome("  shift+tab"));
+    }
+
+    #[test]
+    fn is_tui_chrome_cost_line() {
+        assert!(is_tui_chrome("$0.01 · 2.3k tokens"));
+    }
+
+    #[test]
+    fn is_tui_chrome_not_content() {
+        assert!(!is_tui_chrome("Hello, world!"));
+        assert!(!is_tui_chrome("The answer is 4"));
+        assert!(!is_tui_chrome("")); // empty lines are not chrome
+        assert!(!is_tui_chrome("  some output  "));
+    }
+
+    #[test]
+    fn extract_response_strips_chrome() {
+        let pre = "idle screen\n\u{276F} ";
+        let cur = "\u{276F} Hello\n\nThe answer is 42\n\n\
+                   ────────────────────\n\
+                   \u{23F5}\u{23F5} bypass permissions on\n\
+                   \u{276F} ";
+        let resp = extract_response(pre, cur);
+        assert!(resp.contains("42"), "should contain the answer: {resp}");
+        assert!(
+            !resp.contains("────"),
+            "should strip horizontal rule: {resp}"
+        );
+        assert!(!resp.contains("bypass"), "should strip status bar: {resp}");
+    }
+
+    #[test]
+    fn extract_response_strips_echoed_input() {
+        let pre = "\u{276F} ";
+        let cur = "\u{276F} What is 2+2?\n\n4\n\n\u{276F} ";
+        let resp = extract_response(pre, cur);
+        assert!(resp.contains('4'), "should contain answer: {resp}");
+        assert!(
+            !resp.contains("What is 2+2"),
+            "should strip echoed input: {resp}"
+        );
+    }
+
+    #[test]
+    fn extract_response_tui_full_rewrite() {
+        // Simulate Claude TUI where entire screen changes
+        let pre = "Welcome to Claude\n\n\u{276F} ";
+        let cur = "\u{276F} Hello\n\nHello! How can I help?\n\n\
+                   ────────────────────\n\
+                   \u{276F} ";
+        let resp = extract_response(pre, cur);
+        assert!(
+            resp.contains("Hello! How can I help?"),
+            "should extract response from TUI rewrite: {resp}"
+        );
+    }
+
+    #[test]
+    fn strip_claude_bullets_removes_marker() {
+        assert_eq!(strip_claude_bullets("\u{23FA} 4"), "4");
+        assert_eq!(
+            strip_claude_bullets("  \u{23FA} hello world"),
+            "  hello world"
+        );
+        assert_eq!(strip_claude_bullets("no bullet here"), "no bullet here");
+        assert_eq!(strip_claude_bullets(""), "");
+    }
+
+    #[test]
+    fn extract_response_strips_claude_bullets() {
+        let pre = "\u{276F} ";
+        let cur = "\u{276F} question\n\n\u{23FA} 42\n\n\u{276F} ";
+        let resp = extract_response(pre, cur);
+        assert!(resp.contains("42"), "should contain answer: {resp}");
+        assert!(
+            !resp.contains('\u{23FA}'),
+            "should strip bullet marker: {resp}"
+        );
     }
 }
