@@ -44,6 +44,16 @@ fn binary_available(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn kiro_command() -> Option<&'static str> {
+    if binary_available("kiro-cli") {
+        Some("kiro-cli")
+    } else if binary_available("kiro") {
+        Some("kiro")
+    } else {
+        None
+    }
+}
+
 /// Capture the current screen content from the shim for diagnostics.
 fn capture_screen(ch: &mut Channel) -> Option<String> {
     if ch
@@ -451,12 +461,12 @@ fn live_codex_message_delivered() {
 #[test]
 #[cfg_attr(not(feature = "live-agent"), ignore)]
 fn live_kiro_message_delivered() {
-    if !binary_available("kiro") {
-        eprintln!("SKIP: kiro CLI not found on PATH");
+    let Some(kiro_cmd) = kiro_command() else {
+        eprintln!("SKIP: kiro-cli not found on PATH");
         return;
-    }
+    };
 
-    let mut ch = spawn_agent_shim(AgentType::Kiro, "kiro");
+    let mut ch = spawn_agent_shim(AgentType::Kiro, kiro_cmd);
     let (ready, _) = wait_for_ready_and_verify(&mut ch);
     assert!(ready, "Kiro did not become ready within 120s");
 
@@ -602,12 +612,12 @@ fn live_codex_response_extracted() {
 #[test]
 #[cfg_attr(not(feature = "live-agent"), ignore)]
 fn live_kiro_response_extracted() {
-    if !binary_available("kiro") {
-        eprintln!("SKIP: kiro CLI not found on PATH");
+    let Some(kiro_cmd) = kiro_command() else {
+        eprintln!("SKIP: kiro-cli not found on PATH");
         return;
-    }
+    };
 
-    let mut ch = spawn_agent_shim(AgentType::Kiro, "kiro");
+    let mut ch = spawn_agent_shim(AgentType::Kiro, kiro_cmd);
     let (ready, _) = wait_for_ready_and_verify(&mut ch);
     assert!(ready, "Kiro did not become ready");
 
@@ -817,12 +827,12 @@ fn live_codex_state_transitions_timed() {
 #[test]
 #[cfg_attr(not(feature = "live-agent"), ignore)]
 fn live_kiro_state_transitions_timed() {
-    if !binary_available("kiro") {
-        eprintln!("SKIP: kiro CLI not found on PATH");
+    let Some(kiro_cmd) = kiro_command() else {
+        eprintln!("SKIP: kiro-cli not found on PATH");
         return;
-    }
+    };
 
-    let mut ch = spawn_agent_shim(AgentType::Kiro, "kiro");
+    let mut ch = spawn_agent_shim(AgentType::Kiro, kiro_cmd);
     let (ready, _) = wait_for_ready_and_verify(&mut ch);
     assert!(ready, "Kiro did not become ready");
 
