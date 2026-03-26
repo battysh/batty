@@ -1,0 +1,74 @@
+name: batty-dev
+
+workflow_mode: hybrid
+orchestrator_position: left
+use_shim: true
+
+board:
+  rotation_threshold: 15
+  auto_dispatch: true
+
+standup:
+  interval_secs: 900
+  output_lines: 40
+
+automation:
+  timeout_nudges: true
+  standups: true
+  triage_interventions: true
+  review_interventions: true
+  owned_task_interventions: true
+  manager_dispatch_interventions: false
+  architect_utilization_interventions: true
+  intervention_idle_grace_secs: 120
+  intervention_cooldown_secs: 300
+
+automation_sender: human
+
+layout:
+  zones:
+    - name: architect
+      width_pct: 20
+    - name: managers
+      width_pct: 20
+    - name: engineers
+      width_pct: 60
+
+roles:
+  - name: human
+    role_type: user
+    channel: telegram
+    channel_config:
+      target: "170281556"
+      provider: openclaw
+      bot_token: "BATTY_TELEGRAM_BOT_TOKEN_REDACTED"
+      allowed_user_ids: [170281556]
+    talks_to: [architect]
+
+  - name: architect
+    role_type: architect
+    agent: codex
+    instances: 1
+    prompt: batty_architect.md
+    talks_to: [human, manager]
+    nudge_interval_secs: 300
+    standup_interval_secs: 1800
+    owns: ["planning/**", "docs/**", "CLAUDE.md"]
+
+  - name: manager
+    role_type: manager
+    agent: codex
+    instances: 1
+    prompt: batty_manager.md
+    talks_to: [architect, engineer]
+    nudge_interval_secs: 300
+    standup_interval_secs: 1800
+
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 4
+    prompt: batty_engineer.md
+    talks_to: [manager]
+    nudge_interval_secs: 300
+    use_worktrees: true

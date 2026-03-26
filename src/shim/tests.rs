@@ -6,7 +6,11 @@
 //! These tests spawn a real bash process via the shim runtime and
 //! exercise the protocol end-to-end.
 
+use std::fs;
+use std::os::unix::io::IntoRawFd;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
+use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::time::Duration;
 
 use crate::shim::protocol::{self, Channel, Command, Event, ShimState};
@@ -48,6 +52,78 @@ fn spawn_bash_shim() -> Channel {
     ch.set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
     ch
+}
+
+fn build_batty_binary() -> PathBuf {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let status = ProcessCommand::new("cargo")
+        .args(["build", "--quiet", "--bin", "batty"])
+        .current_dir(&repo_root)
+        .status()
+        .expect("failed to build batty binary");
+    assert!(status.success(), "cargo build --bin batty should succeed");
+    repo_root.join("target").join("debug").join("batty")
+}
+
+fn spawn_external_shim(cmd: &str, cwd: &std::path::Path) -> (Child, Channel) {
+    let (parent_sock, child_sock) = protocol::socketpair().unwrap();
+    let child_fd = child_sock.into_raw_fd();
+    let batty = build_batty_binary();
+
+    let process = unsafe {
+        let child_fd_copy = child_fd;
+        ProcessCommand::new(&batty)
+            .args([
+                "shim",
+                "--id",
+                "test-agent",
+                "--agent-type",
+                "generic",
+                "--cmd",
+                cmd,
+                "--cwd",
+                cwd.to_string_lossy().as_ref(),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .pre_exec(move || {
+                if child_fd_copy != 3 {
+                    let ret = libc::dup2(child_fd_copy, 3);
+                    if ret < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    libc::close(child_fd_copy);
+                }
+                Ok(())
+            })
+            .spawn()
+            .expect("failed to spawn external shim")
+    };
+
+    unsafe {
+        libc::close(child_fd);
+    }
+
+    let mut channel = Channel::new(parent_sock);
+    channel
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    (process, channel)
+}
+
+fn pid_exists(pid: u32) -> bool {
+    let output = ProcessCommand::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .expect("failed to run ps");
+    if !output.status.success() {
+        return false;
+    }
+
+    let stat = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stat.trim();
+    !trimmed.is_empty() && !trimmed.starts_with('Z')
 }
 
 /// Wait for a Ready event (with timeout). Handles read timeouts by retrying.
@@ -104,6 +180,30 @@ where
             Err(_) => return None,
         }
     }
+}
+
+fn wait_for_pid_file(path: &std::path::Path, timeout: Duration) -> Option<u32> {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() <= deadline {
+        if let Ok(contents) = fs::read_to_string(path) {
+            if let Ok(pid) = contents.trim().parse::<u32>() {
+                return Some(pid);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    None
+}
+
+fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() <= deadline {
+        if !pid_exists(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
 }
 
 // -----------------------------------------------------------------------
@@ -289,6 +389,54 @@ fn shim_send_while_working_returns_error() {
     // Wait for the original command to complete
     let _ = wait_for_completion(&mut ch, Duration::from_secs(10));
     ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+}
+
+#[test]
+#[cfg_attr(not(feature = "shim-integration"), ignore)]
+#[cfg_attr(
+    feature = "shim-integration",
+    ignore = "known regression: unexpected shim death may leave descendants alive"
+)]
+fn shim_death_reaps_background_descendants() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pid_file = tmp.path().join("descendant.pid");
+    let launcher = tmp.path().join("launch-descendant.py");
+
+    fs::write(
+        &launcher,
+        format!(
+            "import os\n\
+import subprocess\n\
+\n\
+pid_file = r\"{}\"\n\
+child_cmd = 'trap \"\" TERM HUP INT; echo $$ > \"{}\"; while :; do sleep 1; done'\n\
+subprocess.Popen(['/bin/sh', '-c', child_cmd])\n\
+os.execvp('bash', ['bash', '--noprofile', '--norc', '-i'])\n",
+            pid_file.display(),
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+
+    let cmd = format!("env BASH_ENV=/dev/null HOME='{}' python3 '{}'", tmp.path().display(), launcher.display());
+
+    let (mut shim, mut ch) = spawn_external_shim(&cmd, tmp.path());
+    assert!(wait_for_ready(&mut ch), "shim did not become ready");
+
+    let descendant_pid = wait_for_pid_file(&pid_file, Duration::from_secs(10))
+        .expect("background descendant pid should be recorded");
+    assert!(
+        pid_exists(descendant_pid),
+        "background descendant should be alive before shim death"
+    );
+
+    shim.kill().unwrap();
+    let _ = shim.wait();
+
+    assert!(
+        wait_for_pid_exit(descendant_pid, Duration::from_secs(10)),
+        "background descendant should be reaped after shim death"
+    );
 }
 
 #[test]
