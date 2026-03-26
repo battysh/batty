@@ -1,4 +1,6 @@
 use super::*;
+use crate::team::test_support::{EnvVarGuard, PATH_LOCK, setup_fake_backend};
+use serial_test::serial;
 
 fn minimal_yaml() -> &'static str {
     r#"
@@ -922,7 +924,22 @@ roles:
 }
 
 #[test]
+#[serial]
 fn verbose_shows_checks_all_pass() {
+    let _path_guard = PATH_LOCK.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let (claude_bin, _claude_log) = setup_fake_backend(&tmp, "claude", "fake-claude.log");
+    let (codex_bin, _codex_log) = setup_fake_backend(&tmp, "codex", "fake-codex.log");
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    let _path = EnvVarGuard::set(
+        "PATH",
+        &format!(
+            "{}:{}:{original_path}",
+            claude_bin.to_string_lossy(),
+            codex_bin.to_string_lossy()
+        ),
+    );
+
     let yaml = r#"
 name: test-team
 roles:

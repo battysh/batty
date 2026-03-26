@@ -10,96 +10,23 @@ Optional runtime defaults are read from `.batty/config.toml` when the file is pr
 
 ## Fields
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `defaults.agent` | string | `claude` | Default agent name for runtime paths that consult `.batty/config.toml`. |
-| `defaults.policy` | enum (`observe`, `suggest`, `act`) | `observe` | Default policy tier for prompt handling. |
-| `defaults.dod` | string or null | `(none)` | Definition of done command run after task completion. |
-| `defaults.max_retries` | integer | `3` | Maximum retries for failed DoD commands. |
-| `supervisor.enabled` | boolean | `true` | Enable Tier 2 supervisor escalation. |
-| `supervisor.program` | string | `claude` | Program used for supervisor calls. |
-| `supervisor.args` | array[string] | `[-p, --output-format, text]` | Arguments passed to the supervisor program. |
-| `supervisor.timeout_secs` | integer | `60` | Supervisor command timeout in seconds. |
-| `supervisor.trace_io` | boolean | `true` | Log supervisor prompts and responses for debugging. |
-| `detector.silence_timeout_secs` | integer | `3` | Silence threshold before unknown-request fallback triggers. |
-| `detector.answer_cooldown_millis` | integer | `1000` | Minimum delay between automatic answers. |
-| `detector.unknown_request_fallback` | boolean | `true` | Escalate unresolved output to supervisor when no known prompt matches. |
-| `detector.idle_input_fallback` | boolean | `true` | Allow idle-output input prompts to trigger response handling. |
-| `dangerous_mode.enabled` | boolean | `false` | Enable dangerous-mode flags for supported agent wrappers. |
-| `policy.auto_answer` | table[string -> string] | `{}` | Prompt-to-answer overrides for runtime paths that use this config. |
-
-## Agent Backend Configuration (team.yaml)
-
-Team topology is configured in `.batty/team_config/team.yaml`. Each role can specify which agent backend to use.
-
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `agent` (team-level) | string or null | `claude` | Default agent backend for all roles. |
-| `roles[].agent` | string or null | _(inherits team default)_ | Per-role agent backend override. |
-
-Resolution order: role-level `agent` > team-level `agent` > `"claude"` (hardcoded default).
-
-Supported backends: `claude`, `codex`, `kiro`.
-
-Use `batty init --agent <backend>` to scaffold a team config with a specific default backend.
-
-Use `batty validate --show-checks` to verify all configured backends are installed and reachable.
-
-### Example
-
-```yaml
-name: my-team
-agent: claude  # team default
-
-roles:
-  - name: architect
-    role_type: architect
-    agent: codex   # override: use codex for architect
-    instances: 1
-  - name: manager
-    role_type: manager
-    instances: 1
-    # inherits team default (claude)
-  - name: eng
-    role_type: engineer
-    agent: kiro    # override: use kiro for engineers
-    instances: 3
-```
-
-## Shim Mode (team.yaml)
-
-The shim runtime spawns each agent as a `batty shim` subprocess instead of
-running it directly in a tmux pane. The shim owns the PTY, classifies agent
-state, and communicates with the daemon via a structured socket protocol.
-Tmux is used only for display (each pane tails the shim's PTY log).
-
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `use_shim` | boolean | `false` | When `true`, agents are spawned as shim subprocesses. The shim manages the PTY, state classification, and message delivery over a structured channel. |
-
-### Example
-
-```yaml
-name: my-team
-use_shim: true
-
-roles:
-  - name: architect
-    role_type: architect
-    agent: claude
-    instances: 1
-  - name: eng
-    role_type: engineer
-    agent: codex
-    instances: 3
-```
-
-When `use_shim` is enabled:
-
-- Each agent runs inside a `batty shim` process with its own PTY
-- Agent state (starting, idle, working, dead, context_exhausted) is detected automatically via screen classification
-- Raw PTY output is streamed to a log file at `.batty/shim_logs/<agent-id>.log` for tmux display panes to tail
-- The daemon communicates with each shim over a Unix socketpair using length-prefixed JSON messages
+| Key                                 | Type                               | Default                       | Description                                                             |
+| ----------------------------------- | ---------------------------------- | ----------------------------- | ----------------------------------------------------------------------- |
+| `defaults.agent`                    | string                             | `claude`                      | Default agent name for runtime paths that consult `.batty/config.toml`. |
+| `defaults.policy`                   | enum (`observe`, `suggest`, `act`) | `observe`                     | Default policy tier for prompt handling.                                |
+| `defaults.dod`                      | string or null                     | `(none)`                      | Definition of done command run after task completion.                   |
+| `defaults.max_retries`              | integer                            | `3`                           | Maximum retries for failed DoD commands.                                |
+| `supervisor.enabled`                | boolean                            | `true`                        | Enable Tier 2 supervisor escalation.                                    |
+| `supervisor.program`                | string                             | `claude`                      | Program used for supervisor calls.                                      |
+| `supervisor.args`                   | array[string]                      | `[-p, --output-format, text]` | Arguments passed to the supervisor program.                             |
+| `supervisor.timeout_secs`           | integer                            | `60`                          | Supervisor command timeout in seconds.                                  |
+| `supervisor.trace_io`               | boolean                            | `true`                        | Log supervisor prompts and responses for debugging.                     |
+| `detector.silence_timeout_secs`     | integer                            | `3`                           | Silence threshold before unknown-request fallback triggers.             |
+| `detector.answer_cooldown_millis`   | integer                            | `1000`                        | Minimum delay between automatic answers.                                |
+| `detector.unknown_request_fallback` | boolean                            | `true`                        | Escalate unresolved output to supervisor when no known prompt matches.  |
+| `detector.idle_input_fallback`      | boolean                            | `true`                        | Allow idle-output input prompts to trigger response handling.           |
+| `dangerous_mode.enabled`            | boolean                            | `false`                       | Enable dangerous-mode flags for supported agent wrappers.               |
+| `policy.auto_answer`                | table[string -> string]            | `{}`                          | Prompt-to-answer overrides for runtime paths that use this config.      |
 
 ## Default Template
 

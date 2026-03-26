@@ -1,6 +1,6 @@
 # Getting Started
 
-Use this guide to install Batty, create a team config, launch a tmux session, send the first directive, and stop or resume the team.
+Use this guide to install Batty, create a team config, launch a shim-driven team session, send the first directive, and stop or resume the team.
 
 ## Prerequisites
 
@@ -65,14 +65,15 @@ Supported backends include `claude`, `codex`, and `kiro`. You can override indiv
 
 ## Agent Runtime: Shim Mode
 
-By default, Batty launches agent CLIs directly inside tmux panes. When
-`use_shim: true` is set in `team.yaml`, agents run as shim subprocesses
-instead. Each shim owns a PTY, classifies agent state automatically, and
-communicates with the daemon over a structured socket protocol. Tmux panes
-become display-only surfaces that tail the shim's PTY log.
+Batty supports a shim runtime for agent execution. When `use_shim: true` is
+set in `team.yaml`, each agent runs as a `batty shim` subprocess instead of
+being driven directly through a tmux pane. The shim owns the PTY, classifies
+agent state automatically, and communicates with the daemon over a structured
+socket protocol. Tmux panes become display-only surfaces that tail the shim's
+PTY log.
 
-Shim mode is recommended for production use because it provides reliable
-state detection, structured message delivery, and graceful shutdown. Add
+Shim mode is the recommended runtime because it gives you reliable state
+detection, structured message delivery, and cleaner shutdown behavior. Add
 this to your `team.yaml`:
 
 ```yaml
@@ -178,7 +179,8 @@ Start the daemon and attach to tmux immediately:
 batty start --attach
 ```
 
-`batty start --attach` opens tmux instead of printing a summary. Expect something like:
+`batty start --attach` opens tmux instead of printing a summary. In shim mode,
+those panes show each shim-backed agent session. Expect something like:
 
 ```text
 ┌ architect ─────────────┬ manager ───────────────┬ eng-1-1 ───────────────┐
@@ -675,8 +677,8 @@ batty grafana setup
 This runs three steps:
 
 1. `brew install grafana`
-2. `grafana-cli plugins install frser-sqlite-datasource`
-3. `brew services start grafana`
+1. `grafana-cli plugins install frser-sqlite-datasource`
+1. `brew services start grafana`
 
 Once Grafana is running, start your team as usual:
 
@@ -730,11 +732,11 @@ The dashboard has 6 rows:
 Six alerts fire automatically when thresholds are crossed:
 
 1. **Agent Stall** — an agent has stopped producing output
-2. **Delivery Failure Spike** — message delivery error rate is elevated
-3. **Pipeline Starvation** — no tasks are flowing through the pipeline
-4. **High Failure Rate** — task failure rate exceeds normal levels
-5. **Context Exhaustion** — an agent's context window is nearly full
-6. **Session Idle** — the session has been idle for too long
+1. **Delivery Failure Spike** — message delivery error rate is elevated
+1. **Pipeline Starvation** — no tasks are flowing through the pipeline
+1. **High Failure Rate** — task failure rate exceeds normal levels
+1. **Context Exhaustion** — an agent's context window is nearly full
+1. **Session Idle** — the session has been idle for too long
 
 Alert thresholds are configurable inside the dashboard JSON.
 

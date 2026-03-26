@@ -418,7 +418,11 @@ os.execvp('bash', ['bash', '--noprofile', '--norc', '-i'])\n",
     )
     .unwrap();
 
-    let cmd = format!("env BASH_ENV=/dev/null HOME='{}' python3 '{}'", tmp.path().display(), launcher.display());
+    let cmd = format!(
+        "env BASH_ENV=/dev/null HOME='{}' python3 '{}'",
+        tmp.path().display(),
+        launcher.display()
+    );
 
     let (mut shim, mut ch) = spawn_external_shim(&cmd, tmp.path());
     assert!(wait_for_ready(&mut ch), "shim did not become ready");

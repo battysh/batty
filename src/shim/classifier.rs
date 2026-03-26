@@ -303,7 +303,7 @@ fn classify_kiro(content: &str) -> ScreenVerdict {
             }
         }
         if trimmed.ends_with("> ") || trimmed.ends_with('>') {
-            let before_gt = trimmed.trim_end_matches(|c| c == '>' || c == ' ');
+            let before_gt = trimmed.trim_end_matches(['>', ' ']);
             if before_gt.len() < trimmed.len() {
                 return ScreenVerdict::AgentIdle;
             }
