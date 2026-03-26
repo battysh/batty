@@ -1,5 +1,6 @@
 use super::*;
 use crate::team::task_loop::setup_multi_repo_worktree;
+use crate::team::{layout, shim_log_path, shim_logs_dir};
 use tracing::debug;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -218,6 +219,10 @@ impl TeamDaemon {
     }
 
     pub(super) fn spawn_all_agents(&mut self, resume: bool) -> Result<()> {
+        if self.config.team_config.use_shim {
+            return self.spawn_all_shim_agents(resume);
+        }
+
         let previous_launch_state = load_launch_state(&self.config.project_root);
         let duplicate_claude_session_ids = duplicate_claude_session_ids(&previous_launch_state);
         let mut next_launch_state = HashMap::new();
@@ -270,6 +275,114 @@ impl TeamDaemon {
 
         if let Err(error) = save_launch_state(&self.config.project_root, &next_launch_state) {
             warn!(error = %error, "failed to persist launch state after spawning agents");
+        }
+
+        Ok(())
+    }
+
+    fn spawn_all_shim_agents(&mut self, resume: bool) -> Result<()> {
+        let previous_launch_state = load_launch_state(&self.config.project_root);
+        let duplicate_claude_session_ids = duplicate_claude_session_ids(&previous_launch_state);
+        let mut next_launch_state = HashMap::new();
+        let mut resume_summaries = Vec::new();
+
+        let inboxes = inbox::inboxes_root(&self.config.project_root);
+        for member in &self.config.members {
+            if let Err(error) = inbox::init_inbox(&inboxes, &member.name) {
+                warn!(member = %member.name, error = %error, "failed to init inbox");
+            }
+        }
+
+        let shim_logs_dir = shim_logs_dir(&self.config.project_root);
+        std::fs::create_dir_all(&shim_logs_dir).with_context(|| {
+            format!(
+                "failed to create shim log directory {}",
+                shim_logs_dir.display()
+            )
+        })?;
+
+        let members = self.config.members.clone();
+        for member in &members {
+            if member.role_type == RoleType::User {
+                continue;
+            }
+
+            let Some(pane_id) = self.config.pane_map.get(&member.name).cloned() else {
+                warn!(member = %member.name, "no pane found for member");
+                continue;
+            };
+
+            match self.prepare_member_launch(
+                member,
+                resume,
+                &previous_launch_state,
+                &duplicate_claude_session_ids,
+            ) {
+                Ok(plan) => {
+                    resume_summaries.push(plan.resume_summary.clone());
+
+                    let log_path = shim_log_path(&self.config.project_root, &member.name);
+                    if let Err(error) = layout::respawn_as_display_pane(&pane_id, &log_path) {
+                        warn!(
+                            member = %member.name,
+                            pane = %pane_id,
+                            error = %error,
+                            "failed to respawn pane as shim display"
+                        );
+                        continue;
+                    }
+
+                    let agent_type =
+                        shim_agent_type_name(member.agent.as_deref().unwrap_or("claude"));
+                    match shim_spawn::spawn_shim(
+                        &member.name,
+                        &agent_type,
+                        &plan.short_cmd,
+                        &plan.work_dir,
+                        Some(&log_path),
+                    ) {
+                        Ok(handle) => {
+                            if let Some(watcher) = self.watchers.get_mut(&member.name) {
+                                watcher.set_session_id(plan.identity.session_id.clone());
+                            }
+                            self.shim_handles.insert(member.name.clone(), handle);
+                            self.states
+                                .insert(member.name.clone(), MemberState::Working);
+                            self.update_automation_timers_for_state(
+                                &member.name,
+                                MemberState::Working,
+                            );
+                            self.record_agent_spawned(&member.name);
+                            next_launch_state.insert(member.name.clone(), plan.identity);
+                        }
+                        Err(error) => {
+                            warn!(
+                                member = %member.name,
+                                error = %error,
+                                "failed to spawn shim for member"
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        member = %member.name,
+                        error = %error,
+                        "failed to prepare shim launch"
+                    );
+                }
+            }
+        }
+
+        if !resume_summaries.is_empty() {
+            self.record_orchestrator_action(format!("resume: {}", resume_summaries.join(", ")));
+        }
+
+        if let Err(error) = save_launch_state(&self.config.project_root, &next_launch_state) {
+            warn!(
+                error = %error,
+                "failed to persist launch state after spawning shims"
+            );
         }
 
         Ok(())
@@ -452,6 +565,15 @@ pub(super) fn canonical_agent_name(agent_name: &str) -> String {
     agent::adapter_from_name(agent_name)
         .map(|adapter| adapter.name().to_string())
         .unwrap_or_else(|| agent_name.to_string())
+}
+
+fn shim_agent_type_name(agent_name: &str) -> String {
+    match canonical_agent_name(agent_name).as_str() {
+        "claude-code" => "claude".to_string(),
+        "codex-cli" => "codex".to_string(),
+        "kiro-cli" => "kiro".to_string(),
+        other => other.to_string(),
+    }
 }
 
 pub(super) fn new_member_session_id(agent_name: &str) -> Option<String> {
@@ -790,6 +912,16 @@ mod tests {
             "claude --dangerously-skip-permissions --session-id '11111111-1111-4111-8111-111111111111' 'plan the project'"
         ));
         assert!(!content.contains("--append-system-prompt"));
+    }
+
+    #[test]
+    fn shim_agent_type_name_maps_known_aliases() {
+        assert_eq!(shim_agent_type_name("claude"), "claude");
+        assert_eq!(shim_agent_type_name("claude-code"), "claude");
+        assert_eq!(shim_agent_type_name("codex"), "codex");
+        assert_eq!(shim_agent_type_name("codex-cli"), "codex");
+        assert_eq!(shim_agent_type_name("kiro"), "kiro");
+        assert_eq!(shim_agent_type_name("kiro-cli"), "kiro");
     }
 
     #[test]
