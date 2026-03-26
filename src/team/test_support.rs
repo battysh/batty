@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::team::config::{
@@ -12,6 +13,36 @@ use crate::team::failure_patterns::FailureTracker;
 use crate::team::hierarchy::MemberInstance;
 use crate::team::standup::MemberState;
 use crate::team::watcher::SessionWatcher;
+
+pub(crate) static PATH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+pub(crate) struct EnvVarGuard {
+    key: &'static str,
+    original: Option<String>,
+}
+
+impl EnvVarGuard {
+    pub(crate) fn set(key: &'static str, value: &str) -> Self {
+        let original = std::env::var(key).ok();
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.original.as_deref() {
+            Some(value) => unsafe {
+                std::env::set_var(self.key, value);
+            },
+            None => unsafe {
+                std::env::remove_var(self.key);
+            },
+        }
+    }
+}
 
 pub(crate) fn git(dir: &Path, args: &[&str]) -> Output {
     Command::new("git")
@@ -136,6 +167,39 @@ pub(crate) fn setup_fake_claude(tmp: &tempfile::TempDir, member_name: &str) -> (
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    (fake_bin, fake_log)
+}
+
+pub(crate) fn setup_fake_backend(
+    tmp: &tempfile::TempDir,
+    program: &str,
+    log_name: &str,
+) -> (PathBuf, PathBuf) {
+    let project_slug = tmp
+        .path()
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "default".to_string());
+    let fake_bin = std::env::temp_dir().join(format!("batty-bin-{project_slug}-{program}"));
+    let _ = std::fs::remove_dir_all(&fake_bin);
+    std::fs::create_dir_all(&fake_bin).unwrap();
+
+    let fake_log = tmp.path().join(log_name);
+    let fake_program = fake_bin.join(program);
+    std::fs::write(
+        &fake_program,
+        format!(
+            "#!/bin/bash\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+            fake_log.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_program, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     (fake_bin, fake_log)
