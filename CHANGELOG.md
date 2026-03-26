@@ -2,6 +2,20 @@
 
 All notable changes to Batty are documented here.
 
+## 0.7.1 — 2026-03-26
+
+Patch release focused on shim hardening and live-runtime defaults.
+
+- **Kiro shim delivery/completion hardening** — Kiro now uses `kiro-cli`
+  consistently, sends input via bracketed paste, and waits for a stable idle
+  screen before emitting `Completion`, fixing truncated multi-line responses in
+  `batty chat` and live-agent shim tests.
+- **Live Kiro validation** — `cargo test --features live-agent live_kiro`
+  passes against the real CLI after the shim timing fixes.
+- **Team runtime defaults updated** — the Batty project team config now uses
+  `codex` for architect, manager, and engineer roles with `use_shim: true`,
+  aligning the live system with the shim-first runtime migration.
+
 ## 0.7.0 — 2026-03-24
 
 Architecture release replacing tmux-direct agent management with a

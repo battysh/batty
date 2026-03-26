@@ -8,10 +8,12 @@ use std::collections::VecDeque;
 use std::io::{Read, Write as IoWrite};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use portable_pty::{CommandBuilder, PtySize};
+use portable_pty::{Child, CommandBuilder, PtySize};
 
 use super::classifier::{self, AgentType, ScreenVerdict};
 use super::protocol::{Channel, Command, Event, ShimState};
@@ -34,31 +36,131 @@ const POLL_INTERVAL_MS: u64 = 250;
 /// agents like Kiro-cli whose idle prompt disappears quickly during processing.
 const WORKING_DWELL_MS: u64 = 300;
 
+/// Additional quiet period required before Kiro is considered Idle.
+/// Kiro can redraw its idle prompt before the final response bytes land.
+const KIRO_IDLE_SETTLE_MS: u64 = 1200;
+
 /// Max time to wait for agent to show its first prompt (secs).
 const READY_TIMEOUT_SECS: u64 = 120;
 
 /// Maximum number of messages that can be queued while the agent is working.
 const MAX_QUEUE_DEPTH: usize = 16;
 
+const PROCESS_EXIT_POLL_MS: u64 = 100;
+const PARENT_DEATH_POLL_SECS: u64 = 1;
+const GROUP_TERM_GRACE_SECS: u64 = 2;
+
+fn shell_single_quote(input: &str) -> String {
+    input.replace('\'', "'\\''")
+}
+
+fn build_supervised_agent_command(command: &str, shim_pid: u32) -> String {
+    let escaped_command = shell_single_quote(command);
+    format!(
+        "shim_pid={shim_pid}; \
+         agent_root_pid=$$; \
+         agent_pgid=$$; \
+         setsid sh -c ' \
+           shim_pid=\"$1\"; \
+           agent_pgid=\"$2\"; \
+           agent_root_pid=\"$3\"; \
+           collect_descendants() {{ \
+             parent_pid=\"$1\"; \
+             for child_pid in $(pgrep -P \"$parent_pid\" 2>/dev/null); do \
+               printf \"%s\\n\" \"$child_pid\"; \
+               collect_descendants \"$child_pid\"; \
+             done; \
+           }}; \
+           while kill -0 \"$shim_pid\" 2>/dev/null; do sleep {PARENT_DEATH_POLL_SECS}; done; \
+           descendant_pids=$(collect_descendants \"$agent_root_pid\"); \
+           kill -TERM -- -\"$agent_pgid\" >/dev/null 2>&1 || true; \
+           for descendant_pid in $descendant_pids; do kill -TERM \"$descendant_pid\" >/dev/null 2>&1 || true; done; \
+           sleep {GROUP_TERM_GRACE_SECS}; \
+           kill -KILL -- -\"$agent_pgid\" >/dev/null 2>&1 || true; \
+           for descendant_pid in $descendant_pids; do kill -KILL \"$descendant_pid\" >/dev/null 2>&1 || true; done \
+         ' _ \"$shim_pid\" \"$agent_pgid\" \"$agent_root_pid\" >/dev/null 2>&1 < /dev/null & \
+         exec bash -lc '{escaped_command}'"
+    )
+}
+
+#[cfg(unix)]
+fn signal_process_group(child: &dyn Child, signal: libc::c_int) -> std::io::Result<()> {
+    let pid = child
+        .process_id()
+        .ok_or_else(|| std::io::Error::other("child process id unavailable"))?;
+    let result = unsafe { libc::killpg(pid as libc::pid_t, signal) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn terminate_agent_group(
+    child: &mut Box<dyn Child + Send + Sync>,
+    sigterm_grace: Duration,
+) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        signal_process_group(child.as_ref(), libc::SIGTERM)?;
+        let deadline = Instant::now() + sigterm_grace;
+        while Instant::now() <= deadline {
+            if let Ok(Some(_)) = child.try_wait() {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(PROCESS_EXIT_POLL_MS));
+        }
+
+        signal_process_group(child.as_ref(), libc::SIGKILL)?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    child.kill()
+}
+
 /// Write body bytes to the PTY in small chunks with micro-delays, then
 /// send the Enter sequence. This prevents TUI agents with synchronized
 /// output from losing characters during screen redraw cycles.
 fn pty_write_paced(
     pty_writer: &Arc<Mutex<Box<dyn std::io::Write + Send>>>,
+    agent_type: AgentType,
     body: &[u8],
     enter: &[u8],
 ) -> std::io::Result<()> {
-    // Write in chunks of 4 bytes with 5ms between chunks.
-    // This gives the TUI time to process input between redraws.
-    for chunk in body.chunks(4) {
+    if agent_type == AgentType::Kiro {
+        let mut writer = pty_writer.lock().unwrap();
+        writer.write_all(b"\x1b[200~")?;
+        writer.write_all(body)?;
+        writer.write_all(b"\x1b[201~")?;
+        writer.flush()?;
+        drop(writer);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let mut writer = pty_writer.lock().unwrap();
+        writer.write_all(enter)?;
+        writer.flush()?;
+        return Ok(());
+    }
+
+    let (initial_delay_ms, chunk_size, inter_chunk_delay_ms, pre_enter_delay_ms) =
+        match agent_type {
+            _ => (0, 4, 5, 50),
+        };
+
+    if initial_delay_ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(initial_delay_ms));
+    }
+
+    for chunk in body.chunks(chunk_size) {
         let mut writer = pty_writer.lock().unwrap();
         writer.write_all(chunk)?;
         writer.flush()?;
         drop(writer);
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::thread::sleep(std::time::Duration::from_millis(inter_chunk_delay_ms));
     }
-    // Pause before Enter to let the TUI finish rendering the typed text
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // Pause before Enter to let the TUI finish rendering the typed text.
+    std::thread::sleep(std::time::Duration::from_millis(pre_enter_delay_ms));
     let mut writer = pty_writer.lock().unwrap();
     writer.write_all(enter)?;
     writer.flush()?;
@@ -113,6 +215,7 @@ struct ShimInner {
     state: ShimState,
     state_changed_at: Instant,
     last_screen_hash: u64,
+    last_pty_output_at: Instant,
     pre_injection_content: String,
     pending_message_id: Option<String>,
     agent_type: AgentType,
@@ -188,8 +291,11 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
         .context("failed to create PTY")?;
 
     // -- Spawn agent CLI on slave side --
+    let shim_pid = std::process::id();
+    let supervised_cmd = build_supervised_agent_command(&args.cmd, shim_pid);
+
     let mut cmd = CommandBuilder::new("bash");
-    cmd.args(["-c", &args.cmd]);
+    cmd.args(["-lc", &supervised_cmd]);
     cmd.cwd(&args.cwd);
     cmd.env_remove("CLAUDECODE"); // prevent nested detection
 
@@ -217,6 +323,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
         state: ShimState::Starting,
         state_changed_at: Instant::now(),
         last_screen_hash: 0,
+        last_pty_output_at: Instant::now(),
         pre_injection_content: String::new(),
         pending_message_id: None,
         agent_type: args.agent_type,
@@ -257,6 +364,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                     }
 
                     let mut inner = inner_pty.lock().unwrap();
+                    inner.last_pty_output_at = Instant::now();
                     inner.parser.process(&buf[..n]);
 
                     // Classify when the screen content actually changes.
@@ -287,11 +395,15 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                     // agent starts processing.
                     let working_too_short = old_state == ShimState::Working
                         && inner.state_changed_at.elapsed().as_millis() < WORKING_DWELL_MS as u128;
-
                     let new_state = match (old_state, verdict) {
                         (ShimState::Starting, ScreenVerdict::AgentIdle) => Some(ShimState::Idle),
                         (ShimState::Idle, ScreenVerdict::AgentIdle) => None,
                         (ShimState::Working, ScreenVerdict::AgentIdle) if working_too_short => None,
+                        (ShimState::Working, ScreenVerdict::AgentIdle)
+                            if inner.agent_type == AgentType::Kiro =>
+                        {
+                            None
+                        }
                         (ShimState::Working, ScreenVerdict::AgentIdle) => Some(ShimState::Idle),
                         (ShimState::Working, ScreenVerdict::AgentWorking) => None,
                         (_, ScreenVerdict::ContextExhausted) => Some(ShimState::ContextExhausted),
@@ -372,6 +484,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                             let enter = enter_seq(agent_type_for_enter);
                             if let Err(e) = pty_write_paced(
                                 &pty_writer_pty,
+                                agent_type_for_enter,
                                 msg.body.as_bytes(),
                                 enter.as_bytes(),
                             ) {
@@ -423,6 +536,90 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
         }
     });
 
+    // Kiro can repaint its idle prompt before its final response bytes land.
+    // Poll for a stable idle screen after PTY output has been quiet for long
+    // enough, then emit the Working -> Idle completion transition.
+    let inner_idle = Arc::clone(&inner);
+    let pty_writer_idle = Arc::clone(&pty_writer);
+    let mut idle_channel = cmd_channel.try_clone().context("failed to clone channel")?;
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+
+        let mut inner = inner_idle.lock().unwrap();
+        if inner.agent_type != AgentType::Kiro || inner.state != ShimState::Working {
+            continue;
+        }
+        if inner.last_pty_output_at.elapsed().as_millis() < KIRO_IDLE_SETTLE_MS as u128 {
+            continue;
+        }
+        if classifier::classify(inner.agent_type, inner.parser.screen()) != ScreenVerdict::AgentIdle
+        {
+            continue;
+        }
+
+        let summary = inner.last_n_lines(5);
+        let pre_content = inner.pre_injection_content.clone();
+        let current_content = inner.screen_contents();
+        let working_screen = inner.last_working_screen.clone();
+        let msg_id = inner.pending_message_id.take();
+
+        inner.state = ShimState::Idle;
+        inner.state_changed_at = Instant::now();
+
+        let queued_msg = if !inner.message_queue.is_empty() {
+            inner.message_queue.pop_front()
+        } else {
+            None
+        };
+
+        if let Some(ref msg) = queued_msg {
+            inner.pre_injection_content = inner.screen_contents();
+            inner.pending_message_id = msg.message_id.clone();
+            inner.state = ShimState::Working;
+            inner.state_changed_at = Instant::now();
+        }
+
+        let queue_depth = inner.message_queue.len();
+        let agent_type_for_enter = inner.agent_type;
+        drop(inner);
+
+        for event in build_transition_events(
+            ShimState::Working,
+            ShimState::Idle,
+            &summary,
+            &pre_content,
+            &current_content,
+            &working_screen,
+            msg_id,
+        ) {
+            if idle_channel.send(&event).is_err() {
+                return;
+            }
+        }
+
+        if let Some(msg) = queued_msg {
+            let enter = enter_seq(agent_type_for_enter);
+            if let Err(e) = pty_write_paced(
+                &pty_writer_idle,
+                agent_type_for_enter,
+                msg.body.as_bytes(),
+                enter.as_bytes(),
+            ) {
+                let _ = idle_channel.send(&Event::Error {
+                    command: "SendMessage".into(),
+                    reason: format!("PTY write failed for queued message: {e}"),
+                });
+                continue;
+            }
+
+            let _ = idle_channel.send(&Event::StateChanged {
+                from: ShimState::Idle,
+                to: ShimState::Working,
+                summary: format!("delivering queued message ({} remaining)", queue_depth),
+            });
+        }
+    });
+
     // -- Main thread: handle commands from orchestrator --
     let inner_cmd = Arc::clone(&inner);
 
@@ -465,10 +662,11 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                             READY_TIMEOUT_SECS, last,
                         ),
                     })?;
-                    child.kill().ok();
+                    terminate_agent_group(&mut child, Duration::from_secs(GROUP_TERM_GRACE_SECS))
+                        .ok();
                     return Ok(());
                 }
-                std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+                thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
             }
             ShimState::Dead => {
                 drop(inner);
@@ -492,10 +690,11 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                             READY_TIMEOUT_SECS, state, last,
                         ),
                     })?;
-                    child.kill().ok();
+                    terminate_agent_group(&mut child, Duration::from_secs(GROUP_TERM_GRACE_SECS))
+                        .ok();
                     return Ok(());
                 }
-                std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+                thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
             }
         }
     }
@@ -509,12 +708,14 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                     "[shim {}] orchestrator disconnected, shutting down",
                     args.id
                 );
-                child.kill().ok();
+                terminate_agent_group(&mut child, Duration::from_secs(GROUP_TERM_GRACE_SECS))
+                    .ok();
                 break;
             }
             Err(e) => {
                 eprintln!("[shim {}] channel error: {e}", args.id);
-                child.kill().ok();
+                terminate_agent_group(&mut child, Duration::from_secs(GROUP_TERM_GRACE_SECS))
+                    .ok();
                 break;
             }
         };
@@ -530,20 +731,24 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                     ShimState::Idle => {
                         inner.pre_injection_content = inner.screen_contents();
                         inner.pending_message_id = message_id;
-
-                        let enter = enter_seq(inner.agent_type);
+                        let agent_type = inner.agent_type;
+                        let enter = enter_seq(agent_type);
                         drop(inner);
                         // Write body char-by-char with micro-delays for TUI
                         // agents that use synchronized output. Bulk writes
                         // get interleaved with screen redraws, losing chars.
                         if let Err(e) =
-                            pty_write_paced(&pty_writer, body.as_bytes(), enter.as_bytes())
+                            pty_write_paced(
+                                &pty_writer,
+                                agent_type,
+                                body.as_bytes(),
+                                enter.as_bytes(),
+                            )
                         {
                             cmd_channel.send(&Event::Error {
                                 command: "SendMessage".into(),
                                 reason: format!("PTY write failed: {e}"),
                             })?;
-                            let mut inner = inner_cmd.lock().unwrap();
                             // Restore state on failure
                             continue;
                         }
@@ -669,22 +874,27 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                     writer.write_all(b"\x03").ok(); // Ctrl-C
                     writer.flush().ok();
                 }
-                let deadline = Instant::now() + std::time::Duration::from_secs(timeout_secs as u64);
+                let deadline = Instant::now() + Duration::from_secs(timeout_secs as u64);
                 loop {
                     if Instant::now() > deadline {
-                        child.kill().ok();
+                        terminate_agent_group(
+                            &mut child,
+                            Duration::from_secs(GROUP_TERM_GRACE_SECS),
+                        )
+                        .ok();
                         break;
                     }
                     if let Ok(Some(_)) = child.try_wait() {
                         break;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    thread::sleep(Duration::from_millis(PROCESS_EXIT_POLL_MS));
                 }
                 break;
             }
 
             Command::Kill => {
-                child.kill().ok();
+                terminate_agent_group(&mut child, Duration::from_secs(GROUP_TERM_GRACE_SECS))
+                    .ok();
                 break;
             }
         }
@@ -982,6 +1192,32 @@ mod tests {
     fn content_hash_deterministic() {
         assert_eq!(content_hash("hello"), content_hash("hello"));
         assert_ne!(content_hash("hello"), content_hash("world"));
+    }
+
+    #[test]
+    fn shell_single_quote_escapes_embedded_quote() {
+        assert_eq!(shell_single_quote("fix user's bug"), "fix user'\\''s bug");
+    }
+
+    #[test]
+    fn supervised_command_contains_watchdog_and_exec() {
+        let command = build_supervised_agent_command("kiro-cli chat 'hello'", 4242);
+        assert!(command.contains("shim_pid=4242"));
+        assert!(command.contains("agent_root_pid=$$"));
+        assert!(command.contains("agent_pgid=$$"));
+        assert!(command.contains("setsid sh -c"));
+        assert!(command.contains("shim_pid=\"$1\""));
+        assert!(command.contains("agent_pgid=\"$2\""));
+        assert!(command.contains("agent_root_pid=\"$3\""));
+        assert!(command.contains("collect_descendants()"));
+        assert!(command.contains("pgrep -P \"$parent_pid\""));
+        assert!(command.contains("descendant_pids=$(collect_descendants \"$agent_root_pid\")"));
+        assert!(command.contains("kill -TERM -- -\"$agent_pgid\""));
+        assert!(command.contains("kill -TERM \"$descendant_pid\""));
+        assert!(command.contains("kill -KILL -- -\"$agent_pgid\""));
+        assert!(command.contains("kill -KILL \"$descendant_pid\""));
+        assert!(command.contains("' _ \"$shim_pid\" \"$agent_pgid\" \"$agent_root_pid\""));
+        assert!(command.contains("exec bash -lc 'kiro-cli chat '\\''hello'\\'''"));
     }
 
     #[test]

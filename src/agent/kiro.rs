@@ -17,14 +17,14 @@ pub const KIRO_DEFAULT_MODEL: &str = "claude-opus-4.6-1m";
 
 /// Adapter for the Kiro CLI.
 pub struct KiroCliAdapter {
-    /// Override the kiro binary name/path (default: "kiro").
+    /// Override the kiro binary name/path (default: "kiro-cli").
     program: String,
 }
 
 impl KiroCliAdapter {
     pub fn new(program: Option<String>) -> Self {
         Self {
-            program: program.unwrap_or_else(|| "kiro".to_string()),
+            program: program.unwrap_or_else(|| "kiro-cli".to_string()),
         }
     }
 }
@@ -98,16 +98,19 @@ impl AgentAdapter for KiroCliAdapter {
         _resume: bool,
         _session_id: Option<&str>,
     ) -> anyhow::Result<String> {
+        let escaped_program = self.program.replace('\'', "'\\''");
         // `prompt` is reused as the agent name when called from the launcher
         // after write_kiro_agent_config has been invoked. If it looks like an
         // agent name (no whitespace), use --agent; otherwise fall back to
         // passing the prompt as input.
         if !prompt.contains(' ') && prompt.starts_with("batty-") {
-            Ok(format!("exec kiro chat --trust-all-tools --agent {prompt}"))
+            Ok(format!(
+                "exec '{escaped_program}' chat --trust-all-tools --agent {prompt}"
+            ))
         } else {
             let escaped = prompt.replace('\'', "'\\''");
             Ok(format!(
-                "exec kiro chat --trust-all-tools --model {KIRO_DEFAULT_MODEL} '{escaped}'"
+                "exec '{escaped_program}' chat --trust-all-tools --model {KIRO_DEFAULT_MODEL} '{escaped}'"
             ))
         }
     }
@@ -129,7 +132,7 @@ mod tests {
     fn default_program_is_kiro() {
         let adapter = KiroCliAdapter::new(None);
         let config = adapter.spawn_config("test", Path::new("/tmp"));
-        assert_eq!(config.program, "kiro");
+        assert_eq!(config.program, "kiro-cli");
     }
 
     #[test]
@@ -172,7 +175,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             cmd,
-            "exec kiro chat --trust-all-tools --agent batty-architect"
+            "exec 'kiro-cli' chat --trust-all-tools --agent batty-architect"
         );
     }
 
@@ -193,6 +196,18 @@ mod tests {
             .launch_command("fix user's bug", false, false, None)
             .unwrap();
         assert!(cmd.contains("user'\\''s"));
+    }
+
+    #[test]
+    fn launch_command_uses_configured_program() {
+        let adapter = KiroCliAdapter::new(Some("/opt/kiro-cli".to_string()));
+        let cmd = adapter
+            .launch_command("batty-architect", false, false, None)
+            .unwrap();
+        assert_eq!(
+            cmd,
+            "exec '/opt/kiro-cli' chat --trust-all-tools --agent batty-architect"
+        );
     }
 
     #[test]
