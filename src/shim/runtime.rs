@@ -143,10 +143,8 @@ fn pty_write_paced(
         return Ok(());
     }
 
-    let (initial_delay_ms, chunk_size, inter_chunk_delay_ms, pre_enter_delay_ms) =
-        match agent_type {
-            _ => (0, 4, 5, 50),
-        };
+    let _ = agent_type;
+    let (initial_delay_ms, chunk_size, inter_chunk_delay_ms, pre_enter_delay_ms) = (0, 4, 5, 50);
 
     if initial_delay_ms > 0 {
         std::thread::sleep(std::time::Duration::from_millis(initial_delay_ms));
@@ -542,81 +540,84 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
     let inner_idle = Arc::clone(&inner);
     let pty_writer_idle = Arc::clone(&pty_writer);
     let mut idle_channel = cmd_channel.try_clone().context("failed to clone channel")?;
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
 
-        let mut inner = inner_idle.lock().unwrap();
-        if inner.agent_type != AgentType::Kiro || inner.state != ShimState::Working {
-            continue;
-        }
-        if inner.last_pty_output_at.elapsed().as_millis() < KIRO_IDLE_SETTLE_MS as u128 {
-            continue;
-        }
-        if classifier::classify(inner.agent_type, inner.parser.screen()) != ScreenVerdict::AgentIdle
-        {
-            continue;
-        }
-
-        let summary = inner.last_n_lines(5);
-        let pre_content = inner.pre_injection_content.clone();
-        let current_content = inner.screen_contents();
-        let working_screen = inner.last_working_screen.clone();
-        let msg_id = inner.pending_message_id.take();
-
-        inner.state = ShimState::Idle;
-        inner.state_changed_at = Instant::now();
-
-        let queued_msg = if !inner.message_queue.is_empty() {
-            inner.message_queue.pop_front()
-        } else {
-            None
-        };
-
-        if let Some(ref msg) = queued_msg {
-            inner.pre_injection_content = inner.screen_contents();
-            inner.pending_message_id = msg.message_id.clone();
-            inner.state = ShimState::Working;
-            inner.state_changed_at = Instant::now();
-        }
-
-        let queue_depth = inner.message_queue.len();
-        let agent_type_for_enter = inner.agent_type;
-        drop(inner);
-
-        for event in build_transition_events(
-            ShimState::Working,
-            ShimState::Idle,
-            &summary,
-            &pre_content,
-            &current_content,
-            &working_screen,
-            msg_id,
-        ) {
-            if idle_channel.send(&event).is_err() {
-                return;
+            let mut inner = inner_idle.lock().unwrap();
+            if inner.agent_type != AgentType::Kiro || inner.state != ShimState::Working {
+                continue;
             }
-        }
-
-        if let Some(msg) = queued_msg {
-            let enter = enter_seq(agent_type_for_enter);
-            if let Err(e) = pty_write_paced(
-                &pty_writer_idle,
-                agent_type_for_enter,
-                msg.body.as_bytes(),
-                enter.as_bytes(),
-            ) {
-                let _ = idle_channel.send(&Event::Error {
-                    command: "SendMessage".into(),
-                    reason: format!("PTY write failed for queued message: {e}"),
-                });
+            if inner.last_pty_output_at.elapsed().as_millis() < KIRO_IDLE_SETTLE_MS as u128 {
+                continue;
+            }
+            if classifier::classify(inner.agent_type, inner.parser.screen())
+                != ScreenVerdict::AgentIdle
+            {
                 continue;
             }
 
-            let _ = idle_channel.send(&Event::StateChanged {
-                from: ShimState::Idle,
-                to: ShimState::Working,
-                summary: format!("delivering queued message ({} remaining)", queue_depth),
-            });
+            let summary = inner.last_n_lines(5);
+            let pre_content = inner.pre_injection_content.clone();
+            let current_content = inner.screen_contents();
+            let working_screen = inner.last_working_screen.clone();
+            let msg_id = inner.pending_message_id.take();
+
+            inner.state = ShimState::Idle;
+            inner.state_changed_at = Instant::now();
+
+            let queued_msg = if !inner.message_queue.is_empty() {
+                inner.message_queue.pop_front()
+            } else {
+                None
+            };
+
+            if let Some(ref msg) = queued_msg {
+                inner.pre_injection_content = inner.screen_contents();
+                inner.pending_message_id = msg.message_id.clone();
+                inner.state = ShimState::Working;
+                inner.state_changed_at = Instant::now();
+            }
+
+            let queue_depth = inner.message_queue.len();
+            let agent_type_for_enter = inner.agent_type;
+            drop(inner);
+
+            for event in build_transition_events(
+                ShimState::Working,
+                ShimState::Idle,
+                &summary,
+                &pre_content,
+                &current_content,
+                &working_screen,
+                msg_id,
+            ) {
+                if idle_channel.send(&event).is_err() {
+                    return;
+                }
+            }
+
+            if let Some(msg) = queued_msg {
+                let enter = enter_seq(agent_type_for_enter);
+                if let Err(e) = pty_write_paced(
+                    &pty_writer_idle,
+                    agent_type_for_enter,
+                    msg.body.as_bytes(),
+                    enter.as_bytes(),
+                ) {
+                    let _ = idle_channel.send(&Event::Error {
+                        command: "SendMessage".into(),
+                        reason: format!("PTY write failed for queued message: {e}"),
+                    });
+                    continue;
+                }
+
+                let _ = idle_channel.send(&Event::StateChanged {
+                    from: ShimState::Idle,
+                    to: ShimState::Working,
+                    summary: format!("delivering queued message ({} remaining)", queue_depth),
+                });
+            }
         }
     });
 
@@ -708,14 +709,12 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                     "[shim {}] orchestrator disconnected, shutting down",
                     args.id
                 );
-                terminate_agent_group(&mut child, Duration::from_secs(GROUP_TERM_GRACE_SECS))
-                    .ok();
+                terminate_agent_group(&mut child, Duration::from_secs(GROUP_TERM_GRACE_SECS)).ok();
                 break;
             }
             Err(e) => {
                 eprintln!("[shim {}] channel error: {e}", args.id);
-                terminate_agent_group(&mut child, Duration::from_secs(GROUP_TERM_GRACE_SECS))
-                    .ok();
+                terminate_agent_group(&mut child, Duration::from_secs(GROUP_TERM_GRACE_SECS)).ok();
                 break;
             }
         };
@@ -737,14 +736,12 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                         // Write body char-by-char with micro-delays for TUI
                         // agents that use synchronized output. Bulk writes
                         // get interleaved with screen redraws, losing chars.
-                        if let Err(e) =
-                            pty_write_paced(
-                                &pty_writer,
-                                agent_type,
-                                body.as_bytes(),
-                                enter.as_bytes(),
-                            )
-                        {
+                        if let Err(e) = pty_write_paced(
+                            &pty_writer,
+                            agent_type,
+                            body.as_bytes(),
+                            enter.as_bytes(),
+                        ) {
                             cmd_channel.send(&Event::Error {
                                 command: "SendMessage".into(),
                                 reason: format!("PTY write failed: {e}"),
@@ -893,8 +890,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
             }
 
             Command::Kill => {
-                terminate_agent_group(&mut child, Duration::from_secs(GROUP_TERM_GRACE_SECS))
-                    .ok();
+                terminate_agent_group(&mut child, Duration::from_secs(GROUP_TERM_GRACE_SECS)).ok();
                 break;
             }
         }

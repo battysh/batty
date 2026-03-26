@@ -1,10 +1,11 @@
 <!-- markdownlint-disable MD041 -->
+
 <p align="center">
   <img src="assets/batty-icon.png" alt="Batty" width="200">
   <h1 align="center">Batty</h1>
   <p align="center"><strong>Hierarchical agent teams for software development.</strong></p>
   <p align="center">
-    Define a team of AI agents in YAML. Batty runs them in tmux, routes work and messages between roles, manages engineer worktrees, and keeps the team moving while you stay in control.
+    Define a team of AI agents in YAML. Batty runs them through a shim-based runtime, routes work and messages between roles, manages engineer worktrees, and keeps the team moving while tmux remains the display and persistence layer.
   </p>
 </p>
 
@@ -21,9 +22,9 @@
   <a href="https://github.com/battysh/batty">GitHub</a>
 </p>
 
----
+______________________________________________________________________
 
-Batty is a tmux-native runtime for AI coding teams. Instead of one agent doing everything badly, you define roles like architect, manager, and engineers; Batty launches them, isolates engineer work in git worktrees, routes messages, tracks the board, and gives you a structured way to run parallel agent workflows without losing control or context.
+Batty is a control plane for AI coding teams. Instead of one agent doing everything badly, you define roles like architect, manager, and engineers; Batty launches each agent through a PTY-owning shim, isolates engineer work in git worktrees, routes messages, tracks the board, and uses tmux for visibility and session persistence.
 
 ## Quick Start
 
@@ -65,7 +66,7 @@ Engineers (Codex / Claude / Aider)
    +---- isolated git worktrees ----+
 ```
 
-Batty keeps each role in its own tmux pane, watches for idle/completed states, delivers inbox messages, auto-dispatches board tasks, runs standups, and merges engineer branches back when they pass tests.
+Batty keeps each role visible in its own tmux pane, while the shim handles PTY ownership, state detection, and structured message delivery. The daemon auto-dispatches board tasks, runs standups, and merges engineer branches back when they pass tests.
 
 ## Install
 
@@ -114,36 +115,38 @@ team.yaml
    v
 batty start
    |
-   +--> tmux session per team
-   +--> role prompts loaded into each pane
+   +--> shim process per agent
+   +--> PTY + screen classifier per shim
+   +--> tmux panes tail shim PTY logs
    +--> engineer worktrees created when enabled
-   +--> daemon loop watches output, inboxes, board, retries, standups
+   +--> daemon loop watches shim state, inboxes, board, retries, standups
    |
    v
 batty send / assign / board / status / merge
 ```
 
-Batty does not embed a model. It orchestrates external agent CLIs, keeps state in files, and uses tmux plus git worktrees as the runtime boundary.
+Batty does not embed a model. It orchestrates external agent CLIs, keeps state in files, uses shims as the execution boundary, and uses tmux plus git worktrees as the operator-facing runtime surface.
 
 ## Built-in Templates
 
 `batty init --template <name>` scaffolds a ready-to-run team:
 
-| Template | Agents | Description |
-| --- | ---: | --- |
-| `solo` | 1 | Single engineer, no hierarchy |
-| `pair` | 2 | Architect + 1 engineer |
-| `simple` | 6 | Human + architect + manager + 3 engineers |
-| `squad` | 7 | Architect + manager + 5 engineers |
-| `large` | 19 | Human + architect + 3 managers + 15 engineers |
-| `research` | 10 | PI + 3 sub-leads + 6 researchers |
-| `software` | 11 | Human + tech lead + 2 eng managers + 8 developers |
-| `batty` | 6 | Batty's own self-development team |
+| Template   | Agents | Description                                       |
+| ---------- | -----: | ------------------------------------------------- |
+| `solo`     |      1 | Single engineer, no hierarchy                     |
+| `pair`     |      2 | Architect + 1 engineer                            |
+| `simple`   |      6 | Human + architect + manager + 3 engineers         |
+| `squad`    |      7 | Architect + manager + 5 engineers                 |
+| `large`    |     19 | Human + architect + 3 managers + 15 engineers     |
+| `research` |     10 | PI + 3 sub-leads + 6 researchers                  |
+| `software` |     11 | Human + tech lead + 2 eng managers + 8 developers |
+| `batty`    |      6 | Batty's own self-development team                 |
 
 ## Highlights
 
 - Hierarchical agent teams instead of one overloaded coding agent
-- tmux-native runtime with persistent panes and session resume
+- Shim-driven runtime with PTY ownership, state classification, and structured delivery
+- tmux-backed visibility with persistent panes and session resume
 - Agent-agnostic role assignment: Claude Code, Codex, Aider, Kiro, or similar — set the default with `batty init --agent <backend>`
 - Maildir inbox routing with explicit `talks_to` communication rules
 - Stable per-engineer worktrees with fresh task branches on each assignment
@@ -179,35 +182,35 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 
 ## CLI Quick Reference
 
-| Command | Purpose |
-| --- | --- |
-| `batty init [--template NAME] [--agent BACKEND]` | Scaffold `.batty/team_config/` |
-| `batty start [--attach]` | Launch the daemon and tmux session |
-| `batty stop` / `batty attach` | Stop or reattach to the team session |
-| `batty send <role> <message>` | Send a message to a role |
-| `batty assign <engineer> <task>` | Queue work for an engineer and report delivery result |
-| `batty inbox <member>` / `read` / `ack` | Inspect and manage inbox messages |
-| `batty board` / `board list` / `board summary` | Open the kanban board or inspect it without a TTY |
-| `batty board health` | Show board health dashboard (status counts, stale tasks, dep issues) |
-| `batty board archive [--older-than DATE]` | Move done tasks to archive directory |
-| `batty status [--json]` | Show current team state |
-| `batty merge <engineer>` | Merge an engineer worktree branch |
-| `batty review <id> <disposition> [feedback]` | Record a review disposition (approve, request-changes, reject) |
-| `batty task review <id> --disposition <d>` | Record a review disposition (workflow-level variant) |
-| `batty task schedule <id> [--at T] [--cron E] [--clear]` | Set or clear scheduled dispatch time and cron recurrence |
-| `batty nudge disable/enable/status` | Toggle specific daemon interventions at runtime |
-| `batty telemetry summary/agents/tasks/reviews/events` | Query SQLite telemetry for agent, task, and review metrics |
-| `batty retro` | Generate a run retrospective analyzing throughput and failure patterns |
-| `batty load` | Estimate team load and show recent load history |
-| `batty cost` | Estimate current run cost from agent session files |
-| `batty metrics` | Show consolidated telemetry dashboard (tasks, cycle time, rates, agents) |
-| `batty doctor [--fix]` | Dump diagnostic state; `--fix` cleans up orphan worktrees/branches |
-| `batty pause` / `resume` / `queue` | Control automation and inspect queued dispatch work |
-| `batty inbox purge [--older-than DUR]` | Purge delivered inbox messages, optionally by age |
-| `batty validate [--show-checks]` | Validate config; `--show-checks` shows per-rule pass/fail |
-| `batty config` / `export-run` | Show resolved config and export runtime state |
-| `batty telegram` | Configure Telegram for human communication |
-| `batty completions <shell>` | Generate shell completions |
+| Command                                                  | Purpose                                                                  |
+| -------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `batty init [--template NAME] [--agent BACKEND]`         | Scaffold `.batty/team_config/`                                           |
+| `batty start [--attach]`                                 | Launch the daemon and tmux session                                       |
+| `batty stop` / `batty attach`                            | Stop or reattach to the team session                                     |
+| `batty send <role> <message>`                            | Send a message to a role                                                 |
+| `batty assign <engineer> <task>`                         | Queue work for an engineer and report delivery result                    |
+| `batty inbox <member>` / `read` / `ack`                  | Inspect and manage inbox messages                                        |
+| `batty board` / `board list` / `board summary`           | Open the kanban board or inspect it without a TTY                        |
+| `batty board health`                                     | Show board health dashboard (status counts, stale tasks, dep issues)     |
+| `batty board archive [--older-than DATE]`                | Move done tasks to archive directory                                     |
+| `batty status [--json]`                                  | Show current team state                                                  |
+| `batty merge <engineer>`                                 | Merge an engineer worktree branch                                        |
+| `batty review <id> <disposition> [feedback]`             | Record a review disposition (approve, request-changes, reject)           |
+| `batty task review <id> --disposition <d>`               | Record a review disposition (workflow-level variant)                     |
+| `batty task schedule <id> [--at T] [--cron E] [--clear]` | Set or clear scheduled dispatch time and cron recurrence                 |
+| `batty nudge disable/enable/status`                      | Toggle specific daemon interventions at runtime                          |
+| `batty telemetry summary/agents/tasks/reviews/events`    | Query SQLite telemetry for agent, task, and review metrics               |
+| `batty retro`                                            | Generate a run retrospective analyzing throughput and failure patterns   |
+| `batty load`                                             | Estimate team load and show recent load history                          |
+| `batty cost`                                             | Estimate current run cost from agent session files                       |
+| `batty metrics`                                          | Show consolidated telemetry dashboard (tasks, cycle time, rates, agents) |
+| `batty doctor [--fix]`                                   | Dump diagnostic state; `--fix` cleans up orphan worktrees/branches       |
+| `batty pause` / `resume` / `queue`                       | Control automation and inspect queued dispatch work                      |
+| `batty inbox purge [--older-than DUR]`                   | Purge delivered inbox messages, optionally by age                        |
+| `batty validate [--show-checks]`                         | Validate config; `--show-checks` shows per-rule pass/fail                |
+| `batty config` / `export-run`                            | Show resolved config and export runtime state                            |
+| `batty telegram`                                         | Configure Telegram for human communication                               |
+| `batty completions <shell>`                              | Generate shell completions                                               |
 
 ## Requirements
 
@@ -293,14 +296,14 @@ The dashboard JSON is available in the source tree at `src/team/grafana/dashboar
 
 Pre-configured alerts:
 
-| Alert | Detects |
-| --- | --- |
-| Agent Stall | Agent silent past threshold |
+| Alert                  | Detects                            |
+| ---------------------- | ---------------------------------- |
+| Agent Stall            | Agent silent past threshold        |
 | Delivery Failure Spike | Message delivery failures climbing |
-| Pipeline Starvation | Not enough work in the pipeline |
-| High Failure Rate | Tasks failing above threshold |
-| Context Exhaustion | Agent context window nearly full |
-| Session Idle | Entire team idle too long |
+| Pipeline Starvation    | Not enough work in the pipeline    |
+| High Failure Rate      | Tasks failing above threshold      |
+| Context Exhaustion     | Agent context window nearly full   |
+| Session Idle           | Entire team idle too long          |
 
 ## Docs and Links
 

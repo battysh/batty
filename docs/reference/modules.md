@@ -12,9 +12,9 @@ Contributor-facing map of Batty source modules.
 | `src/team/config.rs`    | `.batty/team_config/team.yaml` parsing, defaults, and validation.         |
 | `src/team/hierarchy.rs` | Role expansion, instance naming, and reporting relationships.             |
 | `src/team/layout.rs`    | tmux pane layout builder for team zones and manager/engineer groupings.   |
-| `src/team/daemon.rs`    | Background runtime loop: spawn agents, poll state, route messages.        |
+| `src/team/daemon.rs`    | Background runtime loop: spawn shims, poll state, route messages.         |
 | `src/team/inbox.rs`     | Maildir inbox storage for inter-role messages.                            |
-| `src/team/message.rs`   | Message types and prompt composition for pane injection.                  |
+| `src/team/message.rs`   | Message types and prompt composition for shim delivery.                   |
 | `src/team/comms.rs`     | Outbound channel abstraction for user roles, including Telegram delivery. |
 | `src/team/telegram.rs`  | Telegram Bot API client and setup wizard behind `batty telegram`.         |
 | `src/team/standup.rs`   | Standup report generation from current member state.                      |
@@ -22,6 +22,7 @@ Contributor-facing map of Batty source modules.
 | `src/team/task_loop.rs` | Task claiming, refresh, tests, and merge handoff logic for engineers.     |
 | `src/team/events.rs`    | Structured team runtime event sink.                                       |
 | `src/team/watcher.rs`   | tmux-pane watcher and idle/completion detection.                          |
+| `src/shim/`             | Shim runtime: PTY ownership, protocol, screen classifier, and chat mode.  |
 | `src/team/templates/`   | Built-in team templates and role prompt scaffolds.                        |
 | `src/tmux.rs`           | tmux command wrapper for sessions, panes, layout, and capability probes.  |
 | `src/agent/mod.rs`      | `AgentAdapter` trait, registry, and shared spawn contract.                |
@@ -38,29 +39,30 @@ Contributor-facing map of Batty source modules.
 
 ## Key Traits and Types
 
-| Type             | Location                | Why it matters                                                            |
-| ---------------- | ----------------------- | ------------------------------------------------------------------------- |
-| `AgentAdapter`   | `src/agent/mod.rs`      | Contract every supported agent CLI implements.                            |
-| `SpawnConfig`    | `src/agent/mod.rs`      | Normalized launch description used by the daemon.                         |
-| `TeamConfig`     | `src/team/config.rs`    | Top-level team definition loaded from `team.yaml`.                        |
-| `RoleDef`        | `src/team/config.rs`    | Per-role config: prompts, instances, routing, worktree settings.          |
-| `ResolvedMember` | `src/team/hierarchy.rs` | Concrete runtime member after role expansion and manager assignment.      |
-| `LayoutPlan`     | `src/team/layout.rs`    | Pane arrangement plan before tmux split commands are applied.             |
-| `TeamDaemon`     | `src/team/daemon.rs`    | Main runtime coordinator for panes, inboxes, standups, and board loop.    |
-| `InboxMessage`   | `src/team/inbox.rs`     | On-disk message unit exchanged between Batty roles.                       |
-| `ChannelConfig`  | `src/team/config.rs`    | Delivery config for user-facing channels such as Telegram.                |
-| `TelegramBot`    | `src/team/telegram.rs`  | Native Telegram Bot API client used for polling and outbound messages.    |
-| `SessionWatcher` | `src/team/watcher.rs`   | Tracks activity, prompts, and completion signals in a tmux pane.          |
-| `Task`           | `src/task/mod.rs`       | Parsed task metadata from the shared board.                               |
-| `PhaseWorktree`  | `src/worktree.rs`       | Worktree metadata used for engineer isolation and merge flow.             |
-| `LogEntry`       | `src/log/mod.rs`        | Structured JSONL runtime event persisted for debugging and audits.        |
-| `PipeWatcher`    | `src/events.rs`         | Incremental output reader that extracts structured events from pane logs. |
+| Type             | Location                          | Why it matters                                                                |
+| ---------------- | --------------------------------- | ----------------------------------------------------------------------------- |
+| `AgentAdapter`   | `src/agent/mod.rs`                | Contract every supported agent CLI implements.                                |
+| `SpawnConfig`    | `src/agent/mod.rs`                | Normalized launch description used by the daemon.                             |
+| `TeamConfig`     | `src/team/config.rs`              | Top-level team definition loaded from `team.yaml`.                            |
+| `RoleDef`        | `src/team/config.rs`              | Per-role config: prompts, instances, routing, worktree settings.              |
+| `ResolvedMember` | `src/team/hierarchy.rs`           | Concrete runtime member after role expansion and manager assignment.          |
+| `LayoutPlan`     | `src/team/layout.rs`              | Pane arrangement plan before tmux split commands are applied.                 |
+| `TeamDaemon`     | `src/team/daemon.rs`              | Main runtime coordinator for shims, panes, inboxes, standups, and board loop. |
+| `InboxMessage`   | `src/team/inbox.rs`               | On-disk message unit exchanged between Batty roles.                           |
+| `ChannelConfig`  | `src/team/config.rs`              | Delivery config for user-facing channels such as Telegram.                    |
+| `TelegramBot`    | `src/team/telegram.rs`            | Native Telegram Bot API client used for polling and outbound messages.        |
+| `SessionWatcher` | `src/team/watcher.rs`             | Tracks activity, prompts, and completion signals in a tmux pane.              |
+| `AgentHandle`    | `src/team/daemon/agent_handle.rs` | Runtime handle that tracks member state and parent-side shim communication.   |
+| `Task`           | `src/task/mod.rs`                 | Parsed task metadata from the shared board.                                   |
+| `PhaseWorktree`  | `src/worktree.rs`                 | Worktree metadata used for engineer isolation and merge flow.                 |
+| `LogEntry`       | `src/log/mod.rs`                  | Structured JSONL runtime event persisted for debugging and audits.            |
+| `PipeWatcher`    | `src/events.rs`                   | Incremental output reader that extracts structured events from pane logs.     |
 
 ## Contributor Notes
 
 - Most modules carry colocated `#[cfg(test)]` suites; the main risk areas are
-  tmux behavior, layout portability, worktree safety, inbox routing, and
-  Telegram parsing.
+  shim state handling, tmux behavior, layout portability, worktree safety,
+  inbox routing, and Telegram parsing.
 - Docs reference pages are partially generated. Regenerate them with
   `./scripts/generate-docs.sh` before committing doc-affecting CLI or config changes.
 - The current public runtime is team-oriented. If you find references to the
