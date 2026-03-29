@@ -395,9 +395,9 @@ mod tests {
 
         let orchestrator_log =
             std::fs::read_to_string(repo.join(".batty").join("orchestrator.log")).unwrap();
-        assert!(orchestrator_log.contains("architect=no (session missing)"));
-        assert!(orchestrator_log.contains("manager=no (session missing)"));
-        assert!(orchestrator_log.contains("eng-1=no (session missing)"));
+        assert!(orchestrator_log.contains("architect=no (prompt changed)"));
+        assert!(orchestrator_log.contains("manager=no (prompt changed)"));
+        assert!(orchestrator_log.contains("eng-1=no (prompt changed)"));
 
         crate::tmux::kill_session(&session).unwrap();
         let _ = std::fs::remove_dir_all(&fake_claude_bin);
