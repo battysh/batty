@@ -662,9 +662,9 @@ impl TeamDaemon {
                 .count(),
             self.truly_idle_engineer_count(&board_tasks)
         );
-        let recent_completions = crate::team::events::read_events(
-            &crate::team::team_events_path(&self.config.project_root),
-        )?
+        let recent_completions = crate::team::events::read_events(&crate::team::team_events_path(
+            &self.config.project_root,
+        ))?
         .into_iter()
         .rev()
         .filter(|event| event.event == "task_completed")
@@ -692,7 +692,10 @@ impl TeamDaemon {
 
         self.planning_cycle_last_fired = Some(Instant::now());
         self.planning_cycle_active = true;
-        info!(architect, "triggered planning cycle after pipeline starvation");
+        info!(
+            architect,
+            "triggered planning cycle after pipeline starvation"
+        );
         self.record_orchestrator_action(format!(
             "planning: triggered planning cycle for {} after pipeline starvation",
             architect
@@ -1014,7 +1017,9 @@ mod tests {
     };
     use serial_test::serial;
 
-    fn setup_fake_kanban_for_planning(tmp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    fn setup_fake_kanban_for_planning(
+        tmp: &tempfile::TempDir,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
         let fake_bin = tmp.path().join("fake-bin");
         std::fs::create_dir_all(&fake_bin).unwrap();
         let log_path = tmp.path().join("kanban.log");
