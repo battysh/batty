@@ -82,6 +82,10 @@ pub fn parse_planning_response(response: &str) -> Vec<TaskSpec> {
 
 /// Create board tasks from parsed specs by shelling out to kanban-md.
 pub fn create_board_tasks(specs: &[TaskSpec], board_dir: &Path) -> Result<Vec<u32>> {
+    if !board_dir.exists() {
+        anyhow::bail!("board directory does not exist: {}", board_dir.display());
+    }
+
     let mut created_ids = Vec::with_capacity(specs.len());
     for spec in specs {
         let depends_on = if spec.depends_on.is_empty() {
@@ -122,6 +126,24 @@ pub fn create_board_tasks(specs: &[TaskSpec], board_dir: &Path) -> Result<Vec<u3
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::team::test_support::{EnvVarGuard, PATH_LOCK};
+
+    fn setup_fake_kanban(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+        let fake_bin = tmp.path().join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        let script = fake_bin.join("kanban-md");
+        std::fs::write(
+            &script,
+            "#!/bin/bash\nset -euo pipefail\nif [ \"$1\" != \"create\" ]; then exit 1; fi\nshift\ntitle=\"$1\"\nshift\nbody=\"\"\npriority=\"high\"\ntags=\"\"\ndepends_on=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --body) body=\"$2\"; shift 2 ;;\n    --priority) priority=\"$2\"; shift 2 ;;\n    --tags) tags=\"$2\"; shift 2 ;;\n    --depends-on) depends_on=\"$2\"; shift 2 ;;\n    --dir) board_dir=\"$2\"; shift 2 ;;\n    *) shift ;;\n  esac\ndone\nmkdir -p \"$board_dir/tasks\"\ncount=$(find \"$board_dir/tasks\" -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')\nid=$((count + 1))\nprintf -- '---\\nid: %s\\ntitle: %s\\nstatus: todo\\npriority: %s\\n' \"$id\" \"$title\" \"$priority\" > \"$board_dir/tasks/$(printf '%03d' \"$id\")-task.md\"\nif [ -n \"$tags\" ]; then printf 'tags: [%s]\\n' \"$tags\" >> \"$board_dir/tasks/$(printf '%03d' \"$id\")-task.md\"; fi\nif [ -n \"$depends_on\" ]; then printf 'depends_on: [%s]\\n' \"$depends_on\" >> \"$board_dir/tasks/$(printf '%03d' \"$id\")-task.md\"; fi\nprintf -- '---\\n\\n%s\\n' \"$body\" >> \"$board_dir/tasks/$(printf '%03d' \"$id\")-task.md\"\nprintf 'Created task #%s\\n' \"$id\"\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fake_bin
+    }
 
     #[test]
     fn parse_single_task() {
@@ -217,5 +239,58 @@ priority: high
 ---
 No title here."#;
         assert!(parse_planning_response(response).is_empty());
+    }
+
+    #[test]
+    fn create_board_tasks_round_trip_creates_tasks_with_metadata() {
+        let _path_lock = PATH_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        std::fs::create_dir_all(board_dir.join("tasks")).unwrap();
+        let fake_bin = setup_fake_kanban(&tmp);
+        let path = format!(
+            "{}:{}",
+            fake_bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let _path_guard = EnvVarGuard::set("PATH", &path);
+
+        let specs = vec![
+            TaskSpec {
+                title: "Task one".into(),
+                body: "Body one".into(),
+                priority: Some("high".into()),
+                depends_on: vec![],
+                tags: vec!["tact".into()],
+            },
+            TaskSpec {
+                title: "Task two".into(),
+                body: "Body two".into(),
+                priority: Some("medium".into()),
+                depends_on: vec![1],
+                tags: vec!["integration".into()],
+            },
+        ];
+
+        let ids = create_board_tasks(&specs, &board_dir).unwrap();
+        assert_eq!(ids, vec![1, 2]);
+        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks")).unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[1].depends_on, vec![1]);
+        assert_eq!(tasks[1].tags, vec!["integration"]);
+    }
+
+    #[test]
+    fn create_board_tasks_missing_board_dir_returns_clear_error() {
+        let specs = vec![TaskSpec {
+            title: "Task one".into(),
+            body: "Body one".into(),
+            priority: None,
+            depends_on: vec![],
+            tags: vec![],
+        }];
+        let tmp = tempfile::tempdir().unwrap();
+        let error = create_board_tasks(&specs, &tmp.path().join("missing")).unwrap_err();
+        assert!(error.to_string().contains("board directory does not exist"),);
     }
 }
