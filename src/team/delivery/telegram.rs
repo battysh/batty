@@ -281,6 +281,8 @@ mod tests {
             pending_delivery_queue: HashMap::new(),
             completion_rejection_counts: HashMap::new(),
             shim_handles: HashMap::new(),
+            planning_cycle_last_fired: None,
+            planning_cycle_active: false,
             last_shim_health_check: Instant::now(),
         }
     }
