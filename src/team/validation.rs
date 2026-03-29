@@ -53,8 +53,8 @@ mod tests {
         expectation: &TemplateExpectation,
     ) -> Vec<MemberInstance> {
         let config = load_template(yaml);
-        assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
-        assert!(!config.orchestrator_enabled());
+        assert_eq!(config.workflow_mode, WorkflowMode::Hybrid);
+        assert!(config.orchestrator_enabled());
 
         let members = resolve_hierarchy(&config).unwrap();
         let capability_map = resolve_capability_map(&members);

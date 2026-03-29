@@ -8,9 +8,36 @@ use tracing::{info, warn};
 
 use super::super::*;
 
+/// Check if a worktree has unresolved merge conflicts (UU, AA, DU, UD entries).
+fn worktree_has_merge_conflicts(worktree_path: &Path) -> bool {
+    let output = match std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(worktree_path)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().any(|line| {
+        let bytes = line.as_bytes();
+        bytes.len() >= 2
+            && matches!(
+                (bytes[0], bytes[1]),
+                (b'U', _) | (_, b'U') | (b'A', b'A') | (b'D', b'D')
+            )
+    })
+}
+
 impl TeamDaemon {
     /// Detect worktrees stuck on stale branches whose commits have already
     /// been cherry-picked onto main, and auto-reset them to the base branch.
+    /// Also detects and auto-recovers worktrees stuck in merge conflict state.
     pub(in super::super) fn check_worktree_staleness(&mut self) -> Result<()> {
         let members: Vec<_> = self
             .config
@@ -26,9 +53,65 @@ impl TeamDaemon {
                 continue;
             }
 
+            // Check for merge conflicts first — these block all git operations
+            if worktree_has_merge_conflicts(&worktree_path) {
+                let base = format!("eng-main/{}", name);
+                warn!(
+                    member = %name,
+                    "worktree has unresolved merge conflicts; auto-recovering via merge --abort and reset"
+                );
+                // Try to abort the merge and reset to base
+                let _ = std::process::Command::new("git")
+                    .args(["merge", "--abort"])
+                    .current_dir(&worktree_path)
+                    .output();
+                let _ = std::process::Command::new("git")
+                    .args(["checkout", "--", "."])
+                    .current_dir(&worktree_path)
+                    .output();
+                let _ = std::process::Command::new("git")
+                    .args(["clean", "-fd"])
+                    .current_dir(&worktree_path)
+                    .output();
+                if let Err(error) = crate::worktree::reset_worktree_to_base(&worktree_path, &base) {
+                    warn!(
+                        member = %name,
+                        error = %error,
+                        "failed to reset worktree after merge conflict recovery"
+                    );
+                } else {
+                    info!(
+                        member = %name,
+                        "worktree merge conflict auto-recovered; reset to base branch"
+                    );
+                    self.record_orchestrator_action(format!(
+                        "health: auto-recovered {}'s worktree from merge conflict state — reset to {}",
+                        name, base
+                    ));
+                    // Clear active task since worktree was reset
+                    if self.active_tasks.contains_key(name.as_str()) {
+                        let task_id = self.active_tasks[name.as_str()];
+                        warn!(
+                            member = %name,
+                            task_id,
+                            "clearing active task after merge conflict recovery"
+                        );
+                        self.clear_active_task(&name);
+                    }
+                }
+                continue;
+            }
+
             let current_branch = match crate::worktree::git_current_branch(&worktree_path) {
                 Ok(b) => b,
-                Err(_) => continue,
+                Err(error) => {
+                    warn!(
+                        member = %name,
+                        error = %error,
+                        "failed to read worktree branch; skipping staleness check"
+                    );
+                    continue;
+                }
             };
 
             let base = format!("eng-main/{}", name);
@@ -73,6 +156,7 @@ impl TeamDaemon {
                 Err(error) => {
                     warn!(
                         member = %name,
+                        branch = %current_branch,
                         error = %error,
                         "failed to check worktree staleness; continuing"
                     );

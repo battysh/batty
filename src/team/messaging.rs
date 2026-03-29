@@ -73,7 +73,19 @@ pub(crate) fn resolve_member_name(project_root: &Path, member_name: &str) -> Res
 /// (set during layout). Falls back to "human" if not in a batty pane.
 /// Enforces communication routing rules from team config.
 pub fn send_message(project_root: &Path, role: &str, msg: &str) -> Result<()> {
-    let from = detect_sender().unwrap_or_else(|| "human".to_string());
+    send_message_as(project_root, None, role, msg)
+}
+
+pub fn send_message_as(
+    project_root: &Path,
+    from_override: Option<&str>,
+    role: &str,
+    msg: &str,
+) -> Result<()> {
+    let from = from_override
+        .map(str::to_string)
+        .or_else(detect_sender)
+        .unwrap_or_else(|| "human".to_string());
     let recipient = resolve_member_name(project_root, role)?;
 
     // Enforce routing: check talks_to rules

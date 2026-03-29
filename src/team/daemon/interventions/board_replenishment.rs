@@ -44,14 +44,18 @@ impl TeamDaemon {
             .iter()
             .map(|task| (task.id, task.status.clone()))
             .collect();
-        let architect_members: Vec<MemberInstance> = self
+        // Target both architects (who own the roadmap) and managers (who own the board).
+        // Architects need to send directives; managers need to create tasks directly.
+        let replenishment_targets: Vec<MemberInstance> = self
             .config
             .members
             .iter()
-            .filter(|member| member.role_type == RoleType::Architect)
+            .filter(|member| {
+                member.role_type == RoleType::Architect || member.role_type == RoleType::Manager
+            })
             .cloned()
             .collect();
-        if architect_members.is_empty() {
+        if replenishment_targets.is_empty() {
             return Ok(());
         }
 
@@ -123,11 +127,22 @@ impl TeamDaemon {
             .count();
         let context = replenishment_context(&self.config.project_root);
 
-        for architect in &architect_members {
-            if !self.is_member_idle(&architect.name) {
+        for architect in &replenishment_targets {
+            // Allow replenishment even if the architect appears "working", as long
+            // as they've been in that state for more than 5 minutes (likely a false
+            // positive from the shim state classifier sitting on a prompt).
+            const WORKING_GRACE_SECS: u64 = 300;
+            let is_idle = self.is_member_idle(&architect.name);
+            let is_long_working = !is_idle
+                && self
+                    .shim_handles
+                    .get(&architect.name)
+                    .map(|h| h.secs_since_state_change() > WORKING_GRACE_SECS)
+                    .unwrap_or(false);
+            if !is_idle && !is_long_working {
                 continue;
             }
-            if !self.ready_for_idle_automation(&inbox_root, &architect.name) {
+            if is_idle && !self.ready_for_idle_automation(&inbox_root, &architect.name) {
                 continue;
             }
 
@@ -245,12 +260,7 @@ impl TeamDaemon {
         };
 
         let mut message = format!(
-            "Board replenishment needed: unblocked todo queue is below threshold. Current counts: todo={todo_count}, in-progress={in_progress_count}, done={done_count}. Idle engineers without work: {} ({idle_engineer_summary}). Runnable todo threshold: {threshold}. Current runnable todo tasks: {todo_summary}.\n\
-            Replenish the board now:\n\
-            1. `batty status`\n\
-            2. `kanban-md list --dir {board_dir_str} --status todo`\n\
-            3. `kanban-md list --dir {board_dir_str} --status in-progress`\n\
-            4. `kanban-md list --dir {board_dir_str} --status done`",
+            "Board replenishment needed: unblocked todo queue is below threshold. Current counts: todo={todo_count}, in-progress={in_progress_count}, done={done_count}. Idle engineers without work: {} ({idle_engineer_summary}). Runnable todo threshold: {threshold}. Current runnable todo tasks: {todo_summary}.",
             idle_engineers.len()
         );
 
@@ -259,9 +269,42 @@ impl TeamDaemon {
             message.push_str(context);
         }
 
+        // For architects: tell them to send a concrete directive to the manager
+        if member.role_type == RoleType::Architect {
+            let manager_names: Vec<String> = self
+                .config
+                .members
+                .iter()
+                .filter(|m| m.role_type == RoleType::Manager)
+                .map(|m| m.name.clone())
+                .collect();
+            let manager_target = manager_names
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("manager");
+            message.push_str(&format!(
+                "\n\nACTION REQUIRED: Send the manager a concrete directive NOW with `batty send {manager_target} \"<directive>\"`. \
+                The directive must contain 2-5 specific work lanes with deliverables and success criteria \
+                so the manager can immediately run `kanban-md create` to populate the board. \
+                Do NOT just update the roadmap file — you MUST send the directive to the manager via batty send."
+            ));
+        }
+
+        // For managers: tell them to create board tasks directly
+        if member.role_type == RoleType::Manager {
+            message.push_str(&format!(
+                "\n\nACTION REQUIRED: Create board tasks NOW. Run:\n\
+                1. `cat planning/roadmap.md` to find the next unstarted milestone\n\
+                2. `kanban-md create --dir {board_dir_str} \"Task title\" --body \"Detailed spec with file paths and acceptance criteria\" --priority high`\n\
+                3. Repeat for each idle engineer\n\
+                4. Assign tasks to idle engineers with `batty assign {idle_engineer_summary} \"<task description>\"`\n\
+                Do NOT narrate what should happen — RUN the commands."
+            ));
+        }
+
         if let Some(parent) = &member.reports_to {
             message.push_str(&format!(
-                "\n\n5. After you add or normalize work, report upward with `batty send {parent} \"board replenished: <what was added or why the board cannot be replenished yet>\"`."
+                "\n\nAfter creating work, report with `batty send {parent} \"board replenished: <what was added>\"`."
             ));
         }
 

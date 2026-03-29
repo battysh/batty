@@ -20,7 +20,7 @@ pub(super) struct ClaudeSessionTracker {
     pub(super) last_state: TrackerState,
 }
 
-pub(super) fn discover_claude_session_file(
+pub(crate) fn discover_claude_session_file(
     projects_root: &Path,
     cwd: &Path,
     session_id: Option<&str>,

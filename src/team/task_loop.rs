@@ -47,15 +47,20 @@ pub(crate) fn next_unclaimed_task(board_dir: &Path) -> Result<Option<crate::task
     Ok(available.into_iter().next())
 }
 
-pub(crate) fn run_tests_in_worktree(worktree_dir: &Path) -> Result<(bool, String)> {
-    let output = std::process::Command::new("cargo")
-        .arg("test")
+pub(crate) fn run_tests_in_worktree(
+    worktree_dir: &Path,
+    test_command: Option<&str>,
+) -> Result<(bool, String)> {
+    let command_text = test_command.unwrap_or("cargo test");
+    let output = std::process::Command::new("sh")
+        .arg("-lc")
+        .arg(command_text)
         .current_dir(worktree_dir)
         .output()
         .with_context(|| {
             format!(
-                "failed while running `cargo test` in engineer worktree {}",
-                worktree_dir.display()
+                "failed while running `{command_text}` in engineer worktree {}",
+                worktree_dir.display(),
             )
         })?;
 
@@ -464,7 +469,7 @@ fn ensure_engineer_worktree_links(worktree_dir: &Path, team_config_dir: &Path) -
     Ok(())
 }
 
-fn worktree_has_user_changes(worktree_dir: &Path) -> Result<bool> {
+pub(crate) fn worktree_has_user_changes(worktree_dir: &Path) -> Result<bool> {
     Ok(map_git_error(
         retry_git(|| git_cmd::status_porcelain(worktree_dir)),
         "failed to inspect worktree status",
@@ -1258,7 +1263,7 @@ mod tests {
             "#[cfg(test)]\nmod tests {\n    #[test]\n    fn passes() {\n        assert_eq!(2 + 2, 4);\n    }\n}\n",
         )
         .unwrap();
-        let (passed, output) = run_tests_in_worktree(worktree).unwrap();
+        let (passed, output) = run_tests_in_worktree(worktree, None).unwrap();
         assert!(passed);
         assert!(output.contains("test result: ok"));
 
@@ -1267,9 +1272,33 @@ mod tests {
             "#[cfg(test)]\nmod tests {\n    #[test]\n    fn fails() {\n        assert_eq!(2 + 2, 5);\n    }\n}\n",
         )
         .unwrap();
-        let (passed, output) = run_tests_in_worktree(worktree).unwrap();
+        let (passed, output) = run_tests_in_worktree(worktree, None).unwrap();
         assert!(!passed);
         assert!(output.contains("FAILED"));
+    }
+
+    #[test]
+    fn test_run_tests_in_worktree_uses_configured_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree = tmp.path();
+        std::fs::write(
+            worktree.join("check.sh"),
+            "#!/bin/sh\necho CONFIG_TEST_OK\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                worktree.join("check.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        let (passed, output) = run_tests_in_worktree(worktree, Some("./check.sh")).unwrap();
+        assert!(passed);
+        assert!(output.contains("CONFIG_TEST_OK"));
     }
 
     #[test]
@@ -2144,7 +2173,7 @@ mod tests {
     #[test]
     fn test_gating_missing_dir_returns_error() {
         let fake_dir = Path::new("/tmp/batty-nonexistent-worktree-test-311");
-        let result = run_tests_in_worktree(fake_dir);
+        let result = run_tests_in_worktree(fake_dir, None);
         // Should propagate an error via context, not panic
         assert!(
             result.is_err(),
@@ -2153,7 +2182,7 @@ mod tests {
         let err_msg = format!("{:#}", result.unwrap_err());
         assert!(
             err_msg.contains("cargo test") || err_msg.contains("failed"),
-            "error should describe the failed cargo test operation, got: {err_msg}"
+            "error should describe the failed test operation, got: {err_msg}"
         );
     }
 

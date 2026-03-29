@@ -2291,6 +2291,60 @@ fn owned_tasks_clears_intervention_when_no_owned_tasks() {
 }
 
 #[test]
+fn owned_tasks_skips_intervention_when_matching_task_branch_has_local_progress() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = crate::team::test_support::init_git_repo(&tmp, "owned_progress_repo");
+    crate::team::test_support::git_ok(&repo, &["branch", "eng-main/eng-1"]);
+    crate::team::test_support::git_ok(&repo, &["branch", "eng-1/191"]);
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    std::fs::create_dir_all(worktree_dir.parent().unwrap()).unwrap();
+    crate::team::test_support::git_ok(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            worktree_dir.to_str().unwrap(),
+            "eng-1/191",
+        ],
+    );
+    std::fs::write(
+        worktree_dir.join("src").join("lib.rs"),
+        "pub fn smoke() -> bool { false }\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(repo.join(".batty").join("team_config").join("board")).unwrap();
+    crate::team::test_support::write_owned_task_file_with_context(
+        &repo,
+        191,
+        "owned-task",
+        "in-progress",
+        "eng-1",
+        "eng-1/191",
+        ".batty/worktrees/eng-1",
+    );
+
+    let mut daemon = TestDaemonBuilder::new(&repo)
+        .members(vec![
+            architect_member("architect"),
+            manager_member("lead", Some("architect")),
+            engineer_member("eng-1", Some("lead"), true),
+        ])
+        .pane_map(std::iter::once(("eng-1".to_string(), "%999998".to_string())).collect())
+        .states(std::iter::once(("eng-1".to_string(), MemberState::Idle)).collect())
+        .build();
+    enter_idle_epoch(&mut daemon, "eng-1");
+
+    daemon.maybe_intervene_owned_tasks().unwrap();
+
+    assert!(
+        inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!daemon.owned_task_interventions.contains_key("eng-1"));
+}
+
+#[test]
 fn review_clears_intervention_when_no_review_tasks() {
     let harness = intervention_team_harness()
         .with_member_state("lead", MemberState::Idle)
@@ -2462,13 +2516,15 @@ fn triage_does_not_fire_without_direct_reports() {
 }
 
 #[test]
-fn review_does_not_fire_without_idle_epoch() {
+fn review_fires_even_without_idle_epoch() {
+    // Review interventions should fire even when triage_idle_epochs is 0
+    // (e.g. right after daemon restart) to prevent review tasks from
+    // sitting unprocessed indefinitely.
     let harness = intervention_team_harness()
         .with_member_state("lead", MemberState::Idle)
         .with_pane("lead", "%999997")
         .with_board_task(191, "review-task", "review", Some("eng-1"));
     let mut daemon = harness.build_daemon().unwrap();
-    // Set idle started but don't enter an idle epoch
     daemon.idle_started_at.insert(
         "lead".to_string(),
         Instant::now() - daemon.automation_idle_grace_duration() - Duration::from_secs(1),
@@ -2476,7 +2532,11 @@ fn review_does_not_fire_without_idle_epoch() {
 
     daemon.maybe_intervene_review_backlog().unwrap();
 
-    assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+    let messages = harness.pending_inbox_messages("lead").unwrap();
+    assert!(
+        !messages.is_empty(),
+        "review intervention should fire even without idle epoch"
+    );
 }
 
 // --- Starvation false-positive suppression tests (task #286) ---

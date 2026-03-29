@@ -559,6 +559,38 @@ fn load_from_file() {
 }
 
 #[test]
+fn omitted_workflow_mode_with_orchestrator_disabled_stays_legacy() {
+    let yaml = r#"
+name: test
+orchestrator_pane: false
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#;
+
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
+    assert!(!config.orchestrator_pane);
+}
+
+#[test]
+fn omitted_workflow_mode_with_orchestrator_enabled_promotes_to_hybrid() {
+    let yaml = r#"
+name: test
+orchestrator_pane: true
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#;
+
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(config.workflow_mode, WorkflowMode::Hybrid);
+    assert!(config.orchestrator_enabled());
+}
+
+#[test]
 fn can_talk_default_hierarchy() {
     let config: TeamConfig = serde_yaml::from_str(
         r#"
@@ -938,6 +970,24 @@ roles:
 fn empty_overrides_when_absent_in_yaml() {
     let config: TeamConfig = serde_yaml::from_str(minimal_yaml()).unwrap();
     assert!(config.workflow_policy.review_timeout_overrides.is_empty());
+}
+
+#[test]
+fn parse_workflow_policy_test_command_from_yaml() {
+    let yaml = r#"
+name: test-team
+workflow_policy:
+  test_command: ./tests/fidelity/test_shell_starts.sh
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+"#;
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(
+        config.workflow_policy.test_command.as_deref(),
+        Some("./tests/fidelity/test_shell_starts.sh")
+    );
 }
 
 // --- Backend health check tests ---
