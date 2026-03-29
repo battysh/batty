@@ -71,6 +71,10 @@ pub enum Event {
         state: ShimState,
         since_secs: u64,
     },
+    SessionStats {
+        output_bytes: u64,
+        uptime_secs: u64,
+    },
     Pong,
     Warning {
         message: String,
@@ -449,6 +453,30 @@ mod tests {
                 assert_eq!(content, "screen data");
                 assert_eq!(cursor_row, 5);
                 assert_eq!(cursor_col, 10);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_event_session_stats() {
+        let (a, b) = socketpair().unwrap();
+        let mut sender = Channel::new(a);
+        let mut receiver = Channel::new(b);
+
+        let evt = Event::SessionStats {
+            output_bytes: 123_456,
+            uptime_secs: 61,
+        };
+        sender.send(&evt).unwrap();
+        let received: Event = receiver.recv::<Event>().unwrap().unwrap();
+        match received {
+            Event::SessionStats {
+                output_bytes,
+                uptime_secs,
+            } => {
+                assert_eq!(output_bytes, 123_456);
+                assert_eq!(uptime_secs, 61);
             }
             _ => panic!("wrong variant"),
         }

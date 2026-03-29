@@ -236,6 +236,10 @@ pub struct WorkflowPolicy {
     pub planning_cycle_cooldown_secs: u64,
     #[serde(default = "default_narration_detection_threshold")]
     pub narration_detection_threshold: usize,
+    #[serde(default = "default_context_pressure_threshold_bytes")]
+    pub context_pressure_threshold_bytes: u64,
+    #[serde(default = "default_context_pressure_restart_delay_secs")]
+    pub context_pressure_restart_delay_secs: u64,
     #[serde(default = "default_uncommitted_warn_threshold")]
     pub uncommitted_warn_threshold: usize,
     #[serde(default)]
@@ -272,6 +276,8 @@ impl Default for WorkflowPolicy {
             health_check_interval_secs: default_health_check_interval_secs(),
             planning_cycle_cooldown_secs: default_planning_cycle_cooldown_secs(),
             narration_detection_threshold: default_narration_detection_threshold(),
+            context_pressure_threshold_bytes: default_context_pressure_threshold_bytes(),
+            context_pressure_restart_delay_secs: default_context_pressure_restart_delay_secs(),
             uncommitted_warn_threshold: default_uncommitted_warn_threshold(),
             test_command: None,
             auto_merge: AutoMergePolicy::default(),
@@ -281,6 +287,14 @@ impl Default for WorkflowPolicy {
 
 fn default_planning_cycle_cooldown_secs() -> u64 {
     300
+}
+
+fn default_context_pressure_threshold_bytes() -> u64 {
+    512_000
+}
+
+fn default_context_pressure_restart_delay_secs() -> u64 {
+    120
 }
 
 fn default_sensitive_paths() -> Vec<String> {

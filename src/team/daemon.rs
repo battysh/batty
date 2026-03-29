@@ -169,6 +169,8 @@ pub struct TeamDaemon {
     pub(super) backend_health: HashMap<String, BackendHealth>,
     /// Rolling capture history used to detect narration loops.
     pub(super) narration_tracker: health::narration::NarrationTracker,
+    /// Per-session output tracking used for proactive context-pressure handling.
+    pub(super) context_pressure_tracker: health::context::ContextPressureTracker,
     /// When the last periodic health check was run.
     pub(super) last_health_check: Instant,
     /// Rate-limiting: last time each engineer received an uncommitted-work warning.
@@ -352,6 +354,16 @@ impl TeamDaemon {
             narration_tracker: health::narration::NarrationTracker::new(
                 12,
                 narration_detection_threshold,
+            ),
+            context_pressure_tracker: health::context::ContextPressureTracker::new(
+                config
+                    .team_config
+                    .workflow_policy
+                    .context_pressure_threshold_bytes,
+                config
+                    .team_config
+                    .workflow_policy
+                    .context_pressure_restart_delay_secs,
             ),
             // Start far enough in the past to trigger an immediate check.
             last_health_check: Instant::now() - Duration::from_secs(3600),
