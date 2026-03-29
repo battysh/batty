@@ -42,6 +42,7 @@ Commands:
   load             Estimate team load and show recent load history
   queue            Show pending dispatch queue entries
   cost             Estimate current run cost from agent session files
+  scale            Dynamically scale team topology (add/remove agents)
   doctor           Dump diagnostic state from Batty state files
   metrics          Show consolidated telemetry dashboard (tasks, cycle time, rates, agents)
   telemetry        Query the telemetry database for agent and task metrics
@@ -316,6 +317,35 @@ Usage: batty config [OPTIONS]
 Options:
       --json
           Emit machine-readable JSON output
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty console-pane`
+
+Internal: interactive shim pane bridge for tmux
+
+```text
+Internal: interactive shim pane bridge for tmux
+
+Usage: batty console-pane [OPTIONS] --project-root <PROJECT_ROOT> --member <MEMBER> --events-log-path <EVENTS_LOG_PATH> --pty-log-path <PTY_LOG_PATH>
+
+Options:
+      --project-root <PROJECT_ROOT>
+          Project root directory
+
+      --member <MEMBER>
+          Member/agent id
+
+      --events-log-path <EVENTS_LOG_PATH>
+          Path to the shim event log
+
+      --pty-log-path <PTY_LOG_PATH>
+          Path to the shim PTY log
 
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
@@ -868,6 +898,110 @@ Options:
           
           [default: human]
 
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty scale`
+
+Dynamically scale team topology (add/remove agents)
+
+```text
+Dynamically scale team topology (add/remove agents)
+
+Usage: batty scale [OPTIONS] <COMMAND>
+
+Commands:
+  engineers       Set engineer instance count (scales up or down)
+  add-manager     Add a new manager role
+  remove-manager  Remove a manager role
+  status          Show current topology (instance counts)
+  help            Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty scale add-manager`
+
+Add a new manager role
+
+```text
+Add a new manager role
+
+Usage: batty scale add-manager [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          Name for the new manager role
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty scale engineers`
+
+Set engineer instance count (scales up or down)
+
+```text
+Set engineer instance count (scales up or down)
+
+Usage: batty scale engineers [OPTIONS] <COUNT>
+
+Arguments:
+  <COUNT>
+          Target number of engineers per manager
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty scale remove-manager`
+
+Remove a manager role
+
+```text
+Remove a manager role
+
+Usage: batty scale remove-manager [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          Name of the manager role to remove
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty scale status`
+
+Show current topology (instance counts)
+
+```text
+Show current topology (instance counts)
+
+Usage: batty scale status [OPTIONS]
+
+Options:
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 
