@@ -12,6 +12,7 @@ use crate::team::daemon::TeamDaemon;
 use crate::team::inbox;
 use crate::tmux;
 
+#[allow(dead_code)]
 impl TeamDaemon {
     pub(in crate::team) fn verify_message_content_in_pane(
         &self,
