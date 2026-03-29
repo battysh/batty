@@ -141,6 +141,9 @@ impl TeamDaemon {
             self.run_recoverable_step("maybe_detect_pipeline_starvation", |daemon| {
                 daemon.maybe_detect_pipeline_starvation()
             });
+            self.run_recoverable_step("maybe_trigger_planning_cycle", |daemon| {
+                daemon.maybe_trigger_planning_cycle()
+            });
 
             // -- Recoverable with catch_unwind (panic-safe) --
             self.run_recoverable_step_with_catch_unwind("process_telegram_queue", |daemon| {

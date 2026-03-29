@@ -58,6 +58,7 @@ pub mod review;
 pub mod scale;
 pub mod standup;
 pub mod status;
+pub mod tact;
 pub mod task_cmd;
 pub mod task_loop;
 pub mod telegram;
