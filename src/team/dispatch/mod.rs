@@ -504,7 +504,12 @@ pub(super) fn summarize_assignment(task: &str) -> String {
     if summary.len() <= 120 {
         summary.to_string()
     } else {
-        format!("{}...", &summary[..117])
+        // Find a char boundary near 117 bytes to avoid panicking on multi-byte UTF-8
+        let mut end = 117;
+        while end > 0 && !summary.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &summary[..end])
     }
 }
 

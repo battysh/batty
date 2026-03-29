@@ -364,27 +364,41 @@ impl TeamDaemon {
                 }
             }
 
+            // Transition to in-progress BEFORE assigning. If this fails,
+            // keep the task in the queue — don't send work that the board
+            // doesn't reflect, or reconciliation will undo it in a loop.
+            if task.status == "backlog" {
+                let _ = transition_task(&board_dir, task.id, "todo");
+            }
+            if let Err(e) = transition_task(&board_dir, task.id, "in-progress") {
+                entry.validation_failures += 1;
+                entry.last_failure = Some(format!("board transition failed: {e}"));
+                warn!(
+                    engineer = %entry.engineer,
+                    task_id = task.id,
+                    error = %e,
+                    "dispatch queue: cannot transition task to in-progress, deferring"
+                );
+                if entry.validation_failures >= DISPATCH_QUEUE_FAILURE_LIMIT {
+                    self.escalate_dispatch_queue_entry(
+                        &entry,
+                        entry
+                            .last_failure
+                            .as_deref()
+                            .unwrap_or("board transition failed"),
+                    )?;
+                } else {
+                    retained.push(entry);
+                }
+                continue;
+            }
+            assign_task_owners(&board_dir, task.id, Some(&entry.engineer), None)?;
+
             let assignment_message =
                 format!("Task #{}: {}\n\n{}", task.id, task.title, task.description);
             match self.assign_task_with_task_id(&entry.engineer, &assignment_message, Some(task.id))
             {
                 Ok(_) => {
-                    assign_task_owners(&board_dir, task.id, Some(&entry.engineer), None)?;
-                    // Transition through intermediate states if needed
-                    // (backlog → todo → in-progress)
-                    if task.status == "backlog" {
-                        let _ = transition_task(&board_dir, task.id, "todo");
-                    }
-                    if let Err(e) = transition_task(&board_dir, task.id, "in-progress") {
-                        warn!(
-                            task_id = task.id,
-                            error = %e,
-                            "failed to transition task to in-progress"
-                        );
-                    }
-                    // Always track in active_tasks so auto-dispatch doesn't
-                    // re-assign the same task in a loop. The 60-second grace
-                    // period in reconciliation will clear stale entries.
                     self.active_tasks.insert(entry.engineer.clone(), task.id);
                     self.retry_counts.remove(&entry.engineer);
                     self.recent_dispatches

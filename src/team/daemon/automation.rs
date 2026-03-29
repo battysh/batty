@@ -45,21 +45,6 @@ impl TeamDaemon {
                     // reconciliation clears it. Without the delay, dispatch assigns a task,
                     // reconciliation immediately clears the active entry, and dispatch
                     // re-assigns in an infinite loop.
-                    Some(task)
-                        if matches!(task.status.as_str(), "todo" | "backlog")
-                            && self
-                                .recent_dispatches
-                                .get(&(task_id, engineer.clone()))
-                                .is_none_or(|dispatched_at| {
-                                    dispatched_at.elapsed().as_secs() > 60
-                                }) =>
-                    {
-                        Some((
-                            engineer.clone(),
-                            task_id,
-                            "task still in todo/backlog after grace period",
-                        ))
-                    }
                     _ => None,
                 }
             })
@@ -675,10 +660,13 @@ impl TeamDaemon {
             _ => "recent completion recorded".to_string(),
         })
         .collect::<Vec<_>>();
-        let prompt = crate::team::tact::compose_planning_prompt(
-            &self.config.team_config.name,
+        let idle_count = self.truly_idle_engineer_count(&board_tasks);
+        let prompt = crate::team::tact::prompt::compose_planning_prompt(
+            idle_count,
             &board_summary,
             &recent_completions,
+            &[],
+            &self.config.team_config.name,
         );
         let body = format!(
             "HIGH PRIORITY: planning cycle triggered because the pipeline starved.\n\n{prompt}"
@@ -704,7 +692,7 @@ impl TeamDaemon {
     }
 
     pub(super) fn handle_planning_response(&mut self, response: &str) -> Result<usize> {
-        let specs = crate::team::tact::parse_planning_response(response);
+        let specs = crate::team::tact::parser::parse_planning_response(response);
         let result = (|| {
             let board_dir = self.board_dir();
             let mut created = 0usize;
