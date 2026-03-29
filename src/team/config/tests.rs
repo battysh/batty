@@ -36,6 +36,7 @@ fn parse_minimal_config() {
         config.event_log_max_bytes,
         super::super::DEFAULT_EVENT_LOG_MAX_BYTES
     );
+    assert!(config.auto_respawn_on_crash);
 }
 
 #[test]
@@ -205,6 +206,21 @@ roles:
         config.event_log_max_bytes,
         super::super::DEFAULT_EVENT_LOG_MAX_BYTES
     );
+    assert!(config.auto_respawn_on_crash);
+}
+
+#[test]
+fn explicit_auto_respawn_on_crash_false_is_preserved() {
+    let yaml = r#"
+name: minimal
+auto_respawn_on_crash: false
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#;
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(!config.auto_respawn_on_crash);
 }
 
 #[test]

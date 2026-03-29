@@ -123,11 +123,15 @@ pub fn provision_dashboard(project_root: &std::path::Path, port: u16) -> Result<
     let ds_result = ProcessCommand::new("curl")
         .args([
             "-sf",
-            "-X", "POST",
+            "-X",
+            "POST",
             &format!("{base_url}/api/datasources"),
-            "-H", "Content-Type: application/json",
-            "-u", "admin:admin",
-            "-d", &ds_body,
+            "-H",
+            "Content-Type: application/json",
+            "-u",
+            "admin:admin",
+            "-d",
+            &ds_body,
         ])
         .output();
     match ds_result {
@@ -146,11 +150,15 @@ pub fn provision_dashboard(project_root: &std::path::Path, port: u16) -> Result<
     let import_result = ProcessCommand::new("curl")
         .args([
             "-sf",
-            "-X", "POST",
+            "-X",
+            "POST",
             &format!("{base_url}/api/dashboards/db"),
-            "-H", "Content-Type: application/json",
-            "-u", "admin:admin",
-            "-d", &format!("@{}", tmp_file.display()),
+            "-H",
+            "Content-Type: application/json",
+            "-u",
+            "admin:admin",
+            "-d",
+            &format!("@{}", tmp_file.display()),
         ])
         .output();
     let _ = std::fs::remove_file(&tmp_file);

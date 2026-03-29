@@ -49,7 +49,9 @@ impl TeamDaemon {
                             && self
                                 .recent_dispatches
                                 .get(&(task_id, engineer.clone()))
-                                .is_none_or(|dispatched_at| dispatched_at.elapsed().as_secs() > 60) =>
+                                .is_none_or(|dispatched_at| {
+                                    dispatched_at.elapsed().as_secs() > 60
+                                }) =>
                     {
                         Some((
                             engineer.clone(),

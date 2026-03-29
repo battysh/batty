@@ -647,6 +647,8 @@ mod tests {
         // kanban-md creates board/ directory; fallback creates kanban.md
         let config = team_config_dir(tmp.path());
         assert!(config.join("board").is_dir() || config.join("kanban.md").exists());
+        let team_yaml = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
+        assert!(team_yaml.contains("auto_respawn_on_crash: true"));
     }
 
     #[test]

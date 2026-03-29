@@ -68,6 +68,10 @@ Engineers (Codex / Claude / Aider)
 
 Batty keeps each role visible in its own tmux pane, while the shim handles PTY ownership, state detection, and structured message delivery. The daemon auto-dispatches board tasks, runs standups, and merges engineer branches back when they pass tests.
 
+For unattended teams, leave `auto_respawn_on_crash: true` enabled. Turning it
+off is mainly useful when you want to debug crashes manually or supervise pane
+restarts yourself.
+
 ## Install
 
 ### 1. Install kanban-md
@@ -127,6 +131,12 @@ batty send / assign / board / status / merge
 
 Batty does not embed a model. It orchestrates external agent CLIs, keeps state in files, uses shims as the execution boundary, and uses tmux plus git worktrees as the operator-facing runtime surface.
 
+On restart, Batty resumes saved agent sessions when the launch identity still
+matches and the saved session is still available. If the saved session is stale
+or missing, Batty falls back to a cold respawn and rebuilds task context
+automatically. Healthy live panes are left alone; startup preflight only
+respawns panes that are already dead.
+
 ## Built-in Templates
 
 `batty init --template <name>` scaffolds a ready-to-run team:
@@ -164,6 +174,7 @@ Batty does not embed a model. It orchestrates external agent CLIs, keeps state i
 - Team template export/import: `batty export-template` saves your team config, `batty init --from` restores it
 - Bundled Grafana dashboard template with 21 panels and 6 alerts for monitoring agent sessions, pipeline health, and task lifecycle
 - Daemon restart recovery: dead agent panes are automatically respawned with task context and backoff
+- Crash auto-respawn defaults to on for unattended teams; disable it only for debugging or manual supervision
 - External senders: allow non-team sources (email routers, Slack bridges) to message any role
 - Graceful non-git-repo handling: git-dependent operations degrade cleanly when the project is not a repository
 - Session summary on `batty stop`: prints task counts, cycle times, and agent uptime before exiting

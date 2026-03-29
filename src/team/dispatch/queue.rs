@@ -213,15 +213,11 @@ impl TeamDaemon {
             // Skip if the task body has unmet text dependencies
             // (e.g. "Blocked on: #65, #66" where those tasks aren't done)
             if let Some(blocked_ids) = parse_body_dependency_ids(&task.description) {
-                let all_tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))
-                    .unwrap_or_default();
+                let all_tasks =
+                    crate::task::load_tasks_from_dir(&board_dir.join("tasks")).unwrap_or_default();
                 let unmet: Vec<u32> = blocked_ids
                     .iter()
-                    .filter(|id| {
-                        !all_tasks
-                            .iter()
-                            .any(|t| t.id == **id && t.status == "done")
-                    })
+                    .filter(|id| !all_tasks.iter().any(|t| t.id == **id && t.status == "done"))
                     .copied()
                     .collect();
                 if !unmet.is_empty() {
@@ -232,9 +228,7 @@ impl TeamDaemon {
                         "dispatch queue: task has unmet body dependencies, skipping"
                     );
                     // Move to blocked status
-                    let _ = crate::team::task_cmd::transition_task(
-                        &board_dir, task.id, "blocked",
-                    );
+                    let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "blocked");
                     continue;
                 }
             }

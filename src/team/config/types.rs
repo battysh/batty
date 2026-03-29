@@ -32,7 +32,9 @@ pub struct TeamConfig {
     /// and message delivery over a structured channel.
     pub use_shim: bool,
     /// When true and `use_shim` is enabled, crashed agents are automatically
-    /// respawned instead of escalating to the manager.
+    /// respawned instead of escalating to the manager. This is the default
+    /// posture for unattended teams; disable it only for debugging or
+    /// deliberate manual supervision.
     pub auto_respawn_on_crash: bool,
     /// Interval in seconds between Ping health checks sent to shim handles.
     pub shim_health_check_interval_secs: u64,
@@ -85,7 +87,7 @@ struct TeamConfigWire {
     pub grafana: GrafanaConfig,
     #[serde(default)]
     pub use_shim: bool,
-    #[serde(default)]
+    #[serde(default = "default_auto_respawn_on_crash")]
     pub auto_respawn_on_crash: bool,
     #[serde(default = "default_shim_health_check_interval_secs")]
     pub shim_health_check_interval_secs: u64,
@@ -174,6 +176,10 @@ impl Default for GrafanaConfig {
 
 fn default_grafana_port() -> u16 {
     3000
+}
+
+fn default_auto_respawn_on_crash() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

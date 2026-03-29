@@ -1,5 +1,6 @@
 name: my-research-project
 use_shim: true
+auto_respawn_on_crash: true
 orchestrator_pane: true
 orchestrator_position: left
 

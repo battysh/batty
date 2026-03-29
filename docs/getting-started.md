@@ -99,6 +99,8 @@ in `team.yaml`.
 
 ```yaml
 name: my-project
+use_shim: true
+auto_respawn_on_crash: true
 automation:
   timeout_nudges: true
   standups: true
@@ -131,6 +133,11 @@ roles:
     prompt: engineer.md
     use_worktrees: true
 ```
+
+`auto_respawn_on_crash` defaults to `true` when omitted. Keep it that way for
+unattended teams so crashed shim-backed agents are relaunched automatically.
+Set it to `false` only when you are actively debugging crashes or you want to
+supervise recovery manually.
 
 Validate before you start:
 
@@ -268,7 +275,7 @@ Session summary: 12 tasks completed, avg cycle 8m, 3h uptime
 Team session stopped.
 ```
 
-The next `batty start` resumes agent sessions from the last stop:
+The next `batty start` attempts to resume agent sessions from the last stop:
 
 ```sh
 batty start
@@ -280,6 +287,11 @@ Example output:
 Team session started: batty-my-project
 Run `batty attach` to connect.
 ```
+
+If a saved session is stale or missing, Batty downgrades that member to a cold
+respawn, rebuilds context from the worktree and task state, and continues
+starting the team. It does not proactively restart healthy live panes during
+startup; only panes that are already dead are respawned.
 
 ## Telegram
 
