@@ -234,6 +234,8 @@ pub struct WorkflowPolicy {
     pub health_check_interval_secs: u64,
     #[serde(default = "default_planning_cycle_cooldown_secs")]
     pub planning_cycle_cooldown_secs: u64,
+    #[serde(default = "default_narration_detection_threshold")]
+    pub narration_detection_threshold: usize,
     #[serde(default = "default_uncommitted_warn_threshold")]
     pub uncommitted_warn_threshold: usize,
     #[serde(default)]
@@ -269,6 +271,7 @@ impl Default for WorkflowPolicy {
             max_stall_restarts: default_max_stall_restarts(),
             health_check_interval_secs: default_health_check_interval_secs(),
             planning_cycle_cooldown_secs: default_planning_cycle_cooldown_secs(),
+            narration_detection_threshold: default_narration_detection_threshold(),
             uncommitted_warn_threshold: default_uncommitted_warn_threshold(),
             test_command: None,
             auto_merge: AutoMergePolicy::default(),
@@ -314,6 +317,9 @@ fn default_max_files_changed() -> usize {
 }
 fn default_max_modules_touched() -> usize {
     2
+}
+fn default_narration_detection_threshold() -> usize {
+    6
 }
 fn default_confidence_threshold() -> f64 {
     0.8
