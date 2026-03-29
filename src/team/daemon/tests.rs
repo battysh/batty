@@ -2439,10 +2439,10 @@ fn spawn_all_agents_resume_reports_missing_sessions_across_primary_roles() {
 
     assert_eq!(
         architect_plan.resume_summary,
-        "architect=no (session missing)"
+        "architect=no (prompt changed)"
     );
-    assert_eq!(manager_plan.resume_summary, "manager=no (session missing)");
-    assert_eq!(engineer_plan.resume_summary, "eng-1=no (session missing)");
+    assert_eq!(manager_plan.resume_summary, "manager=no (prompt changed)");
+    assert_eq!(engineer_plan.resume_summary, "eng-1=no (prompt changed)");
     assert_eq!(architect_plan.identity.agent, "claude-code");
     assert_eq!(manager_plan.identity.agent, "claude-code");
     assert_eq!(engineer_plan.identity.agent, "codex-cli");
