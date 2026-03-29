@@ -84,6 +84,9 @@ impl TeamDaemon {
             self.run_recoverable_step("check_working_state_timeouts", |daemon| {
                 daemon.check_working_state_timeouts()
             });
+            self.run_recoverable_step("check_narration_loops", |daemon| {
+                daemon.check_narration_loops()
+            });
             self.run_recoverable_step("sync_launch_state_session_ids", |daemon| {
                 daemon.sync_launch_state_session_ids()
             });
