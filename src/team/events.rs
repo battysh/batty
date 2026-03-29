@@ -256,6 +256,14 @@ impl TeamEvent {
         }
     }
 
+    pub fn narration_detected(role: &str, task: Option<u32>) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: task.map(|id| id.to_string()),
+            ..Self::base("narration_detected")
+        }
+    }
+
     pub fn stall_detected(role: &str, task: Option<u32>, stall_duration_secs: u64) -> Self {
         Self {
             role: Some(role.into()),
