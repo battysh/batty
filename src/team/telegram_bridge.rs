@@ -217,6 +217,8 @@ mod tests {
                 shim_health_check_interval_secs: 60,
                 shim_health_timeout_secs: 120,
                 shim_shutdown_timeout_secs: 30,
+                shim_working_state_timeout_secs: 1800,
+                pending_queue_max_age_secs: 600,
                 event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 retro_min_duration_secs: 60,
                 roles: vec![RoleDef {
@@ -315,6 +317,8 @@ mod tests {
                     shim_health_check_interval_secs: 60,
                     shim_health_timeout_secs: 120,
                     shim_shutdown_timeout_secs: 30,
+                    shim_working_state_timeout_secs: 1800,
+                    pending_queue_max_age_secs: 600,
                     event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                     retro_min_duration_secs: 60,
                     roles: Vec::new(),
@@ -371,6 +375,7 @@ mod tests {
             last_health_check: Instant::now(),
             last_uncommitted_warn: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
+            completion_rejection_counts: HashMap::new(),
             shim_handles,
             last_shim_health_check: Instant::now(),
         };
@@ -378,15 +383,21 @@ mod tests {
         backdate_idle_grace(&mut daemon, "scientist");
         daemon.maybe_fire_nudges().unwrap();
 
+        // Shim-managed agents: state driven by shim events, not speculative mark_member_working.
+        // mark_member_working is a no-op for shim agents, so state stays Idle and
+        // nudge timers are not reset by update_automation_timers_for_state.
         assert_eq!(
             daemon.states.get("scientist"),
-            Some(&MemberState::Working),
-            "member should be marked Working after live shim delivery"
+            Some(&MemberState::Idle),
+            "shim-managed agent state stays Idle; real state comes from shim events"
         );
         let schedule = daemon.nudges.get("scientist").unwrap();
-        assert!(schedule.paused);
-        assert!(schedule.idle_since.is_none());
-        assert!(!schedule.fired_this_idle);
+        // Nudge is NOT paused because mark_member_working is a no-op for shim agents
+        assert!(!schedule.paused);
+        // idle_since is still set (not cleared) for the same reason
+        assert!(schedule.idle_since.is_some());
+        // The nudge DID fire (delivered_live was true)
+        assert!(schedule.fired_this_idle);
     }
 
     #[test]
@@ -445,6 +456,8 @@ mod tests {
                     shim_health_check_interval_secs: 60,
                     shim_health_timeout_secs: 120,
                     shim_shutdown_timeout_secs: 30,
+                    shim_working_state_timeout_secs: 1800,
+                    pending_queue_max_age_secs: 600,
                     event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                     retro_min_duration_secs: 60,
                     roles: Vec::new(),
@@ -492,6 +505,7 @@ mod tests {
             last_health_check: Instant::now(),
             last_uncommitted_warn: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
+            completion_rejection_counts: HashMap::new(),
             shim_handles: HashMap::new(),
             last_shim_health_check: Instant::now(),
         };
@@ -562,6 +576,8 @@ mod tests {
                     shim_health_check_interval_secs: 60,
                     shim_health_timeout_secs: 120,
                     shim_shutdown_timeout_secs: 30,
+                    shim_working_state_timeout_secs: 1800,
+                    pending_queue_max_age_secs: 600,
                     event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                     retro_min_duration_secs: 60,
                     roles: Vec::new(),
@@ -637,6 +653,7 @@ mod tests {
             last_health_check: Instant::now(),
             last_uncommitted_warn: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
+            completion_rejection_counts: HashMap::new(),
             shim_handles: HashMap::new(),
             last_shim_health_check: Instant::now(),
         };
@@ -911,6 +928,8 @@ mod tests {
                 shim_health_check_interval_secs: 60,
                 shim_health_timeout_secs: 120,
                 shim_shutdown_timeout_secs: 30,
+                shim_working_state_timeout_secs: 1800,
+                pending_queue_max_age_secs: 600,
                 event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 retro_min_duration_secs: 60,
                 roles: Vec::new(),
@@ -949,6 +968,8 @@ mod tests {
                 shim_health_check_interval_secs: 60,
                 shim_health_timeout_secs: 120,
                 shim_shutdown_timeout_secs: 30,
+                shim_working_state_timeout_secs: 1800,
+                pending_queue_max_age_secs: 600,
                 event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 retro_min_duration_secs: 60,
                 roles: Vec::new(),
@@ -1143,6 +1164,8 @@ mod tests {
                 shim_health_check_interval_secs: 60,
                 shim_health_timeout_secs: 120,
                 shim_shutdown_timeout_secs: 30,
+                shim_working_state_timeout_secs: 1800,
+                pending_queue_max_age_secs: 600,
                 event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 retro_min_duration_secs: 60,
                 roles: Vec::new(),

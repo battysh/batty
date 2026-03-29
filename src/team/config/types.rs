@@ -2,20 +2,65 @@
 
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use super::super::DEFAULT_EVENT_LOG_MAX_BYTES;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TeamConfig {
     pub name: String,
     /// Team-level default agent backend. Individual roles can override this
     /// with their own `agent` field. Resolution order:
     /// role-level agent > team-level agent > "claude" (hardcoded default).
+    pub agent: Option<String>,
+    pub workflow_mode: WorkflowMode,
+    pub board: BoardConfig,
+    pub standup: StandupConfig,
+    pub automation: AutomationConfig,
+    pub automation_sender: Option<String>,
+    /// External senders (e.g. email-router, slack-bridge) that are allowed to
+    /// message any role even though they are not team members.
+    pub external_senders: Vec<String>,
+    pub orchestrator_pane: bool,
+    pub orchestrator_position: OrchestratorPosition,
+    pub layout: Option<LayoutConfig>,
+    pub workflow_policy: WorkflowPolicy,
+    pub cost: CostConfig,
+    pub grafana: GrafanaConfig,
+    /// When true, agents are spawned as shim subprocesses instead of
+    /// directly in tmux panes. The shim manages PTY, state classification,
+    /// and message delivery over a structured channel.
+    pub use_shim: bool,
+    /// When true and `use_shim` is enabled, crashed agents are automatically
+    /// respawned instead of escalating to the manager.
+    pub auto_respawn_on_crash: bool,
+    /// Interval in seconds between Ping health checks sent to shim handles.
+    pub shim_health_check_interval_secs: u64,
+    /// Seconds without a Pong response before a shim handle is considered stale.
+    pub shim_health_timeout_secs: u64,
+    /// Seconds to wait for graceful shutdown before sending Kill.
+    pub shim_shutdown_timeout_secs: u32,
+    /// Maximum seconds an agent can remain in "Working" state before being
+    /// force-transitioned to Idle. Prevents permanent stalls where the shim
+    /// state classifier gets stuck on "working" while the agent is actually
+    /// idle. 0 or None disables the check. Default: 1800 (30 minutes).
+    pub shim_working_state_timeout_secs: u64,
+    /// Maximum seconds a message can sit in the pending delivery queue before
+    /// being force-delivered via inbox fallback. Prevents message loss when
+    /// the target agent appears permanently busy. Default: 600 (10 minutes).
+    pub pending_queue_max_age_secs: u64,
+    pub event_log_max_bytes: u64,
+    pub retro_min_duration_secs: u64,
+    pub roles: Vec<RoleDef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamConfigWire {
+    pub name: String,
     #[serde(default)]
     pub agent: Option<String>,
-    #[serde(default = "default_workflow_mode")]
-    pub workflow_mode: WorkflowMode,
+    #[serde(default)]
+    pub workflow_mode: Option<WorkflowMode>,
     #[serde(default)]
     pub board: BoardConfig,
     #[serde(default)]
@@ -24,12 +69,10 @@ pub struct TeamConfig {
     pub automation: AutomationConfig,
     #[serde(default)]
     pub automation_sender: Option<String>,
-    /// External senders (e.g. email-router, slack-bridge) that are allowed to
-    /// message any role even though they are not team members.
     #[serde(default)]
     pub external_senders: Vec<String>,
-    #[serde(default = "default_orchestrator_pane")]
-    pub orchestrator_pane: bool,
+    #[serde(default)]
+    pub orchestrator_pane: Option<bool>,
     #[serde(default)]
     pub orchestrator_position: OrchestratorPosition,
     #[serde(default)]
@@ -40,29 +83,76 @@ pub struct TeamConfig {
     pub cost: CostConfig,
     #[serde(default)]
     pub grafana: GrafanaConfig,
-    /// When true, agents are spawned as shim subprocesses instead of
-    /// directly in tmux panes. The shim manages PTY, state classification,
-    /// and message delivery over a structured channel.
     #[serde(default)]
     pub use_shim: bool,
-    /// When true and `use_shim` is enabled, crashed agents are automatically
-    /// respawned instead of escalating to the manager.
     #[serde(default)]
     pub auto_respawn_on_crash: bool,
-    /// Interval in seconds between Ping health checks sent to shim handles.
     #[serde(default = "default_shim_health_check_interval_secs")]
     pub shim_health_check_interval_secs: u64,
-    /// Seconds without a Pong response before a shim handle is considered stale.
     #[serde(default = "default_shim_health_timeout_secs")]
     pub shim_health_timeout_secs: u64,
-    /// Seconds to wait for graceful shutdown before sending Kill.
     #[serde(default = "default_shim_shutdown_timeout_secs")]
     pub shim_shutdown_timeout_secs: u32,
+    #[serde(default = "default_shim_working_state_timeout_secs")]
+    pub shim_working_state_timeout_secs: u64,
+    #[serde(default = "default_pending_queue_max_age_secs")]
+    pub pending_queue_max_age_secs: u64,
     #[serde(default = "default_event_log_max_bytes")]
     pub event_log_max_bytes: u64,
     #[serde(default = "default_retro_min_duration_secs")]
     pub retro_min_duration_secs: u64,
     pub roles: Vec<RoleDef>,
+}
+
+impl From<TeamConfigWire> for TeamConfig {
+    fn from(wire: TeamConfigWire) -> Self {
+        let orchestrator_pane = wire
+            .orchestrator_pane
+            .unwrap_or_else(default_orchestrator_pane);
+        let workflow_mode = wire.workflow_mode.unwrap_or_else(|| {
+            if matches!(wire.orchestrator_pane, Some(true)) {
+                WorkflowMode::Hybrid
+            } else {
+                default_workflow_mode()
+            }
+        });
+
+        Self {
+            name: wire.name,
+            agent: wire.agent,
+            workflow_mode,
+            board: wire.board,
+            standup: wire.standup,
+            automation: wire.automation,
+            automation_sender: wire.automation_sender,
+            external_senders: wire.external_senders,
+            orchestrator_pane,
+            orchestrator_position: wire.orchestrator_position,
+            layout: wire.layout,
+            workflow_policy: wire.workflow_policy,
+            cost: wire.cost,
+            grafana: wire.grafana,
+            use_shim: wire.use_shim,
+            auto_respawn_on_crash: wire.auto_respawn_on_crash,
+            shim_health_check_interval_secs: wire.shim_health_check_interval_secs,
+            shim_health_timeout_secs: wire.shim_health_timeout_secs,
+            shim_shutdown_timeout_secs: wire.shim_shutdown_timeout_secs,
+            shim_working_state_timeout_secs: wire.shim_working_state_timeout_secs,
+            pending_queue_max_age_secs: wire.pending_queue_max_age_secs,
+            event_log_max_bytes: wire.event_log_max_bytes,
+            retro_min_duration_secs: wire.retro_min_duration_secs,
+            roles: wire.roles,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TeamConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        TeamConfigWire::deserialize(deserializer).map(Into::into)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -139,6 +229,8 @@ pub struct WorkflowPolicy {
     #[serde(default = "default_uncommitted_warn_threshold")]
     pub uncommitted_warn_threshold: usize,
     #[serde(default)]
+    pub test_command: Option<String>,
+    #[serde(default)]
     pub auto_merge: AutoMergePolicy,
 }
 
@@ -169,6 +261,7 @@ impl Default for WorkflowPolicy {
             max_stall_restarts: default_max_stall_restarts(),
             health_check_interval_secs: default_health_check_interval_secs(),
             uncommitted_warn_threshold: default_uncommitted_warn_threshold(),
+            test_command: None,
             auto_merge: AutoMergePolicy::default(),
         }
     }
@@ -243,8 +336,8 @@ pub enum WorkflowMode {
 #[serde(rename_all = "snake_case")]
 pub enum OrchestratorPosition {
     #[default]
-    Bottom,
     Left,
+    Bottom,
 }
 
 impl WorkflowMode {
@@ -541,4 +634,12 @@ fn default_shim_health_timeout_secs() -> u64 {
 
 fn default_shim_shutdown_timeout_secs() -> u32 {
     30
+}
+
+fn default_shim_working_state_timeout_secs() -> u64 {
+    600 // 10 minutes
+}
+
+fn default_pending_queue_max_age_secs() -> u64 {
+    600 // 10 minutes
 }

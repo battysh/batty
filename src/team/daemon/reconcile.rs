@@ -101,8 +101,24 @@ impl TeamDaemon {
             let agent_cmd = agent_name.to_string();
 
             let pty_log_path = crate::team::shim_log_path(&self.config.project_root, &member.name);
+            let events_log_path =
+                crate::team::shim_events_log_path(&self.config.project_root, &member.name);
             if let Some(parent) = pty_log_path.parent() {
                 let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(error) = crate::team::layout::respawn_as_display_pane(
+                &pane_id,
+                &self.config.project_root,
+                &member.name,
+                &events_log_path,
+                &pty_log_path,
+            ) {
+                warn!(
+                    member = member.name.as_str(),
+                    pane = pane_id.as_str(),
+                    error = %error,
+                    "failed to respawn topology-added member pane as console pane"
+                );
             }
 
             match super::shim_spawn::spawn_shim(

@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use anyhow::Result;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::super::super::policy::check_wip_limit;
 use super::super::super::task_loop::engineer_worktree_ready_for_dispatch;
@@ -182,6 +182,13 @@ impl TeamDaemon {
                     "Dispatch guard blocked assignment for '{}' with {} active board item(s)",
                     entry.engineer, active_count
                 ));
+                warn!(
+                    engineer = %entry.engineer,
+                    task_id = entry.task_id,
+                    failures = entry.validation_failures,
+                    active_count,
+                    "dispatch queue: guard blocked — engineer has active board items"
+                );
                 if entry.validation_failures >= DISPATCH_QUEUE_FAILURE_LIMIT {
                     self.escalate_dispatch_queue_entry(
                         &entry,
@@ -206,6 +213,12 @@ impl TeamDaemon {
                     "WIP gate blocked dispatch for '{}' with {} active board task(s)",
                     entry.engineer, active_count
                 ));
+                warn!(
+                    engineer = %entry.engineer,
+                    task_id = entry.task_id,
+                    failures = entry.validation_failures,
+                    "dispatch queue: WIP limit blocked dispatch"
+                );
                 if entry.validation_failures >= DISPATCH_QUEUE_FAILURE_LIMIT {
                     self.escalate_dispatch_queue_entry(
                         &entry,
@@ -230,15 +243,62 @@ impl TeamDaemon {
                 ) {
                     entry.validation_failures += 1;
                     entry.last_failure = Some(error.to_string());
-                    if entry.validation_failures >= DISPATCH_QUEUE_FAILURE_LIMIT {
-                        self.escalate_dispatch_queue_entry(
-                            &entry,
-                            entry
-                                .last_failure
-                                .as_deref()
-                                .unwrap_or("worktree readiness validation failed"),
-                        )?;
+                    warn!(
+                        engineer = %entry.engineer,
+                        task_id = entry.task_id,
+                        failures = entry.validation_failures,
+                        error = %error,
+                        "dispatch queue: worktree not ready for dispatch"
+                    );
+
+                    // Auto-recover: reset worktree to base branch on first failure
+                    // instead of waiting for 3 failures to escalate.
+                    let base_branch = format!("eng-main/{}", entry.engineer);
+                    info!(
+                        engineer = %entry.engineer,
+                        base_branch = %base_branch,
+                        "dispatch queue: auto-resetting worktree to base branch"
+                    );
+                    // Abort any in-progress merge and clean
+                    let _ = std::process::Command::new("git")
+                        .args(["merge", "--abort"])
+                        .current_dir(&worktree_dir)
+                        .output();
+                    let _ = std::process::Command::new("git")
+                        .args(["checkout", "--", "."])
+                        .current_dir(&worktree_dir)
+                        .output();
+                    let _ = std::process::Command::new("git")
+                        .args(["clean", "-fd"])
+                        .current_dir(&worktree_dir)
+                        .output();
+                    if let Err(reset_err) =
+                        crate::worktree::reset_worktree_to_base(&worktree_dir, &base_branch)
+                    {
+                        warn!(
+                            engineer = %entry.engineer,
+                            error = %reset_err,
+                            "dispatch queue: worktree auto-reset failed; escalating"
+                        );
+                        if entry.validation_failures >= DISPATCH_QUEUE_FAILURE_LIMIT {
+                            self.escalate_dispatch_queue_entry(
+                                &entry,
+                                entry
+                                    .last_failure
+                                    .as_deref()
+                                    .unwrap_or("worktree readiness validation failed"),
+                            )?;
+                        } else {
+                            retained.push(entry);
+                        }
                     } else {
+                        info!(
+                            engineer = %entry.engineer,
+                            "dispatch queue: worktree auto-reset succeeded; retrying dispatch"
+                        );
+                        // Reset failure count and retry on next cycle
+                        entry.validation_failures = 0;
+                        entry.last_failure = None;
                         retained.push(entry);
                     }
                     continue;
@@ -270,6 +330,13 @@ impl TeamDaemon {
                 Err(error) => {
                     entry.validation_failures += 1;
                     entry.last_failure = Some(error.to_string());
+                    warn!(
+                        engineer = %entry.engineer,
+                        task_id = entry.task_id,
+                        failures = entry.validation_failures,
+                        error = %error,
+                        "dispatch queue: assignment launch failed"
+                    );
                     if entry.validation_failures >= DISPATCH_QUEUE_FAILURE_LIMIT {
                         self.escalate_dispatch_queue_entry(
                             &entry,
