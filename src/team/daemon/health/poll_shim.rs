@@ -2,14 +2,28 @@
 //! state, and triggers existing daemon flows (completion, context exhaustion,
 //! pane death, health monitoring, and stale detection).
 
+use std::path::PathBuf;
+
 use anyhow::Result;
 use tracing::{debug, info, warn};
 
-use super::super::launcher::member_session_tracker_config;
+use super::super::launcher::{
+    LaunchIdentity, canonical_agent_name, member_session_tracker_config, new_member_session_id,
+    strip_nudge_section, write_launch_script,
+};
 use super::super::*;
 use crate::shim::protocol::{Event, ShimState};
-use crate::team::append_shim_event_log;
 use crate::team::watcher::{SessionTrackerConfig, discover_claude_session_file};
+use crate::team::{append_shim_event_log, shim_log_path};
+
+#[derive(Debug, Clone)]
+struct ShimRespawnPlan {
+    agent_type: String,
+    agent_cmd: String,
+    work_dir: PathBuf,
+    identity: Option<LaunchIdentity>,
+    mode: &'static str,
+}
 
 impl TeamDaemon {
     fn maybe_persist_member_session_id(&mut self, member_name: &str) {
@@ -282,7 +296,13 @@ impl TeamDaemon {
 
                 if self.config.team_config.auto_respawn_on_crash {
                     self.record_member_crashed(member_name, true);
-                    if let Err(error) = self.handle_shim_crash_respawn(member_name) {
+                    let respawn = if self.should_cold_respawn_codex_member(member_name, &last_lines)
+                    {
+                        self.handle_shim_cold_respawn(member_name, "missing saved Codex session")
+                    } else {
+                        self.handle_shim_crash_respawn(member_name)
+                    };
+                    if let Err(error) = respawn {
                         warn!(
                             member = member_name,
                             error = %error,
@@ -372,10 +392,160 @@ impl TeamDaemon {
                     member_name,
                     &format!("<- error {command}: {reason}"),
                 );
+                if self.should_cold_respawn_codex_member(member_name, &reason) {
+                    self.record_member_crashed(member_name, true);
+                    if let Err(error) =
+                        self.handle_shim_cold_respawn(member_name, "missing saved Codex session")
+                    {
+                        warn!(
+                            member = member_name,
+                            error = %error,
+                            "cold shim respawn after resume failure failed"
+                        );
+                    }
+                    return Ok(());
+                }
                 debug!(member = member_name, command, reason, "shim error");
             }
         }
 
+        Ok(())
+    }
+
+    fn should_cold_respawn_codex_member(&self, member_name: &str, detail: &str) -> bool {
+        let Some(handle) = self.shim_handles.get(member_name) else {
+            return false;
+        };
+        if handle.agent_type != "codex" {
+            return false;
+        }
+        if !is_missing_codex_saved_session(detail) {
+            return false;
+        }
+        shim_agent_cmd_uses_resume(&handle.agent_cmd)
+    }
+
+    fn cold_respawn_plan(&self, member_name: &str) -> Result<Option<ShimRespawnPlan>> {
+        let Some(member) = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let Some(handle) = self.shim_handles.get(member_name) else {
+            return Ok(None);
+        };
+
+        if let Some(task) = self.active_task(member_name)? {
+            let team_config_dir = self.config.project_root.join(".batty").join("team_config");
+            let role_context = strip_nudge_section(&self.load_prompt(&member, &team_config_dir));
+            let prompt = Self::restart_assignment_message(&task);
+            let work_dir = self.member_work_dir(&member);
+            let normalized_agent =
+                canonical_agent_name(member.agent.as_deref().unwrap_or("claude"));
+            let session_id = new_member_session_id(&normalized_agent);
+            let agent_cmd = write_launch_script(
+                member_name,
+                member.agent.as_deref().unwrap_or("claude"),
+                &prompt,
+                Some(&role_context),
+                &work_dir,
+                &self.config.project_root,
+                false,
+                false,
+                session_id.as_deref(),
+            )?;
+            return Ok(Some(ShimRespawnPlan {
+                agent_type: handle.agent_type.clone(),
+                agent_cmd,
+                work_dir,
+                identity: Some(LaunchIdentity {
+                    agent: normalized_agent,
+                    prompt,
+                    session_id,
+                }),
+                mode: "cold-task-respawn",
+            }));
+        }
+
+        let team_config_dir = self.config.project_root.join(".batty").join("team_config");
+        let prompt = strip_nudge_section(&self.load_prompt(&member, &team_config_dir));
+        let work_dir = self.member_work_dir(&member);
+        let normalized_agent = canonical_agent_name(member.agent.as_deref().unwrap_or("claude"));
+        let session_id = new_member_session_id(&normalized_agent);
+        let agent_cmd = write_launch_script(
+            member_name,
+            member.agent.as_deref().unwrap_or("claude"),
+            &prompt,
+            Some(&prompt),
+            &work_dir,
+            &self.config.project_root,
+            true,
+            false,
+            session_id.as_deref(),
+        )?;
+        Ok(Some(ShimRespawnPlan {
+            agent_type: handle.agent_type.clone(),
+            agent_cmd,
+            work_dir,
+            identity: Some(LaunchIdentity {
+                agent: normalized_agent,
+                prompt,
+                session_id,
+            }),
+            mode: "cold-member-respawn",
+        }))
+    }
+
+    fn handle_shim_cold_respawn(&mut self, member_name: &str, reason: &str) -> Result<()> {
+        let Some(plan) = self.cold_respawn_plan(member_name)? else {
+            return Ok(());
+        };
+
+        if let Some(handle) = self.shim_handles.get_mut(member_name)
+            && let Err(error) = handle.send_shutdown(5)
+        {
+            debug!(
+                member = member_name,
+                error = %error,
+                "failed to send shutdown before cold respawn"
+            );
+        }
+
+        info!(
+            member = member_name,
+            reason, "downgrading warm resume to cold shim respawn"
+        );
+
+        let log_path = shim_log_path(&self.config.project_root, member_name);
+        let new_handle = super::super::shim_spawn::spawn_shim(
+            member_name,
+            &plan.agent_type,
+            &plan.agent_cmd,
+            &plan.work_dir,
+            Some(&log_path),
+        )?;
+
+        if let Some(identity) = plan.identity.clone() {
+            if let Some(watcher) = self.watchers.get_mut(member_name) {
+                watcher.set_session_id(identity.session_id.clone());
+            }
+            self.persist_member_launch_identity(member_name, identity)?;
+        }
+
+        self.shim_handles
+            .insert(member_name.to_string(), new_handle);
+        self.states
+            .insert(member_name.to_string(), MemberState::Working);
+        self.update_automation_timers_for_state(member_name, MemberState::Working);
+        self.emit_event(TeamEvent::pane_respawned(member_name));
+        self.record_orchestrator_action(format!(
+            "lifecycle: downgraded warm resume to {} for {} after {}",
+            plan.mode, member_name, reason
+        ));
         Ok(())
     }
 
@@ -547,6 +717,34 @@ impl TeamDaemon {
     }
 }
 
+fn is_missing_codex_saved_session(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("no saved session found with id") || detail.contains("no saved session found")
+}
+
+fn shim_agent_cmd_uses_resume(agent_cmd: &str) -> bool {
+    if agent_cmd.contains("codex resume ") {
+        return true;
+    }
+
+    let trimmed = agent_cmd.trim();
+    if let Some(path) = trimmed
+        .strip_prefix("bash '")
+        .and_then(|rest| rest.strip_suffix('\''))
+        .or_else(|| {
+            trimmed
+                .strip_prefix("bash \"")
+                .and_then(|rest| rest.strip_suffix('"'))
+        })
+    {
+        return std::fs::read_to_string(path)
+            .map(|script| script.contains("codex resume "))
+            .unwrap_or(false);
+    }
+
+    false
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -554,7 +752,11 @@ impl TeamDaemon {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::team::test_support::{TestDaemonBuilder, engineer_member, manager_member};
+    use crate::team::test_support::{
+        EnvVarGuard, PATH_LOCK, TestDaemonBuilder, engineer_member, init_git_repo, manager_member,
+        write_owned_task_file_with_context,
+    };
+    use std::collections::HashMap;
 
     fn insert_mock_handle(daemon: &mut TeamDaemon, name: &str) -> crate::shim::protocol::Channel {
         let (parent, child) = crate::shim::protocol::socketpair().unwrap();
@@ -569,6 +771,24 @@ mod tests {
         );
         daemon.shim_handles.insert(name.to_string(), handle);
         crate::shim::protocol::Channel::new(child)
+    }
+
+    fn insert_mock_codex_handle(
+        daemon: &mut TeamDaemon,
+        name: &str,
+        agent_cmd: impl Into<String>,
+        work_dir: PathBuf,
+    ) {
+        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+        let handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            name.into(),
+            crate::shim::protocol::Channel::new(parent),
+            999,
+            "codex".into(),
+            agent_cmd.into(),
+            work_dir,
+        );
+        daemon.shim_handles.insert(name.to_string(), handle);
     }
 
     #[test]
@@ -897,6 +1117,128 @@ mod tests {
         assert!(
             !daemon.pending_delivery_queue.contains_key("eng-1"),
             "pending queue should be drained after working-state timeout"
+        );
+    }
+
+    #[test]
+    fn missing_codex_saved_session_detection_matches_known_error_text() {
+        assert!(is_missing_codex_saved_session(
+            "No saved session found with ID codex-session-123"
+        ));
+        assert!(!is_missing_codex_saved_session("different startup failure"));
+    }
+
+    #[test]
+    fn shim_agent_cmd_uses_resume_detects_resume_in_wrapper_script() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("launch.sh");
+        std::fs::write(&script, "#!/bin/bash\nexec codex resume 'stale-id'\n").unwrap();
+
+        assert!(shim_agent_cmd_uses_resume(&format!(
+            "bash '{}'",
+            script.display()
+        )));
+        assert!(!shim_agent_cmd_uses_resume("bash '/tmp/missing.sh'"));
+    }
+
+    #[test]
+    fn should_cold_respawn_codex_member_ignores_unrelated_healthy_members() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![engineer_member("eng-1", Some("manager"), false)])
+            .build();
+        insert_mock_handle(&mut daemon, "eng-1");
+
+        assert!(
+            !daemon.should_cold_respawn_codex_member(
+                "eng-1",
+                "No saved session found with ID stale-id"
+            )
+        );
+    }
+
+    #[test]
+    fn cold_respawn_plan_rebuilds_active_task_context_for_codex_engineer() {
+        let _path_lock = PATH_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-cold-respawn-plan");
+        std::fs::create_dir_all(repo.join(".batty").join("team_config")).unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _home_guard = EnvVarGuard::set("HOME", home.to_string_lossy().as_ref());
+
+        let worktree_path = repo.join(".batty").join("worktrees").join("eng-1");
+        let branch_name = "eng-1/42";
+        write_owned_task_file_with_context(
+            &repo,
+            42,
+            "respawn-task",
+            "in-progress",
+            "eng-1",
+            branch_name,
+            worktree_path.to_string_lossy().as_ref(),
+        );
+
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), true),
+                engineer_member("eng-2", Some("manager"), true),
+            ])
+            .states(HashMap::from([
+                ("eng-1".to_string(), MemberState::Working),
+                ("eng-2".to_string(), MemberState::Idle),
+            ]))
+            .build();
+        daemon.active_tasks.insert("eng-1".to_string(), 42);
+
+        let launch_script = std::env::temp_dir().join("batty-test-codex-resume.sh");
+        std::fs::write(
+            &launch_script,
+            "#!/bin/bash\nexec codex resume 'stale-session'\n",
+        )
+        .unwrap();
+        insert_mock_codex_handle(
+            &mut daemon,
+            "eng-1",
+            format!("bash '{}'", launch_script.display()),
+            worktree_path.clone(),
+        );
+        insert_mock_codex_handle(
+            &mut daemon,
+            "eng-2",
+            "bash '/tmp/batty-test-cold-healthy.sh'",
+            repo.join(".batty").join("worktrees").join("eng-2"),
+        );
+
+        assert!(daemon.should_cold_respawn_codex_member(
+            "eng-1",
+            "No saved session found with ID stale-session"
+        ));
+        assert!(!daemon.should_cold_respawn_codex_member(
+            "eng-2",
+            "No saved session found with ID stale-session"
+        ));
+
+        let plan = daemon
+            .cold_respawn_plan("eng-1")
+            .unwrap()
+            .expect("expected cold respawn plan");
+        assert_eq!(plan.mode, "cold-task-respawn");
+        assert_eq!(plan.work_dir, worktree_path);
+        assert!(!plan.agent_cmd.contains("codex resume"));
+        let identity = plan.identity.expect("missing launch identity");
+        assert_eq!(identity.agent, "codex-cli");
+        assert!(
+            identity
+                .prompt
+                .contains("Continuing Task #42: respawn-task")
+        );
+        assert!(identity.prompt.contains(&format!("Branch: {branch_name}")));
+        assert!(
+            identity
+                .prompt
+                .contains(&format!("Worktree: {}", worktree_path.display()))
         );
     }
 }
