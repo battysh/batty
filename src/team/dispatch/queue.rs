@@ -10,6 +10,32 @@ use super::super::super::policy::check_wip_limit;
 use super::super::super::task_loop::engineer_worktree_ready_for_dispatch;
 use super::super::task_cmd::{assign_task_owners, transition_task};
 use super::super::*;
+
+/// Parse task IDs from "Blocked on:" or "Depends on:" lines in the task body.
+/// Returns None if no dependency line found, Some(vec) of referenced task IDs.
+fn parse_body_dependency_ids(body: &str) -> Option<Vec<u32>> {
+    let lower = body.to_lowercase();
+    for line in lower.lines() {
+        let trimmed = line.trim().trim_start_matches('-').trim();
+        if trimmed.starts_with("blocked on:") || trimmed.starts_with("depends on:") {
+            let ids: Vec<u32> = trimmed
+                .split('#')
+                .skip(1)
+                .filter_map(|s| {
+                    s.chars()
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect::<String>()
+                        .parse()
+                        .ok()
+                })
+                .collect();
+            if !ids.is_empty() {
+                return Some(ids);
+            }
+        }
+    }
+    None
+}
 use super::{DISPATCH_QUEUE_FAILURE_LIMIT, DispatchQueueEntry, dispatch_priority_rank};
 
 impl TeamDaemon {
@@ -174,6 +200,45 @@ impl TeamDaemon {
                 continue;
             };
 
+            // Skip if the task is already in-progress
+            if task.status == "in-progress" {
+                info!(
+                    engineer = %entry.engineer,
+                    task_id = task.id,
+                    "dispatch queue: task already in-progress, skipping"
+                );
+                continue;
+            }
+
+            // Skip if the task body has unmet text dependencies
+            // (e.g. "Blocked on: #65, #66" where those tasks aren't done)
+            if let Some(blocked_ids) = parse_body_dependency_ids(&task.description) {
+                let all_tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))
+                    .unwrap_or_default();
+                let unmet: Vec<u32> = blocked_ids
+                    .iter()
+                    .filter(|id| {
+                        !all_tasks
+                            .iter()
+                            .any(|t| t.id == **id && t.status == "done")
+                    })
+                    .copied()
+                    .collect();
+                if !unmet.is_empty() {
+                    warn!(
+                        engineer = %entry.engineer,
+                        task_id = task.id,
+                        ?unmet,
+                        "dispatch queue: task has unmet body dependencies, skipping"
+                    );
+                    // Move to blocked status
+                    let _ = crate::team::task_cmd::transition_task(
+                        &board_dir, task.id, "blocked",
+                    );
+                    continue;
+                }
+            }
+
             let active_count =
                 self.engineer_active_board_item_count(&board_dir, &entry.engineer)?;
             if active_count > 0 {
@@ -311,7 +376,21 @@ impl TeamDaemon {
             {
                 Ok(_) => {
                     assign_task_owners(&board_dir, task.id, Some(&entry.engineer), None)?;
-                    transition_task(&board_dir, task.id, "in-progress")?;
+                    // Transition through intermediate states if needed
+                    // (backlog → todo → in-progress)
+                    if task.status == "backlog" {
+                        let _ = transition_task(&board_dir, task.id, "todo");
+                    }
+                    if let Err(e) = transition_task(&board_dir, task.id, "in-progress") {
+                        warn!(
+                            task_id = task.id,
+                            error = %e,
+                            "failed to transition task to in-progress"
+                        );
+                    }
+                    // Always track in active_tasks so auto-dispatch doesn't
+                    // re-assign the same task in a loop. The 60-second grace
+                    // period in reconciliation will clear stale entries.
                     self.active_tasks.insert(entry.engineer.clone(), task.id);
                     self.retry_counts.remove(&entry.engineer);
                     self.recent_dispatches

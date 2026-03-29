@@ -34,13 +34,29 @@ impl TeamDaemon {
                         Some((engineer.clone(), task_id, "task is done/archived"))
                     }
                     None => Some((engineer.clone(), task_id, "task no longer exists")),
-                    // Clear if the task is no longer claimed by this engineer
-                    // (e.g. WIP reconciliation unclaimed it, or manager reassigned)
                     Some(task) if task.claimed_by.as_deref() != Some(engineer.as_str()) => Some((
                         engineer.clone(),
                         task_id,
                         "task no longer claimed by this engineer",
                     )),
+                    // Clear if the task has been in todo/backlog for more than 60 seconds.
+                    // This gives dispatch time to transition it to in-progress before
+                    // reconciliation clears it. Without the delay, dispatch assigns a task,
+                    // reconciliation immediately clears the active entry, and dispatch
+                    // re-assigns in an infinite loop.
+                    Some(task)
+                        if matches!(task.status.as_str(), "todo" | "backlog")
+                            && self
+                                .recent_dispatches
+                                .get(&(task_id, engineer.clone()))
+                                .is_none_or(|dispatched_at| dispatched_at.elapsed().as_secs() > 60) =>
+                    {
+                        Some((
+                            engineer.clone(),
+                            task_id,
+                            "task still in todo/backlog after grace period",
+                        ))
+                    }
                     _ => None,
                 }
             })
@@ -116,11 +132,18 @@ impl TeamDaemon {
             }
         }
 
+        // Skip tasks that are currently tracked in active_tasks — those were just
+        // dispatched this cycle and the board file may not reflect the claim yet.
+        let actively_tracked: std::collections::HashSet<u32> =
+            self.active_tasks.values().copied().collect();
+
         // Orphaned review rescue: tasks in "review" that are stuck because
         // they have no review_owner (nobody assigned to review), or no
         // claimed_by at all. Move them back to todo for re-dispatch.
         for task in &board_tasks {
-            if task.status == "review" && (task.claimed_by.is_none() || task.review_owner.is_none())
+            if task.status == "review"
+                && (task.claimed_by.is_none() || task.review_owner.is_none())
+                && !actively_tracked.contains(&task.id)
             {
                 warn!(
                     task_id = task.id,
@@ -134,7 +157,10 @@ impl TeamDaemon {
 
         // Orphaned in-progress rescue: tasks in "in-progress" with no claimed_by.
         for task in &board_tasks {
-            if task.status == "in-progress" && task.claimed_by.is_none() {
+            if task.status == "in-progress"
+                && task.claimed_by.is_none()
+                && !actively_tracked.contains(&task.id)
+            {
                 warn!(
                     task_id = task.id,
                     "orphaned in-progress task #{} has no owner — moving back to todo", task.id
