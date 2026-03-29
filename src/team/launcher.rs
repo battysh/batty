@@ -18,7 +18,7 @@ pub(super) struct MemberLaunchPlan {
     pub(super) identity: LaunchIdentity,
     initial_state: MemberState,
     activate_watcher: bool,
-    resume_summary: String,
+    pub(super) resume_summary: String,
     persist_session_id: bool,
 }
 

@@ -184,7 +184,7 @@ fn daemon_registers_per_role_nudge_intervals_from_prompt_sections() {
         team_config: TeamConfig {
             name: "test".to_string(),
             agent: None,
-            workflow_mode: WorkflowMode::Legacy,
+            workflow_mode: WorkflowMode::Hybrid,
             board: BoardConfig::default(),
             standup: StandupConfig::default(),
             automation: AutomationConfig::default(),
@@ -466,7 +466,7 @@ fn test_auto_dispatch_filters_idle_engineers_only() {
         team_config: TeamConfig {
             name: "test".to_string(),
             agent: None,
-            workflow_mode: WorkflowMode::Legacy,
+            workflow_mode: WorkflowMode::Hybrid,
             workflow_policy: WorkflowPolicy::default(),
             board: BoardConfig::default(),
             standup: StandupConfig::default(),
@@ -2335,6 +2335,117 @@ fn reconcile_keeps_in_progress_task() {
     daemon.reconcile_active_tasks().unwrap();
 
     assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+}
+
+#[test]
+fn spawn_all_agents_resume_reports_missing_sessions_across_primary_roles() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+    let previous_launch_state = HashMap::from([
+        (
+            "architect".to_string(),
+            super::launcher::LaunchIdentity {
+                agent: "claude-code".to_string(),
+                prompt: String::new(),
+                session_id: Some("missing-architect-session".to_string()),
+            },
+        ),
+        (
+            "manager".to_string(),
+            super::launcher::LaunchIdentity {
+                agent: "claude-code".to_string(),
+                prompt: String::new(),
+                session_id: Some("missing-manager-session".to_string()),
+            },
+        ),
+        (
+            "eng-1".to_string(),
+            super::launcher::LaunchIdentity {
+                agent: "codex-cli".to_string(),
+                prompt: String::new(),
+                session_id: Some("missing-engineer-session".to_string()),
+            },
+        ),
+    ]);
+
+    let daemon = TeamDaemon::new(DaemonConfig {
+        project_root: tmp.path().to_path_buf(),
+        team_config: TeamConfig {
+            name: "test".to_string(),
+            agent: None,
+            workflow_mode: WorkflowMode::Legacy,
+            workflow_policy: WorkflowPolicy::default(),
+            board: BoardConfig::default(),
+            standup: StandupConfig::default(),
+            automation: AutomationConfig::default(),
+            automation_sender: None,
+            external_senders: Vec::new(),
+            orchestrator_pane: true,
+            orchestrator_position: OrchestratorPosition::Bottom,
+            layout: None,
+            cost: Default::default(),
+            grafana: Default::default(),
+            use_shim: false,
+            auto_respawn_on_crash: false,
+            shim_health_check_interval_secs: 60,
+            shim_health_timeout_secs: 120,
+            shim_shutdown_timeout_secs: 30,
+            shim_working_state_timeout_secs: 1800,
+            pending_queue_max_age_secs: 600,
+            event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+            retro_min_duration_secs: 60,
+            roles: Vec::new(),
+        },
+        session: "test".to_string(),
+        members: vec![
+            architect_member("architect"),
+            manager_member("manager", Some("architect")),
+            engineer_member("eng-1", Some("manager"), false),
+        ],
+        pane_map: HashMap::from([
+            ("architect".to_string(), "%901".to_string()),
+            ("manager".to_string(), "%902".to_string()),
+            ("eng-1".to_string(), "%903".to_string()),
+        ]),
+    })
+    .unwrap();
+
+    let duplicate_claude_session_ids =
+        super::launcher::duplicate_claude_session_ids(&previous_launch_state);
+    let architect_plan = daemon
+        .prepare_member_launch(
+            &architect_member("architect"),
+            true,
+            &previous_launch_state,
+            &duplicate_claude_session_ids,
+        )
+        .unwrap();
+    let manager_plan = daemon
+        .prepare_member_launch(
+            &manager_member("manager", Some("architect")),
+            true,
+            &previous_launch_state,
+            &duplicate_claude_session_ids,
+        )
+        .unwrap();
+    let engineer_plan = daemon
+        .prepare_member_launch(
+            &engineer_member("eng-1", Some("manager"), false),
+            true,
+            &previous_launch_state,
+            &duplicate_claude_session_ids,
+        )
+        .unwrap();
+
+    assert_eq!(
+        architect_plan.resume_summary,
+        "architect=no (session missing)"
+    );
+    assert_eq!(manager_plan.resume_summary, "manager=no (session missing)");
+    assert_eq!(engineer_plan.resume_summary, "eng-1=no (session missing)");
+    assert_eq!(architect_plan.identity.agent, "claude-code");
+    assert_eq!(manager_plan.identity.agent, "claude-code");
+    assert_eq!(engineer_plan.identity.agent, "codex-cli");
 }
 
 #[test]
