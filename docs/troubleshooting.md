@@ -80,6 +80,10 @@ tail -50 .batty/daemon.log
 1. Check daemon logs for spawn errors: `tail .batty/daemon.log`
 1. Verify the agent binary is available: `which claude` or `which codex`
 
+For unattended teams, keep `auto_respawn_on_crash: true` in `team.yaml` so
+crashed shim agents are restarted automatically. Set it to `false` only while
+debugging or when you want to restart panes manually.
+
 ## `batty send` rejected: not allowed to message
 
 **Cause:** The `talks_to` rules in team.yaml don't allow this communication path.
@@ -146,6 +150,11 @@ Restart with:
 batty stop                             # clean up
 batty start                            # fresh start
 ```
+
+If Batty finds a stale saved session during startup, it falls back to a cold
+respawn with context rebuild instead of requiring a manual pane restart.
+Healthy live panes do not need a proactive restart; startup recovery only
+touches panes that are already dead.
 
 ## Multiple orphaned batty sessions
 

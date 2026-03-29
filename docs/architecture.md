@@ -105,7 +105,16 @@ automation:
 These switches let a project keep periodic timers enabled while turning specific
 reactive recovery paths on or off per team.
 
-When started with `--resume`, the daemon launches agents with session continuation flags (`claude --continue`, `codex resume --last`) so prior context is preserved.
+In shim mode, `auto_respawn_on_crash` defaults to `true` and should usually stay
+enabled for unattended teams. Disable it only for debugging or when an operator
+intends to supervise crash recovery manually.
+
+When started with `--resume`, the daemon launches agents with session
+continuation flags when the saved launch identity still matches and the saved
+session is still available. If saved session state is stale or missing, that
+member falls back to a fresh launch and rebuilds context from disk instead of
+blocking startup. Startup preflight only respawns panes that are already dead;
+healthy live panes are not restarted proactively.
 
 PID is stored at `.batty/daemon.pid`. Logs go to `.batty/daemon.log`.
 
