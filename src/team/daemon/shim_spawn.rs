@@ -12,8 +12,11 @@ use super::agent_handle::AgentHandle;
 use crate::shim::protocol::{self, Channel};
 
 /// Kill any orphaned shim processes from previous daemon sessions.
-/// Finds processes matching `batty shim --id <member>` and kills them
-/// before spawning fresh shims.
+///
+/// DISABLED: cross-project kills when multiple batty projects run simultaneously.
+/// The pgrep pattern matches shims from ALL projects, not just this one.
+/// Shim lifecycle is managed by auto_respawn_on_crash instead.
+#[allow(dead_code)]
 pub(in crate::team) fn kill_orphan_shims(member_name: &str) {
     let pattern = format!("batty shim --id {member_name}");
     let output = match std::process::Command::new("pgrep")
@@ -101,9 +104,6 @@ pub(in crate::team) fn spawn_shim(
     work_dir: &Path,
     pty_log_path: Option<&Path>,
 ) -> Result<AgentHandle> {
-    // Kill any orphan shim processes from previous sessions
-    kill_orphan_shims(member_name);
-
     let (parent_sock, child_sock) =
         protocol::socketpair().context("failed to create socketpair for shim")?;
 
