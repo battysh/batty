@@ -167,6 +167,8 @@ pub struct TeamDaemon {
     pub(super) manual_assign_cooldowns: HashMap<String, Instant>,
     /// Per-member agent backend health state.
     pub(super) backend_health: HashMap<String, BackendHealth>,
+    /// Rolling capture history used to detect narration loops.
+    pub(super) narration_tracker: health::narration::NarrationTracker,
     /// When the last periodic health check was run.
     pub(super) last_health_check: Instant,
     /// Rate-limiting: last time each engineer received an uncommitted-work warning.
@@ -256,6 +258,10 @@ impl TeamDaemon {
 
         // Create Telegram bot for inbound polling (if configured)
         let telegram_bot = telegram_bridge::build_telegram_bot(&config.team_config);
+        let narration_detection_threshold = config
+            .team_config
+            .workflow_policy
+            .narration_detection_threshold;
 
         let states = HashMap::new();
 
@@ -343,6 +349,10 @@ impl TeamDaemon {
             telemetry_db,
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
+            narration_tracker: health::narration::NarrationTracker::new(
+                12,
+                narration_detection_threshold,
+            ),
             // Start far enough in the past to trigger an immediate check.
             last_health_check: Instant::now() - Duration::from_secs(3600),
             last_uncommitted_warn: HashMap::new(),
