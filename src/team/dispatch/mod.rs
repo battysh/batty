@@ -24,6 +24,7 @@ use super::launcher::{
     canonical_agent_name, new_member_session_id, strip_nudge_section, write_launch_script,
 };
 use super::*;
+use crate::team::append_shim_event_log;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -59,30 +60,36 @@ pub(crate) struct AssignmentLaunch {
 }
 
 impl TeamDaemon {
-    pub(super) fn launch_task_assignment(
+    pub(in crate::team) fn assignment_sender(&self, engineer: &str) -> String {
+        self.config
+            .members
+            .iter()
+            .find(|member| member.name == engineer)
+            .and_then(|member| member.reports_to.clone())
+            .unwrap_or_else(|| "human".to_string())
+    }
+
+    fn shim_assignment_preview(task: &str) -> String {
+        let single_line = task.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut preview = single_line.chars().take(160).collect::<String>();
+        if single_line.chars().count() > 160 {
+            preview.push_str("...");
+        }
+        preview
+    }
+
+    fn prepare_assignment_launch(
         &mut self,
         engineer: &str,
         task: &str,
         task_id: Option<u32>,
-        emit_task_assigned: bool,
     ) -> Result<AssignmentLaunch> {
-        info!(engineer, task, "assigning task");
-
-        let Some(pane_id) = self.config.pane_map.get(engineer).cloned() else {
-            bail!("no pane found for engineer '{engineer}'");
-        };
-
         let member = self
             .config
             .members
             .iter()
             .find(|m| m.name == engineer)
             .cloned();
-        let agent_name = member
-            .as_ref()
-            .and_then(|m| m.agent.as_deref())
-            .unwrap_or("claude");
-
         let team_config_dir = self.config.project_root.join(".batty").join("team_config");
         let use_worktrees = (self.is_git_repo || self.is_multi_repo)
             && member.as_ref().map(|m| m.use_worktrees).unwrap_or(false);
@@ -129,6 +136,111 @@ impl TeamDaemon {
         } else {
             self.config.project_root.clone()
         };
+
+        Ok(AssignmentLaunch {
+            branch: task_branch,
+            work_dir,
+        })
+    }
+
+    fn deliver_shim_assignment(
+        &mut self,
+        sender: &str,
+        engineer: &str,
+        task: &str,
+        task_id: Option<u32>,
+        emit_task_assigned: bool,
+    ) -> Result<AssignmentLaunch> {
+        let launch = self.prepare_assignment_launch(engineer, task, task_id)?;
+        if let Some(handle) = self.shim_handles.get_mut(engineer) {
+            if handle.is_ready() {
+                handle.send_message(sender, task)?;
+                handle.apply_state_change(crate::shim::protocol::ShimState::Working);
+                let _ = append_shim_event_log(
+                    &self.config.project_root,
+                    engineer,
+                    &format!("-> {sender}: {}", Self::shim_assignment_preview(task)),
+                );
+            } else if !handle.is_terminal() {
+                self.pending_delivery_queue
+                    .entry(engineer.to_string())
+                    .or_default()
+                    .push(PendingMessage {
+                        from: sender.to_string(),
+                        body: task.to_string(),
+                        queued_at: Instant::now(),
+                    });
+                let _ = append_shim_event_log(
+                    &self.config.project_root,
+                    engineer,
+                    &format!(
+                        ".. pending {sender}: {}",
+                        Self::shim_assignment_preview(task)
+                    ),
+                );
+            } else {
+                bail!("shim for '{engineer}' is not available");
+            }
+        } else {
+            bail!("no shim handle found for engineer '{engineer}'");
+        }
+
+        self.mark_member_working(engineer);
+        if emit_task_assigned {
+            self.emit_event(TeamEvent::task_assigned(engineer, task));
+        }
+        Ok(launch)
+    }
+
+    pub(super) fn launch_task_assignment(
+        &mut self,
+        engineer: &str,
+        task: &str,
+        task_id: Option<u32>,
+        emit_task_assigned: bool,
+    ) -> Result<AssignmentLaunch> {
+        let sender = self.assignment_sender(engineer);
+        self.launch_task_assignment_as(&sender, engineer, task, task_id, emit_task_assigned)
+    }
+
+    pub(super) fn launch_task_assignment_as(
+        &mut self,
+        sender: &str,
+        engineer: &str,
+        task: &str,
+        task_id: Option<u32>,
+        emit_task_assigned: bool,
+    ) -> Result<AssignmentLaunch> {
+        info!(engineer, task, "assigning task");
+
+        if self.config.team_config.use_shim && self.shim_handles.contains_key(engineer) {
+            return self.deliver_shim_assignment(
+                sender,
+                engineer,
+                task,
+                task_id,
+                emit_task_assigned,
+            );
+        }
+
+        let Some(pane_id) = self.config.pane_map.get(engineer).cloned() else {
+            bail!("no pane found for engineer '{engineer}'");
+        };
+
+        let member = self
+            .config
+            .members
+            .iter()
+            .find(|m| m.name == engineer)
+            .cloned();
+        let agent_name = member
+            .as_ref()
+            .and_then(|m| m.agent.as_deref())
+            .unwrap_or("claude");
+        let worktree_launch = self.prepare_assignment_launch(engineer, task, task_id)?;
+        let work_dir = worktree_launch.work_dir.clone();
+        let task_branch = worktree_launch.branch.clone();
+        let team_config_dir = self.config.project_root.join(".batty").join("team_config");
 
         self.ensure_member_pane_cwd(engineer, &pane_id, &work_dir)?;
 
@@ -332,6 +444,36 @@ impl TeamDaemon {
         self.launch_task_assignment(engineer, task, task_id, true)
     }
 
+    pub(in crate::team) fn assign_task_with_task_id_as(
+        &mut self,
+        sender: &str,
+        engineer: &str,
+        task: &str,
+        task_id: Option<u32>,
+    ) -> Result<AssignmentLaunch> {
+        let effective_task_id = task_id.or_else(|| parse_assignment_task_id(task));
+        let board_dir = self.board_dir();
+        let active_task_ids = self.engineer_active_board_task_ids(&board_dir, engineer)?;
+        if !active_task_ids.is_empty()
+            && effective_task_id.is_none_or(|task_id| !active_task_ids.contains(&task_id))
+        {
+            anyhow::bail!(
+                "dispatch guard blocked assignment for '{engineer}': already owns active board task(s) {}",
+                active_task_ids
+                    .iter()
+                    .map(|id| format!("#{id}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        let launch =
+            self.launch_task_assignment_as(sender, engineer, task, effective_task_id, true)?;
+        if let Some(task_id) = effective_task_id {
+            self.active_tasks.insert(engineer.to_string(), task_id);
+        }
+        Ok(launch)
+    }
+
     pub(super) fn maybe_auto_dispatch(&mut self) -> Result<()> {
         if !self.config.team_config.board.auto_dispatch {
             return Ok(());
@@ -381,7 +523,7 @@ pub(super) fn engineer_task_branch_name(
     format!("{engineer}/{suffix}")
 }
 
-fn parse_assignment_task_id(task: &str) -> Option<u32> {
+pub(crate) fn parse_assignment_task_id(task: &str) -> Option<u32> {
     let mut candidates = Vec::new();
     let bytes = task.as_bytes();
     for (index, window) in bytes.windows(6).enumerate() {

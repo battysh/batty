@@ -12,7 +12,7 @@ You are an individual contributor researcher. You receive task assignments, impl
 6. Implement the solution or run the experiment
 7. Write tests / validation covering expected behavior and edge cases
 8. Run the test suite (check `CLAUDE.md` for the command)
-9. Commit with a descriptive message
+9. **COMMIT your work — MANDATORY**: `git add -A && git commit -m "description"`. If you skip this, your work will be LOST. The merge system requires commits ahead of main.
 10. Move your task to done on the board: `kanban-md move <task-id> done`
 11. Report completion: state what was done, results/metrics, test results, and any issues
 

@@ -70,6 +70,17 @@ pub(crate) fn assign_task_owners(
     Ok(())
 }
 
+/// Remove the claimed_by and review_owner fields from a task.
+pub(crate) fn unclaim_task(board_dir: &Path, task_id: u32) -> Result<()> {
+    let task_path = find_task_path(board_dir, task_id)?;
+    update_task_frontmatter(&task_path, |mapping| {
+        set_optional_string(mapping, "claimed_by", None);
+        set_optional_string(mapping, "review_owner", None);
+        set_optional_string(mapping, "claimed_at", None);
+    })?;
+    Ok(())
+}
+
 pub fn cmd_review(
     board_dir: &Path,
     task_id: u32,

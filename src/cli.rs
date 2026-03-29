@@ -74,6 +74,9 @@ pub enum Command {
 
     /// Send a message to an agent role (human → agent injection)
     Send {
+        /// Explicit sender override (hidden; used by pane bridge and automation)
+        #[arg(long, hide = true)]
+        from: Option<String>,
         /// Target role name (e.g., "architect", "manager-1")
         role: String,
         /// Message to inject
@@ -277,6 +280,26 @@ pub enum Command {
         /// Path to write raw PTY output for tmux display panes
         #[arg(long)]
         pty_log_path: Option<String>,
+    },
+
+    /// Internal: interactive shim pane bridge for tmux
+    #[command(hide = true)]
+    ConsolePane {
+        /// Project root directory
+        #[arg(long)]
+        project_root: String,
+
+        /// Member/agent id
+        #[arg(long)]
+        member: String,
+
+        /// Path to the shim event log
+        #[arg(long)]
+        events_log_path: String,
+
+        /// Path to the shim PTY log
+        #[arg(long)]
+        pty_log_path: String,
     },
 
     /// Internal: run the daemon loop (spawned by `batty start`)
@@ -911,7 +934,12 @@ mod tests {
     fn send_subcommand_parses_role_and_message() {
         let cli = Cli::parse_from(["batty", "send", "architect", "hello world"]);
         match cli.command {
-            Command::Send { role, message } => {
+            Command::Send {
+                from,
+                role,
+                message,
+            } => {
+                assert!(from.is_none());
                 assert_eq!(role, "architect");
                 assert_eq!(message, "hello world");
             }

@@ -163,7 +163,7 @@ proptest! {
         // All optional fields should have defaults
         prop_assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
         prop_assert!(config.orchestrator_pane);
-        prop_assert_eq!(config.orchestrator_position, OrchestratorPosition::Bottom);
+        prop_assert_eq!(config.orchestrator_position, OrchestratorPosition::Left);
         prop_assert!(config.layout.is_none());
         prop_assert!(config.agent.is_none());
         prop_assert!(config.automation_sender.is_none());

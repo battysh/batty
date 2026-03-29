@@ -24,6 +24,52 @@ use super::git_ops::{commits_ahead_of_main, now_unix, run_git_with_context};
 use super::lock::{MergeLock, MergeOutcome};
 use super::operations::merge_engineer_branch;
 
+fn move_task_to_review(
+    _daemon: &mut TeamDaemon,
+    board_dir: &Path,
+    task_id: u32,
+    manager_name: Option<&str>,
+    engineer: &str,
+) {
+    if let Err(error) = crate::team::task_cmd::transition_task(board_dir, task_id, "review") {
+        warn!(
+            engineer,
+            task_id,
+            error = %error,
+            "failed to move task to review — attempting force via in-progress first"
+        );
+        // If the task is in an unexpected state (e.g. blocked), try
+        // transitioning through in-progress first, then to review.
+        // This prevents the stuck loop where completion fires repeatedly
+        // but the state transition always fails.
+        let _ = crate::team::task_cmd::transition_task(board_dir, task_id, "in-progress");
+        if let Err(error2) = crate::team::task_cmd::transition_task(board_dir, task_id, "review") {
+            warn!(
+                engineer,
+                task_id,
+                error = %error2,
+                "force review transition also failed — leaving task in current state"
+            );
+        }
+    }
+    if let Some(manager_name) = manager_name
+        && let Err(error) = crate::team::task_cmd::assign_task_owners(
+            board_dir,
+            task_id,
+            Some(engineer),
+            Some(manager_name),
+        )
+    {
+        warn!(
+            engineer,
+            task_id,
+            manager = manager_name,
+            error = %error,
+            "failed to set review owner"
+        );
+    }
+}
+
 pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str) -> Result<()> {
     let Some(task_id) = daemon.active_task_id(engineer) else {
         return Ok(());
@@ -45,17 +91,89 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     };
 
     if total_commits == 0 {
-        // Do NOT clear active task or set idle — the engineer still owns this task.
-        // Clearing would orphan the board task in-progress with no engineer tracking it.
-        let msg = "Completion rejected: your branch has no commits ahead of main. Commit your changes before reporting done again.";
-        daemon.queue_message("batty", engineer, msg)?;
+        let rejection_count = daemon
+            .completion_rejection_counts
+            .entry(engineer.to_string())
+            .or_insert(0);
+        *rejection_count += 1;
+        let count = *rejection_count;
+
+        const MAX_REJECTIONS_BEFORE_RESET: u32 = 3;
+
         warn!(
             engineer,
             task_id,
-            "engineer idle but no commits on task branch — keeping task #{task_id} active for {engineer}"
+            rejection_count = count,
+            "engineer idle but no commits on task branch — keeping task #{task_id} active for {engineer} (rejection {count}/{MAX_REJECTIONS_BEFORE_RESET})"
         );
+
+        if count >= MAX_REJECTIONS_BEFORE_RESET {
+            // Auto-recovery: the branch never diverged from main.
+            // Reset the worktree to a fresh task branch so the engineer can start clean.
+            warn!(
+                engineer,
+                task_id,
+                "completion rejected {count} times — auto-resetting worktree branch for {engineer}"
+            );
+            let base_branch = engineer_base_branch_name(engineer);
+            if let Err(error) = checkout_worktree_branch_from_main(&worktree_dir, &base_branch) {
+                warn!(
+                    engineer,
+                    task_id,
+                    error = %error,
+                    "failed to auto-reset worktree to base branch"
+                );
+            }
+            daemon.completion_rejection_counts.remove(engineer);
+
+            // Escalate to manager so they know the engineer needs re-assignment
+            if let Some(ref manager_name) = manager_name {
+                let msg = format!(
+                    "[daemon] Engineer {engineer} reported completion {count} times for task #{task_id} but branch has no commits. Worktree has been auto-reset. The engineer may need a clearer task specification or is not committing work. Please re-assign or investigate."
+                );
+                daemon.queue_message("daemon", manager_name, &msg)?;
+            }
+            info!(
+                engineer,
+                task_id,
+                rejection_count = count,
+                "auto-reset worktree after repeated completion rejections (branch never diverged from main)"
+            );
+        } else {
+            // Check if there are uncommitted changes to give a more helpful message
+            let has_dirty_files = std::process::Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(&worktree_dir)
+                .output()
+                .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+                .unwrap_or(false);
+
+            let msg = if has_dirty_files {
+                format!(
+                    "Completion rejected ({count}/{MAX_REJECTIONS_BEFORE_RESET}): you have uncommitted changes but no commits ahead of main. Your work will be LOST if you don't commit. Run these commands NOW:\n\
+                    ```\n\
+                    git add -A\n\
+                    git commit -m \"your task description\"\n\
+                    ```\n\
+                    After {MAX_REJECTIONS_BEFORE_RESET} rejections, your worktree will be auto-reset and all uncommitted work will be destroyed."
+                )
+            } else {
+                format!(
+                    "Completion rejected ({count}/{MAX_REJECTIONS_BEFORE_RESET}): your branch has no commits ahead of main and no modified files. You need to actually create the deliverables for this task, then commit them:\n\
+                    ```\n\
+                    git add -A\n\
+                    git commit -m \"your task description\"\n\
+                    ```\n\
+                    After {MAX_REJECTIONS_BEFORE_RESET} rejections, your worktree will be auto-reset."
+                )
+            };
+            daemon.queue_message("batty", engineer, &msg)?;
+        }
         return Ok(());
     }
+
+    // Clear rejection counter on successful completion
+    daemon.completion_rejection_counts.remove(engineer);
 
     let task_branch = if daemon.is_multi_repo {
         multi_repo_task_branch(&worktree_dir, &daemon.sub_repo_names)?
@@ -64,7 +182,15 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     };
     let test_started = Instant::now();
     // For multi-repo, run tests from the engineer's worktree root (parent of sub-repos)
-    let (tests_passed, output_truncated) = run_tests_in_worktree(&worktree_dir)?;
+    let (tests_passed, output_truncated) = run_tests_in_worktree(
+        &worktree_dir,
+        daemon
+            .config
+            .team_config
+            .workflow_policy
+            .test_command
+            .as_deref(),
+    )?;
     let test_duration_ms = test_started.elapsed().as_millis() as u64;
     if tests_passed {
         let task_title = read_task_title(&board_dir, task_id);
@@ -97,6 +223,13 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                 engineer,
                 task_id, "auto-merge disabled by per-task override, routing to manual review"
             );
+            move_task_to_review(
+                daemon,
+                &board_dir,
+                task_id,
+                manager_name.as_deref(),
+                engineer,
+            );
             if let Some(ref manager_name) = manager_name {
                 let msg = format!(
                     "[{engineer}] Task #{task_id} passed tests. Auto-merge disabled by override — awaiting manual review.\nTitle: {task_title}"
@@ -104,6 +237,9 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                 daemon.queue_message(engineer, manager_name, &msg)?;
                 daemon.mark_member_working(manager_name);
             }
+            daemon.clear_active_task(engineer);
+            daemon.record_task_completed(engineer, Some(task_id));
+            daemon.set_member_idle(engineer);
             return Ok(());
         }
 
@@ -151,6 +287,13 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                                 ?reasons,
                                 "routing to manual review"
                             );
+                            move_task_to_review(
+                                daemon,
+                                &board_dir,
+                                task_id,
+                                manager_name.as_deref(),
+                                engineer,
+                            );
                             if let Some(ref manager_name) = manager_name {
                                 let reason_text = reasons.join("; ");
                                 let msg = format!(
@@ -159,6 +302,9 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                                 daemon.queue_message(engineer, manager_name, &msg)?;
                                 daemon.mark_member_working(manager_name);
                             }
+                            daemon.clear_active_task(engineer);
+                            daemon.record_task_completed(engineer, Some(task_id));
+                            daemon.set_member_idle(engineer);
                             return Ok(());
                         }
                     }
@@ -807,14 +953,17 @@ mod tests {
         assert!(
             engineer_messages[0]
                 .body
-                .contains("no commits ahead of main")
+                .contains("no commits ahead of main"),
+            "rejection message should mention no commits: {:?}",
+            engineer_messages[0].body
         );
         assert!(
-            engineer_messages[0]
-                .body
-                .contains("Commit your changes before reporting done again")
+            engineer_messages[0].body.contains("git add -A"),
+            "rejection message should include commit instructions: {:?}",
+            engineer_messages[0].body
         );
 
+        // On first rejection, manager is NOT notified (only after 3 rejections)
         let manager_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
         assert!(manager_messages.is_empty());
@@ -1187,6 +1336,23 @@ mod tests {
         let mut daemon = auto_merge_daemon(&repo, policy);
 
         handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        let task = crate::task::Task::from_file(
+            &repo
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("042-large-diff-task.md"),
+        )
+        .unwrap();
+        assert_eq!(task.status, "review");
+        assert_eq!(task.review_owner.as_deref(), Some("manager"));
+        assert_eq!(daemon.active_task_id("eng-1"), None);
+        assert_eq!(
+            daemon.member_state_for_test("eng-1"),
+            Some(MemberState::Idle)
+        );
 
         let manager_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();

@@ -48,7 +48,7 @@ use super::task_loop::{
     branch_is_merged_into, checkout_worktree_branch_from_main, current_worktree_branch,
     engineer_base_branch_name, is_worktree_safe_to_mutate, setup_engineer_worktree,
 };
-use super::watcher::{SessionTrackerConfig, SessionWatcher, WatcherState};
+use super::watcher::{SessionWatcher, WatcherState};
 use super::{AssignmentDeliveryResult, AssignmentResultStatus, now_unix, store_assignment_result};
 use crate::agent::{self, BackendHealth};
 use crate::tmux;
@@ -169,6 +169,9 @@ pub struct TeamDaemon {
     pub(super) last_health_check: Instant,
     /// Rate-limiting: last time each engineer received an uncommitted-work warning.
     pub(super) last_uncommitted_warn: HashMap<String, Instant>,
+    /// Tracks consecutive "no commits ahead of main" rejections per engineer.
+    /// Used to detect and auto-recover from branches that never diverged.
+    pub(super) completion_rejection_counts: HashMap<String, u32>,
     /// Messages deferred because the target agent was still starting.
     /// Drained automatically when the agent transitions to ready.
     pub(super) pending_delivery_queue: HashMap<String, Vec<PendingMessage>>,
@@ -339,6 +342,7 @@ impl TeamDaemon {
             // Start far enough in the past to trigger an immediate check.
             last_health_check: Instant::now() - Duration::from_secs(3600),
             last_uncommitted_warn: HashMap::new(),
+            completion_rejection_counts: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
             shim_handles: HashMap::new(),
             last_shim_health_check: Instant::now(),
@@ -367,6 +371,14 @@ impl TeamDaemon {
     }
 
     pub(super) fn mark_member_working(&mut self, member_name: &str) {
+        // When shim mode is active, the shim is the single source of truth for
+        // agent state. Speculative mark_member_working calls from delivery,
+        // completion, and interventions must not override the shim's verdict —
+        // doing so causes the daemon to permanently think the agent is "working"
+        // when the shim classifier sees it as idle.
+        if self.shim_handles.contains_key(member_name) {
+            return;
+        }
         self.states
             .insert(member_name.to_string(), MemberState::Working);
         if let Some(watcher) = self.watchers.get_mut(member_name) {
@@ -376,6 +388,16 @@ impl TeamDaemon {
     }
 
     pub(super) fn set_member_idle(&mut self, member_name: &str) {
+        // For shim agents: don't override the state (shim is source of truth),
+        // but DO update automation timers so idle_started_at gets populated.
+        // Without this, interventions like review_backlog never fire because
+        // automation_idle_grace_elapsed returns false.
+        if self.shim_handles.contains_key(member_name) {
+            if self.states.get(member_name) == Some(&MemberState::Idle) {
+                self.update_automation_timers_for_state(member_name, MemberState::Idle);
+            }
+            return;
+        }
         self.states
             .insert(member_name.to_string(), MemberState::Idle);
         if let Some(watcher) = self.watchers.get_mut(member_name) {

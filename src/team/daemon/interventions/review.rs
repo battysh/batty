@@ -64,16 +64,18 @@ impl TeamDaemon {
             }
 
             let idle_epoch = self.triage_idle_epochs.get(&name).copied().unwrap_or(0);
-            if idle_epoch == 0 {
-                continue;
-            }
+            // Use epoch 1 as fallback so review interventions fire even before
+            // the triage system has seen the manager go idle (e.g. after restart).
+            let effective_epoch = if idle_epoch == 0 { 1 } else { idle_epoch };
 
             let signature = review_task_intervention_signature(&review_tasks);
             let review_key = review_intervention_key(&name);
             if self
                 .owned_task_interventions
                 .get(&review_key)
-                .is_some_and(|state| state.signature == signature)
+                .is_some_and(|state| {
+                    state.signature == signature && state.idle_epoch == effective_epoch
+                })
             {
                 continue;
             }
@@ -103,7 +105,7 @@ impl TeamDaemon {
             self.owned_task_interventions.insert(
                 review_key.clone(),
                 OwnedTaskInterventionState {
-                    idle_epoch,
+                    idle_epoch: effective_epoch,
                     signature,
                     detected_at: Instant::now(),
                     escalation_sent: false,
@@ -198,17 +200,34 @@ impl TeamDaemon {
             member_name = member.name,
         );
 
-        if first_report_is_engineer {
-            message.push_str(&format!(
-                "\n4. To accept engineer work, run `batty merge {first_report}` then `kanban-md move --dir {board_dir_str} {task_id} done`.",
-                task_id = first_task.id,
-            ));
-        } else {
-            message.push_str(&format!(
-                "\n4. To accept the review packet, move it forward with `kanban-md move --dir {board_dir_str} {task_id} done` and send the disposition to `{first_report}`.",
-                task_id = first_task.id,
-            ));
+        // Build explicit merge commands for ALL review tasks so the manager
+        // can copy-paste them. Listing only the first task caused managers to
+        // review but not actually run the merge command.
+        let mut merge_cmds = Vec::new();
+        for task in review_tasks {
+            let engineer = task.claimed_by.as_deref().unwrap_or("engineer");
+            let is_eng = self
+                .config
+                .members
+                .iter()
+                .find(|m| m.name == engineer)
+                .is_some_and(|m| m.role_type == RoleType::Engineer);
+            if is_eng {
+                merge_cmds.push(format!(
+                    "   `batty merge {engineer}` && `kanban-md move --dir {board_dir_str} {} done`",
+                    task.id,
+                ));
+            } else {
+                merge_cmds.push(format!(
+                    "   `kanban-md move --dir {board_dir_str} {} done`",
+                    task.id,
+                ));
+            }
         }
+        message.push_str(&format!(
+            "\n4. ACTION REQUIRED — run these merge commands NOW:\n{}",
+            merge_cmds.join("\n"),
+        ));
 
         message.push_str(&format!(
             "\n5. To discard it, run `kanban-md move --dir {board_dir_str} {task_id} archived` and `batty send {first_report} \"Task #{task_id} discarded: <reason>\"`.",

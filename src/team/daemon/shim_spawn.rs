@@ -6,10 +6,78 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::agent_handle::AgentHandle;
 use crate::shim::protocol::{self, Channel};
+
+/// Kill any orphaned shim processes from previous daemon sessions.
+/// Finds processes matching `batty shim --id <member>` and kills them
+/// before spawning fresh shims.
+pub(in crate::team) fn kill_orphan_shims(member_name: &str) {
+    let pattern = format!("batty shim --id {member_name}");
+    let output = match std::process::Command::new("pgrep")
+        .args(["-f", &pattern])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+    if !output.status.success() {
+        return; // no matches
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let my_pid = std::process::id();
+    for line in stdout.lines() {
+        if let Ok(pid) = line.trim().parse::<u32>() {
+            if pid == my_pid {
+                continue;
+            }
+            warn!(
+                member = member_name,
+                pid, "killing orphan shim process from previous session"
+            );
+            unsafe {
+                // Kill the process group to also terminate the child agent
+                libc::kill(-(pid as i32), libc::SIGTERM);
+            }
+            // Give it a moment, then force kill
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+/// Query the tmux pane dimensions for a member by looking up their pane ID
+/// in the current session.
+fn query_pane_size(member_name: &str) -> Option<(u16, u16)> {
+    // Find the pane for this member by checking tmux pane titles or the layout
+    let output = std::process::Command::new("tmux")
+        .args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_title} #{pane_width} #{pane_height}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 3 && parts[0] == member_name {
+            let cols: u16 = parts[1].parse().ok()?;
+            let rows: u16 = parts[2].parse().ok()?;
+            return Some((cols, rows));
+        }
+    }
+    None
+}
 
 /// Resolve the path to the `batty` binary.
 fn batty_binary() -> String {
@@ -22,7 +90,8 @@ fn batty_binary() -> String {
 /// Spawn a shim subprocess for the given agent.
 ///
 /// Creates a socketpair, passes the child end as fd 3, and launches
-/// `batty shim` with the appropriate arguments.
+/// `batty shim` with the appropriate arguments. Kills any orphan shim
+/// processes for this member from previous sessions first.
 ///
 /// Returns an `AgentHandle` holding the parent channel and child PID.
 pub(in crate::team) fn spawn_shim(
@@ -32,6 +101,9 @@ pub(in crate::team) fn spawn_shim(
     work_dir: &Path,
     pty_log_path: Option<&Path>,
 ) -> Result<AgentHandle> {
+    // Kill any orphan shim processes from previous sessions
+    kill_orphan_shims(member_name);
+
     let (parent_sock, child_sock) =
         protocol::socketpair().context("failed to create socketpair for shim")?;
 
@@ -53,6 +125,17 @@ pub(in crate::team) fn spawn_shim(
     if let Some(log_path) = pty_log_path {
         cmd.arg("--pty-log-path")
             .arg(log_path.to_string_lossy().as_ref());
+    }
+
+    // Query the tmux pane size for this member and pass it to the shim
+    // so the agent's PTY matches the actual display dimensions.
+    if let Some((cols, rows)) = query_pane_size(member_name) {
+        cmd.arg("--rows").arg(rows.to_string());
+        cmd.arg("--cols").arg(cols.to_string());
+        debug!(
+            member = member_name,
+            rows, cols, "passing pane size to shim"
+        );
     }
 
     // Pass child socket as fd 3
@@ -93,6 +176,10 @@ pub(in crate::team) fn spawn_shim(
     }
 
     let parent_channel = Channel::new(parent_sock);
+    let mut parent_channel = parent_channel;
+    parent_channel
+        .set_read_timeout(Some(std::time::Duration::from_millis(25)))
+        .context("failed to set shim parent channel read timeout")?;
     let handle = AgentHandle::new(
         member_name.to_string(),
         parent_channel,
@@ -118,10 +205,30 @@ pub(in crate::team) fn spawn_shim(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn batty_binary_returns_a_path() {
         let path = batty_binary();
         assert!(!path.is_empty());
+    }
+
+    #[test]
+    fn parent_channel_timeout_is_applied() {
+        let (parent_sock, _child_sock) = protocol::socketpair().unwrap();
+        let mut channel = Channel::new(parent_sock);
+        channel
+            .set_read_timeout(Some(Duration::from_millis(5)))
+            .unwrap();
+        let result: anyhow::Result<Option<crate::shim::protocol::Event>> = channel.recv();
+        let io_error = result.unwrap_err();
+        assert!(
+            io_error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ))
+        );
     }
 }

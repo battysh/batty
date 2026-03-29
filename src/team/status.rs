@@ -750,6 +750,7 @@ pub(crate) fn board_status_task_queues(
     let mut active_tasks = Vec::new();
     let mut review_queue = Vec::new();
     for task in task::load_tasks_from_dir(&tasks_dir)? {
+        let inferred = infer_runtime_task_metadata(project_root, &task);
         let entry = StatusTaskEntry {
             id: task.id,
             title: task.title,
@@ -758,9 +759,11 @@ pub(crate) fn board_status_task_queues(
             claimed_by: task.claimed_by,
             review_owner: task.review_owner,
             blocked_on: task.blocked_on,
-            branch: task.branch,
-            worktree_path: task.worktree_path,
-            commit: task.commit,
+            branch: task.branch.or_else(|| inferred.branch.clone()),
+            worktree_path: task
+                .worktree_path
+                .or_else(|| inferred.worktree_path.clone()),
+            commit: task.commit.or_else(|| inferred.commit.clone()),
             next_action: task.next_action,
         };
 
@@ -772,6 +775,55 @@ pub(crate) fn board_status_task_queues(
     }
 
     Ok((active_tasks, review_queue))
+}
+
+#[derive(Default)]
+struct InferredTaskMetadata {
+    branch: Option<String>,
+    worktree_path: Option<String>,
+    commit: Option<String>,
+}
+
+fn infer_runtime_task_metadata(project_root: &Path, task: &task::Task) -> InferredTaskMetadata {
+    let Some(claimed_by) = task.claimed_by.as_deref() else {
+        return InferredTaskMetadata::default();
+    };
+    if !claimed_by.starts_with("eng-") {
+        return InferredTaskMetadata::default();
+    }
+
+    let worktree_path = project_root
+        .join(".batty")
+        .join("worktrees")
+        .join(claimed_by);
+    if !worktree_path.is_dir() {
+        return InferredTaskMetadata::default();
+    }
+
+    InferredTaskMetadata {
+        branch: git_stdout(&worktree_path, ["rev-parse", "--abbrev-ref", "HEAD"]),
+        worktree_path: relative_to_project_root(project_root, &worktree_path),
+        commit: git_stdout(&worktree_path, ["rev-parse", "--short", "HEAD"]),
+    }
+}
+
+fn git_stdout<const N: usize>(cwd: &Path, args: [&str; N]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty() && value != "HEAD").then_some(value)
+}
+
+fn relative_to_project_root(project_root: &Path, path: &Path) -> Option<String> {
+    path.strip_prefix(project_root)
+        .ok()
+        .map(|relative| relative.display().to_string())
 }
 
 pub(crate) fn build_team_status_health(
@@ -2044,6 +2096,52 @@ mod tests {
         assert_eq!(review_queue[0].id, 42);
         assert_eq!(review_queue[0].review_owner.as_deref(), Some("manager"));
         assert_eq!(review_queue[0].next_action.as_deref(), Some("review now"));
+    }
+
+    #[test]
+    fn board_status_task_queues_infers_worktree_metadata_when_frontmatter_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = crate::team::test_support::init_git_repo(&tmp, "status-infer");
+        let tasks_dir = repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(
+            tasks_dir.join("041-active.md"),
+            "---\nid: 41\ntitle: Active task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\n---\n",
+        )
+        .unwrap();
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        crate::team::task_loop::setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-1",
+            &team_config_dir,
+        )
+        .unwrap();
+        fs::write(worktree_dir.join("note.txt"), "done\n").unwrap();
+        crate::team::test_support::git_ok(&worktree_dir, &["add", "note.txt"]);
+        crate::team::test_support::git_ok(&worktree_dir, &["commit", "-m", "note"]);
+
+        let (active_tasks, review_queue) = board_status_task_queues(&repo).unwrap();
+
+        assert!(review_queue.is_empty());
+        assert_eq!(active_tasks.len(), 1);
+        assert_eq!(
+            active_tasks[0].worktree_path.as_deref(),
+            Some(".batty/worktrees/eng-1")
+        );
+        assert!(
+            active_tasks[0]
+                .branch
+                .as_deref()
+                .is_some_and(|branch| branch.contains("eng-1"))
+        );
+        assert!(active_tasks[0].commit.as_deref().is_some());
     }
 
     #[test]

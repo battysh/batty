@@ -1,5 +1,7 @@
 use super::*;
+use crate::shim::protocol::{Command, ShimState, socketpair};
 use crate::team::config::{BoardConfig, WorkflowPolicy};
+use crate::team::daemon::agent_handle::AgentHandle;
 use crate::team::inbox;
 use crate::team::standup::MemberState;
 use crate::team::task_loop::{engineer_base_branch_name, setup_engineer_worktree};
@@ -37,6 +39,143 @@ fn summarize_assignment_uses_first_non_empty_line() {
         summarize_assignment("\n\nTask #9: fix move ordering\n\nDetails below"),
         "Task #9: fix move ordering"
     );
+}
+
+#[test]
+fn shim_assignment_sends_message_to_existing_engineer() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(
+        tmp.path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks"),
+    )
+    .unwrap();
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), false),
+        ])
+        .build();
+    daemon.config.team_config.use_shim = true;
+
+    let (parent_sock, child_sock) = socketpair().unwrap();
+    let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+    let mut child_channel = crate::shim::protocol::Channel::new(child_sock);
+    let mut handle = AgentHandle::new(
+        "eng-1".to_string(),
+        parent_channel,
+        12345,
+        "codex".to_string(),
+        "codex".to_string(),
+        tmp.path().to_path_buf(),
+    );
+    handle.apply_state_change(ShimState::Idle);
+    daemon.shim_handles.insert("eng-1".to_string(), handle);
+
+    let launch = daemon
+        .assign_task_with_task_id_as("manager", "eng-1", "Task #42: fix it", Some(42))
+        .unwrap();
+
+    let cmd: Command = child_channel.recv().unwrap().unwrap();
+    match cmd {
+        Command::SendMessage { from, body, .. } => {
+            assert_eq!(from, "manager");
+            assert_eq!(body, "Task #42: fix it");
+        }
+        other => panic!("expected SendMessage, got {other:?}"),
+    }
+
+    // Shim-managed agents: state driven by shim events, not speculative mark_member_working
+    assert_ne!(daemon.states.get("eng-1"), Some(&MemberState::Working));
+    assert_eq!(launch.branch, None);
+    assert_eq!(launch.work_dir, tmp.path());
+}
+
+#[test]
+fn assignment_guard_rejects_second_active_task_for_engineer() {
+    let tmp = tempfile::tempdir().unwrap();
+    crate::team::test_support::write_owned_task_file(
+        tmp.path(),
+        91,
+        "active-task",
+        "in-progress",
+        "eng-1",
+    );
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), false),
+        ])
+        .build();
+    daemon.config.team_config.use_shim = true;
+
+    let (parent_sock, _child_sock) = socketpair().unwrap();
+    let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+    let mut handle = AgentHandle::new(
+        "eng-1".to_string(),
+        parent_channel,
+        12345,
+        "codex".to_string(),
+        "codex".to_string(),
+        tmp.path().to_path_buf(),
+    );
+    handle.apply_state_change(ShimState::Idle);
+    daemon.shim_handles.insert("eng-1".to_string(), handle);
+
+    let error = daemon
+        .assign_task_with_task_id_as("manager", "eng-1", "Task #42: fix it", Some(42))
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("already owns active board task(s) #91"));
+}
+
+#[test]
+fn assignment_guard_allows_resuming_same_active_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    crate::team::test_support::write_owned_task_file(
+        tmp.path(),
+        91,
+        "active-task",
+        "in-progress",
+        "eng-1",
+    );
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), false),
+        ])
+        .build();
+    daemon.config.team_config.use_shim = true;
+
+    let (parent_sock, child_sock) = socketpair().unwrap();
+    let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+    let mut child_channel = crate::shim::protocol::Channel::new(child_sock);
+    let mut handle = AgentHandle::new(
+        "eng-1".to_string(),
+        parent_channel,
+        12345,
+        "codex".to_string(),
+        "codex".to_string(),
+        tmp.path().to_path_buf(),
+    );
+    handle.apply_state_change(ShimState::Idle);
+    daemon.shim_handles.insert("eng-1".to_string(), handle);
+
+    daemon
+        .assign_task_with_task_id_as("manager", "eng-1", "Task #91: continue", Some(91))
+        .unwrap();
+
+    let cmd: Command = child_channel.recv().unwrap().unwrap();
+    match cmd {
+        Command::SendMessage { from, body, .. } => {
+            assert_eq!(from, "manager");
+            assert_eq!(body, "Task #91: continue");
+        }
+        other => panic!("expected SendMessage, got {other:?}"),
+    }
 }
 
 #[test]
@@ -228,14 +367,16 @@ fn worktree_gate_blocks_dirty_worktrees() {
 
     daemon.maybe_auto_dispatch().unwrap();
 
+    // Worktree auto-recovery cleans dirty files and resets to base branch,
+    // so the entry stays in the queue with failures cleared for retry.
     assert_eq!(daemon.dispatch_queue.len(), 1);
-    assert_eq!(daemon.dispatch_queue[0].validation_failures, 1);
+    assert_eq!(
+        daemon.dispatch_queue[0].validation_failures, 0,
+        "auto-recovery should clear failure count after successful reset"
+    );
     assert!(
-        daemon.dispatch_queue[0]
-            .last_failure
-            .as_deref()
-            .unwrap_or_default()
-            .contains("uncommitted changes")
+        daemon.dispatch_queue[0].last_failure.is_none(),
+        "auto-recovery should clear failure message after successful reset"
     );
 }
 

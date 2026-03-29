@@ -21,6 +21,12 @@ pub(super) struct CodexSessionTracker {
     pub(super) last_response_hash: Option<u64>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct CodexSessionMeta {
+    pub(super) id: Option<String>,
+    pub(super) cwd: Option<std::ffi::OsString>,
+}
+
 pub(super) fn discover_codex_session_file(
     sessions_root: &Path,
     cwd: &Path,
@@ -34,11 +40,22 @@ pub(super) fn discover_codex_session_file(
         for year in read_dir_paths(sessions_root)? {
             for month in read_dir_paths(&year)? {
                 for day in read_dir_paths(&month)? {
-                    let entry = day.join(format!("{session_id}.jsonl"));
-                    if entry.is_file()
-                        && session_meta_cwd(&entry)?.as_deref() == Some(cwd.as_os_str())
-                    {
-                        return Ok(Some(entry));
+                    for entry in read_dir_paths(&day)? {
+                        if entry.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                            continue;
+                        }
+                        let Some(meta) = read_codex_session_meta(&entry)? else {
+                            continue;
+                        };
+                        if meta.cwd.as_deref() != Some(cwd.as_os_str()) {
+                            continue;
+                        }
+                        let file_id = session_file_id(&entry);
+                        if file_id.as_deref() == Some(session_id)
+                            || meta.id.as_deref() == Some(session_id)
+                        {
+                            return Ok(Some(entry));
+                        }
                     }
                 }
             }
@@ -54,7 +71,10 @@ pub(super) fn discover_codex_session_file(
                     if entry.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
                         continue;
                     }
-                    if session_meta_cwd(&entry)?.as_deref() != Some(cwd.as_os_str()) {
+                    let Some(meta) = read_codex_session_meta(&entry)? else {
+                        continue;
+                    };
+                    if meta.cwd.as_deref() != Some(cwd.as_os_str()) {
                         continue;
                     }
                     let modified = fs::metadata(&entry)
@@ -72,7 +92,14 @@ pub(super) fn discover_codex_session_file(
     Ok(newest.map(|(_, path)| path))
 }
 
-fn session_meta_cwd(path: &Path) -> Result<Option<std::ffi::OsString>> {
+pub(super) fn codex_session_resume_id(path: &Path) -> Result<Option<String>> {
+    let meta = read_codex_session_meta(path)?;
+    Ok(meta
+        .and_then(|meta| meta.id)
+        .or_else(|| session_file_id(path)))
+}
+
+fn read_codex_session_meta(path: &Path) -> Result<Option<CodexSessionMeta>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     for line in reader.lines() {
@@ -86,13 +113,25 @@ fn session_meta_cwd(path: &Path) -> Result<Option<std::ffi::OsString>> {
         if entry.get("type").and_then(Value::as_str) != Some("session_meta") {
             continue;
         }
-        return Ok(entry
-            .get("payload")
-            .and_then(|payload| payload.get("cwd"))
-            .and_then(Value::as_str)
-            .map(std::ffi::OsString::from));
+        let payload = entry.get("payload");
+        return Ok(Some(CodexSessionMeta {
+            id: payload
+                .and_then(|payload| payload.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            cwd: payload
+                .and_then(|payload| payload.get("cwd"))
+                .and_then(Value::as_str)
+                .map(std::ffi::OsString::from),
+        }));
     }
     Ok(None)
+}
+
+fn session_file_id(path: &Path) -> Option<String> {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::to_string)
 }
 
 pub(super) fn poll_codex_session_file(
@@ -321,6 +360,42 @@ mod tests {
         let discovered =
             discover_codex_session_file(&sessions_root, &cwd, Some("missing-session")).unwrap();
         assert!(discovered.is_none());
+    }
+
+    #[test]
+    fn discover_codex_session_file_matches_payload_session_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions_root = tmp.path().join("sessions");
+        let session_dir = sessions_root.join("2026").join("03").join("21");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let cwd = tmp
+            .path()
+            .join("repo")
+            .join(".batty")
+            .join("codex-context")
+            .join("eng-1");
+        let session_file = session_dir.join("rollout-2026-03-26T13-54-07-sample.jsonl");
+        std::fs::write(
+            &session_file,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"019d2b48-3d33-7613-bb3d-d0b4ecd45e2e\",\"cwd\":\"{}\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+
+        let discovered = discover_codex_session_file(
+            &sessions_root,
+            &cwd,
+            Some("019d2b48-3d33-7613-bb3d-d0b4ecd45e2e"),
+        )
+        .unwrap();
+        assert_eq!(discovered.as_deref(), Some(session_file.as_path()));
+        assert_eq!(
+            codex_session_resume_id(&session_file).unwrap().as_deref(),
+            Some("019d2b48-3d33-7613-bb3d-d0b4ecd45e2e")
+        );
     }
 
     #[test]

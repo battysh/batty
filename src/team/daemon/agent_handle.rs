@@ -30,6 +30,10 @@ pub(in crate::team) struct AgentHandle {
     pub agent_cmd: String,
     /// Working directory for respawning.
     pub work_dir: PathBuf,
+    /// Last known pane width (for resize sync).
+    pub last_cols: u16,
+    /// Last known pane height (for resize sync).
+    pub last_rows: u16,
 }
 
 impl AgentHandle {
@@ -52,6 +56,8 @@ impl AgentHandle {
             agent_type,
             agent_cmd,
             work_dir,
+            last_cols: 0,
+            last_rows: 0,
         }
     }
 
@@ -114,8 +120,22 @@ impl AgentHandle {
     /// Try to receive an event from the shim (non-blocking via timeout).
     /// Returns Ok(None) on EOF or timeout.
     pub fn try_recv_event(&mut self) -> anyhow::Result<Option<Event>> {
-        // Set a short read timeout so we don't block the daemon loop
-        self.channel.recv::<Event>()
+        match self.channel.recv::<Event>() {
+            Ok(event) => Ok(event),
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io_error| {
+                        matches!(
+                            io_error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        )
+                    }) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Seconds since last state change.
@@ -290,5 +310,17 @@ mod tests {
         handle.record_pong();
         assert!(handle.last_pong_at.is_some());
         assert_eq!(handle.secs_since_last_pong(), Some(0));
+    }
+
+    #[test]
+    fn try_recv_event_returns_none_on_timeout() {
+        let (mut handle, _child) = make_test_handle();
+        handle
+            .channel
+            .set_read_timeout(Some(std::time::Duration::from_millis(5)))
+            .unwrap();
+
+        let event = handle.try_recv_event().unwrap();
+        assert!(event.is_none());
     }
 }

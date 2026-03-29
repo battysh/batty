@@ -358,8 +358,12 @@ fn main() -> Result<()> {
             team::team_status(&root, json)?;
         }
 
-        Command::Send { role, message } => {
-            team::send_message(&root, &role, &message)?;
+        Command::Send {
+            from,
+            role,
+            message,
+        } => {
+            team::send_message_as(&root, from.as_deref(), &role, &message)?;
             println!("Message queued for {role}.");
         }
 
@@ -891,6 +895,20 @@ fn main() -> Result<()> {
             };
 
             shim::runtime::run(args, channel)?;
+        }
+
+        Command::ConsolePane {
+            project_root,
+            member,
+            events_log_path,
+            pty_log_path,
+        } => {
+            batty_cli::console_pane::run(
+                PathBuf::from(project_root).as_path(),
+                &member,
+                PathBuf::from(events_log_path).as_path(),
+                PathBuf::from(pty_log_path).as_path(),
+            )?;
         }
 
         Command::Daemon {

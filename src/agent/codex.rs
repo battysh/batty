@@ -67,15 +67,24 @@ impl AgentAdapter for CodexCliAdapter {
         session_id: Option<&str>,
     ) -> anyhow::Result<String> {
         let escaped = prompt.replace('\'', "'\\''");
+        let prefix = format!(
+            "{} --dangerously-bypass-approvals-and-sandbox",
+            self.program
+        );
         if resume {
             let sid = session_id.context("missing Codex session ID for resume")?;
+            let fallback = if idle {
+                format!("exec {prefix}")
+            } else {
+                format!("exec {prefix} '{escaped}'")
+            };
             Ok(format!(
-                "exec codex resume '{sid}' --dangerously-bypass-approvals-and-sandbox"
+                "{program} resume '{sid}' --dangerously-bypass-approvals-and-sandbox || {fallback}",
+                program = self.program,
             ))
         } else {
-            let prefix = "exec codex --dangerously-bypass-approvals-and-sandbox";
             if idle {
-                Ok(prefix.to_string())
+                Ok(format!("exec {prefix}"))
             } else {
                 Ok(format!("{prefix} '{escaped}'"))
             }
@@ -166,8 +175,10 @@ mod tests {
         let cmd = adapter
             .launch_command("do the thing", false, false, None)
             .unwrap();
-        assert!(cmd.contains("exec codex --dangerously-bypass-approvals-and-sandbox"));
+        assert!(cmd.contains("codex --dangerously-bypass-approvals-and-sandbox"));
         assert!(cmd.contains("'do the thing'"));
+        // Active (non-resume) should NOT use exec so the shim can detect exit
+        assert!(!cmd.starts_with("exec "));
     }
 
     #[test]
@@ -185,8 +196,20 @@ mod tests {
         let cmd = adapter
             .launch_command("ignored", false, true, Some("codex-sess-1"))
             .unwrap();
-        assert!(cmd.contains("exec codex resume 'codex-sess-1'"));
+        assert!(cmd.contains("codex resume 'codex-sess-1'"));
         assert!(cmd.contains("--dangerously-bypass-approvals-and-sandbox"));
+        assert!(cmd.contains("|| exec codex --dangerously-bypass-approvals-and-sandbox 'ignored'"));
+    }
+
+    #[test]
+    fn launch_command_resume_idle_falls_back_to_fresh_idle_start() {
+        let adapter = CodexCliAdapter::new(None);
+        let cmd = adapter
+            .launch_command("ignored", true, true, Some("codex-sess-1"))
+            .unwrap();
+        assert!(cmd.contains("codex resume 'codex-sess-1'"));
+        assert!(cmd.contains("|| exec codex --dangerously-bypass-approvals-and-sandbox"));
+        assert!(!cmd.contains("'ignored'"));
     }
 
     #[test]

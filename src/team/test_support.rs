@@ -344,6 +344,8 @@ impl<'a> TestDaemonBuilder<'a> {
                 shim_health_check_interval_secs: 60,
                 shim_health_timeout_secs: 120,
                 shim_shutdown_timeout_secs: 30,
+                shim_working_state_timeout_secs: 1800,
+                pending_queue_max_age_secs: 600,
                 event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 retro_min_duration_secs: 60,
                 roles: Vec::new(),

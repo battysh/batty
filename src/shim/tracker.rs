@@ -85,6 +85,9 @@ impl SessionTracker {
                 self.session_id.as_deref(),
             )?;
             if let Some(ref path) = self.session_file {
+                if self.agent_type == AgentType::Codex {
+                    self.session_id = codex_session_resume_id(path)?;
+                }
                 // Bind at EOF — ignore history
                 self.offset = file_len(path)?;
                 self.last_verdict = TrackerVerdict::Unknown;
@@ -142,7 +145,11 @@ impl SessionTracker {
         }
 
         self.session_file = Some(newest.clone());
-        self.session_id = file_stem_id(&newest);
+        self.session_id = match self.agent_type {
+            AgentType::Codex => codex_session_resume_id(&newest)?,
+            AgentType::Claude => file_stem_id(&newest),
+            _ => file_stem_id(&newest),
+        };
         self.offset = file_len(&newest)?;
         self.last_verdict = TrackerVerdict::Unknown;
         Ok(())
@@ -233,11 +240,21 @@ fn discover_codex_session(
         for year in read_dir_sorted(sessions_root)? {
             for month in read_dir_sorted(&year)? {
                 for day in read_dir_sorted(&month)? {
-                    let entry = day.join(format!("{sid}.jsonl"));
-                    if entry.is_file()
-                        && codex_session_cwd(&entry)?.as_deref() == Some(cwd.as_os_str())
-                    {
-                        return Ok(Some(entry));
+                    for entry in read_dir_sorted(&day)? {
+                        if entry.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                            continue;
+                        }
+                        let Some(meta) = read_codex_session_meta(&entry)? else {
+                            continue;
+                        };
+                        if meta.cwd.as_deref() != Some(cwd.as_os_str()) {
+                            continue;
+                        }
+                        if file_stem_id(&entry).as_deref() == Some(sid)
+                            || meta.id.as_deref() == Some(sid)
+                        {
+                            return Ok(Some(entry));
+                        }
                     }
                 }
             }
@@ -253,7 +270,9 @@ fn discover_codex_session(
                     if entry.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                         continue;
                     }
-                    if codex_session_cwd(&entry)?.as_deref() != Some(cwd.as_os_str()) {
+                    if read_codex_session_meta(&entry)?.and_then(|meta| meta.cwd)
+                        != Some(cwd.as_os_str().to_os_string())
+                    {
                         continue;
                     }
                     let modified = file_modified(&entry);
@@ -468,7 +487,13 @@ fn claude_session_cwd(path: &Path) -> Result<Option<std::ffi::OsString>> {
     Ok(None)
 }
 
-fn codex_session_cwd(path: &Path) -> Result<Option<std::ffi::OsString>> {
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CodexSessionMeta {
+    id: Option<String>,
+    cwd: Option<std::ffi::OsString>,
+}
+
+fn read_codex_session_meta(path: &Path) -> Result<Option<CodexSessionMeta>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     for line in reader.lines() {
@@ -482,13 +507,25 @@ fn codex_session_cwd(path: &Path) -> Result<Option<std::ffi::OsString>> {
         if entry.get("type").and_then(Value::as_str) != Some("session_meta") {
             continue;
         }
-        return Ok(entry
-            .get("payload")
-            .and_then(|p| p.get("cwd"))
-            .and_then(Value::as_str)
-            .map(std::ffi::OsString::from));
+        let payload = entry.get("payload");
+        return Ok(Some(CodexSessionMeta {
+            id: payload
+                .and_then(|payload| payload.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            cwd: payload
+                .and_then(|payload| payload.get("cwd"))
+                .and_then(Value::as_str)
+                .map(std::ffi::OsString::from),
+        }));
     }
     Ok(None)
+}
+
+fn codex_session_resume_id(path: &Path) -> Result<Option<String>> {
+    Ok(read_codex_session_meta(path)?
+        .and_then(|meta| meta.id)
+        .or_else(|| file_stem_id(path)))
 }
 
 fn newest_jsonl_in(dir: &Path) -> Result<Option<PathBuf>> {
@@ -831,6 +868,34 @@ mod tests {
     }
 
     #[test]
+    fn codex_exact_session_id_lookup_matches_payload_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("sessions");
+        let day_dir = root.join("2026").join("03").join("23");
+        fs::create_dir_all(&day_dir).unwrap();
+
+        let cwd = PathBuf::from("/Users/test/repo");
+        let session = day_dir.join("rollout-2026-03-26T13-54-07-sample.jsonl");
+        fs::write(
+            &session,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"019d2b48-3d33-7613-bb3d-d0b4ecd45e2e\",\"cwd\":\"{}\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+
+        let found =
+            discover_codex_session(&root, &cwd, Some("019d2b48-3d33-7613-bb3d-d0b4ecd45e2e"))
+                .unwrap();
+        assert_eq!(found.as_deref(), Some(session.as_path()));
+        assert_eq!(
+            codex_session_resume_id(&session).unwrap().as_deref(),
+            Some("019d2b48-3d33-7613-bb3d-d0b4ecd45e2e")
+        );
+    }
+
+    #[test]
     fn codex_nonexistent_root_returns_none() {
         let found =
             discover_codex_session(Path::new("/nonexistent"), Path::new("/foo"), None).unwrap();
@@ -953,7 +1018,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut tracker = SessionTracker::new(AgentType::Codex, root, cwd, None);
+        let mut tracker = SessionTracker::new(AgentType::Codex, root, cwd.clone(), None);
         tracker.poll().unwrap(); // bind
 
         let mut f = fs::OpenOptions::new().append(true).open(&session).unwrap();
@@ -1034,6 +1099,45 @@ mod tests {
         // Poll should rebind to the newer file
         tracker.poll().unwrap();
         assert_eq!(tracker.session_file.as_deref(), Some(new_session.as_path()));
+    }
+
+    #[test]
+    fn codex_tracker_rebind_keeps_payload_resume_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("sessions");
+        let day_dir = root.join("2026").join("03").join("27");
+        fs::create_dir_all(&day_dir).unwrap();
+
+        let cwd = PathBuf::from("/Users/test/repo");
+        let old_session = day_dir.join("rollout-2026-03-27T10-00-00-old.jsonl");
+        fs::write(
+            &old_session,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"old-resume-id\",\"cwd\":\"{}\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+
+        let mut tracker = SessionTracker::new(AgentType::Codex, root, cwd.clone(), None);
+        tracker.poll().unwrap();
+        assert_eq!(tracker.session_file.as_deref(), Some(old_session.as_path()));
+        assert_eq!(tracker.session_id.as_deref(), Some("old-resume-id"));
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let new_session = day_dir.join("rollout-2026-03-27T10-01-00-new.jsonl");
+        fs::write(
+            &new_session,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"new-resume-id\",\"cwd\":\"{}\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+
+        tracker.poll().unwrap();
+        assert_eq!(tracker.session_file.as_deref(), Some(new_session.as_path()));
+        assert_eq!(tracker.session_id.as_deref(), Some("new-resume-id"));
     }
 
     // -- parse_session_tail --

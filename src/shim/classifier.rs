@@ -117,50 +117,46 @@ const CLAUDE_SPINNER_CHARS: &[char] = &[
 ];
 
 fn classify_claude(content: &str) -> ScreenVerdict {
+    // Claude Code classification based on the status bar and tool execution indicators.
+    //
+    // Working signals (any of these = Working):
+    //   - "esc to interrupt" in status bar (agent thinking/generating)
+    //   - "ctrl+b to run in background" (tool/bash command executing)
+    //   - "Waiting…" or "Running…" (tool execution in progress)
+    // Idle signal:
+    //   - Status bar present with none of the above
+    //
+    // The status bar is always in the last few lines of the terminal.
     let lines: Vec<&str> = content.lines().collect();
-    let recent_raw: Vec<&str> = lines.iter().rev().take(6).copied().collect();
+    let bottom: Vec<&str> = lines.iter().rev().take(6).copied().collect();
 
-    // "esc to interrupt" means Claude is actively working
-    let has_interrupt_footer = recent_raw.iter().any(|line| {
-        let trimmed = line.trim().to_lowercase();
-        trimmed.contains("esc to interrupt")
-            || trimmed.contains("esc to inter")
-            || trimmed.contains("esc to in\u{2026}")
-            || trimmed.contains("esc to in...")
+    let is_working = bottom.iter().any(|line| {
+        let lower = line.trim().to_lowercase();
+        // "esc to interrupt" — agent thinking/generating (+ truncated variants)
+        lower.contains("esc to interrupt")
+            || lower.contains("esc to inter")
+            || lower.contains("esc to in\u{2026}")
+            || lower.contains("esc to in...")
+            || lower.contains("esc t\u{2026}")
+            || (lower.contains("esc t") && lower.contains("bypass"))
+            // "ctrl+b to run in background" — tool/bash executing
+            || lower.contains("ctrl+b to run")
+            || lower.contains("ctrl+b to r")
     });
 
-    if has_interrupt_footer {
+    if is_working {
         return ScreenVerdict::AgentWorking;
     }
 
-    // Check for spinner in recent non-empty lines
-    let recent_nonempty: Vec<&str> = lines
-        .iter()
-        .rev()
-        .filter(|l| !l.trim().is_empty())
-        .take(12)
-        .copied()
-        .collect();
+    let has_status_bar = bottom.iter().any(|line| {
+        let lower = line.trim().to_lowercase();
+        lower.contains("bypass permissions")
+            || lower.contains("shift+tab")
+            || lower.contains("ctrl+g to edit")
+    });
 
-    for line in &recent_nonempty {
-        if looks_like_claude_spinner(line) {
-            return ScreenVerdict::AgentWorking;
-        }
-    }
-
-    // Check for idle prompt: ❯ followed by ONLY whitespace or EOL.
-    // Reject ❯ followed by alphanumeric content (e.g., dialog menu items
-    // like "❯ 1. Yes, I trust this folder").
-    for line in &recent_nonempty {
-        let trimmed = line.trim();
-        for &prompt_char in CLAUDE_PROMPT_CHARS {
-            if trimmed.starts_with(prompt_char) {
-                let after = &trimmed[prompt_char.len_utf8()..];
-                if after.trim().is_empty() {
-                    return ScreenVerdict::AgentIdle;
-                }
-            }
-        }
+    if has_status_bar {
+        return ScreenVerdict::AgentIdle;
     }
 
     ScreenVerdict::Unknown
@@ -362,7 +358,9 @@ mod tests {
 
     #[test]
     fn claude_idle_prompt() {
-        let parser = make_screen("Some output\n\n\u{276F} ");
+        // Status bar without "esc to interrupt" = idle
+        let parser =
+            make_screen("Some output\n\u{276F}\n  bypass permissions on (shift+tab to cycle)");
         assert_eq!(
             classify(AgentType::Claude, parser.screen()),
             ScreenVerdict::AgentIdle
@@ -371,7 +369,8 @@ mod tests {
 
     #[test]
     fn claude_idle_bare_prompt() {
-        let parser = make_screen("Some output\n\n\u{276F}");
+        // Status bar with "ctrl+g to edit" but no interrupt = idle
+        let parser = make_screen("Some output\n\u{276F}\n  ctrl+g to edit in Vim");
         assert_eq!(
             classify(AgentType::Claude, parser.screen()),
             ScreenVerdict::AgentIdle
@@ -380,7 +379,9 @@ mod tests {
 
     #[test]
     fn claude_working_spinner() {
-        let parser = make_screen("\u{00B7} Thinking\u{2026}\n");
+        // Status bar with "esc to interrupt" = working
+        let parser =
+            make_screen("\u{00B7} Thinking\u{2026}\n  bypass permissions on · esc to interrupt");
         assert_eq!(
             classify(AgentType::Claude, parser.screen()),
             ScreenVerdict::AgentWorking
@@ -399,6 +400,27 @@ mod tests {
     #[test]
     fn claude_working_interrupt_truncated() {
         let parser = make_screen("Some output\nesc to inter\n");
+        assert_eq!(
+            classify(AgentType::Claude, parser.screen()),
+            ScreenVerdict::AgentWorking
+        );
+    }
+
+    #[test]
+    fn claude_working_interrupt_narrow_pane_ellipsis() {
+        // Narrow pane truncates to "esc t…" with ellipsis
+        let parser =
+            make_screen("output\n  bypass permissions on (shift+tab) \u{00B7} esc t\u{2026}");
+        assert_eq!(
+            classify(AgentType::Claude, parser.screen()),
+            ScreenVerdict::AgentWorking
+        );
+    }
+
+    #[test]
+    fn claude_working_interrupt_narrow_pane_cutoff() {
+        // Narrow pane cuts mid-word with bypass context
+        let parser = make_screen("output\n  bypass permissions on · esc t");
         assert_eq!(
             classify(AgentType::Claude, parser.screen()),
             ScreenVerdict::AgentWorking
@@ -626,8 +648,9 @@ mod tests {
 
     #[test]
     fn claude_idle_with_trailing_spaces() {
-        // ❯ followed by multiple spaces — still idle
-        let parser = make_screen("Output\n\u{276F}    ");
+        // Status bar present, no interrupt = idle
+        let parser =
+            make_screen("Output\n\u{276F}    \n  bypass permissions on (shift+tab to cycle)    ");
         assert_eq!(
             classify(AgentType::Claude, parser.screen()),
             ScreenVerdict::AgentIdle

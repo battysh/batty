@@ -137,6 +137,26 @@ pub(crate) fn shim_log_path(project_root: &Path, agent_id: &str) -> PathBuf {
     shim_logs_dir(project_root).join(format!("{agent_id}.pty.log"))
 }
 
+pub(crate) fn shim_events_log_path(project_root: &Path, agent_id: &str) -> PathBuf {
+    shim_logs_dir(project_root).join(format!("{agent_id}.events.log"))
+}
+
+pub(crate) fn append_shim_event_log(project_root: &Path, agent_id: &str, line: &str) -> Result<()> {
+    let path = shim_events_log_path(project_root, agent_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("failed to open shim event log {}", path.display()))?;
+    use std::io::Write;
+    writeln!(file, "[{}] {}", now_unix(), line)
+        .with_context(|| format!("failed to write shim event log {}", path.display()))?;
+    Ok(())
+}
+
 fn assignment_results_dir(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("assignment_results")
 }
@@ -298,6 +318,15 @@ mod tests {
         assert_eq!(
             shim_log_path(root, "eng-1-1"),
             PathBuf::from("/tmp/project/.batty/shim-logs/eng-1-1.pty.log")
+        );
+    }
+
+    #[test]
+    fn shim_events_log_path_includes_agent_id() {
+        let root = Path::new("/tmp/project");
+        assert_eq!(
+            shim_events_log_path(root, "eng-1-1"),
+            PathBuf::from("/tmp/project/.batty/shim-logs/eng-1-1.events.log")
         );
     }
 

@@ -14,36 +14,239 @@ use super::*;
 
 impl TeamDaemon {
     pub(super) fn reconcile_active_tasks(&mut self) -> Result<()> {
-        if self.active_tasks.is_empty() {
-            return Ok(());
-        }
         let tasks_dir = self.board_dir().join("tasks");
         let board_tasks = if tasks_dir.exists() {
             crate::task::load_tasks_from_dir(&tasks_dir)?
         } else {
             Vec::new()
         };
-        let stale: Vec<(String, u32)> = self
+        self.replay_owned_tasks_for_idle_engineers(&board_tasks)?;
+        if self.active_tasks.is_empty() {
+            return Ok(());
+        }
+        let stale: Vec<(String, u32, &str)> = self
             .active_tasks
             .iter()
-            .filter(|(_engineer, task_id)| {
-                let task_id = **task_id;
+            .filter_map(|(engineer, task_id)| {
+                let task_id = *task_id;
                 match board_tasks.iter().find(|t| t.id == task_id) {
-                    Some(task) => task.status == "done" || task.status == "archived",
-                    None => true, // task no longer exists
+                    Some(task) if task.status == "done" || task.status == "archived" => {
+                        Some((engineer.clone(), task_id, "task is done/archived"))
+                    }
+                    None => Some((engineer.clone(), task_id, "task no longer exists")),
+                    // Clear if the task is no longer claimed by this engineer
+                    // (e.g. WIP reconciliation unclaimed it, or manager reassigned)
+                    Some(task) if task.claimed_by.as_deref() != Some(engineer.as_str()) => Some((
+                        engineer.clone(),
+                        task_id,
+                        "task no longer claimed by this engineer",
+                    )),
+                    _ => None,
                 }
             })
-            .map(|(engineer, task_id)| (engineer.clone(), *task_id))
             .collect();
-        for (engineer, task_id) in stale {
+        for (engineer, task_id, reason) in stale {
             info!(
                 engineer = %engineer,
                 task_id,
-                "Reconciled stale active_task: {engineer} was tracking done task #{task_id}"
+                reason,
+                "Reconciled stale active_task: {engineer} was tracking task #{task_id} ({reason})"
             );
             self.clear_active_task(&engineer);
         }
+
+        // WIP reconciliation: if an engineer has multiple claimed non-done tasks,
+        // unclaim the extras (keep the one with lowest ID / highest priority).
+        // This catches cases where the manager claims tasks via kanban-md directly,
+        // bypassing the daemon's WIP guard.
+        let engineer_names: Vec<String> = self
+            .config
+            .members
+            .iter()
+            .filter(|m| m.role_type == RoleType::Engineer)
+            .map(|m| m.name.clone())
+            .collect();
+        let board_dir = self.board_dir();
+        for eng in &engineer_names {
+            // Only count in-progress and review as active WIP.
+            // Claimed todo/backlog tasks are reservations, not active work —
+            // they shouldn't block dispatch or count toward WIP limits.
+            let mut claimed: Vec<&crate::task::Task> = board_tasks
+                .iter()
+                .filter(|t| {
+                    t.claimed_by.as_deref() == Some(eng.as_str())
+                        && matches!(t.status.as_str(), "in-progress" | "review")
+                })
+                .collect();
+            if claimed.len() <= 1 {
+                continue;
+            }
+            // Keep the in-progress one, or the lowest ID if none in-progress
+            claimed.sort_by_key(|t| (if t.status == "in-progress" { 0 } else { 1 }, t.id));
+            let keep = claimed[0].id;
+            for task in &claimed[1..] {
+                warn!(
+                    engineer = eng.as_str(),
+                    task_id = task.id,
+                    kept_task_id = keep,
+                    "WIP reconciliation: unclaiming excess task #{} from {} (keeping #{})",
+                    task.id,
+                    eng,
+                    keep
+                );
+                if let Err(e) = crate::team::task_cmd::unclaim_task(&board_dir, task.id) {
+                    warn!(
+                        task_id = task.id,
+                        error = %e,
+                        "failed to unclaim excess task"
+                    );
+                }
+                // Move back to todo so it's dispatchable again
+                if matches!(task.status.as_str(), "in-progress" | "backlog" | "review") {
+                    // review -> todo requires going through in-progress first
+                    if task.status == "review" {
+                        let _ = crate::team::task_cmd::transition_task(
+                            &board_dir,
+                            task.id,
+                            "in-progress",
+                        );
+                    }
+                    let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "todo");
+                }
+            }
+        }
+
+        // Orphaned review rescue: tasks in "review" that are stuck because
+        // they have no review_owner (nobody assigned to review), or no
+        // claimed_by at all. Move them back to todo for re-dispatch.
+        for task in &board_tasks {
+            if task.status == "review" && (task.claimed_by.is_none() || task.review_owner.is_none())
+            {
+                warn!(
+                    task_id = task.id,
+                    "orphaned review task #{} has no owner — moving back to todo", task.id
+                );
+                let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "in-progress");
+                let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "todo");
+                let _ = crate::team::task_cmd::unclaim_task(&board_dir, task.id);
+            }
+        }
+
+        // Orphaned in-progress rescue: tasks in "in-progress" with no claimed_by.
+        for task in &board_tasks {
+            if task.status == "in-progress" && task.claimed_by.is_none() {
+                warn!(
+                    task_id = task.id,
+                    "orphaned in-progress task #{} has no owner — moving back to todo", task.id
+                );
+                let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "todo");
+            }
+        }
         Ok(())
+    }
+
+    fn replay_owned_tasks_for_idle_engineers(
+        &mut self,
+        board_tasks: &[crate::task::Task],
+    ) -> Result<()> {
+        let inbox_root = inbox::inboxes_root(&self.config.project_root);
+        let engineers: Vec<String> = self
+            .config
+            .members
+            .iter()
+            .filter(|member| member.role_type == RoleType::Engineer)
+            .map(|member| member.name.clone())
+            .collect();
+
+        for engineer in engineers {
+            let engineer_idle = self
+                .watchers
+                .get(&engineer)
+                .map(|watcher| {
+                    matches!(
+                        watcher.state,
+                        crate::team::watcher::WatcherState::Ready
+                            | crate::team::watcher::WatcherState::Idle
+                    )
+                })
+                .unwrap_or(matches!(
+                    self.states.get(&engineer),
+                    Some(MemberState::Idle) | None
+                ));
+            if !engineer_idle {
+                continue;
+            }
+            if self.active_tasks.contains_key(&engineer) {
+                continue;
+            }
+            let has_pending_inbox = match inbox::pending_message_count(&inbox_root, &engineer) {
+                Ok(count) => count > 0,
+                Err(error) => {
+                    warn!(
+                        engineer = %engineer,
+                        error = %error,
+                        "failed to count pending inbox before owned-task replay"
+                    );
+                    true
+                }
+            };
+            if has_pending_inbox {
+                continue;
+            }
+            let Some(task) = board_tasks.iter().find(|task| {
+                task.claimed_by.as_deref() == Some(engineer.as_str())
+                    && super::interventions::task_needs_owned_intervention(task.status.as_str())
+            }) else {
+                continue;
+            };
+
+            if self.engineer_worktree_already_tracks_task(&engineer, task) {
+                self.active_tasks.insert(engineer.clone(), task.id);
+                continue;
+            }
+
+            let assignment = format!("Task #{}: {}\n\n{}", task.id, task.title, task.description);
+            let sender = self.assignment_sender(&engineer);
+            match self.assign_task_with_task_id_as(&sender, &engineer, &assignment, Some(task.id)) {
+                Ok(_) => {
+                    self.record_orchestrator_action(format!(
+                        "replay: resumed owned task #{} for {}",
+                        task.id, engineer
+                    ));
+                }
+                Err(error) => {
+                    warn!(
+                        engineer = %engineer,
+                        task_id = task.id,
+                        error = %error,
+                        "failed to replay owned task to idle engineer"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn engineer_worktree_already_tracks_task(
+        &self,
+        engineer: &str,
+        task: &crate::task::Task,
+    ) -> bool {
+        let worktree_dir = self.worktree_dir(engineer);
+        let Ok(current_branch) = current_worktree_branch(&worktree_dir) else {
+            return false;
+        };
+
+        let matches_recorded_branch = task
+            .branch
+            .as_deref()
+            .is_some_and(|branch| branch == current_branch);
+        let looks_like_task_branch = current_branch.starts_with(&format!("{engineer}/"))
+            && current_branch.contains("/")
+            && current_branch != engineer_base_branch_name(engineer);
+
+        matches_recorded_branch || looks_like_task_branch
     }
 
     pub(super) fn maybe_escalate_stale_reviews(&mut self) -> Result<()> {
@@ -309,12 +512,24 @@ impl TeamDaemon {
             }
         }
 
-        // Suppress if manager is actively working (likely processing directives)
-        let manager_working = self.config.members.iter().any(|m| {
+        // Suppress if manager has been actively working for less than 10 minutes.
+        // Previously this was an unconditional suppression, causing permanent
+        // deadlock when the shim state classifier got stuck on "working".
+        const MANAGER_WORKING_GRACE: Duration = Duration::from_secs(600);
+        let manager_recently_working = self.config.members.iter().any(|m| {
             m.role_type == RoleType::Manager
                 && self.states.get(&m.name) == Some(&MemberState::Working)
+                && self
+                    .shim_handles
+                    .get(&m.name)
+                    .map(|handle| {
+                        handle.secs_since_state_change() < MANAGER_WORKING_GRACE.as_secs()
+                    })
+                    // For non-shim agents, check if idle_started_at is absent
+                    // (meaning they transitioned to working recently)
+                    .unwrap_or_else(|| !self.idle_started_at.contains_key(&m.name))
         });
-        if manager_working {
+        if manager_recently_working {
             return Ok(());
         }
 
@@ -628,9 +843,10 @@ mod tests {
     use crate::team::config::RoleType;
     use crate::team::events::TeamEvent;
     use crate::team::hierarchy::MemberInstance;
+    use crate::team::task_loop::setup_engineer_worktree;
     use crate::team::test_helpers::{make_test_daemon, write_event_log};
     use crate::team::test_support::{
-        TestDaemonBuilder, write_board_task_file, write_owned_task_file,
+        TestDaemonBuilder, git_ok, init_git_repo, write_board_task_file, write_owned_task_file,
     };
 
     #[test]
@@ -982,6 +1198,54 @@ mod tests {
 
         daemon.reconcile_active_tasks().unwrap();
         assert_eq!(daemon.active_tasks.get("eng-1"), Some(&10));
+    }
+
+    #[test]
+    fn reconcile_active_tasks_marks_owned_task_active_when_worktree_already_on_task_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "replay-owned-task");
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: true,
+        };
+        let mut daemon = make_test_daemon(&repo, vec![manager, engineer]);
+        daemon.set_member_idle("eng-1");
+
+        write_board_task_file(
+            &repo,
+            10,
+            "active-task",
+            "in-progress",
+            Some("eng-1"),
+            &[],
+            None,
+        );
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-main/eng-1", &team_config_dir).unwrap();
+        crate::team::task_loop::checkout_worktree_branch_from_main(&worktree_dir, "eng-1/10")
+            .unwrap();
+        std::fs::write(worktree_dir.join("note.txt"), "done\n").unwrap();
+        git_ok(&worktree_dir, &["add", "note.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "task work"]);
+
+        daemon.reconcile_active_tasks().unwrap();
+        assert_eq!(daemon.active_task_id("eng-1"), Some(10));
     }
 
     #[test]
@@ -2089,5 +2353,180 @@ mod tests {
             .join("board")
             .join("tasks");
         assert!(tasks_dir.join("005-none-archive.md").exists());
+    }
+
+    // ── pipeline starvation time-bounded manager suppression ──
+
+    #[test]
+    fn pipeline_starvation_fires_when_manager_working_too_long() {
+        use crate::team::config::WorkflowPolicy;
+        use crate::team::standup::MemberState;
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "architect").unwrap();
+
+        let policy = WorkflowPolicy {
+            pipeline_starvation_threshold: Some(1),
+            ..WorkflowPolicy::default()
+        };
+
+        let architect = MemberInstance {
+            name: "architect".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let eng1 = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+        };
+
+        let mut states = std::collections::HashMap::new();
+        states.insert("manager".to_string(), MemberState::Working);
+        states.insert("eng-1".to_string(), MemberState::Idle);
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![architect, manager, eng1])
+            .states(states)
+            .workflow_policy(policy)
+            .build();
+
+        // Manager has no shim handle (non-shim mode) and no idle_started_at
+        // entry, meaning the old code would suppress starvation. But since
+        // there's no shim handle, the fallback checks idle_started_at. Without
+        // an entry, it falls back to suppressed. To test the shim path:
+        // Insert a mock shim handle for the manager that's been working for
+        // 20 minutes (past the 10-minute grace).
+        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+        let channel = crate::shim::protocol::Channel::new(parent);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "manager".into(),
+            channel,
+            999,
+            "claude".into(),
+            "claude".into(),
+            std::path::PathBuf::from("/tmp/test"),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Working);
+        // Backdate to 20 minutes ago
+        handle.state_changed_at = std::time::Instant::now() - std::time::Duration::from_secs(1200);
+        daemon.shim_handles.insert("manager".to_string(), handle);
+
+        daemon.maybe_detect_pipeline_starvation().unwrap();
+
+        assert!(
+            daemon.pipeline_starvation_fired,
+            "starvation should fire when manager has been working for >10 minutes"
+        );
+    }
+
+    #[test]
+    fn pipeline_starvation_suppressed_when_manager_recently_working() {
+        use crate::team::config::WorkflowPolicy;
+        use crate::team::standup::MemberState;
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "architect").unwrap();
+
+        let policy = WorkflowPolicy {
+            pipeline_starvation_threshold: Some(1),
+            ..WorkflowPolicy::default()
+        };
+
+        let architect = MemberInstance {
+            name: "architect".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        };
+        let eng1 = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+        };
+
+        let mut states = std::collections::HashMap::new();
+        states.insert("manager".to_string(), MemberState::Working);
+        states.insert("eng-1".to_string(), MemberState::Idle);
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![architect, manager, eng1])
+            .states(states)
+            .workflow_policy(policy)
+            .build();
+
+        // Insert a mock shim handle for manager that's been working for only
+        // 2 minutes (within the 10-minute grace).
+        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+        let channel = crate::shim::protocol::Channel::new(parent);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "manager".into(),
+            channel,
+            999,
+            "claude".into(),
+            "claude".into(),
+            std::path::PathBuf::from("/tmp/test"),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Working);
+        // Just started working — within grace period
+        daemon.shim_handles.insert("manager".to_string(), handle);
+
+        daemon.maybe_detect_pipeline_starvation().unwrap();
+
+        assert!(
+            !daemon.pipeline_starvation_fired,
+            "starvation should be suppressed when manager is recently working"
+        );
     }
 }

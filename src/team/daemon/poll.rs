@@ -81,6 +81,9 @@ impl TeamDaemon {
             // -- Recoverable subsystems: log-and-skip with consecutive-failure tracking --
             self.run_recoverable_step("poll_shim_handles", |daemon| daemon.poll_shim_handles());
             self.run_recoverable_step("shim_health_check", |daemon| daemon.shim_health_check());
+            self.run_recoverable_step("check_working_state_timeouts", |daemon| {
+                daemon.check_working_state_timeouts()
+            });
             self.run_recoverable_step("sync_launch_state_session_ids", |daemon| {
                 daemon.sync_launch_state_session_ids()
             });
@@ -94,6 +97,9 @@ impl TeamDaemon {
             });
             self.run_loop_step("retry_failed_deliveries", |daemon| {
                 daemon.retry_failed_deliveries()
+            });
+            self.run_recoverable_step("expire_stale_pending_messages", |daemon| {
+                daemon.expire_stale_pending_messages()
             });
 
             // -- Recoverable subsystems --

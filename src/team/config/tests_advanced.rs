@@ -468,6 +468,7 @@ fn parse_workflow_policy_defaults_all_applied() {
     assert_eq!(p.max_stall_restarts, 2);
     assert_eq!(p.health_check_interval_secs, 60);
     assert_eq!(p.uncommitted_warn_threshold, 200);
+    assert!(p.test_command.is_none());
 }
 
 #[test]
@@ -668,9 +669,9 @@ roles:
 }
 
 #[test]
-fn parse_orchestrator_position_defaults_to_bottom() {
+fn parse_orchestrator_position_defaults_to_left() {
     let config: TeamConfig = serde_yaml::from_str(minimal_yaml()).unwrap();
-    assert_eq!(config.orchestrator_position, OrchestratorPosition::Bottom);
+    assert_eq!(config.orchestrator_position, OrchestratorPosition::Left);
 }
 
 // --- Edge case tests: event log and retro ---

@@ -7,20 +7,32 @@ use anyhow::Result;
 use super::super::*;
 
 impl TeamDaemon {
-    pub(in super::super) fn engineer_active_board_item_count(
+    pub(in super::super) fn engineer_active_board_task_ids(
         &self,
         board_dir: &Path,
         engineer: &str,
-    ) -> Result<u32> {
-        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
-        Ok(tasks
+    ) -> Result<Vec<u32>> {
+        let mut ids: Vec<u32> = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?
             .into_iter()
             .filter(|task| {
                 (matches!(task.status.as_str(), "todo" | "in-progress")
                     && task.claimed_by.as_deref() == Some(engineer))
                     || (task.status == "review" && task.review_owner.as_deref() == Some(engineer))
             })
-            .count() as u32)
+            .map(|task| task.id)
+            .collect();
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    pub(in super::super) fn engineer_active_board_item_count(
+        &self,
+        board_dir: &Path,
+        engineer: &str,
+    ) -> Result<u32> {
+        Ok(self
+            .engineer_active_board_task_ids(board_dir, engineer)?
+            .len() as u32)
     }
 }
 
@@ -150,6 +162,12 @@ mod tests {
                 .engineer_active_board_item_count(&board_dir, "eng-1")
                 .unwrap(),
             3
+        );
+        assert_eq!(
+            daemon
+                .engineer_active_board_task_ids(&board_dir, "eng-1")
+                .unwrap(),
+            vec![1, 2, 3]
         );
     }
 

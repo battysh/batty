@@ -217,21 +217,40 @@ fn shell_single_quote(value: &str) -> String {
     value.replace('\'', "'\"'\"'")
 }
 
-/// Build a shell command that displays a shim's PTY log in a tmux pane.
-///
-/// Uses `tail -n 200 -F` (capital F) so it follows the file even after
-/// rotation/truncation. The pane becomes a read-only view of the agent's
-/// terminal output.
-pub fn display_pane_command(log_path: &Path) -> String {
+fn batty_binary() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.to_str().map(str::to_string))
+        .unwrap_or_else(|| "batty".to_string())
+}
+
+/// Build a shell command that runs the interactive shim pane bridge.
+pub fn display_pane_command(
+    project_root: &Path,
+    member: &str,
+    events_log_path: &Path,
+    pty_log_path: &Path,
+) -> String {
+    let batty = batty_binary();
     format!(
-        "bash -lc 'touch {path}; exec tail -n 200 -F {path}'",
-        path = shell_single_quote(log_path.to_string_lossy().as_ref())
+        "bash -lc 'touch {events}; touch {pty}; exec {batty} console-pane --project-root {root} --member {member} --events-log-path {events} --pty-log-path {pty}'",
+        batty = shell_single_quote(&batty),
+        root = shell_single_quote(project_root.to_string_lossy().as_ref()),
+        member = shell_single_quote(member),
+        events = shell_single_quote(events_log_path.to_string_lossy().as_ref()),
+        pty = shell_single_quote(pty_log_path.to_string_lossy().as_ref()),
     )
 }
 
-/// Respawn a tmux pane as a display-only viewer of a shim PTY log file.
-pub fn respawn_as_display_pane(pane_target: &str, log_path: &Path) -> Result<()> {
-    let cmd = display_pane_command(log_path);
+/// Respawn a tmux pane as an interactive shim console pane.
+pub fn respawn_as_display_pane(
+    pane_target: &str,
+    project_root: &Path,
+    member: &str,
+    events_log_path: &Path,
+    pty_log_path: &Path,
+) -> Result<()> {
+    let cmd = display_pane_command(project_root, member, events_log_path, pty_log_path);
     crate::tmux::respawn_pane(pane_target, &cmd)?;
     Ok(())
 }
@@ -1612,19 +1631,24 @@ roles:
 
     #[test]
     fn display_pane_command_simple_path() {
-        let path = std::path::PathBuf::from("/tmp/shim-logs/eng-1.pty.log");
-        let cmd = display_pane_command(&path);
-        assert!(cmd.contains("tail -n 200 -F"));
+        let root = std::path::PathBuf::from("/tmp/repo");
+        let events = std::path::PathBuf::from("/tmp/shim-logs/eng-1.events.log");
+        let pty = std::path::PathBuf::from("/tmp/shim-logs/eng-1.pty.log");
+        let cmd = display_pane_command(&root, "eng-1", &events, &pty);
+        assert!(cmd.contains("console-pane"));
+        assert!(cmd.contains("/tmp/shim-logs/eng-1.events.log"));
         assert!(cmd.contains("/tmp/shim-logs/eng-1.pty.log"));
         assert!(cmd.starts_with("bash -lc"));
     }
 
     #[test]
     fn display_pane_command_escapes_single_quotes() {
-        let path = std::path::PathBuf::from("/tmp/it's a log.pty.log");
-        let cmd = display_pane_command(&path);
+        let root = std::path::PathBuf::from("/tmp/repo");
+        let events = std::path::PathBuf::from("/tmp/it's events.log");
+        let pty = std::path::PathBuf::from("/tmp/it's a log.pty.log");
+        let cmd = display_pane_command(&root, "eng-1", &events, &pty);
         // Single quote should be escaped for shell safety
         assert!(!cmd.contains("it's"));
-        assert!(cmd.contains("tail -n 200 -F"));
+        assert!(cmd.contains("console-pane"));
     }
 }

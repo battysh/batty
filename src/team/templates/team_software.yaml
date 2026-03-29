@@ -1,4 +1,7 @@
 name: my-product
+use_shim: true
+orchestrator_pane: true
+orchestrator_position: left
 
 board:
   rotation_threshold: 25

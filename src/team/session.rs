@@ -439,6 +439,13 @@ fn migration_validation_notes(
     workflow_mode_is_explicit: bool,
 ) -> Vec<String> {
     if !workflow_mode_is_explicit {
+        if team_config.orchestrator_pane
+            && matches!(team_config.workflow_mode, config::WorkflowMode::Hybrid)
+        {
+            return vec![
+                "Migration: workflow_mode omitted; orchestrator_pane=true promotes the team to hybrid mode so the orchestrator surface is active.".to_string(),
+            ];
+        }
         return vec![
             "Migration: workflow_mode omitted; defaulting to legacy so existing teams and boards run unchanged.".to_string(),
         ];
@@ -644,7 +651,8 @@ roles:
 
         assert_eq!(notes.len(), 1);
         assert!(notes[0].contains("workflow_mode omitted"));
-        assert!(notes[0].contains("run unchanged"));
+        // team_pair.yaml has orchestrator_pane: true, so it gets promoted to hybrid
+        assert!(notes[0].contains("promotes the team to hybrid"));
     }
 
     #[test]
