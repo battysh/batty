@@ -155,7 +155,7 @@ fn check_agent_classifiers() -> Vec<CheckLine> {
     let test_cases: &[(AgentType, &str, ScreenVerdict)] = &[
         (
             AgentType::Claude,
-            "Some output\n\n\u{276F} ",
+            "Some output\n\u{276F}\n  bypass permissions on (shift+tab to cycle)",
             ScreenVerdict::AgentIdle,
         ),
         (

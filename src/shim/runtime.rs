@@ -50,6 +50,21 @@ const PROCESS_EXIT_POLL_MS: u64 = 100;
 const PARENT_DEATH_POLL_SECS: u64 = 1;
 const GROUP_TERM_GRACE_SECS: u64 = 2;
 
+fn reply_target_for(sender: &str) -> &str {
+    sender
+}
+
+fn format_injected_message(sender: &str, body: &str) -> String {
+    let reply_to = reply_target_for(sender);
+    format!(
+        "--- Message from {sender} ---\n\
+Reply-To: {reply_to}\n\
+If you need to reply, use: batty send {reply_to} \"<your reply>\"\n\
+\n\
+{body}"
+    )
+}
+
 fn shell_single_quote(input: &str) -> String {
     input.replace('\'', "'\\''")
 }
@@ -128,40 +143,38 @@ fn pty_write_paced(
     body: &[u8],
     enter: &[u8],
 ) -> std::io::Result<()> {
-    if agent_type == AgentType::Kiro {
-        let mut writer = pty_writer.lock().unwrap();
-        writer.write_all(b"\x1b[200~")?;
-        writer.write_all(body)?;
-        writer.write_all(b"\x1b[201~")?;
-        writer.flush()?;
-        drop(writer);
-        std::thread::sleep(std::time::Duration::from_millis(500));
+    // Use bracketed paste for TUI agents (Claude, Kiro, Codex).
+    // This is the standard terminal protocol for pasting text — the agent
+    // receives the complete body atomically between \x1b[200~ and \x1b[201~
+    // markers, then we send Enter to submit.
+    // Character-by-character injection loses keystrokes in TUI agents that
+    // use synchronized output, causing "pasted text" indicators without
+    // the Enter being processed.
+    match agent_type {
+        AgentType::Generic => {
+            // Generic/bash: write directly, no paste mode needed
+            let mut writer = pty_writer.lock().unwrap();
+            writer.write_all(body)?;
+            writer.write_all(enter)?;
+            writer.flush()?;
+        }
+        _ => {
+            // TUI agents: bracketed paste + pause + Enter
+            let mut writer = pty_writer.lock().unwrap();
+            writer.write_all(b"\x1b[200~")?;
+            writer.write_all(body)?;
+            writer.write_all(b"\x1b[201~")?;
+            writer.flush()?;
+            drop(writer);
 
-        let mut writer = pty_writer.lock().unwrap();
-        writer.write_all(enter)?;
-        writer.flush()?;
-        return Ok(());
+            // Pause to let the TUI process the paste before sending Enter
+            std::thread::sleep(std::time::Duration::from_millis(200));
+
+            let mut writer = pty_writer.lock().unwrap();
+            writer.write_all(enter)?;
+            writer.flush()?;
+        }
     }
-
-    let _ = agent_type;
-    let (initial_delay_ms, chunk_size, inter_chunk_delay_ms, pre_enter_delay_ms) = (0, 4, 5, 50);
-
-    if initial_delay_ms > 0 {
-        std::thread::sleep(std::time::Duration::from_millis(initial_delay_ms));
-    }
-
-    for chunk in body.chunks(chunk_size) {
-        let mut writer = pty_writer.lock().unwrap();
-        writer.write_all(chunk)?;
-        writer.flush()?;
-        drop(writer);
-        std::thread::sleep(std::time::Duration::from_millis(inter_chunk_delay_ms));
-    }
-    // Pause before Enter to let the TUI finish rendering the typed text.
-    std::thread::sleep(std::time::Duration::from_millis(pre_enter_delay_ms));
-    let mut writer = pty_writer.lock().unwrap();
-    writer.write_all(enter)?;
-    writer.flush()?;
     Ok(())
 }
 
@@ -296,6 +309,8 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
     cmd.args(["-lc", &supervised_cmd]);
     cmd.cwd(&args.cwd);
     cmd.env_remove("CLAUDECODE"); // prevent nested detection
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
 
     let mut child = pty_pair
         .slave
@@ -451,6 +466,9 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
 
                         let queue_depth = inner.message_queue.len();
                         let agent_type_for_enter = inner.agent_type;
+                        let queued_injected = queued_msg
+                            .as_ref()
+                            .map(|msg| format_injected_message(&msg.from, &msg.body));
 
                         drop(inner); // release lock before I/O
 
@@ -480,10 +498,11 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                         // Inject queued message into PTY
                         if let Some(msg) = queued_msg {
                             let enter = enter_seq(agent_type_for_enter);
+                            let injected = queued_injected.as_deref().unwrap_or(msg.body.as_str());
                             if let Err(e) = pty_write_paced(
                                 &pty_writer_pty,
                                 agent_type_for_enter,
-                                msg.body.as_bytes(),
+                                injected.as_bytes(),
                                 enter.as_bytes(),
                             ) {
                                 let _ = evt_channel.send(&Event::Error {
@@ -581,6 +600,9 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
 
             let queue_depth = inner.message_queue.len();
             let agent_type_for_enter = inner.agent_type;
+            let queued_injected = queued_msg
+                .as_ref()
+                .map(|msg| format_injected_message(&msg.from, &msg.body));
             drop(inner);
 
             for event in build_transition_events(
@@ -599,10 +621,11 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
 
             if let Some(msg) = queued_msg {
                 let enter = enter_seq(agent_type_for_enter);
+                let injected = queued_injected.as_deref().unwrap_or(msg.body.as_str());
                 if let Err(e) = pty_write_paced(
                     &pty_writer_idle,
                     agent_type_for_enter,
-                    msg.body.as_bytes(),
+                    injected.as_bytes(),
                     enter.as_bytes(),
                 ) {
                     let _ = idle_channel.send(&Event::Error {
@@ -616,6 +639,44 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                     from: ShimState::Idle,
                     to: ShimState::Working,
                     summary: format!("delivering queued message ({} remaining)", queue_depth),
+                });
+            }
+        }
+    });
+
+    // -- Periodic screen poll thread: re-classify even when PTY is quiet --
+    // The PTY reader thread only classifies when new output arrives. If the
+    // agent finishes and shows the idle prompt but produces no further output,
+    // the reader blocks on read() and the state stays Working forever.
+    // This thread polls the screen every 5 seconds to catch that case.
+    let inner_poll = Arc::clone(&inner);
+    let mut poll_channel = cmd_channel
+        .try_clone()
+        .context("failed to clone channel for poll thread")?;
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let mut inner = inner_poll.lock().unwrap();
+            if inner.state != ShimState::Working {
+                continue;
+            }
+            // Only re-classify if PTY has been quiet for at least 2 seconds
+            if inner.last_pty_output_at.elapsed().as_secs() < 2 {
+                continue;
+            }
+            let verdict = classifier::classify(inner.agent_type, inner.parser.screen());
+            if verdict == classifier::ScreenVerdict::AgentIdle {
+                let summary = inner.last_n_lines(5);
+                inner.state = ShimState::Idle;
+                inner.state_changed_at = Instant::now();
+                drop(inner);
+
+                // Emit the transition — the daemon will handle message
+                // queue draining and completion processing.
+                let _ = poll_channel.send(&Event::StateChanged {
+                    from: ShimState::Working,
+                    to: ShimState::Idle,
+                    summary,
                 });
             }
         }
@@ -732,6 +793,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                         inner.pending_message_id = message_id;
                         let agent_type = inner.agent_type;
                         let enter = enter_seq(agent_type);
+                        let injected = format_injected_message(&from, &body);
                         drop(inner);
                         // Write body char-by-char with micro-delays for TUI
                         // agents that use synchronized output. Bulk writes
@@ -739,7 +801,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                         if let Err(e) = pty_write_paced(
                             &pty_writer,
                             agent_type,
-                            body.as_bytes(),
+                            injected.as_bytes(),
                             enter.as_bytes(),
                         ) {
                             cmd_channel.send(&Event::Error {
@@ -937,10 +999,11 @@ fn build_transition_events(
     last_working_screen: &str,
     message_id: Option<String>,
 ) -> Vec<Event> {
+    let summary = sanitize_summary(summary);
     let mut events = vec![Event::StateChanged {
         from,
         to,
-        summary: summary.to_string(),
+        summary: summary.clone(),
     }];
 
     // Working → Idle = completion, but only if a message was actually pending.
@@ -957,7 +1020,7 @@ fn build_transition_events(
         events.push(Event::Completion {
             message_id,
             response,
-            last_lines: summary.to_string(),
+            last_lines: summary.clone(),
         });
     }
 
@@ -965,11 +1028,30 @@ fn build_transition_events(
     if to == ShimState::ContextExhausted {
         events.push(Event::ContextExhausted {
             message: "Agent reported context exhaustion".to_string(),
-            last_lines: summary.to_string(),
+            last_lines: summary,
         });
     }
 
     events
+}
+
+fn sanitize_summary(summary: &str) -> String {
+    let cleaned: Vec<String> = summary
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || is_tui_chrome(line) || is_prompt_line(trimmed) {
+                return None;
+            }
+            Some(strip_claude_bullets(trimmed))
+        })
+        .collect();
+
+    if cleaned.is_empty() {
+        String::new()
+    } else {
+        cleaned.join("\n")
+    }
 }
 
 /// Extract the agent's response by diffing pre-injection and post-completion
@@ -1433,6 +1515,37 @@ mod tests {
     #[test]
     fn max_queue_depth_is_16() {
         assert_eq!(MAX_QUEUE_DEPTH, 16);
+    }
+
+    #[test]
+    fn format_injected_message_includes_sender_and_reply_target() {
+        let formatted = format_injected_message("human", "what is 2+2?");
+        assert!(formatted.contains("--- Message from human ---"));
+        assert!(formatted.contains("Reply-To: human"));
+        assert!(formatted.contains("batty send human"));
+        assert!(formatted.ends_with("what is 2+2?"));
+    }
+
+    #[test]
+    fn format_injected_message_uses_sender_as_reply_target() {
+        let formatted = format_injected_message("manager", "status?");
+        assert!(formatted.contains("Reply-To: manager"));
+        assert!(formatted.contains("batty send manager"));
+    }
+
+    #[test]
+    fn sanitize_summary_strips_tui_chrome_and_prompt_lines() {
+        let summary = "────────────────────\n❯ \n  ⏵⏵ bypass permissions on\nThe answer is 4\n";
+        assert_eq!(sanitize_summary(summary), "The answer is 4");
+    }
+
+    #[test]
+    fn sanitize_summary_keeps_multiline_meaningful_content() {
+        let summary = "  Root cause: stale resume id\n\n  Fix: retry with fresh start\n";
+        assert_eq!(
+            sanitize_summary(summary),
+            "Root cause: stale resume id\nFix: retry with fresh start"
+        );
     }
 
     // -----------------------------------------------------------------------

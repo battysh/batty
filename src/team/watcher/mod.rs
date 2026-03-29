@@ -16,6 +16,7 @@ use std::time::Instant;
 
 use crate::tmux;
 
+pub(crate) use claude::discover_claude_session_file;
 pub use screen::is_at_agent_prompt;
 
 use claude::ClaudeSessionTracker;
@@ -315,8 +316,20 @@ impl SessionWatcher {
 
     pub fn current_session_id(&self) -> Option<String> {
         match self.tracker.as_ref() {
-            Some(SessionTracker::Codex(codex)) => session_file_id(codex.session_file.as_ref()),
+            Some(SessionTracker::Codex(codex)) => codex
+                .session_file
+                .as_ref()
+                .and_then(|path| codex::codex_session_resume_id(path).ok().flatten())
+                .or_else(|| codex.session_id.clone()),
             Some(SessionTracker::Claude(claude)) => session_file_id(claude.session_file.as_ref()),
+            None => None,
+        }
+    }
+
+    pub fn configured_session_id(&self) -> Option<String> {
+        match self.tracker.as_ref() {
+            Some(SessionTracker::Codex(codex)) => codex.session_id.clone(),
+            Some(SessionTracker::Claude(claude)) => claude.session_id.clone(),
             None => None,
         }
     }
@@ -343,6 +356,11 @@ impl SessionWatcher {
         observed
     }
 
+    pub fn refresh_session_tracking(&mut self) -> Result<()> {
+        let _ = self.poll_tracker()?;
+        Ok(())
+    }
+
     fn poll_tracker(&mut self) -> Result<TrackerState> {
         let current_state = self.state;
         let Some(tracker) = self.tracker.as_mut() else {
@@ -358,6 +376,7 @@ impl SessionWatcher {
                         codex.session_id.as_deref(),
                     )?;
                     if let Some(session_file) = codex.session_file.as_ref() {
+                        codex.session_id = codex::codex_session_resume_id(session_file)?;
                         codex.offset = current_file_len(session_file)?;
                     }
                     codex.quality = CodexQualitySignals::default();
@@ -397,6 +416,7 @@ impl SessionWatcher {
                     )? {
                         if latest != session_file {
                             codex.session_file = Some(latest.clone());
+                            codex.session_id = codex::codex_session_resume_id(&latest)?;
                             codex.offset = 0;
                             codex.quality = CodexQualitySignals::default();
                             codex.last_response_hash = None;
@@ -743,6 +763,69 @@ mod tests {
         assert_eq!(
             watcher.current_session_id().as_deref(),
             Some("1e94dc68-6004-402a-9a7b-1bfca674806e")
+        );
+    }
+
+    #[test]
+    fn watcher_exposes_codex_payload_session_id_from_bound_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_file = tmp.path().join("rollout-2026-03-26T13-54-07-sample.jsonl");
+        fs::write(
+            &session_file,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"019d2b48-3d33-7613-bb3d-d0b4ecd45e2e\",\"cwd\":\"/repo/.batty/codex-context/architect\"}}\n",
+        )
+        .unwrap();
+
+        let mut watcher = SessionWatcher::new("%0", "architect", 300, None);
+        watcher.tracker = Some(SessionTracker::Codex(CodexSessionTracker {
+            sessions_root: tmp.path().to_path_buf(),
+            cwd: PathBuf::from("/repo/.batty/codex-context/architect"),
+            session_id: Some("rollout-2026-03-26T13-54-07-sample".to_string()),
+            session_file: Some(session_file),
+            offset: 0,
+            quality: CodexQualitySignals::default(),
+            last_response_hash: None,
+        }));
+
+        assert_eq!(
+            watcher.current_session_id().as_deref(),
+            Some("019d2b48-3d33-7613-bb3d-d0b4ecd45e2e")
+        );
+    }
+
+    #[test]
+    fn refresh_session_tracking_binds_codex_tracker_without_pane_poll() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions_root = tmp.path().join("sessions");
+        let session_dir = sessions_root.join("2026").join("03").join("27");
+        fs::create_dir_all(&session_dir).unwrap();
+        let cwd = PathBuf::from("/repo/.batty/codex-context/architect");
+        let session_file = session_dir.join("rollout-2026-03-27T15-04-13-sample.jsonl");
+        fs::write(
+            &session_file,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"019d30ae-c469-7e33-8c33-45dcdc85804c\",\"cwd\":\"{}\"}}}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+
+        let mut watcher = SessionWatcher::new("%0", "architect", 300, None);
+        watcher.tracker = Some(SessionTracker::Codex(CodexSessionTracker {
+            sessions_root,
+            cwd,
+            session_id: None,
+            session_file: None,
+            offset: 0,
+            quality: CodexQualitySignals::default(),
+            last_response_hash: None,
+        }));
+
+        watcher.refresh_session_tracking().unwrap();
+
+        assert_eq!(
+            watcher.current_session_id().as_deref(),
+            Some("019d30ae-c469-7e33-8c33-45dcdc85804c")
         );
     }
 

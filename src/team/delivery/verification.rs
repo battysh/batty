@@ -151,18 +151,7 @@ impl TeamDaemon {
                 continue;
             }
 
-            let is_ready = self
-                .watchers
-                .get(&delivery.recipient)
-                .map(|watcher| {
-                    matches!(
-                        watcher.state,
-                        super::super::watcher::WatcherState::Ready
-                            | super::super::watcher::WatcherState::Idle
-                    )
-                })
-                .unwrap_or(true);
-            if !is_ready {
+            if !self.member_ready_for_delivery(&delivery.recipient) {
                 self.failed_deliveries.push(delivery);
                 continue;
             }
@@ -178,21 +167,20 @@ impl TeamDaemon {
 
             // Retry via shim channel
             let delivered = if let Some(handle) = self.shim_handles.get_mut(&delivery.recipient) {
-                if handle.is_ready() {
-                    match handle.send_message(&delivery.from, &delivery.body) {
-                        Ok(()) => true,
-                        Err(error) => {
-                            warn!(
-                                recipient = %delivery.recipient,
-                                from = %delivery.from,
-                                error = %error,
-                                "shim retry delivery failed"
-                            );
-                            false
-                        }
+                match handle.send_message(&delivery.from, &delivery.body) {
+                    Ok(()) => {
+                        handle.apply_state_change(crate::shim::protocol::ShimState::Working);
+                        true
                     }
-                } else {
-                    false
+                    Err(error) => {
+                        warn!(
+                            recipient = %delivery.recipient,
+                            from = %delivery.from,
+                            error = %error,
+                            "shim retry delivery failed"
+                        );
+                        false
+                    }
                 }
             } else {
                 false
@@ -479,6 +467,8 @@ mod tests {
                     shim_health_check_interval_secs: 60,
                     shim_health_timeout_secs: 120,
                     shim_shutdown_timeout_secs: 30,
+                    shim_working_state_timeout_secs: 1800,
+                    pending_queue_max_age_secs: 600,
                     event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                     retro_min_duration_secs: 60,
                     roles: Vec::new(),
@@ -526,6 +516,7 @@ mod tests {
             last_health_check: Instant::now(),
             last_uncommitted_warn: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
+            completion_rejection_counts: HashMap::new(),
             shim_handles: HashMap::new(),
             last_shim_health_check: Instant::now(),
         }
@@ -583,6 +574,8 @@ mod tests {
                     shim_health_check_interval_secs: 60,
                     shim_health_timeout_secs: 120,
                     shim_shutdown_timeout_secs: 30,
+                    shim_working_state_timeout_secs: 1800,
+                    pending_queue_max_age_secs: 600,
                     event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                     retro_min_duration_secs: 60,
                     roles: Vec::new(),

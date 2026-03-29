@@ -355,6 +355,17 @@ Remove legacy code and validate the complete system.
 
 **Success criteria for v0.7.0:** A multi-agent team run completes autonomously with shim backend, with no regressions vs. tmux-direct mode and measurably better state detection latency.
 
+### Immediate Reliability Follow-Up
+
+Recent dogfooding exposed two concrete reliability gaps in shim-era unattended operation: warm resume could fail against missing Codex saved sessions, and branch integration could fail because the main merge context was not clean.
+
+- **Resume fallback hardening** — if saved session lookup fails during resume, the runtime must immediately cold-start the agent and restore task context rather than retrying the invalid session path. Sequencing anchor for the wave. (`T-365`)
+- **Crash policy defaults** — unattended team configs should default to `auto_respawn_on_crash: true`, with explicit operator guidance that disabling it is for debugging only and that healthy live panes do not need proactive restart after the setting is enabled. (`T-363`)
+- **Recovery validation** — end-to-end shim validation must include missing-session resume cases across architect, manager, and engineer roles so a single stale session reference cannot collapse the whole team. Depends on fallback hardening landing first. (`T-364`, depends on `T-365`)
+- **Merge-preflight cleanliness** — merges must verify that the main integration worktree is clean before attempting branch integration, and must surface a structured blocker when local tracked or untracked changes would be overwritten. Recovery should preserve legitimate local work on an isolation branch or worktree before retrying. Added after task `#352` was blocked by dirty main-worktree files and recovered via preserved local state plus clean-retry merge. (`T-367`)
+
+**Exit:** Missing or stale saved-session state no longer causes cascading agent failure. Teams recover automatically without manual pane restarts, and branch integration only runs from a verified clean main context.
+
 ---
 
 ## Goal-Directed Architecture with Console TUI (In Progress — v0.8.0)

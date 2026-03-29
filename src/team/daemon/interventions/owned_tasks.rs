@@ -11,6 +11,7 @@ use super::super::helpers::format_stuck_duration;
 use super::super::*;
 use super::{OwnedTaskInterventionState, task_needs_owned_intervention};
 use crate::team::config::PlanningDirectiveFile;
+use crate::team::task_loop::{current_worktree_branch, worktree_has_user_changes};
 
 impl TeamDaemon {
     pub(in super::super) fn maybe_intervene_owned_tasks(&mut self) -> Result<()> {
@@ -57,6 +58,10 @@ impl TeamDaemon {
                 .filter(|task| task_needs_owned_intervention(task.status.as_str()))
                 .collect();
             if owned_tasks.is_empty() {
+                self.owned_task_interventions.remove(&name);
+                continue;
+            }
+            if self.member_has_local_task_progress(&name, &owned_tasks) {
                 self.owned_task_interventions.remove(&name);
                 continue;
             }
@@ -168,6 +173,31 @@ impl TeamDaemon {
         }
 
         Ok(())
+    }
+
+    fn member_has_local_task_progress(
+        &self,
+        member_name: &str,
+        owned_tasks: &[&crate::task::Task],
+    ) -> bool {
+        let worktree_dir = self.worktree_dir(member_name);
+        if !worktree_dir.exists() {
+            return false;
+        }
+
+        let current_branch = current_worktree_branch(&worktree_dir).ok();
+        let branch_matches_owned_task = current_branch.as_deref().is_some_and(|branch| {
+            owned_tasks
+                .iter()
+                .filter_map(|task| task.branch.as_deref())
+                .any(|task_branch| task_branch == branch)
+        });
+        if !branch_matches_owned_task {
+            return false;
+        }
+
+        worktree_has_user_changes(&worktree_dir).unwrap_or(false)
+            || worktree_commits_ahead_of_main(&worktree_dir).unwrap_or(0) > 0
     }
 
     pub(super) fn build_owned_task_intervention_message(
@@ -323,6 +353,23 @@ impl TeamDaemon {
             message,
         )
     }
+}
+
+fn worktree_commits_ahead_of_main(worktree_dir: &std::path::Path) -> Result<u32> {
+    let output = std::process::Command::new("git")
+        .args(["rev-list", "--count", "main..HEAD"])
+        .current_dir(worktree_dir)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "failed to count commits ahead of main in {}: {}",
+            worktree_dir.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()?)
 }
 
 pub(super) fn owned_task_intervention_signature(tasks: &[&crate::task::Task]) -> String {

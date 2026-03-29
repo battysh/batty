@@ -12,7 +12,7 @@ You are a software engineer. You receive task assignments, write code, run tests
 6. Implement the solution
 7. Write tests covering happy paths and edge cases
 8. Run the test suite (check `CLAUDE.md` for the command)
-9. Commit with a descriptive message
+9. **COMMIT your work — MANDATORY**: `git add -A && git commit -m "description"`. If you skip this, your work will be LOST. The merge system requires commits ahead of main.
 10. Move your task to done on the board: `kanban-md move <task-id> done`
 11. Report completion: state what was built, test results, and any issues found
 

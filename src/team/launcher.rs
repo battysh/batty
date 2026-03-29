@@ -1,6 +1,7 @@
 use super::*;
 use crate::team::task_loop::setup_multi_repo_worktree;
-use crate::team::{layout, shim_log_path, shim_logs_dir};
+use crate::team::watcher::{SessionTrackerConfig, discover_claude_session_file};
+use crate::team::{layout, shim_events_log_path, shim_log_path, shim_logs_dir};
 use tracing::debug;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -18,6 +19,17 @@ pub(super) struct MemberLaunchPlan {
     initial_state: MemberState,
     activate_watcher: bool,
     resume_summary: String,
+    persist_session_id: bool,
+}
+
+impl MemberLaunchPlan {
+    fn persisted_identity(&self) -> LaunchIdentity {
+        let mut identity = self.identity.clone();
+        if !self.persist_session_id {
+            identity.session_id = None;
+        }
+        identity
+    }
 }
 
 impl TeamDaemon {
@@ -79,6 +91,9 @@ impl TeamDaemon {
     }
 
     pub(super) fn validate_member_panes_on_startup(&mut self) {
+        if self.config.team_config.use_shim {
+            return;
+        }
         let members = self.config.members.clone();
         for member in &members {
             if member.role_type == RoleType::User {
@@ -124,14 +139,17 @@ impl TeamDaemon {
             &prompt_text,
         );
         let previous_identity = previous_launch_state.get(&member.name);
+        let resolved_previous_session_id = previous_identity
+            .and_then(|identity| identity.session_id.as_deref())
+            .and_then(|session_id| resolve_session_id(&normalized_agent, session_id));
         let session_available = previous_identity
             .and_then(|identity| identity.session_id.as_deref())
-            .is_none_or(|session_id| session_id_exists(&normalized_agent, session_id));
+            .is_none_or(|_| resolved_previous_session_id.is_some());
         let (member_resume, session_id) = resolve_member_launch_session(
             &normalized_agent,
             previous_identity,
             requested_resume,
-            session_available,
+            resolved_previous_session_id.clone(),
             previous_identity
                 .and_then(|identity| identity.session_id.as_deref())
                 .is_some_and(|existing| duplicate_claude_session_ids.contains(existing)),
@@ -175,13 +193,14 @@ impl TeamDaemon {
             short_cmd,
             work_dir,
             identity: LaunchIdentity {
-                agent: normalized_agent,
+                agent: normalized_agent.clone(),
                 prompt: prompt_text,
                 session_id,
             },
             initial_state: initial_member_state(idle, member_resume),
             activate_watcher: should_activate_watcher_on_spawn(idle, member_resume),
             resume_summary,
+            persist_session_id: member_resume || normalized_agent != "claude-code",
         })
     }
 
@@ -194,7 +213,9 @@ impl TeamDaemon {
         if let Some(watcher) = self.watchers.get_mut(&member.name) {
             watcher.set_session_id(plan.identity.session_id.clone());
         }
-        self.ensure_member_pane_cwd(&member.name, pane_id, &plan.work_dir)?;
+        if !self.config.team_config.use_shim {
+            self.ensure_member_pane_cwd(&member.name, pane_id, &plan.work_dir)?;
+        }
         tmux::send_keys(pane_id, &plan.short_cmd, true)?;
         self.states.insert(member.name.clone(), plan.initial_state);
         self.update_automation_timers_for_state(&member.name, plan.initial_state);
@@ -257,7 +278,7 @@ impl TeamDaemon {
                         warn!(member = %member.name, error = %error, "failed to launch member");
                         continue;
                     }
-                    next_launch_state.insert(member.name.clone(), plan.identity);
+                    next_launch_state.insert(member.name.clone(), plan.persisted_identity());
                 }
                 Err(error) => {
                     warn!(
@@ -322,7 +343,15 @@ impl TeamDaemon {
                     resume_summaries.push(plan.resume_summary.clone());
 
                     let log_path = shim_log_path(&self.config.project_root, &member.name);
-                    if let Err(error) = layout::respawn_as_display_pane(&pane_id, &log_path) {
+                    let events_log_path =
+                        shim_events_log_path(&self.config.project_root, &member.name);
+                    if let Err(error) = layout::respawn_as_display_pane(
+                        &pane_id,
+                        &self.config.project_root,
+                        &member.name,
+                        &events_log_path,
+                        &log_path,
+                    ) {
                         warn!(
                             member = %member.name,
                             pane = %pane_id,
@@ -353,7 +382,8 @@ impl TeamDaemon {
                                 MemberState::Working,
                             );
                             self.record_agent_spawned(&member.name);
-                            next_launch_state.insert(member.name.clone(), plan.identity);
+                            next_launch_state
+                                .insert(member.name.clone(), plan.persisted_identity());
                         }
                         Err(error) => {
                             warn!(
@@ -388,12 +418,40 @@ impl TeamDaemon {
         Ok(())
     }
 
-    pub(super) fn sync_launch_state_session_ids(&self) -> Result<()> {
+    pub(super) fn sync_launch_state_session_ids(&mut self) -> Result<()> {
         let mut launch_state = load_launch_state(&self.config.project_root);
         let mut changed = false;
 
-        for (member_name, watcher) in &self.watchers {
-            let Some(session_id) = watcher.current_session_id() else {
+        for (member_name, watcher) in &mut self.watchers {
+            watcher.refresh_session_tracking()?;
+            let preferred_session_id = watcher.configured_session_id();
+            let session_id = watcher.current_session_id().or_else(|| {
+                let member = self
+                    .config
+                    .members
+                    .iter()
+                    .find(|member| member.name == *member_name)?;
+                let tracker = member_session_tracker_config(&self.config.project_root, member)?;
+                match tracker {
+                    SessionTrackerConfig::Claude { cwd } => {
+                        let projects_root = std::env::var_os("HOME")
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|| PathBuf::from("/"))
+                            .join(".claude")
+                            .join("projects");
+                        let session_file = discover_claude_session_file(
+                            &projects_root,
+                            &cwd,
+                            preferred_session_id.as_deref(),
+                        )
+                        .ok()??;
+                        let stem = session_file.file_stem()?.to_str()?;
+                        Some(stem.to_string())
+                    }
+                    _ => None,
+                }
+            });
+            let Some(session_id) = session_id else {
                 continue;
             };
             let Some(entry) = launch_state.get_mut(member_name) else {
@@ -643,13 +701,14 @@ fn default_codex_sessions_root() -> PathBuf {
         .join("sessions")
 }
 
-fn session_id_exists(agent_name: &str, session_id: &str) -> bool {
+fn resolve_session_id(agent_name: &str, session_id: &str) -> Option<String> {
     match agent_name {
-        "codex-cli" => codex_session_id_exists_in(&default_codex_sessions_root(), session_id),
+        "codex-cli" => codex_resume_session_id_in(&default_codex_sessions_root(), session_id),
         // Kiro doesn't write session files; the ID is only used for
         // launch-state bookkeeping so we always consider it valid.
-        "kiro-cli" => !session_id.is_empty(),
-        _ => claude_session_id_exists_in(&default_claude_projects_root(), session_id),
+        "kiro-cli" => (!session_id.is_empty()).then(|| session_id.to_string()),
+        _ => claude_session_id_exists_in(&default_claude_projects_root(), session_id)
+            .then(|| session_id.to_string()),
     }
 }
 
@@ -665,22 +724,41 @@ fn claude_session_id_exists_in(projects_root: &Path, session_id: &str) -> bool {
     })
 }
 
+#[cfg(test)]
 fn codex_session_id_exists_in(sessions_root: &Path, session_id: &str) -> bool {
-    let session_file = format!("{session_id}.jsonl");
+    codex_resume_session_id_in(sessions_root, session_id).is_some()
+}
+
+fn codex_resume_session_id_in(sessions_root: &Path, session_id: &str) -> Option<String> {
     let Ok(years) = fs::read_dir(sessions_root) else {
-        return false;
+        return None;
     };
 
-    years.flatten().any(|year| {
+    years.flatten().find_map(|year| {
         let Ok(months) = fs::read_dir(year.path()) else {
-            return false;
+            return None;
         };
-        months.flatten().any(|month| {
+        months.flatten().find_map(|month| {
             let Ok(days) = fs::read_dir(month.path()) else {
-                return false;
+                return None;
             };
-            days.flatten()
-                .any(|day| day.path().join(&session_file).exists())
+            days.flatten().find_map(|day| {
+                let Ok(entries) = fs::read_dir(day.path()) else {
+                    return None;
+                };
+                entries.flatten().find_map(|entry| {
+                    let path = entry.path();
+                    if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                        return None;
+                    }
+                    let file_id = path.file_stem().and_then(|stem| stem.to_str());
+                    let meta_id = read_codex_session_meta_id(&path);
+                    if file_id == Some(session_id) || meta_id.as_deref() == Some(session_id) {
+                        return meta_id.or_else(|| file_id.map(str::to_string));
+                    }
+                    None
+                })
+            })
         })
     })
 }
@@ -689,7 +767,7 @@ fn resolve_member_launch_session(
     agent_name: &str,
     previous_identity: Option<&LaunchIdentity>,
     resume_requested: bool,
-    session_available: bool,
+    resolved_previous_session_id: Option<String>,
     duplicate_session_id: bool,
 ) -> (bool, Option<String>) {
     if agent_name == "codex-cli" {
@@ -697,13 +775,14 @@ fn resolve_member_launch_session(
             return (false, None);
         }
 
-        if let Some(previous_session_id) =
-            previous_identity.and_then(|identity| identity.session_id.clone())
+        if previous_identity
+            .and_then(|identity| identity.session_id.as_deref())
+            .is_some()
         {
-            if !session_available {
-                return (false, None);
+            if let Some(previous_session_id) = resolved_previous_session_id {
+                return (true, Some(previous_session_id));
             }
-            return (true, Some(previous_session_id));
+            return (false, None);
         }
 
         return (false, None);
@@ -728,16 +807,35 @@ fn resolve_member_launch_session(
         return (false, Some(session_id));
     }
 
-    if let Some(previous_session_id) =
-        previous_identity.and_then(|identity| identity.session_id.clone())
-    {
-        if !session_available {
-            return (false, Some(session_id));
-        }
+    if let Some(previous_session_id) = resolved_previous_session_id {
         return (true, Some(previous_session_id));
     }
 
     (false, Some(session_id))
+}
+
+fn read_codex_session_meta_id(path: &Path) -> Option<String> {
+    let Ok(file) = fs::File::open(path) else {
+        return None;
+    };
+    let reader = std::io::BufReader::new(file);
+    for line in std::io::BufRead::lines(reader).map_while(Result::ok) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if entry.get("type").and_then(serde_json::Value::as_str) != Some("session_meta") {
+            continue;
+        }
+        return entry
+            .get("payload")
+            .and_then(|payload| payload.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+    }
+    None
 }
 
 pub(super) fn duplicate_claude_session_ids(
@@ -818,7 +916,7 @@ fn format_resume_decision_summary(
                 .map(short_session_summary)
                 .unwrap_or_else(|| "identity matched".to_string())
         } else if previous.session_id.is_none() {
-            "session unavailable".to_string()
+            "no saved session".to_string()
         } else {
             "starting fresh".to_string()
         }
@@ -1011,9 +1109,10 @@ mod tests {
         let agents_path = context_dir.join("AGENTS.md");
         assert!(content.contains(&format!("cd '{}'", context_dir.display())));
         assert!(
-            content
-                .contains("exec codex --dangerously-bypass-approvals-and-sandbox 'work the task'")
+            content.contains("codex --dangerously-bypass-approvals-and-sandbox 'work the task'")
         );
+        // Active (non-resume) codex should NOT use exec
+        assert!(!content.contains("exec codex"));
         let agents = std::fs::read_to_string(&agents_path).unwrap();
         assert!(agents.contains("role context"));
     }
@@ -1081,7 +1180,7 @@ mod tests {
             std::env::temp_dir().join(format!("batty-launch-{project_slug}-eng-1.sh"));
         let content = std::fs::read_to_string(&script_path).unwrap();
         assert!(content.contains(
-            "exec codex resume '55555555-5555-4555-8555-555555555555' --dangerously-bypass-approvals-and-sandbox"
+            "codex resume '55555555-5555-4555-8555-555555555555' --dangerously-bypass-approvals-and-sandbox"
         ));
         assert!(!content.contains("--last"));
     }
@@ -1309,6 +1408,31 @@ mod tests {
     }
 
     #[test]
+    fn no_saved_session_is_not_reported_as_unavailable() {
+        let previous = LaunchIdentity {
+            agent: "codex-cli".to_string(),
+            prompt: "same prompt".to_string(),
+            session_id: None,
+        };
+
+        let summary = format_resume_decision_summary(
+            "eng-1-1",
+            "codex-cli",
+            Some(&previous),
+            true,
+            "same prompt",
+            true,
+            false,
+            false,
+            None,
+        );
+
+        assert!(summary.contains("eng-1-1=no"));
+        assert!(summary.contains("no saved session"));
+        assert!(!summary.contains("session unavailable"));
+    }
+
+    #[test]
     fn resolve_member_launch_session_reuses_saved_claude_session_id() {
         let previous = LaunchIdentity {
             agent: "claude-code".to_string(),
@@ -1316,8 +1440,13 @@ mod tests {
             session_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
         };
 
-        let (resume, session_id) =
-            resolve_member_launch_session("claude-code", Some(&previous), true, true, false);
+        let (resume, session_id) = resolve_member_launch_session(
+            "claude-code",
+            Some(&previous),
+            true,
+            Some("11111111-1111-4111-8111-111111111111".to_string()),
+            false,
+        );
 
         assert!(resume);
         assert_eq!(
@@ -1335,7 +1464,7 @@ mod tests {
         };
 
         let (resume, session_id) =
-            resolve_member_launch_session("claude-code", Some(&previous), true, true, false);
+            resolve_member_launch_session("claude-code", Some(&previous), true, None, false);
 
         assert!(!resume);
         assert!(session_id.is_some());
@@ -1349,8 +1478,13 @@ mod tests {
             session_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
         };
 
-        let (resume, session_id) =
-            resolve_member_launch_session("claude-code", Some(&previous), true, true, true);
+        let (resume, session_id) = resolve_member_launch_session(
+            "claude-code",
+            Some(&previous),
+            true,
+            Some("11111111-1111-4111-8111-111111111111".to_string()),
+            true,
+        );
 
         assert!(!resume);
         assert!(session_id.is_some());
@@ -1369,12 +1503,61 @@ mod tests {
         };
 
         let (resume, session_id) =
-            resolve_member_launch_session("claude-code", Some(&previous), true, false, false);
+            resolve_member_launch_session("claude-code", Some(&previous), true, None, false);
 
         assert!(!resume);
         assert!(session_id.is_some());
         assert_ne!(
             session_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+    }
+
+    #[test]
+    fn fresh_claude_launch_plan_does_not_persist_provisional_session_id() {
+        let plan = MemberLaunchPlan {
+            short_cmd: "exec claude".to_string(),
+            work_dir: PathBuf::from("/tmp/project"),
+            identity: LaunchIdentity {
+                agent: "claude-code".to_string(),
+                prompt: "prompt".to_string(),
+                session_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+            },
+            initial_state: MemberState::Idle,
+            activate_watcher: false,
+            resume_summary: "architect=no (no saved session)".to_string(),
+            persist_session_id: false,
+        };
+
+        let persisted = plan.persisted_identity();
+        assert_eq!(persisted.agent, "claude-code");
+        assert_eq!(persisted.prompt, "prompt");
+        assert!(persisted.session_id.is_none());
+        assert_eq!(
+            plan.identity.session_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+    }
+
+    #[test]
+    fn resumed_claude_launch_plan_keeps_session_id_for_persistence() {
+        let plan = MemberLaunchPlan {
+            short_cmd: "exec claude --resume".to_string(),
+            work_dir: PathBuf::from("/tmp/project"),
+            identity: LaunchIdentity {
+                agent: "claude-code".to_string(),
+                prompt: "prompt".to_string(),
+                session_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+            },
+            initial_state: MemberState::Working,
+            activate_watcher: true,
+            resume_summary: "architect=yes (session 11111111...)".to_string(),
+            persist_session_id: true,
+        };
+
+        let persisted = plan.persisted_identity();
+        assert_eq!(
+            persisted.session_id.as_deref(),
             Some("11111111-1111-4111-8111-111111111111")
         );
     }
@@ -1387,8 +1570,13 @@ mod tests {
             session_id: Some("codex-session-1".to_string()),
         };
 
-        let (resume, session_id) =
-            resolve_member_launch_session("codex-cli", Some(&previous), true, true, false);
+        let (resume, session_id) = resolve_member_launch_session(
+            "codex-cli",
+            Some(&previous),
+            true,
+            Some("codex-session-1".to_string()),
+            false,
+        );
 
         assert!(resume);
         assert_eq!(session_id.as_deref(), Some("codex-session-1"));
@@ -1403,7 +1591,7 @@ mod tests {
         };
 
         let (resume, session_id) =
-            resolve_member_launch_session("codex-cli", Some(&previous), true, false, false);
+            resolve_member_launch_session("codex-cli", Some(&previous), true, None, false);
 
         assert!(!resume);
         assert!(session_id.is_none());
@@ -1417,8 +1605,13 @@ mod tests {
             session_id: Some("kiro-session-1".to_string()),
         };
 
-        let (resume, session_id) =
-            resolve_member_launch_session("kiro-cli", Some(&previous), true, true, false);
+        let (resume, session_id) = resolve_member_launch_session(
+            "kiro-cli",
+            Some(&previous),
+            true,
+            Some("kiro-session-1".to_string()),
+            false,
+        );
 
         assert!(!resume);
         assert!(session_id.is_some());
@@ -1455,6 +1648,28 @@ mod tests {
 
         assert!(codex_session_id_exists_in(tmp.path(), "codex-session-1"));
         assert!(!codex_session_id_exists_in(tmp.path(), "codex-session-2"));
+    }
+
+    #[test]
+    fn codex_resume_session_id_in_resolves_payload_id_from_rollout_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_dir = tmp.path().join("2026").join("03").join("21");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            session_dir.join("rollout-2026-03-26T13-54-07-sample.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"019d2b48-3d33-7613-bb3d-d0b4ecd45e2e\"}}\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            codex_resume_session_id_in(tmp.path(), "rollout-2026-03-26T13-54-07-sample").as_deref(),
+            Some("019d2b48-3d33-7613-bb3d-d0b4ecd45e2e")
+        );
+        assert_eq!(
+            codex_resume_session_id_in(tmp.path(), "019d2b48-3d33-7613-bb3d-d0b4ecd45e2e")
+                .as_deref(),
+            Some("019d2b48-3d33-7613-bb3d-d0b4ecd45e2e")
+        );
     }
 
     #[test]

@@ -63,7 +63,71 @@ impl TeamDaemon {
             }
         }
 
+        // Sync pane sizes: if a tmux pane was resized, send Resize command
+        // to the shim so the agent's PTY matches the display.
+        let shim_names: Vec<String> = self.shim_handles.keys().cloned().collect();
+        for name in &shim_names {
+            let Some(pane_id) = self.config.pane_map.get(name.as_str()) else {
+                continue;
+            };
+            let Some((cols, rows)) = query_tmux_pane_size(pane_id) else {
+                continue;
+            };
+            let Some(handle) = self.shim_handles.get_mut(name.as_str()) else {
+                continue;
+            };
+            if handle.is_terminal() {
+                continue;
+            }
+            // Only send resize if dimensions changed
+            if handle.last_cols != cols || handle.last_rows != rows {
+                if let Err(error) = handle
+                    .channel
+                    .send(&crate::shim::protocol::Command::Resize { rows, cols })
+                {
+                    debug!(
+                        member = name.as_str(),
+                        error = %error,
+                        "failed to send Resize to shim"
+                    );
+                } else {
+                    debug!(
+                        member = name.as_str(),
+                        rows, cols, "synced pane size to shim"
+                    );
+                }
+                handle.last_cols = cols;
+                handle.last_rows = rows;
+            }
+        }
+
         Ok(())
+    }
+}
+
+/// Query tmux pane dimensions by pane ID (e.g. "%602").
+fn query_tmux_pane_size(pane_id: &str) -> Option<(u16, u16)> {
+    let output = std::process::Command::new("tmux")
+        .args([
+            "display-message",
+            "-t",
+            pane_id,
+            "-p",
+            "#{pane_width} #{pane_height}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<&str> = stdout.trim().split_whitespace().collect();
+    if parts.len() >= 2 {
+        let cols: u16 = parts[0].parse().ok()?;
+        let rows: u16 = parts[1].parse().ok()?;
+        Some((cols, rows))
+    } else {
+        None
     }
 }
 
