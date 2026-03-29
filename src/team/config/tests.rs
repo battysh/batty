@@ -199,6 +199,14 @@ roles:
     assert!(config.automation.triage_interventions);
     assert_eq!(config.automation.intervention_idle_grace_secs, 60);
     assert_eq!(config.workflow_policy.narration_detection_threshold, 6);
+    assert_eq!(
+        config.workflow_policy.context_pressure_threshold_bytes,
+        512_000
+    );
+    assert_eq!(
+        config.workflow_policy.context_pressure_restart_delay_secs,
+        120
+    );
     assert!(config.cost.models.is_empty());
     assert_eq!(config.roles[0].instances, 1);
     assert_eq!(config.workflow_mode, WorkflowMode::Legacy);

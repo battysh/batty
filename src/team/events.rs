@@ -58,6 +58,8 @@ pub struct TeamEvent {
     pub uptime_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_bytes: Option<u64>,
     pub ts: u64,
 }
 
@@ -88,6 +90,7 @@ impl TeamEvent {
             error: None,
             uptime_secs: None,
             session_size_bytes: None,
+            output_bytes: None,
             ts: Self::now(),
         }
     }
@@ -261,6 +264,21 @@ impl TeamEvent {
             role: Some(role.into()),
             task: task.map(|id| id.to_string()),
             ..Self::base("narration_detected")
+        }
+    }
+
+    pub fn context_pressure_warning(
+        role: &str,
+        task: Option<u32>,
+        output_bytes: u64,
+        threshold_bytes: u64,
+    ) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: task.map(|id| id.to_string()),
+            output_bytes: Some(output_bytes),
+            reason: Some(format!("threshold_bytes={threshold_bytes}")),
+            ..Self::base("context_pressure_warning")
         }
     }
 
@@ -646,6 +664,10 @@ mod tests {
             ("member_crashed", TeamEvent::member_crashed("eng-1", true)),
             ("pane_death", TeamEvent::pane_death("eng-1")),
             ("pane_respawned", TeamEvent::pane_respawned("eng-1")),
+            (
+                "context_pressure_warning",
+                TeamEvent::context_pressure_warning("eng-1", Some(42), 400_000, 512_000),
+            ),
             ("message_routed", TeamEvent::message_routed("a", "b")),
             ("agent_spawned", TeamEvent::agent_spawned("eng-1")),
             (
@@ -807,6 +829,22 @@ mod tests {
         assert_eq!(parsed["task"].as_str().unwrap(), "67");
         assert_eq!(parsed["reason"].as_str().unwrap(), "context_exhausted");
         assert_eq!(parsed["restart_count"].as_u64().unwrap(), 2);
+    }
+
+    #[test]
+    fn context_pressure_warning_includes_threshold_and_output_bytes() {
+        let event = TeamEvent::context_pressure_warning("eng-1-2", Some(67), 420_000, 512_000);
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            parsed["event"].as_str().unwrap(),
+            "context_pressure_warning"
+        );
+        assert_eq!(parsed["role"].as_str().unwrap(), "eng-1-2");
+        assert_eq!(parsed["task"].as_str().unwrap(), "67");
+        assert_eq!(parsed["output_bytes"].as_u64().unwrap(), 420_000);
+        assert_eq!(parsed["reason"].as_str().unwrap(), "threshold_bytes=512000");
     }
 
     #[test]

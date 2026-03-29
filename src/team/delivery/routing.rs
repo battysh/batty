@@ -692,6 +692,7 @@ mod tests {
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
             narration_tracker: Default::default(),
+            context_pressure_tracker: Default::default(),
             last_health_check: Instant::now(),
             last_uncommitted_warn: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
