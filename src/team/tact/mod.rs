@@ -10,3 +10,6 @@ pub struct TaskSpec {
     pub depends_on: Vec<u32>,
     pub tags: Vec<String>,
 }
+
+pub use parser::{create_board_tasks, parse_planning_response};
+pub use prompt::{PLANNING_RESPONSE_FORMAT, compose_planning_prompt};
