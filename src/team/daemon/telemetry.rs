@@ -91,6 +91,21 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::context_exhausted(role, task, session_size_bytes));
     }
 
+    pub(super) fn record_context_pressure_warning(
+        &mut self,
+        role: &str,
+        task: Option<u32>,
+        output_bytes: u64,
+        threshold_bytes: u64,
+    ) {
+        self.emit_event(TeamEvent::context_pressure_warning(
+            role,
+            task,
+            output_bytes,
+            threshold_bytes,
+        ));
+    }
+
     pub(crate) fn record_delivery_failed(&mut self, role: &str, from: &str, reason: &str) {
         self.emit_event(TeamEvent::delivery_failed(role, from, reason));
     }
@@ -494,6 +509,7 @@ mod tests {
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
             narration_tracker: Default::default(),
+            context_pressure_tracker: Default::default(),
             last_health_check: Instant::now(),
             last_uncommitted_warn: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
@@ -902,6 +918,7 @@ mod tests {
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
             narration_tracker: Default::default(),
+            context_pressure_tracker: Default::default(),
             last_health_check: Instant::now(),
             last_uncommitted_warn: HashMap::new(),
             pending_delivery_queue: HashMap::new(),

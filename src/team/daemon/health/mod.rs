@@ -17,6 +17,7 @@ use super::*;
 use anyhow::{Context, Result};
 
 mod checks;
+pub mod context;
 mod context_exhaustion;
 pub mod narration;
 mod ping_pong;

@@ -137,6 +137,7 @@ impl TeamDaemon {
             Event::Ready => {
                 let _ = append_shim_event_log(&self.config.project_root, member_name, "<- ready");
                 info!(member = member_name, "shim agent ready");
+                self.context_pressure_tracker.clear_member(member_name);
 
                 // Drain any pending messages
                 if self.pending_delivery_queue.contains_key(member_name) {
@@ -201,6 +202,9 @@ impl TeamDaemon {
                 if prev_state != Some(member_state) {
                     self.states.insert(member_name.to_string(), member_state);
                     self.update_automation_timers_for_state(member_name, member_state);
+                }
+                if member_state != MemberState::Working {
+                    self.context_pressure_tracker.mark_not_working(member_name);
                 }
 
                 self.maybe_persist_member_session_id(member_name);
@@ -365,6 +369,18 @@ impl TeamDaemon {
                 if let Some(handle) = self.shim_handles.get_mut(member_name) {
                     handle.record_pong();
                 }
+            }
+
+            Event::SessionStats {
+                output_bytes,
+                uptime_secs,
+            } => {
+                let _ = append_shim_event_log(
+                    &self.config.project_root,
+                    member_name,
+                    &format!("<- stats output_bytes={output_bytes} uptime_secs={uptime_secs}"),
+                );
+                self.handle_context_pressure_stats(member_name, output_bytes, uptime_secs)?;
             }
 
             Event::Warning { message, idle_secs } => {

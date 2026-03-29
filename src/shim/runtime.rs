@@ -42,6 +42,7 @@ const KIRO_IDLE_SETTLE_MS: u64 = 1200;
 
 /// Max time to wait for agent to show its first prompt (secs).
 const READY_TIMEOUT_SECS: u64 = 120;
+const SESSION_STATS_INTERVAL_SECS: u64 = 60;
 
 /// Maximum number of messages that can be queued while the agent is working.
 const MAX_QUEUE_DEPTH: usize = 16;
@@ -227,6 +228,8 @@ struct ShimInner {
     state_changed_at: Instant,
     last_screen_hash: u64,
     last_pty_output_at: Instant,
+    started_at: Instant,
+    cumulative_output_bytes: u64,
     pre_injection_content: String,
     pending_message_id: Option<String>,
     agent_type: AgentType,
@@ -337,6 +340,8 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
         state_changed_at: Instant::now(),
         last_screen_hash: 0,
         last_pty_output_at: Instant::now(),
+        started_at: Instant::now(),
+        cumulative_output_bytes: 0,
         pre_injection_content: String::new(),
         pending_message_id: None,
         agent_type: args.agent_type,
@@ -378,6 +383,8 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
 
                     let mut inner = inner_pty.lock().unwrap();
                     inner.last_pty_output_at = Instant::now();
+                    inner.cumulative_output_bytes =
+                        inner.cumulative_output_bytes.saturating_add(n as u64);
                     inner.parser.process(&buf[..n]);
 
                     // Classify when the screen content actually changes.
@@ -678,6 +685,33 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                     to: ShimState::Idle,
                     summary,
                 });
+            }
+        }
+    });
+
+    let inner_stats = Arc::clone(&inner);
+    let mut stats_channel = cmd_channel
+        .try_clone()
+        .context("failed to clone channel for stats thread")?;
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(SESSION_STATS_INTERVAL_SECS));
+            let inner = inner_stats.lock().unwrap();
+            if inner.state == ShimState::Dead {
+                return;
+            }
+            let output_bytes = inner.cumulative_output_bytes;
+            let uptime_secs = inner.started_at.elapsed().as_secs();
+            drop(inner);
+
+            if stats_channel
+                .send(&Event::SessionStats {
+                    output_bytes,
+                    uptime_secs,
+                })
+                .is_err()
+            {
+                return;
             }
         }
     });
