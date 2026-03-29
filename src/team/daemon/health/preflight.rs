@@ -91,10 +91,14 @@ mod tests {
     use super::super::super::*;
     use super::super::helpers::{board_dir, ensure_board_initialized, ensure_kanban_available};
     use super::super::test_helpers::{EnvVarGuard, PATH_LOCK, setup_fake_kanban, test_team_config};
-    use crate::team::config::RoleType;
+    use crate::team::config::{
+        AutomationConfig, BoardConfig, OrchestratorPosition, RoleType, StandupConfig, TeamConfig,
+        WorkflowMode, WorkflowPolicy,
+    };
     use crate::team::hierarchy::MemberInstance;
     use crate::team::test_support::{
-        TestDaemonBuilder, architect_member, engineer_member, init_git_repo, setup_fake_claude,
+        TestDaemonBuilder, architect_member, engineer_member, init_git_repo, manager_member,
+        setup_fake_backend, setup_fake_claude,
     };
     use crate::team::watcher::SessionWatcher;
     use serial_test::serial;
@@ -216,6 +220,188 @@ mod tests {
         }));
 
         crate::tmux::kill_session(&session).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
+    fn startup_preflight_missing_sessions_recover_failed_member_without_respawning_healthy_panes() {
+        let _path_guard = PATH_LOCK.lock().unwrap();
+        let session = format!("batty-test-startup-missing-session-{}", std::process::id());
+        let _ = crate::tmux::kill_session(&session);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "startup_missing_sessions");
+        let fake_kanban = setup_fake_kanban(&tmp, "startup-missing-session");
+        let (fake_claude_bin, _fake_claude_log) = setup_fake_claude(&tmp, "supervisors");
+        let (fake_codex_bin, _fake_codex_log) =
+            setup_fake_backend(&tmp, "codex", "eng-1-fake-codex.log");
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let _path = EnvVarGuard::set(
+            "PATH",
+            &format!(
+                "{}:{}:{}:{original_path}",
+                fake_kanban.to_string_lossy(),
+                fake_claude_bin.to_string_lossy(),
+                fake_codex_bin.to_string_lossy(),
+            ),
+        );
+
+        crate::tmux::create_session(&session, "bash", &[], repo.to_string_lossy().as_ref())
+            .unwrap();
+        crate::tmux::create_window(
+            &session,
+            "manager",
+            "bash",
+            &[],
+            repo.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        crate::tmux::create_window(
+            &session,
+            "eng-1",
+            "bash",
+            &[],
+            repo.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+
+        let architect_pane = crate::tmux::pane_id(&session).unwrap();
+        let manager_pane = crate::tmux::pane_id(&format!("{session}:manager")).unwrap();
+        let engineer_pane = crate::tmux::pane_id(&format!("{session}:eng-1")).unwrap();
+
+        Command::new("tmux")
+            .args([
+                "set-option",
+                "-p",
+                "-t",
+                &engineer_pane,
+                "remain-on-exit",
+                "on",
+            ])
+            .output()
+            .unwrap();
+        crate::tmux::send_keys(&engineer_pane, "exit", true).unwrap();
+        for _ in 0..20 {
+            if crate::tmux::pane_dead(&engineer_pane).unwrap_or(false) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(crate::tmux::pane_dead(&engineer_pane).unwrap());
+        assert!(!crate::tmux::pane_dead(&architect_pane).unwrap_or(true));
+        assert!(!crate::tmux::pane_dead(&manager_pane).unwrap_or(true));
+
+        std::fs::write(
+            repo.join(".batty").join("launch-state.json"),
+            serde_json::json!({
+                "architect": {
+                    "agent": "claude-code",
+                    "prompt": "",
+                    "session_id": "missing-architect-session"
+                },
+                "manager": {
+                    "agent": "claude-code",
+                    "prompt": "",
+                    "session_id": "missing-manager-session"
+                },
+                "eng-1": {
+                    "agent": "codex-cli",
+                    "prompt": "",
+                    "session_id": "missing-engineer-session"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut daemon = TeamDaemon::new(DaemonConfig {
+            project_root: repo.clone(),
+            team_config: TeamConfig {
+                name: "test".to_string(),
+                agent: None,
+                workflow_mode: WorkflowMode::Hybrid,
+                workflow_policy: WorkflowPolicy::default(),
+                board: BoardConfig::default(),
+                standup: StandupConfig::default(),
+                automation: AutomationConfig::default(),
+                automation_sender: None,
+                external_senders: Vec::new(),
+                orchestrator_pane: true,
+                orchestrator_position: OrchestratorPosition::Bottom,
+                layout: None,
+                cost: Default::default(),
+                grafana: Default::default(),
+                use_shim: false,
+                auto_respawn_on_crash: false,
+                shim_health_check_interval_secs: 60,
+                shim_health_timeout_secs: 120,
+                shim_shutdown_timeout_secs: 30,
+                shim_working_state_timeout_secs: 1800,
+                pending_queue_max_age_secs: 600,
+                event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+                retro_min_duration_secs: 60,
+                roles: Vec::new(),
+            },
+            session: session.clone(),
+            members: vec![
+                architect_member("architect"),
+                manager_member("manager", Some("architect")),
+                engineer_member("eng-1", Some("manager"), false),
+            ],
+            pane_map: HashMap::from([
+                ("architect".to_string(), architect_pane.clone()),
+                ("manager".to_string(), manager_pane.clone()),
+                ("eng-1".to_string(), engineer_pane.clone()),
+            ]),
+        })
+        .unwrap();
+
+        daemon.run_startup_preflight().unwrap();
+        assert!(!crate::tmux::pane_dead(&architect_pane).unwrap_or(true));
+        assert!(!crate::tmux::pane_dead(&manager_pane).unwrap_or(true));
+        assert!(!crate::tmux::pane_dead(&engineer_pane).unwrap_or(true));
+
+        daemon.spawn_all_agents(true).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+
+        assert!(crate::tmux::session_exists(&session));
+        assert_eq!(
+            daemon.states.get("architect"),
+            Some(&crate::team::standup::MemberState::Idle)
+        );
+        assert_eq!(
+            daemon.states.get("manager"),
+            Some(&crate::team::standup::MemberState::Idle)
+        );
+        assert_eq!(
+            daemon.states.get("eng-1"),
+            Some(&crate::team::standup::MemberState::Idle)
+        );
+
+        let events = crate::team::events::read_events(
+            &repo.join(".batty").join("team_config").join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "pane_respawned" && event.role.as_deref() == Some("eng-1")
+        }));
+        assert!(!events.iter().any(|event| {
+            event.event == "pane_respawned" && event.role.as_deref() == Some("architect")
+        }));
+        assert!(!events.iter().any(|event| {
+            event.event == "pane_respawned" && event.role.as_deref() == Some("manager")
+        }));
+
+        let orchestrator_log =
+            std::fs::read_to_string(repo.join(".batty").join("orchestrator.log")).unwrap();
+        assert!(orchestrator_log.contains("architect=no (session missing)"));
+        assert!(orchestrator_log.contains("manager=no (session missing)"));
+        assert!(orchestrator_log.contains("eng-1=no (session missing)"));
+
+        crate::tmux::kill_session(&session).unwrap();
+        let _ = std::fs::remove_dir_all(&fake_claude_bin);
+        let _ = std::fs::remove_dir_all(&fake_codex_bin);
     }
 
     #[test]
