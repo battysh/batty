@@ -232,6 +232,8 @@ pub struct WorkflowPolicy {
     pub max_stall_restarts: u32,
     #[serde(default = "default_health_check_interval_secs")]
     pub health_check_interval_secs: u64,
+    #[serde(default = "default_planning_cycle_cooldown_secs")]
+    pub planning_cycle_cooldown_secs: u64,
     #[serde(default = "default_uncommitted_warn_threshold")]
     pub uncommitted_warn_threshold: usize,
     #[serde(default)]
@@ -266,11 +268,16 @@ impl Default for WorkflowPolicy {
             stall_threshold_secs: default_stall_threshold_secs(),
             max_stall_restarts: default_max_stall_restarts(),
             health_check_interval_secs: default_health_check_interval_secs(),
+            planning_cycle_cooldown_secs: default_planning_cycle_cooldown_secs(),
             uncommitted_warn_threshold: default_uncommitted_warn_threshold(),
             test_command: None,
             auto_merge: AutoMergePolicy::default(),
         }
     }
+}
+
+fn default_planning_cycle_cooldown_secs() -> u64 {
+    300
 }
 
 fn default_sensitive_paths() -> Vec<String> {
