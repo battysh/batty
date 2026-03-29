@@ -50,8 +50,14 @@ planning/          # Architecture, roadmap, philosophy docs
 
 Tests are split into **unit** and **integration**:
 
-- **Unit tests** (`cargo test`): ~1,574 tests that run without tmux. Safe for CI without a tmux server.
+- **Unit tests** (`cargo test`): ~2,509 tests that run without tmux. Safe for CI without a tmux server.
 - **Integration tests** (`cargo test --features integration`): 56 tmux-dependent tests gated behind the `integration` Cargo feature. These require a running tmux server.
+
+## Monitoring
+
+- **Telemetry:** SQLite database at `.batty/telemetry.db` — events, agent metrics, task metrics, session summaries
+- **Grafana:** `batty grafana setup` installs Grafana + SQLite plugin, provisions datasource and imports the bundled 34-panel dashboard
+- **Dashboard panels:** stat counters, health gauges, hourly time series (with gap-filling for outages), pie charts, tables
 
 Integration tests use `#[cfg_attr(not(feature = "integration"), ignore)]`. Without the feature flag, they are automatically skipped.
 
