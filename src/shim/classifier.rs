@@ -104,9 +104,12 @@ fn detect_context_exhausted(content: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Claude Code prompt characters.
+// Claude prompt and spinner chars retained for use in tests and other classifiers.
+#[allow(dead_code)]
 const CLAUDE_PROMPT_CHARS: &[char] = &['\u{276F}']; // ❯
 
 /// Claude spinner prefixes.
+#[allow(dead_code)]
 const CLAUDE_SPINNER_CHARS: &[char] = &[
     '\u{00B7}', // ·
     '\u{2722}', // ✢
@@ -193,6 +196,7 @@ pub fn detect_claude_dialog(content: &str) -> bool {
     detect_startup_dialog(content)
 }
 
+#[allow(dead_code)]
 fn looks_like_claude_spinner(line: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.is_empty() {

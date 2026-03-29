@@ -121,7 +121,7 @@ fn query_tmux_pane_size(pane_id: &str) -> Option<(u16, u16)> {
         return None;
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<&str> = stdout.trim().split_whitespace().collect();
+    let parts: Vec<&str> = stdout.split_whitespace().collect();
     if parts.len() >= 2 {
         let cols: u16 = parts[0].parse().ok()?;
         let rows: u16 = parts[1].parse().ok()?;

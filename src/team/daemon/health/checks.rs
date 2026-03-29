@@ -96,7 +96,7 @@ impl TeamDaemon {
                             task_id,
                             "clearing active task after merge conflict recovery"
                         );
-                        self.clear_active_task(&name);
+                        self.clear_active_task(name);
                     }
                 }
                 continue;
