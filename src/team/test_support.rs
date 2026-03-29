@@ -365,6 +365,8 @@ impl<'a> TestDaemonBuilder<'a> {
         daemon.last_auto_dispatch = Instant::now();
         daemon.pipeline_starvation_fired = false;
         daemon.pipeline_starvation_last_fired = None;
+        daemon.planning_cycle_last_fired = None;
+        daemon.planning_cycle_active = false;
         daemon.retro_generated = false;
         daemon.failed_deliveries = Vec::new();
         daemon.poll_interval = Duration::from_secs(5);

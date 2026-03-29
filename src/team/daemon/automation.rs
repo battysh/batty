@@ -11,6 +11,7 @@ use tracing::{info, warn};
 
 use super::helpers::MemberWorktreeContext;
 use super::*;
+use crate::team::board_cmd;
 
 impl TeamDaemon {
     pub(super) fn reconcile_active_tasks(&mut self) -> Result<()> {
@@ -608,6 +609,140 @@ impl TeamDaemon {
         Ok(())
     }
 
+    pub(super) fn maybe_trigger_planning_cycle(&mut self) -> Result<()> {
+        if !self.pipeline_starvation_fired || self.planning_cycle_active {
+            return Ok(());
+        }
+
+        let cooldown = Duration::from_secs(
+            self.config
+                .team_config
+                .workflow_policy
+                .planning_cycle_cooldown_secs,
+        );
+        if let Some(last) = self.planning_cycle_last_fired
+            && last.elapsed() < cooldown
+        {
+            return Ok(());
+        }
+
+        let Some(architect) = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.role_type == RoleType::Architect)
+            .map(|member| member.name.clone())
+        else {
+            return Ok(());
+        };
+
+        let board_tasks =
+            crate::task::load_tasks_from_dir(&self.board_dir().join("tasks")).unwrap_or_default();
+        let board_summary = format!(
+            "todo={}, backlog={}, in-progress={}, review={}, done={}, idle_engineers={}",
+            board_tasks
+                .iter()
+                .filter(|task| task.status == "todo")
+                .count(),
+            board_tasks
+                .iter()
+                .filter(|task| task.status == "backlog")
+                .count(),
+            board_tasks
+                .iter()
+                .filter(|task| task.status == "in-progress")
+                .count(),
+            board_tasks
+                .iter()
+                .filter(|task| task.status == "review")
+                .count(),
+            board_tasks
+                .iter()
+                .filter(|task| task.status == "done")
+                .count(),
+            self.truly_idle_engineer_count(&board_tasks)
+        );
+        let recent_completions = crate::team::events::read_events(
+            &crate::team::team_events_path(&self.config.project_root),
+        )?
+        .into_iter()
+        .rev()
+        .filter(|event| event.event == "task_completed")
+        .take(5)
+        .map(|event| match (event.role, event.task) {
+            (Some(role), Some(task)) => format!("{role} completed task #{task}"),
+            (Some(role), None) => format!("{role} reported a completion"),
+            _ => "recent completion recorded".to_string(),
+        })
+        .collect::<Vec<_>>();
+        let prompt = crate::team::tact::compose_planning_prompt(
+            &self.config.team_config.name,
+            &board_summary,
+            &recent_completions,
+        );
+        let body = format!(
+            "HIGH PRIORITY: planning cycle triggered because the pipeline starved.\n\n{prompt}"
+        );
+
+        let inbox_root = inbox::inboxes_root(&self.config.project_root);
+        let sender = self.automation_sender_for(&architect);
+        let message = inbox::InboxMessage::new_send(&sender, &architect, &body);
+        inbox::deliver_to_inbox(&inbox_root, &message)?;
+        self.record_message_routed(&sender, &architect);
+
+        self.planning_cycle_last_fired = Some(Instant::now());
+        self.planning_cycle_active = true;
+        info!(architect, "triggered planning cycle after pipeline starvation");
+        self.record_orchestrator_action(format!(
+            "planning: triggered planning cycle for {} after pipeline starvation",
+            architect
+        ));
+        Ok(())
+    }
+
+    pub(super) fn handle_planning_response(&mut self, response: &str) -> Result<usize> {
+        let specs = crate::team::tact::parse_planning_response(response);
+        let result = (|| {
+            let board_dir = self.board_dir();
+            let mut created = 0usize;
+            for spec in specs {
+                let tags = (!spec.tags.is_empty()).then(|| spec.tags.join(","));
+                let depends_on = (!spec.depends_on.is_empty()).then(|| {
+                    spec.depends_on
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                });
+                board_cmd::create_task(
+                    &board_dir,
+                    &spec.title,
+                    &spec.body,
+                    spec.priority.as_deref(),
+                    tags.as_deref(),
+                    depends_on.as_deref(),
+                )
+                .with_context(|| format!("failed to create planning task '{}'", spec.title))?;
+                created += 1;
+            }
+            Ok(created)
+        })();
+
+        self.planning_cycle_active = false;
+
+        match result {
+            Ok(created) => {
+                info!(created, "applied planning cycle response");
+                self.record_orchestrator_action(format!(
+                    "planning: applied planning response and created {} tasks",
+                    created
+                ));
+                Ok(created)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Count engineers that are tmux-idle AND have no active board items.
     pub(super) fn truly_idle_engineer_count(&self, all_tasks: &[crate::task::Task]) -> usize {
         let engineers_with_active_items: std::collections::HashSet<String> = all_tasks
@@ -874,8 +1009,58 @@ mod tests {
     use crate::team::task_loop::setup_engineer_worktree;
     use crate::team::test_helpers::{make_test_daemon, write_event_log};
     use crate::team::test_support::{
-        TestDaemonBuilder, git_ok, init_git_repo, write_board_task_file, write_owned_task_file,
+        EnvVarGuard, PATH_LOCK, TestDaemonBuilder, git_ok, init_git_repo, write_board_task_file,
+        write_open_task_file, write_owned_task_file,
     };
+    use serial_test::serial;
+
+    fn setup_fake_kanban_for_planning(tmp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+        let fake_bin = tmp.path().join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        let log_path = tmp.path().join("kanban.log");
+        let script = fake_bin.join("kanban-md");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/bash
+set -euo pipefail
+printf '%s\\n' \"$*\" >> '{}'
+if [ \"$1\" != \"create\" ]; then
+  exit 1
+fi
+title=\"$2\"
+body=\"\"
+priority=\"high\"
+tags=\"\"
+depends_on=\"\"
+shift 2
+while [ $# -gt 0 ]; do
+  case \"$1\" in
+    --body) body=\"$2\"; shift 2 ;;
+    --priority) priority=\"$2\"; shift 2 ;;
+    --tags) tags=\"$2\"; shift 2 ;;
+    --depends-on) depends_on=\"$2\"; shift 2 ;;
+    --dir) board_dir=\"$2\"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+mkdir -p \"$board_dir/tasks\"
+count=$(find \"$board_dir/tasks\" -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')
+id=$((count + 1))
+printf -- '---\nid: %s\ntitle: %s\nstatus: todo\npriority: %s\n---\n\n%s\n' \"$id\" \"$title\" \"$priority\" \"$body\" > \"$board_dir/tasks/$(printf '%03d' \"$id\")-task.md\"
+printf 'Created task #%s\n' \"$id\"
+",
+                log_path.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        (fake_bin, log_path)
+    }
 
     #[test]
     fn maybe_auto_unblock_moves_blocked_task_to_todo_and_notifies_owner() {
