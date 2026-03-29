@@ -1908,7 +1908,8 @@ mod tests {
         paste_buffer(&pane).unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(300));
-        let content = capture_pane(&pane).unwrap();
+        let live_pane = pane_id(session).unwrap_or(pane);
+        let content = capture_pane(&live_pane).unwrap();
         assert!(
             content.contains("hello-from-buffer"),
             "paste-buffer should inject text into pane, got: {content:?}"
