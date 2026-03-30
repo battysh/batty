@@ -45,8 +45,21 @@ fn format_git_command(repo_dir: &Path, args: &[&str]) -> String {
     parts.join(" ")
 }
 
+fn git_program() -> &'static str {
+    for program in ["git", "/usr/bin/git", "/opt/homebrew/bin/git"] {
+        if std::process::Command::new(program)
+            .arg("--version")
+            .output()
+            .is_ok()
+        {
+            return program;
+        }
+    }
+    "git"
+}
+
 fn run_git_with_status(repo_dir: &Path, args: &[&str]) -> Result<std::process::Output, GitError> {
-    Command::new("git")
+    Command::new(git_program())
         .arg("-C")
         .arg(repo_dir)
         .args(args)
@@ -59,7 +72,7 @@ fn run_git_with_status(repo_dir: &Path, args: &[&str]) -> Result<std::process::O
 
 /// Check whether `path` is inside a git work tree.
 pub fn is_git_repo(path: &Path) -> bool {
-    Command::new("git")
+    Command::new(git_program())
         .arg("-C")
         .arg(path)
         .args(["rev-parse", "--is-inside-work-tree"])
