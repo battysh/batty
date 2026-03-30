@@ -516,7 +516,11 @@ impl TeamDaemon {
         }))
     }
 
-    fn handle_shim_cold_respawn(&mut self, member_name: &str, reason: &str) -> Result<()> {
+    pub(super) fn handle_shim_cold_respawn(
+        &mut self,
+        member_name: &str,
+        reason: &str,
+    ) -> Result<()> {
         let Some(plan) = self.cold_respawn_plan(member_name)? else {
             return Ok(());
         };
