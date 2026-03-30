@@ -231,9 +231,15 @@ exit 1
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use crate::shim::protocol::{Command, ShimState, socketpair};
+    use crate::team::daemon::agent_handle::AgentHandle;
     use crate::team::events::TeamEvent;
+    use crate::team::inbox;
     use crate::team::test_helpers::{make_test_daemon, write_event_log};
-    use crate::team::test_support::{TestDaemonBuilder, manager_member, write_owned_task_file};
+    use crate::team::test_support::{
+        TestDaemonBuilder, engineer_member, manager_member, write_owned_task_file,
+        write_owned_task_file_with_context,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -391,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn context_restart_count_counts_all_reasons_for_task() {
+    fn task_restart_count_uses_latest_task_resumed_event_for_task() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
 
@@ -399,14 +405,13 @@ mod tests {
             tmp.path(),
             &[
                 TeamEvent::agent_restarted("eng-1", "42", "context_exhausted", 1),
-                TeamEvent::agent_restarted("eng-1", "42", "stalled", 1),
-                TeamEvent::agent_restarted("eng-1", "99", "context_exhausted", 1),
+                TeamEvent::task_resumed("eng-1", "42", "context_exhausted", 1),
+                TeamEvent::task_resumed("eng-1", "42", "stalled", 2),
+                TeamEvent::task_resumed("eng-1", "99", "context_exhausted", 1),
             ],
         );
 
         let daemon = make_test_daemon(tmp.path(), vec![]);
-        // context_restart_count counts ALL agent_restarted events for the task
-        // (not filtered by reason, unlike stall_restart_count)
         assert_eq!(daemon.context_restart_count(42).unwrap(), 2);
         assert_eq!(daemon.context_restart_count(99).unwrap(), 1);
         assert_eq!(daemon.context_restart_count(100).unwrap(), 0);
@@ -527,5 +532,188 @@ mod tests {
         assert!(extracted.contains("eng-1-1/77"));
         assert!(extracted.contains("deadbeef checkpoint test"));
         assert!(extracted.contains("3 passed"));
+    }
+
+    #[test]
+    fn maybe_resume_task_from_restart_context_redispatches_and_logs_task_resumed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member_name = "eng-1";
+        let manager_name = "manager";
+        let worktree_path = tmp
+            .path()
+            .join(".batty")
+            .join("worktrees")
+            .join(member_name);
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+        std::fs::create_dir_all(&worktree_path).unwrap();
+        write_owned_task_file_with_context(
+            tmp.path(),
+            42,
+            "resume-task",
+            "in-progress",
+            member_name,
+            "eng-1/42",
+            worktree_path.to_string_lossy().as_ref(),
+        );
+        crate::team::checkpoint::write_checkpoint(
+            tmp.path(),
+            &crate::team::checkpoint::Checkpoint {
+                role: member_name.to_string(),
+                task_id: 42,
+                task_title: "resume-task".to_string(),
+                task_description: "Resume task description.".to_string(),
+                branch: Some("eng-1/42".to_string()),
+                last_commit: Some("abc1234 resume checkpoint".to_string()),
+                test_summary: Some("test result: ok. 4 passed".to_string()),
+                timestamp: "2026-03-29T12:00:00Z".to_string(),
+            },
+        )
+        .unwrap();
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, member_name).unwrap();
+        inbox::init_inbox(&inbox_root, manager_name).unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member(manager_name, None),
+                engineer_member(member_name, Some(manager_name), false),
+            ])
+            .build();
+        daemon.config.team_config.use_shim = true;
+
+        let (parent_sock, child_sock) = socketpair().unwrap();
+        let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+        let mut child_channel = crate::shim::protocol::Channel::new(child_sock);
+        let mut handle = AgentHandle::new(
+            member_name.to_string(),
+            parent_channel,
+            12345,
+            "codex".to_string(),
+            "codex".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        handle.apply_state_change(ShimState::Idle);
+        daemon.shim_handles.insert(member_name.to_string(), handle);
+
+        crate::team::checkpoint::write_restart_context(
+            &worktree_path,
+            &crate::team::checkpoint::RestartContext {
+                role: member_name.to_string(),
+                task_id: 42,
+                task_title: "resume-task".to_string(),
+                task_description: "Resume task description.".to_string(),
+                branch: Some("eng-1/42".to_string()),
+                worktree_path: Some(worktree_path.to_string_lossy().into_owned()),
+                restart_count: 2,
+                reason: "context_exhausted".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert!(daemon
+            .maybe_resume_task_from_restart_context(member_name)
+            .unwrap());
+        assert_eq!(daemon.active_task_id(member_name), Some(42));
+
+        let cmd: Command = child_channel.recv().unwrap().unwrap();
+        match cmd {
+            Command::SendMessage { from, body, .. } => {
+                assert_eq!(from, "daemon");
+                assert!(body.contains("Continuing Task #42"));
+                assert!(body.contains("resume-task"));
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+
+        let engineer_messages = inbox::pending_messages(&inbox_root, member_name).unwrap();
+        assert!(engineer_messages
+            .iter()
+            .any(|msg| msg.body.contains("Resuming task #42 after 2 restart(s).")));
+        assert!(engineer_messages
+            .iter()
+            .any(|msg| msg.body.contains("[RESUMING FROM CHECKPOINT]")));
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "task_resumed"
+                && event.role.as_deref() == Some(member_name)
+                && event.task.as_deref() == Some("42")
+                && event.reason.as_deref() == Some("context_exhausted")
+                && event.restart_count == Some(2)
+        }));
+        assert!(!crate::team::checkpoint::restart_context_path(&worktree_path).exists());
+    }
+
+    #[test]
+    fn maybe_resume_task_from_restart_context_escalates_at_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member_name = "eng-1";
+        let manager_name = "manager";
+        let worktree_path = tmp
+            .path()
+            .join(".batty")
+            .join("worktrees")
+            .join(member_name);
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+        std::fs::create_dir_all(&worktree_path).unwrap();
+        write_owned_task_file(tmp.path(), 42, "resume-task", "in-progress", member_name);
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, manager_name).unwrap();
+        inbox::init_inbox(&inbox_root, member_name).unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member(manager_name, None),
+                engineer_member(member_name, Some(manager_name), false),
+            ])
+            .build();
+
+        crate::team::checkpoint::write_restart_context(
+            &worktree_path,
+            &crate::team::checkpoint::RestartContext {
+                role: member_name.to_string(),
+                task_id: 42,
+                task_title: "resume-task".to_string(),
+                task_description: "Resume task description.".to_string(),
+                branch: None,
+                worktree_path: Some(worktree_path.to_string_lossy().into_owned()),
+                restart_count: 3,
+                reason: "context_exhausted".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert!(daemon
+            .maybe_resume_task_from_restart_context(member_name)
+            .unwrap());
+        assert_eq!(daemon.active_task_id(member_name), None);
+
+        let manager_messages = inbox::pending_messages(&inbox_root, manager_name).unwrap();
+        assert!(manager_messages.iter().any(|msg| {
+            msg.body
+                .contains("hit the restart continuation limit (3 restarts)")
+        }));
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "task_escalated"
+                && event.role.as_deref() == Some(member_name)
+                && event.task.as_deref() == Some("42")
+                && event.reason.as_deref() == Some("restart_limit")
+        }));
+        assert!(!events.iter().any(|event| event.event == "task_resumed"));
+        assert!(!crate::team::checkpoint::restart_context_path(&worktree_path).exists());
     }
 }
