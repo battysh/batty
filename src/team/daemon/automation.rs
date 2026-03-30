@@ -11,8 +11,6 @@ use tracing::{info, warn};
 
 use super::helpers::MemberWorktreeContext;
 use super::*;
-use crate::team::board_cmd;
-
 impl TeamDaemon {
     pub(super) fn reconcile_active_tasks(&mut self) -> Result<()> {
         let tasks_dir = self.board_dir().join("tasks");
@@ -256,11 +254,9 @@ impl TeamDaemon {
             .branch
             .as_deref()
             .is_some_and(|branch| branch == current_branch);
-        let looks_like_task_branch = current_branch.starts_with(&format!("{engineer}/"))
-            && current_branch.contains("/")
-            && current_branch != engineer_base_branch_name(engineer);
+        let matches_task_branch_suffix = branch_task_id(&current_branch) == Some(task.id);
 
-        matches_recorded_branch || looks_like_task_branch
+        matches_recorded_branch || matches_task_branch_suffix
     }
 
     pub(super) fn maybe_escalate_stale_reviews(&mut self) -> Result<()> {
@@ -623,6 +619,7 @@ impl TeamDaemon {
 
         let board_tasks =
             crate::task::load_tasks_from_dir(&self.board_dir().join("tasks")).unwrap_or_default();
+        let idle_engineer_count = self.truly_idle_engineer_count(&board_tasks);
         let board_summary = format!(
             "todo={}, backlog={}, in-progress={}, review={}, done={}, idle_engineers={}",
             board_tasks
@@ -645,7 +642,7 @@ impl TeamDaemon {
                 .iter()
                 .filter(|task| task.status == "done")
                 .count(),
-            self.truly_idle_engineer_count(&board_tasks)
+            idle_engineer_count
         );
         let recent_completions = crate::team::events::read_events(&crate::team::team_events_path(
             &self.config.project_root,
@@ -660,9 +657,8 @@ impl TeamDaemon {
             _ => "recent completion recorded".to_string(),
         })
         .collect::<Vec<_>>();
-        let idle_count = self.truly_idle_engineer_count(&board_tasks);
-        let prompt = crate::team::tact::prompt::compose_planning_prompt(
-            idle_count,
+        let prompt = crate::team::tact::compose_planning_prompt(
+            idle_engineer_count,
             &board_summary,
             &recent_completions,
             &[],
@@ -691,32 +687,13 @@ impl TeamDaemon {
         Ok(())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn handle_planning_response(&mut self, response: &str) -> Result<usize> {
         let specs = crate::team::tact::parser::parse_planning_response(response);
         let result = (|| {
             let board_dir = self.board_dir();
-            let mut created = 0usize;
-            for spec in specs {
-                let tags = (!spec.tags.is_empty()).then(|| spec.tags.join(","));
-                let depends_on = (!spec.depends_on.is_empty()).then(|| {
-                    spec.depends_on
-                        .iter()
-                        .map(u32::to_string)
-                        .collect::<Vec<_>>()
-                        .join(",")
-                });
-                board_cmd::create_task(
-                    &board_dir,
-                    &spec.title,
-                    &spec.body,
-                    spec.priority.as_deref(),
-                    tags.as_deref(),
-                    depends_on.as_deref(),
-                )
-                .with_context(|| format!("failed to create planning task '{}'", spec.title))?;
-                created += 1;
-            }
-            Ok(created)
+            crate::team::tact::create_board_tasks(&specs, &board_dir)
+                .map(|created: Vec<u32>| created.len())
         })();
 
         self.planning_cycle_active = false;
@@ -991,19 +968,38 @@ impl TeamDaemon {
     }
 }
 
+fn branch_task_id(branch: &str) -> Option<u32> {
+    let (_, suffix) = branch.split_once('/')?;
+    suffix
+        .strip_prefix("task-")
+        .unwrap_or(suffix)
+        .parse::<u32>()
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::*;
     use crate::team::config::RoleType;
+    use crate::team::config::{WorkflowMode, WorkflowPolicy};
     use crate::team::events::TeamEvent;
     use crate::team::hierarchy::MemberInstance;
     use crate::team::task_loop::setup_engineer_worktree;
     use crate::team::test_helpers::{make_test_daemon, write_event_log};
     use crate::team::test_support::{
-        EnvVarGuard, PATH_LOCK, TestDaemonBuilder, git_ok, init_git_repo, write_board_task_file,
-        write_open_task_file, write_owned_task_file,
+        EnvVarGuard, PATH_LOCK, TestDaemonBuilder, architect_member, engineer_member, git_ok,
+        init_git_repo, write_board_task_file, write_owned_task_file,
     };
-    use serial_test::serial;
+    use std::collections::HashMap;
+
+    #[test]
+    fn branch_task_id_accepts_legacy_and_ticket_scoped_patterns() {
+        assert_eq!(super::branch_task_id("eng-1/42"), Some(42));
+        assert_eq!(super::branch_task_id("eng-1/task-42"), Some(42));
+        assert_eq!(super::branch_task_id("eng-1-4/42"), Some(42));
+        assert_eq!(super::branch_task_id("main"), None);
+        assert_eq!(super::branch_task_id("eng-1/feature"), None);
+    }
 
     fn setup_fake_kanban_for_planning(
         tmp: &tempfile::TempDir,
@@ -1040,7 +1036,14 @@ done
 mkdir -p \"$board_dir/tasks\"
 count=$(find \"$board_dir/tasks\" -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')
 id=$((count + 1))
-printf -- '---\nid: %s\ntitle: %s\nstatus: todo\npriority: %s\n---\n\n%s\n' \"$id\" \"$title\" \"$priority\" \"$body\" > \"$board_dir/tasks/$(printf '%03d' \"$id\")-task.md\"
+printf -- '---\nid: %s\ntitle: %s\nstatus: todo\npriority: %s\n' \"$id\" \"$title\" \"$priority\" > \"$board_dir/tasks/$(printf '%03d' \"$id\")-task.md\"
+if [ -n \"$tags\" ]; then
+  printf 'tags: [%s]\n' \"$tags\" >> \"$board_dir/tasks/$(printf '%03d' \"$id\")-task.md\"
+fi
+if [ -n \"$depends_on\" ]; then
+  printf 'depends_on: [%s]\n' \"$depends_on\" >> \"$board_dir/tasks/$(printf '%03d' \"$id\")-task.md\"
+fi
+printf -- '---\n\n%s\n' \"$body\" >> \"$board_dir/tasks/$(printf '%03d' \"$id\")-task.md\"
 printf 'Created task #%s\n' \"$id\"
 ",
                 log_path.display()
@@ -1053,6 +1056,325 @@ printf 'Created task #%s\n' \"$id\"
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         (fake_bin, log_path)
+    }
+
+    fn planning_test_daemon(tmp: &tempfile::TempDir, cooldown_secs: u64) -> TeamDaemon {
+        let board_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&board_dir).unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                engineer_member("eng-1", Some("architect"), false),
+                engineer_member("eng-2", Some("architect"), false),
+                engineer_member("eng-3", Some("architect"), false),
+            ])
+            .workflow_policy(WorkflowPolicy {
+                planning_cycle_cooldown_secs: cooldown_secs,
+                ..WorkflowPolicy::default()
+            })
+            .states(HashMap::from([
+                ("architect".to_string(), MemberState::Idle),
+                ("eng-1".to_string(), MemberState::Idle),
+                ("eng-2".to_string(), MemberState::Idle),
+                ("eng-3".to_string(), MemberState::Idle),
+            ]))
+            .build();
+        daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+        daemon
+    }
+
+    fn planning_inbox_messages(tmp: &tempfile::TempDir) -> Vec<inbox::InboxMessage> {
+        inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "architect").unwrap()
+    }
+
+    const SINGLE_TASK_RESPONSE: &str = r#"---
+title: "Add planning telemetry"
+priority: high
+tags: [tact, telemetry]
+---
+Record planning cycle events in the orchestrator log and add assertions.
+"#;
+
+    const THREE_TASK_RESPONSE: &str = r#"---
+title: "Add planning telemetry"
+priority: high
+tags: [tact, telemetry]
+---
+Record planning cycle events in the orchestrator log.
+---
+title: "Persist planning outputs"
+priority: medium
+depends_on: [1]
+tags: [tact, board]
+---
+Create board tasks from planning responses.
+---
+title: "Backfill planning tests"
+priority: medium
+depends_on: [1, 2]
+tags: [tact, tests]
+---
+Add end-to-end planning cycle coverage.
+"#;
+
+    const MIXED_RESPONSE: &str = r#"---
+title: "Good task"
+priority: high
+tags: [tact]
+---
+Good body.
+---
+title: [broken
+---
+Bad body.
+---
+title: "Second good task"
+priority: medium
+depends_on: [1]
+---
+Second body.
+"#;
+
+    #[test]
+    fn planning_cycle_trigger_generates_prompt_in_architect_inbox() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        daemon.pipeline_starvation_fired = true;
+
+        daemon.maybe_trigger_planning_cycle().unwrap();
+
+        let messages = planning_inbox_messages(&tmp);
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0]
+                .body
+                .contains("HIGH PRIORITY: planning cycle triggered")
+        );
+        assert!(messages[0].body.contains("Idle engineers available: 3"));
+        assert!(messages[0].body.contains("Expected response format:"));
+        assert!(daemon.planning_cycle_active);
+    }
+
+    #[test]
+    fn planning_cycle_prompt_includes_recent_completion_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_event_log(
+            tmp.path(),
+            &[TeamEvent::task_completed("eng-2", Some("44"))],
+        );
+
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        daemon.pipeline_starvation_fired = true;
+        daemon.maybe_trigger_planning_cycle().unwrap();
+
+        let messages = planning_inbox_messages(&tmp);
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].body.contains("eng-2 completed task #44"));
+    }
+
+    #[test]
+    fn planning_cycle_round_trip_creates_board_tasks_and_resets_active_flag() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let (fake_bin, _log_path) = setup_fake_kanban_for_planning(&tmp);
+        let path = format!(
+            "{}:{}",
+            fake_bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let _path_guard = EnvVarGuard::set("PATH", &path);
+
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        daemon.pipeline_starvation_fired = true;
+        daemon.maybe_trigger_planning_cycle().unwrap();
+        let created = daemon
+            .handle_planning_response(THREE_TASK_RESPONSE)
+            .unwrap();
+
+        assert_eq!(created, 3);
+        assert!(!daemon.planning_cycle_active);
+
+        let tasks = crate::task::load_tasks_from_dir(&daemon.board_dir().join("tasks")).unwrap();
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks[0].title, "Add planning telemetry");
+        assert_eq!(tasks[1].title, "Persist planning outputs");
+        assert_eq!(tasks[2].title, "Backfill planning tests");
+        assert_eq!(tasks[0].tags, vec!["tact", "telemetry"]);
+        assert_eq!(tasks[1].depends_on, vec![1]);
+        assert_eq!(tasks[1].tags, vec!["tact", "board"]);
+        assert_eq!(tasks[2].depends_on, vec![1, 2]);
+        assert_eq!(tasks[2].tags, vec!["tact", "tests"]);
+
+        let orchestrator_log =
+            std::fs::read_to_string(crate::team::orchestrator_log_path(tmp.path()))
+                .unwrap_or_default();
+        assert!(orchestrator_log.contains("planning: triggered planning cycle"));
+        assert!(
+            orchestrator_log.contains("planning: applied planning response and created 3 tasks")
+        );
+    }
+
+    #[test]
+    fn planning_round_trip_with_malformed_blocks_keeps_good_tasks() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let (fake_bin, _log_path) = setup_fake_kanban_for_planning(&tmp);
+        let path = format!(
+            "{}:{}",
+            fake_bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let _path_guard = EnvVarGuard::set("PATH", &path);
+
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        daemon.pipeline_starvation_fired = true;
+        daemon.planning_cycle_active = true;
+
+        let created = daemon.handle_planning_response(MIXED_RESPONSE).unwrap();
+        assert_eq!(created, 2);
+        assert!(!daemon.planning_cycle_active);
+    }
+
+    #[test]
+    fn planning_response_empty_creates_zero_tasks_and_resets_cycle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        daemon.planning_cycle_active = true;
+
+        let created = daemon.handle_planning_response("").unwrap();
+        assert_eq!(created, 0);
+        assert!(!daemon.planning_cycle_active);
+
+        let orchestrator_log =
+            std::fs::read_to_string(crate::team::orchestrator_log_path(tmp.path()))
+                .unwrap_or_default();
+        assert!(
+            orchestrator_log.contains("planning: applied planning response and created 0 tasks")
+        );
+    }
+
+    #[test]
+    fn planning_response_missing_board_dir_returns_graceful_error_and_resets_cycle() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let (fake_bin, _log_path) = setup_fake_kanban_for_planning(&tmp);
+        let path = format!(
+            "{}:{}",
+            fake_bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let _path_guard = EnvVarGuard::set("PATH", &path);
+
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        std::fs::remove_dir_all(daemon.board_dir()).unwrap();
+        daemon.planning_cycle_active = true;
+
+        let error = daemon
+            .handle_planning_response(SINGLE_TASK_RESPONSE)
+            .unwrap_err();
+        assert!(error.to_string().contains("board directory does not exist"));
+        assert!(!daemon.planning_cycle_active);
+    }
+
+    #[test]
+    fn planning_response_missing_kanban_binary_returns_clear_error() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _path_guard = EnvVarGuard::set("PATH", tmp.path().display().to_string().as_str());
+
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        daemon.planning_cycle_active = true;
+
+        let error = daemon
+            .handle_planning_response(SINGLE_TASK_RESPONSE)
+            .unwrap_err();
+        let detail = error.to_string();
+        assert!(
+            detail.contains("failed to create board task") || detail.contains("failed to execute")
+        );
+        assert!(!daemon.planning_cycle_active);
+    }
+
+    #[test]
+    fn planning_response_double_apply_is_graceful() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let (fake_bin, _log_path) = setup_fake_kanban_for_planning(&tmp);
+        let path = format!(
+            "{}:{}",
+            fake_bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let _path_guard = EnvVarGuard::set("PATH", &path);
+
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        daemon.planning_cycle_active = true;
+
+        assert_eq!(
+            daemon
+                .handle_planning_response(SINGLE_TASK_RESPONSE)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            daemon
+                .handle_planning_response(SINGLE_TASK_RESPONSE)
+                .unwrap(),
+            1
+        );
+
+        let tasks = crate::task::load_tasks_from_dir(&daemon.board_dir().join("tasks")).unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert!(!daemon.planning_cycle_active);
+    }
+
+    #[test]
+    fn planning_cycle_cooldown_blocks_immediate_retrigger() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        daemon.pipeline_starvation_fired = true;
+
+        daemon.maybe_trigger_planning_cycle().unwrap();
+        daemon.planning_cycle_active = false;
+        daemon.maybe_trigger_planning_cycle().unwrap();
+
+        assert_eq!(planning_inbox_messages(&tmp).len(), 1);
+    }
+
+    #[test]
+    fn planning_cycle_retriggers_after_cooldown_expires() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        daemon.pipeline_starvation_fired = true;
+
+        daemon.maybe_trigger_planning_cycle().unwrap();
+        daemon.planning_cycle_active = false;
+        daemon.planning_cycle_last_fired = Some(Instant::now() - Duration::from_secs(301));
+        daemon.maybe_trigger_planning_cycle().unwrap();
+
+        assert_eq!(planning_inbox_messages(&tmp).len(), 2);
+    }
+
+    #[test]
+    fn planning_prompt_and_parser_round_trip_sample_response() {
+        let prompt = crate::team::tact::compose_planning_prompt(
+            3,
+            "todo=0 backlog=2 in-progress=1 review=0 done=3 idle_engineers=3",
+            &["eng-1 completed task #44".to_string()],
+            &["Improve planning automation".to_string()],
+            "Batty",
+        );
+
+        let specs = crate::team::tact::parse_planning_response(THREE_TASK_RESPONSE);
+        assert!(prompt.contains("Improve planning automation"));
+        assert_eq!(specs.len(), 3);
+        assert_eq!(specs[2].depends_on, vec![1, 2]);
     }
 
     #[test]
