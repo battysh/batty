@@ -45,11 +45,21 @@ impl Drop for EnvVarGuard {
 }
 
 pub(crate) fn git(dir: &Path, args: &[&str]) -> Output {
-    Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .unwrap_or_else(|error| panic!("git {:?} failed to run: {error}", args))
+    let mut last_not_found = None;
+    for program in ["git", "/usr/bin/git", "/opt/homebrew/bin/git"] {
+        match Command::new(program).args(args).current_dir(dir).output() {
+            Ok(output) => return output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                last_not_found = Some(error);
+            }
+            Err(error) => panic!("git {:?} failed to run via {program}: {error}", args),
+        }
+    }
+
+    let error = last_not_found.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "git binary not found")
+    });
+    panic!("git {:?} failed to run: {error}", args)
 }
 
 pub(crate) fn git_ok(dir: &Path, args: &[&str]) {
