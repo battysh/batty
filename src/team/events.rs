@@ -327,6 +327,16 @@ impl TeamEvent {
         }
     }
 
+    pub fn task_resumed(role: &str, task: &str, reason: &str, restart_count: u32) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            reason: Some(reason.into()),
+            restart_count: Some(restart_count),
+            ..Self::base("task_resumed")
+        }
+    }
+
     pub fn delivery_failed(role: &str, from: &str, reason: &str) -> Self {
         Self {
             role: Some(role.into()),

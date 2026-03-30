@@ -6,6 +6,7 @@
 //! resume with full awareness of what it was doing.
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Information captured in a progress checkpoint.
@@ -21,6 +22,18 @@ pub struct Checkpoint {
     pub timestamp: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestartContext {
+    pub role: String,
+    pub task_id: u32,
+    pub task_title: String,
+    pub task_description: String,
+    pub branch: Option<String>,
+    pub worktree_path: Option<String>,
+    pub restart_count: u32,
+    pub reason: String,
+}
+
 /// Returns the progress directory path: `<project_root>/.batty/progress/`.
 pub fn progress_dir(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("progress")
@@ -29,6 +42,10 @@ pub fn progress_dir(project_root: &Path) -> PathBuf {
 /// Returns the checkpoint file path for a given role.
 pub fn checkpoint_path(project_root: &Path, role: &str) -> PathBuf {
     progress_dir(project_root).join(format!("{role}.md"))
+}
+
+pub fn restart_context_path(worktree_dir: &Path) -> PathBuf {
+    worktree_dir.join("restart_context.json")
 }
 
 /// Write a progress checkpoint file for the given role.
@@ -53,6 +70,25 @@ pub fn read_checkpoint(project_root: &Path, role: &str) -> Option<String> {
 pub fn remove_checkpoint(project_root: &Path, role: &str) {
     let path = checkpoint_path(project_root, role);
     let _ = std::fs::remove_file(&path);
+}
+
+pub fn write_restart_context(worktree_dir: &Path, context: &RestartContext) -> Result<()> {
+    std::fs::create_dir_all(worktree_dir)?;
+    let path = restart_context_path(worktree_dir);
+    let content = serde_json::to_vec_pretty(context)?;
+    std::fs::write(path, content)?;
+    Ok(())
+}
+
+pub fn read_restart_context(worktree_dir: &Path) -> Option<RestartContext> {
+    let path = restart_context_path(worktree_dir);
+    let content = std::fs::read(path).ok()?;
+    serde_json::from_slice(&content).ok()
+}
+
+pub fn remove_restart_context(worktree_dir: &Path) {
+    let path = restart_context_path(worktree_dir);
+    let _ = std::fs::remove_file(path);
 }
 
 /// Gather checkpoint information from the worktree and task.
@@ -435,6 +471,60 @@ mod tests {
         let content = read_checkpoint(root, "eng-1-1").unwrap();
         assert!(content.contains("**Task:** #2 — Second"));
         assert!(!content.contains("First"));
+    }
+
+    #[test]
+    fn write_and_read_restart_context_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree_dir = tmp.path().join("eng-1-1");
+        let context = RestartContext {
+            role: "eng-1-1".to_string(),
+            task_id: 42,
+            task_title: "Fix the widget".to_string(),
+            task_description: "Widget is broken, needs fixing.".to_string(),
+            branch: Some("eng-1-1/42".to_string()),
+            worktree_path: Some("/tmp/worktrees/eng-1-1".to_string()),
+            restart_count: 2,
+            reason: "context_exhausted".to_string(),
+        };
+
+        write_restart_context(&worktree_dir, &context).unwrap();
+
+        let loaded = read_restart_context(&worktree_dir).unwrap();
+        assert_eq!(loaded, context);
+    }
+
+    #[test]
+    fn remove_restart_context_deletes_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree_dir = tmp.path().join("eng-1-1");
+        let context = RestartContext {
+            role: "eng-1-1".to_string(),
+            task_id: 42,
+            task_title: "Fix the widget".to_string(),
+            task_description: "Widget is broken, needs fixing.".to_string(),
+            branch: None,
+            worktree_path: None,
+            restart_count: 1,
+            reason: "stalled".to_string(),
+        };
+
+        write_restart_context(&worktree_dir, &context).unwrap();
+        assert!(restart_context_path(&worktree_dir).exists());
+
+        remove_restart_context(&worktree_dir);
+        assert!(!restart_context_path(&worktree_dir).exists());
+    }
+
+    #[test]
+    fn read_restart_context_returns_none_when_missing_or_invalid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree_dir = tmp.path().join("eng-1-1");
+        assert!(read_restart_context(&worktree_dir).is_none());
+
+        std::fs::create_dir_all(&worktree_dir).unwrap();
+        std::fs::write(restart_context_path(&worktree_dir), b"{not json").unwrap();
+        assert!(read_restart_context(&worktree_dir).is_none());
     }
 
     // --- Error path and recovery tests (Task #265) ---
