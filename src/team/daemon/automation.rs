@@ -687,6 +687,7 @@ impl TeamDaemon {
         Ok(())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn handle_planning_response(&mut self, response: &str) -> Result<usize> {
         let specs = crate::team::tact::parser::parse_planning_response(response);
         let result = (|| {
@@ -1035,7 +1036,14 @@ done
 mkdir -p \"$board_dir/tasks\"
 count=$(find \"$board_dir/tasks\" -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')
 id=$((count + 1))
-printf -- '---\nid: %s\ntitle: %s\nstatus: todo\npriority: %s\n---\n\n%s\n' \"$id\" \"$title\" \"$priority\" \"$body\" > \"$board_dir/tasks/$(printf '%03d' \"$id\")-task.md\"
+printf -- '---\nid: %s\ntitle: %s\nstatus: todo\npriority: %s\n' \"$id\" \"$title\" \"$priority\" > \"$board_dir/tasks/$(printf '%03d' \"$id\")-task.md\"
+if [ -n \"$tags\" ]; then
+  printf 'tags: [%s]\n' \"$tags\" >> \"$board_dir/tasks/$(printf '%03d' \"$id\")-task.md\"
+fi
+if [ -n \"$depends_on\" ]; then
+  printf 'depends_on: [%s]\n' \"$depends_on\" >> \"$board_dir/tasks/$(printf '%03d' \"$id\")-task.md\"
+fi
+printf -- '---\n\n%s\n' \"$body\" >> \"$board_dir/tasks/$(printf '%03d' \"$id\")-task.md\"
 printf 'Created task #%s\n' \"$id\"
 ",
                 log_path.display()
@@ -1154,8 +1162,25 @@ Second body.
     }
 
     #[test]
+    fn planning_cycle_prompt_includes_recent_completion_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_event_log(
+            tmp.path(),
+            &[TeamEvent::task_completed("eng-2", Some("44"))],
+        );
+
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        daemon.pipeline_starvation_fired = true;
+        daemon.maybe_trigger_planning_cycle().unwrap();
+
+        let messages = planning_inbox_messages(&tmp);
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].body.contains("eng-2 completed task #44"));
+    }
+
+    #[test]
     fn planning_cycle_round_trip_creates_board_tasks_and_resets_active_flag() {
-        let _path_lock = PATH_LOCK.lock().unwrap();
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let (fake_bin, _log_path) = setup_fake_kanban_for_planning(&tmp);
         let path = format!(
@@ -1180,6 +1205,11 @@ Second body.
         assert_eq!(tasks[0].title, "Add planning telemetry");
         assert_eq!(tasks[1].title, "Persist planning outputs");
         assert_eq!(tasks[2].title, "Backfill planning tests");
+        assert_eq!(tasks[0].tags, vec!["tact", "telemetry"]);
+        assert_eq!(tasks[1].depends_on, vec![1]);
+        assert_eq!(tasks[1].tags, vec!["tact", "board"]);
+        assert_eq!(tasks[2].depends_on, vec![1, 2]);
+        assert_eq!(tasks[2].tags, vec!["tact", "tests"]);
 
         let orchestrator_log =
             std::fs::read_to_string(crate::team::orchestrator_log_path(tmp.path()))
@@ -1192,7 +1222,7 @@ Second body.
 
     #[test]
     fn planning_round_trip_with_malformed_blocks_keeps_good_tasks() {
-        let _path_lock = PATH_LOCK.lock().unwrap();
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let (fake_bin, _log_path) = setup_fake_kanban_for_planning(&tmp);
         let path = format!(
@@ -1220,11 +1250,18 @@ Second body.
         let created = daemon.handle_planning_response("").unwrap();
         assert_eq!(created, 0);
         assert!(!daemon.planning_cycle_active);
+
+        let orchestrator_log =
+            std::fs::read_to_string(crate::team::orchestrator_log_path(tmp.path()))
+                .unwrap_or_default();
+        assert!(
+            orchestrator_log.contains("planning: applied planning response and created 0 tasks")
+        );
     }
 
     #[test]
     fn planning_response_missing_board_dir_returns_graceful_error_and_resets_cycle() {
-        let _path_lock = PATH_LOCK.lock().unwrap();
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let (fake_bin, _log_path) = setup_fake_kanban_for_planning(&tmp);
         let path = format!(
@@ -1247,7 +1284,7 @@ Second body.
 
     #[test]
     fn planning_response_missing_kanban_binary_returns_clear_error() {
-        let _path_lock = PATH_LOCK.lock().unwrap();
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let _path_guard = EnvVarGuard::set("PATH", tmp.path().display().to_string().as_str());
 
@@ -1266,7 +1303,7 @@ Second body.
 
     #[test]
     fn planning_response_double_apply_is_graceful() {
-        let _path_lock = PATH_LOCK.lock().unwrap();
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let (fake_bin, _log_path) = setup_fake_kanban_for_planning(&tmp);
         let path = format!(
