@@ -904,7 +904,14 @@ fn main() -> Result<()> {
             };
 
             if sdk_mode {
-                shim::runtime_sdk::run_sdk(args, channel)?;
+                match at {
+                    shim::classifier::AgentType::Codex => {
+                        shim::runtime_codex::run_codex_sdk(args, channel)?;
+                    }
+                    _ => {
+                        shim::runtime_sdk::run_sdk(args, channel)?;
+                    }
+                }
             } else {
                 shim::runtime::run(args, channel)?;
             }

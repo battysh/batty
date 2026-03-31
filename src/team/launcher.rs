@@ -168,8 +168,7 @@ impl TeamDaemon {
             session_id.as_deref(),
         );
 
-        let sdk_mode =
-            matches!(agent_name, "claude" | "claude-code") && self.config.team_config.use_sdk_mode;
+        let sdk_mode = agent_supports_sdk_mode(agent_name) && self.config.team_config.use_sdk_mode;
         // SDK mode always uses a fresh session — Claude -p doesn't support --resume
         // and reusing a session_id causes "Session ID already in use" errors.
         let effective_session_id = if sdk_mode {
@@ -374,7 +373,8 @@ impl TeamDaemon {
 
                     let agent_type =
                         shim_agent_type_name(member.agent.as_deref().unwrap_or("claude"));
-                    let sdk_mode = agent_type == "claude" && self.config.team_config.use_sdk_mode;
+                    let sdk_mode = agent_supports_sdk_mode(&agent_type)
+                        && self.config.team_config.use_sdk_mode;
                     match shim_spawn::spawn_shim(
                         &member.name,
                         &agent_type,
@@ -584,11 +584,20 @@ pub(super) fn write_launch_script(
     };
 
     let agent_cmd = if sdk_mode {
-        // In SDK mode, Claude Code uses stream-json protocol.
-        // Role prompt goes via --append-system-prompt; tasks arrive via stdin NDJSON.
-        use crate::agent::claude::ClaudeCodeAdapter;
-        let claude_adapter = ClaudeCodeAdapter::new(None);
-        claude_adapter.sdk_launch_command(session_id, Some(&effective_prompt))
+        match agent_name {
+            "codex" | "codex-cli" => {
+                // Codex SDK uses spawn-per-message — the runtime handles subprocess
+                // spawning. The launch script just needs a sentinel process.
+                "exec sleep infinity".to_string()
+            }
+            _ => {
+                // Claude SDK uses stream-json protocol.
+                // Role prompt goes via --append-system-prompt; tasks arrive via stdin NDJSON.
+                use crate::agent::claude::ClaudeCodeAdapter;
+                let claude_adapter = ClaudeCodeAdapter::new(None);
+                claude_adapter.sdk_launch_command(session_id, Some(&effective_prompt))
+            }
+        }
     } else {
         adapter.launch_command(&effective_prompt, idle, resume, session_id)?
     };
@@ -638,6 +647,11 @@ pub(super) fn write_launch_script(
         .with_context(|| format!("failed to write launch script {}", script_path.display()))?;
 
     Ok(format!("bash '{}'", script_path.to_string_lossy()))
+}
+
+/// Whether an agent supports SDK mode (structured JSON I/O).
+pub(crate) fn agent_supports_sdk_mode(agent_name: &str) -> bool {
+    matches!(agent_name, "claude" | "claude-code" | "codex" | "codex-cli")
 }
 
 pub(super) fn canonical_agent_name(agent_name: &str) -> String {

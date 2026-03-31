@@ -21,7 +21,8 @@ use super::super::task_loop::prepare_engineer_assignment_worktree;
 use super::super::task_loop::prepare_multi_repo_assignment_worktree;
 use super::helpers::describe_command_failure;
 use super::launcher::{
-    canonical_agent_name, new_member_session_id, strip_nudge_section, write_launch_script,
+    agent_supports_sdk_mode, canonical_agent_name, new_member_session_id, strip_nudge_section,
+    write_launch_script,
 };
 use super::*;
 use crate::team::append_shim_event_log;
@@ -251,8 +252,7 @@ impl TeamDaemon {
         let session_id = new_member_session_id(&normalized_agent);
 
         std::thread::sleep(Duration::from_secs(1));
-        let sdk_mode =
-            matches!(agent_name, "claude" | "claude-code") && self.config.team_config.use_sdk_mode;
+        let sdk_mode = agent_supports_sdk_mode(agent_name) && self.config.team_config.use_sdk_mode;
         let short_cmd = write_launch_script(
             engineer,
             agent_name,
