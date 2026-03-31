@@ -168,6 +168,16 @@ impl TeamDaemon {
             session_id.as_deref(),
         );
 
+        let sdk_mode =
+            matches!(agent_name, "claude" | "claude-code") && self.config.team_config.use_sdk_mode;
+        // SDK mode always uses a fresh session — Claude -p doesn't support --resume
+        // and reusing a session_id causes "Session ID already in use" errors.
+        let effective_session_id = if sdk_mode {
+            Some(uuid::Uuid::new_v4().to_string())
+        } else {
+            session_id.clone()
+        };
+        let effective_resume = if sdk_mode { false } else { member_resume };
         let short_cmd = write_launch_script(
             &member.name,
             agent_name,
@@ -176,8 +186,9 @@ impl TeamDaemon {
             &work_dir,
             &self.config.project_root,
             idle,
-            member_resume,
-            session_id.as_deref(),
+            effective_resume,
+            effective_session_id.as_deref(),
+            sdk_mode,
         )?;
 
         debug!(
@@ -195,7 +206,7 @@ impl TeamDaemon {
             identity: LaunchIdentity {
                 agent: normalized_agent.clone(),
                 prompt: prompt_text,
-                session_id,
+                session_id: effective_session_id,
             },
             initial_state: initial_member_state(idle, member_resume),
             activate_watcher: should_activate_watcher_on_spawn(idle, member_resume),
@@ -363,23 +374,24 @@ impl TeamDaemon {
 
                     let agent_type =
                         shim_agent_type_name(member.agent.as_deref().unwrap_or("claude"));
+                    let sdk_mode = agent_type == "claude" && self.config.team_config.use_sdk_mode;
                     match shim_spawn::spawn_shim(
                         &member.name,
                         &agent_type,
                         &plan.short_cmd,
                         &plan.work_dir,
                         Some(&log_path),
+                        sdk_mode,
                     ) {
                         Ok(handle) => {
                             if let Some(watcher) = self.watchers.get_mut(&member.name) {
                                 watcher.set_session_id(plan.identity.session_id.clone());
                             }
                             self.shim_handles.insert(member.name.clone(), handle);
-                            self.states
-                                .insert(member.name.clone(), MemberState::Working);
+                            self.states.insert(member.name.clone(), plan.initial_state);
                             self.update_automation_timers_for_state(
                                 &member.name,
-                                MemberState::Working,
+                                plan.initial_state,
                             );
                             self.record_agent_spawned(&member.name);
                             next_launch_state
@@ -546,6 +558,7 @@ pub(super) fn write_launch_script(
     idle: bool,
     resume: bool,
     session_id: Option<&str>,
+    sdk_mode: bool,
 ) -> Result<String> {
     let project_slug = project_root
         .file_name()
@@ -570,7 +583,15 @@ pub(super) fn write_launch_script(
         prompt.to_string()
     };
 
-    let agent_cmd = adapter.launch_command(&effective_prompt, idle, resume, session_id)?;
+    let agent_cmd = if sdk_mode {
+        // In SDK mode, Claude Code uses stream-json protocol.
+        // Role prompt goes via --append-system-prompt; tasks arrive via stdin NDJSON.
+        use crate::agent::claude::ClaudeCodeAdapter;
+        let claude_adapter = ClaudeCodeAdapter::new(None);
+        claude_adapter.sdk_launch_command(session_id, Some(&effective_prompt))
+    } else {
+        adapter.launch_command(&effective_prompt, idle, resume, session_id)?
+    };
 
     let wrapper_dir = std::env::temp_dir().join(format!("batty-bin-{project_slug}-{member_name}"));
     std::fs::create_dir_all(&wrapper_dir).ok();
@@ -610,7 +631,7 @@ pub(super) fn write_launch_script(
     set_executable(&batty_wrapper);
 
     let script = format!(
-        "#!/bin/bash\nexport PATH='{}':\"$PATH\"\ncd '{launch_dir_str}'\n{agent_cmd}\n",
+        "#!/bin/bash\nexport PATH='{}':\"$PATH\"\nexport BATTY_MEMBER='{member_name}'\ncd '{launch_dir_str}'\n{agent_cmd}\n",
         wrapper_dir.to_string_lossy()
     );
     std::fs::write(&script_path, &script)
@@ -1001,6 +1022,7 @@ mod tests {
             false,
             false,
             Some("11111111-1111-4111-8111-111111111111"),
+            false,
         )
         .unwrap();
         assert!(cmd.contains("batty-launch-project-arch-1.sh"));
@@ -1034,6 +1056,7 @@ mod tests {
             true,
             false,
             Some("22222222-2222-4222-8222-222222222222"),
+            false,
         )
         .unwrap();
         assert!(cmd.contains("batty-launch-project-mgr-1.sh"));
@@ -1062,6 +1085,7 @@ mod tests {
             true,
             false,
             None,
+            false,
         )
         .unwrap();
         let project_slug = tmp.path().file_name().unwrap().to_string_lossy();
@@ -1095,6 +1119,7 @@ mod tests {
             false,
             false,
             None,
+            false,
         )
         .unwrap();
         let project_slug = tmp.path().file_name().unwrap().to_string_lossy();
@@ -1129,6 +1154,7 @@ mod tests {
             false,
             false,
             Some("33333333-3333-4333-8333-333333333333"),
+            false,
         )
         .unwrap();
         let script_path = std::env::temp_dir().join("batty-launch-tmp-eng-2.sh");
@@ -1148,6 +1174,7 @@ mod tests {
             true,
             true,
             Some("44444444-4444-4444-8444-444444444444"),
+            false,
         )
         .unwrap();
         let script_path = std::env::temp_dir().join("batty-launch-project-architect.sh");
@@ -1173,6 +1200,7 @@ mod tests {
             true,
             true,
             Some("55555555-5555-4555-8555-555555555555"),
+            false,
         )
         .unwrap();
         let project_slug = tmp.path().file_name().unwrap().to_string_lossy();
@@ -1199,6 +1227,7 @@ mod tests {
             true,
             false,
             None,
+            false,
         )
         .unwrap();
         let slug = project.file_name().unwrap().to_string_lossy();
@@ -1223,6 +1252,7 @@ mod tests {
             false,
             false,
             None,
+            false,
         )
         .unwrap();
         let slug = project.file_name().unwrap().to_string_lossy();

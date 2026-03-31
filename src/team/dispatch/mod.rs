@@ -251,6 +251,8 @@ impl TeamDaemon {
         let session_id = new_member_session_id(&normalized_agent);
 
         std::thread::sleep(Duration::from_secs(1));
+        let sdk_mode =
+            matches!(agent_name, "claude" | "claude-code") && self.config.team_config.use_sdk_mode;
         let short_cmd = write_launch_script(
             engineer,
             agent_name,
@@ -261,6 +263,7 @@ impl TeamDaemon {
             false,
             false,
             session_id.as_deref(),
+            sdk_mode,
         )?;
         if let Some(watcher) = self.watchers.get_mut(engineer) {
             watcher.set_session_id(session_id.clone());

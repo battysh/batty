@@ -31,6 +31,10 @@ pub struct TeamConfig {
     /// directly in tmux panes. The shim manages PTY, state classification,
     /// and message delivery over a structured channel.
     pub use_shim: bool,
+    /// When true and `use_shim` is enabled, Claude Code agents communicate via
+    /// structured NDJSON (stream-json protocol) instead of PTY screen-scraping.
+    /// Requires `use_shim: true` and only applies to claude/claude-code agents.
+    pub use_sdk_mode: bool,
     /// When true and `use_shim` is enabled, crashed agents are automatically
     /// respawned instead of escalating to the manager. This is the default
     /// posture for unattended teams; disable it only for debugging or
@@ -87,6 +91,8 @@ struct TeamConfigWire {
     pub grafana: GrafanaConfig,
     #[serde(default)]
     pub use_shim: bool,
+    #[serde(default)]
+    pub use_sdk_mode: bool,
     #[serde(default = "default_auto_respawn_on_crash")]
     pub auto_respawn_on_crash: bool,
     #[serde(default = "default_shim_health_check_interval_secs")]
@@ -135,6 +141,7 @@ impl From<TeamConfigWire> for TeamConfig {
             cost: wire.cost,
             grafana: wire.grafana,
             use_shim: wire.use_shim,
+            use_sdk_mode: wire.use_sdk_mode,
             auto_respawn_on_crash: wire.auto_respawn_on_crash,
             shim_health_check_interval_secs: wire.shim_health_check_interval_secs,
             shim_health_timeout_secs: wire.shim_health_timeout_secs,

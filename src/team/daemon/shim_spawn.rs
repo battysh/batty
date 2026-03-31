@@ -103,6 +103,7 @@ pub(in crate::team) fn spawn_shim(
     agent_cmd: &str,
     work_dir: &Path,
     pty_log_path: Option<&Path>,
+    sdk_mode: bool,
 ) -> Result<AgentHandle> {
     let (parent_sock, child_sock) =
         protocol::socketpair().context("failed to create socketpair for shim")?;
@@ -125,6 +126,10 @@ pub(in crate::team) fn spawn_shim(
     if let Some(log_path) = pty_log_path {
         cmd.arg("--pty-log-path")
             .arg(log_path.to_string_lossy().as_ref());
+    }
+
+    if sdk_mode {
+        cmd.arg("--sdk-mode");
     }
 
     // Query the tmux pane size for this member and pass it to the shim

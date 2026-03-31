@@ -350,6 +350,7 @@ impl<'a> TestDaemonBuilder<'a> {
                 cost: Default::default(),
                 grafana: Default::default(),
                 use_shim: false,
+                use_sdk_mode: false,
                 auto_respawn_on_crash: false,
                 shim_health_check_interval_secs: 60,
                 shim_health_timeout_secs: 120,

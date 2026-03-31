@@ -139,6 +139,35 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 }
 
+impl ClaudeCodeAdapter {
+    /// Build the launch command for SDK (stream-json) mode.
+    ///
+    /// Returns a shell command that starts Claude Code in non-interactive mode
+    /// with structured NDJSON I/O on stdin/stdout.
+    ///
+    /// `system_prompt` is the role prompt injected via `--append-system-prompt`.
+    /// Pass `None` to omit it (e.g., for `batty chat` interactive mode).
+    pub fn sdk_launch_command(
+        &self,
+        session_id: Option<&str>,
+        system_prompt: Option<&str>,
+    ) -> String {
+        let mut cmd = format!(
+            "exec {} -p --verbose --input-format=stream-json --output-format=stream-json --permission-mode=bypassPermissions",
+            self.program,
+        );
+        if let Some(sid) = session_id {
+            let escaped = sid.replace('\'', "'\\''");
+            cmd.push_str(&format!(" --session-id '{escaped}'"));
+        }
+        if let Some(prompt) = system_prompt {
+            let escaped = prompt.replace('\'', "'\\''");
+            cmd.push_str(&format!(" --append-system-prompt '{escaped}'"));
+        }
+        cmd
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,5 +349,49 @@ mod tests {
     fn supports_resume_is_true() {
         let adapter = ClaudeCodeAdapter::new(None);
         assert!(adapter.supports_resume());
+    }
+
+    // --- SDK launch command tests ---
+
+    #[test]
+    fn sdk_launch_command_includes_stream_json_flags() {
+        let adapter = ClaudeCodeAdapter::new(None);
+        let cmd = adapter.sdk_launch_command(None, None);
+        assert!(cmd.contains("exec claude"));
+        assert!(cmd.contains("-p"));
+        assert!(cmd.contains("--verbose"));
+        assert!(cmd.contains("--input-format=stream-json"));
+        assert!(cmd.contains("--output-format=stream-json"));
+        assert!(cmd.contains("--permission-mode=bypassPermissions"));
+        assert!(!cmd.contains("--session-id"));
+        assert!(!cmd.contains("--append-system-prompt"));
+    }
+
+    #[test]
+    fn sdk_launch_command_with_session_id() {
+        let adapter = ClaudeCodeAdapter::new(None);
+        let cmd = adapter.sdk_launch_command(Some("sess-abc-123"), None);
+        assert!(cmd.contains("--session-id 'sess-abc-123'"));
+    }
+
+    #[test]
+    fn sdk_launch_command_with_system_prompt() {
+        let adapter = ClaudeCodeAdapter::new(None);
+        let cmd = adapter.sdk_launch_command(None, Some("You are an engineer."));
+        assert!(cmd.contains("--append-system-prompt 'You are an engineer.'"));
+    }
+
+    #[test]
+    fn sdk_launch_command_escapes_prompt_quotes() {
+        let adapter = ClaudeCodeAdapter::new(None);
+        let cmd = adapter.sdk_launch_command(None, Some("Fix user's bug"));
+        assert!(cmd.contains("user'\\''s"));
+    }
+
+    #[test]
+    fn sdk_launch_command_custom_binary() {
+        let adapter = ClaudeCodeAdapter::new(Some("/opt/claude".to_string()));
+        let cmd = adapter.sdk_launch_command(None, None);
+        assert!(cmd.contains("exec /opt/claude -p"));
     }
 }

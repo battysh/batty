@@ -116,6 +116,14 @@ pub fn send_message_as(
 /// Detect who is calling `batty send` by reading the `@batty_role` option
 /// from the current tmux pane.
 pub(crate) fn detect_sender() -> Option<String> {
+    // 1. Check BATTY_MEMBER env var (set by SDK mode shim subprocess)
+    if let Ok(member) = std::env::var("BATTY_MEMBER") {
+        if !member.is_empty() {
+            return Some(member);
+        }
+    }
+
+    // 2. Fall back to tmux pane role detection (PTY mode)
     let pane_id = std::env::var("TMUX_PANE").ok()?;
     let output = std::process::Command::new("tmux")
         .args(["show-options", "-p", "-t", &pane_id, "-v", "@batty_role"])

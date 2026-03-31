@@ -59,7 +59,7 @@ pub fn parse_special(input: &str) -> Option<SpecialCommand> {
 // Chat entry point
 // ---------------------------------------------------------------------------
 
-pub fn run(agent_type: AgentType, cmd: &str, cwd: &Path) -> Result<()> {
+pub fn run(agent_type: AgentType, cmd: &str, cwd: &Path, sdk_mode: bool) -> Result<()> {
     // -- Create socketpair --
     let (parent_sock, child_sock) = protocol::socketpair().context("socketpair failed")?;
 
@@ -73,19 +73,25 @@ pub fn run(agent_type: AgentType, cmd: &str, cwd: &Path) -> Result<()> {
     let cmd_owned = cmd.to_string();
     let cwd_str = cwd.display().to_string();
 
+    let mut args = vec![
+        "shim".to_string(),
+        "--id".to_string(),
+        "chat-agent".to_string(),
+        "--agent-type".to_string(),
+        agent_type_str.clone(),
+        "--cmd".to_string(),
+        cmd_owned.clone(),
+        "--cwd".to_string(),
+        cwd_str.clone(),
+    ];
+    if sdk_mode {
+        args.push("--sdk-mode".to_string());
+    }
+    let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
     let mut child = unsafe {
         Command::new(&self_exe)
-            .args([
-                "shim",
-                "--id",
-                "chat-agent",
-                "--agent-type",
-                &agent_type_str,
-                "--cmd",
-                &cmd_owned,
-                "--cwd",
-                &cwd_str,
-            ])
+            .args(&args_refs)
             .stdin(Stdio::null())
             .stderr(Stdio::inherit())
             .pre_exec(move || {
