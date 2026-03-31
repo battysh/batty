@@ -31,9 +31,9 @@ pub struct TeamConfig {
     /// directly in tmux panes. The shim manages PTY, state classification,
     /// and message delivery over a structured channel.
     pub use_shim: bool,
-    /// When true and `use_shim` is enabled, Claude Code agents communicate via
-    /// structured NDJSON (stream-json protocol) instead of PTY screen-scraping.
-    /// Requires `use_shim: true` and only applies to claude/claude-code agents.
+    /// When true and `use_shim` is enabled, agents that support structured I/O
+    /// (Claude Code, Codex) communicate via JSON protocols instead of PTY
+    /// screen-scraping. Requires `use_shim: true`. Defaults to true.
     pub use_sdk_mode: bool,
     /// When true and `use_shim` is enabled, crashed agents are automatically
     /// respawned instead of escalating to the manager. This is the default
@@ -91,7 +91,7 @@ struct TeamConfigWire {
     pub grafana: GrafanaConfig,
     #[serde(default)]
     pub use_shim: bool,
-    #[serde(default)]
+    #[serde(default = "default_use_sdk_mode")]
     pub use_sdk_mode: bool,
     #[serde(default = "default_auto_respawn_on_crash")]
     pub auto_respawn_on_crash: bool,
@@ -183,6 +183,10 @@ impl Default for GrafanaConfig {
 
 fn default_grafana_port() -> u16 {
     3000
+}
+
+fn default_use_sdk_mode() -> bool {
+    true
 }
 
 fn default_auto_respawn_on_crash() -> bool {
