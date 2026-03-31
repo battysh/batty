@@ -389,13 +389,24 @@ impl TeamDaemon {
                     member_name,
                     &format!("<- warning idle_secs={idle_secs:?}: {message}"),
                 );
-                info!(
-                    member = member_name,
-                    idle_secs,
-                    message = message.as_str(),
-                    "shim warning: potential stall"
-                );
-                self.surface_shim_stall_warning(member_name, &message, idle_secs);
+
+                // "message queued while agent working" is normal queue behavior,
+                // not a stall. Only surface genuine stall warnings to the manager.
+                if message.contains("message queued while agent working") {
+                    info!(
+                        member = member_name,
+                        message = message.as_str(),
+                        "shim warning: message queued (not a stall)"
+                    );
+                } else {
+                    info!(
+                        member = member_name,
+                        idle_secs,
+                        message = message.as_str(),
+                        "shim warning: potential stall"
+                    );
+                    self.surface_shim_stall_warning(member_name, &message, idle_secs);
+                }
             }
 
             Event::ScreenCapture { .. } | Event::State { .. } => {
