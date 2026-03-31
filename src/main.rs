@@ -849,19 +849,27 @@ fn main() -> Result<()> {
             agent_type,
             cmd,
             cwd,
+            sdk_mode,
         } => {
             use batty_cli::shim;
 
             let at: shim::classifier::AgentType =
                 agent_type.parse().map_err(|e: String| anyhow::anyhow!(e))?;
 
-            let cmd = cmd.unwrap_or_else(|| shim::chat::default_cmd(at).to_string());
+            let cmd = if sdk_mode && cmd.is_none() {
+                // In SDK mode, default to Claude stream-json command
+                use batty_cli::agent::claude::ClaudeCodeAdapter;
+                let adapter = ClaudeCodeAdapter::new(None);
+                adapter.sdk_launch_command(None, None)
+            } else {
+                cmd.unwrap_or_else(|| shim::chat::default_cmd(at).to_string())
+            };
 
             let cwd = PathBuf::from(&cwd)
                 .canonicalize()
                 .unwrap_or_else(|_| PathBuf::from(&cwd));
 
-            shim::chat::run(at, &cmd, &cwd)?;
+            shim::chat::run(at, &cmd, &cwd, sdk_mode)?;
         }
 
         Command::Shim {
@@ -872,6 +880,7 @@ fn main() -> Result<()> {
             rows,
             cols,
             pty_log_path,
+            sdk_mode,
         } => {
             use batty_cli::shim;
             use std::os::unix::io::FromRawFd;
@@ -894,7 +903,11 @@ fn main() -> Result<()> {
                 pty_log_path: pty_log_path.map(PathBuf::from),
             };
 
-            shim::runtime::run(args, channel)?;
+            if sdk_mode {
+                shim::runtime_sdk::run_sdk(args, channel)?;
+            } else {
+                shim::runtime::run(args, channel)?;
+            }
         }
 
         Command::ConsolePane {

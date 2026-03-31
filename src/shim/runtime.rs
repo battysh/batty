@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, PtySize};
 
 use super::classifier::{self, AgentType, ScreenVerdict};
+use super::common::{self, QueuedMessage};
 use super::protocol::{Channel, Command, Event, ShimState};
 use super::pty_log::PtyLogWriter;
 
@@ -42,28 +43,15 @@ const KIRO_IDLE_SETTLE_MS: u64 = 1200;
 
 /// Max time to wait for agent to show its first prompt (secs).
 const READY_TIMEOUT_SECS: u64 = 120;
-const SESSION_STATS_INTERVAL_SECS: u64 = 60;
-
-/// Maximum number of messages that can be queued while the agent is working.
-const MAX_QUEUE_DEPTH: usize = 16;
+use common::MAX_QUEUE_DEPTH;
+use common::SESSION_STATS_INTERVAL_SECS;
 
 const PROCESS_EXIT_POLL_MS: u64 = 100;
 const PARENT_DEATH_POLL_SECS: u64 = 1;
 const GROUP_TERM_GRACE_SECS: u64 = 2;
 
-fn reply_target_for(sender: &str) -> &str {
-    sender
-}
-
 fn format_injected_message(sender: &str, body: &str) -> String {
-    let reply_to = reply_target_for(sender);
-    format!(
-        "--- Message from {sender} ---\n\
-Reply-To: {reply_to}\n\
-If you need to reply, use: batty send {reply_to} \"<your reply>\"\n\
-\n\
-{body}"
-    )
+    common::format_injected_message(sender, body)
 }
 
 fn shell_single_quote(input: &str) -> String {
@@ -206,17 +194,7 @@ pub struct ShimArgs {
     pub pty_log_path: Option<PathBuf>,
 }
 
-// ---------------------------------------------------------------------------
-// Queued message (buffered while agent is Working)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-struct QueuedMessage {
-    #[allow(dead_code)]
-    from: String,
-    body: String,
-    message_id: Option<String>,
-}
+// QueuedMessage is imported from super::common
 
 // ---------------------------------------------------------------------------
 // Shared state between PTY reader thread and command handler thread
@@ -996,28 +974,11 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Drain the message queue, emitting Error events for each dropped message
-// ---------------------------------------------------------------------------
-
 fn drain_queue_errors(
     queue: &mut VecDeque<QueuedMessage>,
     terminal_state: ShimState,
 ) -> Vec<Event> {
-    let mut events = Vec::new();
-    while let Some(msg) = queue.pop_front() {
-        events.push(Event::Error {
-            command: "SendMessage".into(),
-            reason: format!(
-                "agent entered {} state, queued message dropped{}",
-                terminal_state,
-                msg.message_id
-                    .map(|id| format!(" (id: {id})"))
-                    .unwrap_or_default(),
-            ),
-        });
-    }
-    events
+    common::drain_queue_errors(queue, terminal_state)
 }
 
 // ---------------------------------------------------------------------------

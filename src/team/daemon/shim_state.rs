@@ -91,12 +91,14 @@ impl TeamDaemon {
                 work_dir = %persisted.work_dir.display(),
                 "restoring shim from saved state"
             );
+            let sdk_mode = persisted.agent_type == "claude" && self.config.team_config.use_sdk_mode;
             match super::shim_spawn::spawn_shim(
                 &persisted.id,
                 &persisted.agent_type,
                 &persisted.agent_cmd,
                 &persisted.work_dir,
                 None,
+                sdk_mode,
             ) {
                 Ok(handle) => {
                     self.shim_handles.insert(name.clone(), handle);

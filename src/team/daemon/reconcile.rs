@@ -121,12 +121,14 @@ impl TeamDaemon {
                 );
             }
 
+            let sdk_mode = agent_name == "claude" && self.config.team_config.use_sdk_mode;
             match super::shim_spawn::spawn_shim(
                 &member.name,
                 agent_name,
                 &agent_cmd,
                 &work_dir,
                 Some(&pty_log_path),
+                sdk_mode,
             ) {
                 Ok(handle) => {
                     self.shim_handles.insert(member.name.clone(), handle);
