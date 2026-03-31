@@ -463,9 +463,12 @@ impl TeamDaemon {
             let normalized_agent =
                 canonical_agent_name(member.agent.as_deref().unwrap_or("claude"));
             let session_id = new_member_session_id(&normalized_agent);
+            let agent_name = member.agent.as_deref().unwrap_or("claude");
+            let sdk_mode_task = matches!(agent_name, "claude" | "claude-code")
+                && self.config.team_config.use_sdk_mode;
             let agent_cmd = write_launch_script(
                 member_name,
-                member.agent.as_deref().unwrap_or("claude"),
+                agent_name,
                 &prompt,
                 Some(&role_context),
                 &work_dir,
@@ -473,6 +476,7 @@ impl TeamDaemon {
                 false,
                 false,
                 session_id.as_deref(),
+                sdk_mode_task,
             )?;
             return Ok(Some(ShimRespawnPlan {
                 agent_type: handle.agent_type.clone(),
@@ -492,9 +496,12 @@ impl TeamDaemon {
         let work_dir = self.member_work_dir(&member);
         let normalized_agent = canonical_agent_name(member.agent.as_deref().unwrap_or("claude"));
         let session_id = new_member_session_id(&normalized_agent);
+        let agent_name_idle = member.agent.as_deref().unwrap_or("claude");
+        let sdk_mode_idle = matches!(agent_name_idle, "claude" | "claude-code")
+            && self.config.team_config.use_sdk_mode;
         let agent_cmd = write_launch_script(
             member_name,
-            member.agent.as_deref().unwrap_or("claude"),
+            agent_name_idle,
             &prompt,
             Some(&prompt),
             &work_dir,
@@ -502,6 +509,7 @@ impl TeamDaemon {
             true,
             false,
             session_id.as_deref(),
+            sdk_mode_idle,
         )?;
         Ok(Some(ShimRespawnPlan {
             agent_type: handle.agent_type.clone(),
@@ -541,12 +549,14 @@ impl TeamDaemon {
         );
 
         let log_path = shim_log_path(&self.config.project_root, member_name);
+        let sdk_mode = plan.agent_type == "claude" && self.config.team_config.use_sdk_mode;
         let new_handle = super::super::shim_spawn::spawn_shim(
             member_name,
             &plan.agent_type,
             &plan.agent_cmd,
             &plan.work_dir,
             Some(&log_path),
+            sdk_mode,
         )?;
 
         if let Some(identity) = plan.identity.clone() {
@@ -584,12 +594,14 @@ impl TeamDaemon {
 
         info!(member = member_name, "auto-respawning shim after crash");
 
+        let sdk_mode = agent_type == "claude" && self.config.team_config.use_sdk_mode;
         let new_handle = super::super::shim_spawn::spawn_shim(
             member_name,
             &agent_type,
             &agent_cmd,
             &work_dir,
             None,
+            sdk_mode,
         )?;
         self.shim_handles
             .insert(member_name.to_string(), new_handle);
