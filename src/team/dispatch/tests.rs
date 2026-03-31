@@ -422,15 +422,16 @@ fn queue_escalates_after_repeated_validation_failures() {
         daemon.maybe_auto_dispatch().unwrap();
     }
 
-    assert!(daemon.dispatch_queue.is_empty());
+    assert!(
+        daemon.dispatch_queue.is_empty(),
+        "queue should be drained after failure limit"
+    );
+    // With the reassign-or-drop fix, blocked entries are silently dropped
+    // (no escalation to manager) since auto-dispatch will re-queue when
+    // the engineer frees up.
     let inbox_root = inbox::inboxes_root(tmp.path());
     let manager_messages = inbox::pending_messages(&inbox_root, "manager").unwrap();
-    assert_eq!(manager_messages.len(), 1);
-    assert!(
-        manager_messages[0]
-            .body
-            .contains("Dispatch queue entry failed validation")
-    );
+    assert_eq!(manager_messages.len(), 0);
 }
 
 #[test]
