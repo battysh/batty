@@ -248,6 +248,10 @@ pub enum Command {
         /// Working directory for the agent
         #[arg(long, default_value = ".")]
         cwd: String,
+
+        /// Use SDK mode (NDJSON stdin/stdout) instead of PTY screen-scraping
+        #[arg(long, default_value_t = false)]
+        sdk_mode: bool,
     },
 
     /// Internal: run a shim process (spawned by `batty chat` or orchestrator)
@@ -280,6 +284,10 @@ pub enum Command {
         /// Path to write raw PTY output for tmux display panes
         #[arg(long)]
         pty_log_path: Option<String>,
+
+        /// Use SDK mode (NDJSON stdin/stdout) instead of PTY screen-scraping
+        #[arg(long, default_value_t = false)]
+        sdk_mode: bool,
     },
 
     /// Internal: interactive shim pane bridge for tmux
