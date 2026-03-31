@@ -236,26 +236,46 @@ impl TeamDaemon {
             let active_count =
                 self.engineer_active_board_item_count(&board_dir, &entry.engineer)?;
             if active_count > 0 {
+                // Try to reassign to an idle engineer with no active items
+                let retained_engineers: HashSet<&str> =
+                    retained.iter().map(|e| e.engineer.as_str()).collect();
+                let alt = self.idle_engineer_names().into_iter().find(|name| {
+                    name != &entry.engineer
+                        && !retained_engineers.contains(name.as_str())
+                        && self
+                            .engineer_active_board_item_count(&board_dir, name)
+                            .unwrap_or(1)
+                            == 0
+                });
+                if let Some(alt_engineer) = alt {
+                    debug!(
+                        from = %entry.engineer,
+                        to = %alt_engineer,
+                        task_id = entry.task_id,
+                        "dispatch queue: reassigning to idle engineer"
+                    );
+                    entry.engineer = alt_engineer;
+                    entry.validation_failures = 0;
+                    entry.last_failure = None;
+                    retained.push(entry);
+                    continue;
+                }
+
+                // No alternative — increment failure count
                 entry.validation_failures += 1;
                 entry.last_failure = Some(format!(
-                    "Dispatch guard blocked assignment for '{}' with {} active board item(s)",
+                    "Dispatch guard blocked assignment for '{}' with {} active board item(s); no idle alternative",
                     entry.engineer, active_count
                 ));
-                warn!(
-                    engineer = %entry.engineer,
-                    task_id = entry.task_id,
-                    failures = entry.validation_failures,
-                    active_count,
-                    "dispatch queue: guard blocked — engineer has active board items"
-                );
                 if entry.validation_failures >= DISPATCH_QUEUE_FAILURE_LIMIT {
-                    self.escalate_dispatch_queue_entry(
-                        &entry,
-                        entry
-                            .last_failure
-                            .as_deref()
-                            .unwrap_or("dispatch guard blocked assignment"),
-                    )?;
+                    // Drop silently — will be re-queued by auto-dispatch when
+                    // an engineer frees up. No need to escalate what is just
+                    // a "everyone is busy" situation.
+                    debug!(
+                        engineer = %entry.engineer,
+                        task_id = entry.task_id,
+                        "dispatch queue: all engineers busy, dropping entry (will re-queue)"
+                    );
                 } else {
                     retained.push(entry);
                 }
