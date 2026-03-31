@@ -121,7 +121,8 @@ impl TeamDaemon {
                 );
             }
 
-            let sdk_mode = agent_name == "claude" && self.config.team_config.use_sdk_mode;
+            let sdk_mode = super::launcher::agent_supports_sdk_mode(agent_name)
+                && self.config.team_config.use_sdk_mode;
             match super::shim_spawn::spawn_shim(
                 &member.name,
                 agent_name,

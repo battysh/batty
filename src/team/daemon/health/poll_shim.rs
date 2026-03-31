@@ -8,8 +8,8 @@ use anyhow::Result;
 use tracing::{debug, info, warn};
 
 use super::super::launcher::{
-    LaunchIdentity, canonical_agent_name, member_session_tracker_config, new_member_session_id,
-    strip_nudge_section, write_launch_script,
+    LaunchIdentity, agent_supports_sdk_mode, canonical_agent_name, member_session_tracker_config,
+    new_member_session_id, strip_nudge_section, write_launch_script,
 };
 use super::super::*;
 use crate::shim::protocol::{Event, ShimState};
@@ -560,7 +560,8 @@ impl TeamDaemon {
         );
 
         let log_path = shim_log_path(&self.config.project_root, member_name);
-        let sdk_mode = plan.agent_type == "claude" && self.config.team_config.use_sdk_mode;
+        let sdk_mode =
+            agent_supports_sdk_mode(&plan.agent_type) && self.config.team_config.use_sdk_mode;
         let new_handle = super::super::shim_spawn::spawn_shim(
             member_name,
             &plan.agent_type,
@@ -605,7 +606,7 @@ impl TeamDaemon {
 
         info!(member = member_name, "auto-respawning shim after crash");
 
-        let sdk_mode = agent_type == "claude" && self.config.team_config.use_sdk_mode;
+        let sdk_mode = agent_supports_sdk_mode(&agent_type) && self.config.team_config.use_sdk_mode;
         let new_handle = super::super::shim_spawn::spawn_shim(
             member_name,
             &agent_type,

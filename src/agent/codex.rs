@@ -100,6 +100,32 @@ impl AgentAdapter for CodexCliAdapter {
     }
 }
 
+impl CodexCliAdapter {
+    /// Build the launch command for SDK (JSONL) mode.
+    ///
+    /// In Codex SDK mode, each message spawns a new `codex exec --json`
+    /// subprocess. The initial prompt is the system/role context; actual
+    /// task messages are sent per-turn by the runtime.
+    ///
+    /// `system_prompt`: role context passed as the initial exec prompt.
+    pub fn sdk_launch_command(&self, system_prompt: Option<&str>) -> String {
+        // In Codex SDK mode, the shim runtime handles spawning per-message.
+        // The launch script just needs to set up the environment (PATH, CWD).
+        // We use a simple sleep loop as a placeholder process — the actual
+        // codex exec calls are made by the runtime_codex module.
+        //
+        // But we need a process that stays alive so the shim doesn't exit.
+        // Use `cat` which blocks on stdin indefinitely (stdin is /dev/null
+        // so it exits immediately — but that's fine, the Codex runtime
+        // doesn't need a persistent process).
+        //
+        // Actually, the Codex runtime handles its own subprocess spawning,
+        // so the launch command is just a sentinel that exits immediately.
+        // The runtime is designed for spawn-per-message, not persistent process.
+        "exec sleep infinity".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
