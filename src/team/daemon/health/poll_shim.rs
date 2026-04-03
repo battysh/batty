@@ -475,7 +475,7 @@ impl TeamDaemon {
                 canonical_agent_name(member.agent.as_deref().unwrap_or("claude"));
             let session_id = new_member_session_id(&normalized_agent);
             let agent_name = member.agent.as_deref().unwrap_or("claude");
-            let sdk_mode_task = matches!(agent_name, "claude" | "claude-code")
+            let sdk_mode_task = agent_supports_sdk_mode(agent_name)
                 && self.config.team_config.use_sdk_mode;
             let agent_cmd = write_launch_script(
                 member_name,
@@ -508,7 +508,7 @@ impl TeamDaemon {
         let normalized_agent = canonical_agent_name(member.agent.as_deref().unwrap_or("claude"));
         let session_id = new_member_session_id(&normalized_agent);
         let agent_name_idle = member.agent.as_deref().unwrap_or("claude");
-        let sdk_mode_idle = matches!(agent_name_idle, "claude" | "claude-code")
+        let sdk_mode_idle = agent_supports_sdk_mode(agent_name_idle)
             && self.config.team_config.use_sdk_mode;
         let agent_cmd = write_launch_script(
             member_name,

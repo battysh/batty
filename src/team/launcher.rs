@@ -590,6 +590,13 @@ pub(super) fn write_launch_script(
                 // spawning. The launch script just needs a sentinel process.
                 "exec sleep infinity".to_string()
             }
+            "kiro" | "kiro-cli" => {
+                // Kiro SDK uses ACP (JSON-RPC 2.0) protocol.
+                // Session prompt is sent via JSON-RPC; agent config carries the system prompt.
+                use crate::agent::kiro::KiroCliAdapter;
+                let kiro_adapter = KiroCliAdapter::new(None);
+                kiro_adapter.sdk_launch_command()
+            }
             _ => {
                 // Claude SDK uses stream-json protocol.
                 // Role prompt goes via --append-system-prompt; tasks arrive via stdin NDJSON.
@@ -651,7 +658,10 @@ pub(super) fn write_launch_script(
 
 /// Whether an agent supports SDK mode (structured JSON I/O).
 pub(crate) fn agent_supports_sdk_mode(agent_name: &str) -> bool {
-    matches!(agent_name, "claude" | "claude-code" | "codex" | "codex-cli")
+    matches!(
+        agent_name,
+        "claude" | "claude-code" | "codex" | "codex-cli" | "kiro" | "kiro-cli"
+    )
 }
 
 pub(super) fn canonical_agent_name(agent_name: &str) -> String {
