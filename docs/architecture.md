@@ -193,11 +193,11 @@ When `use_sdk_mode: true` is set in `team.yaml` (the default for Claude and Code
 
 Three backend-specific protocols are supported:
 
-| Backend    | Protocol                    | Agent invocation                                                        |
-| ---------- | --------------------------- | ----------------------------------------------------------------------- |
-| Claude Code | stream-json NDJSON          | `claude -p --input-format=stream-json --output-format=stream-json`     |
-| Codex CLI   | JSONL spawn-per-message     | `codex exec --json`                                                     |
-| Kiro CLI    | ACP JSON-RPC 2.0            | `kiro-cli acp --trust-all-tools`                                        |
+| Backend     | Protocol                | Agent invocation                                                   |
+| ----------- | ----------------------- | ------------------------------------------------------------------ |
+| Claude Code | stream-json NDJSON      | `claude -p --input-format=stream-json --output-format=stream-json` |
+| Codex CLI   | JSONL spawn-per-message | `codex exec --json`                                                |
+| Kiro CLI    | ACP JSON-RPC 2.0        | `kiro-cli acp --trust-all-tools`                                   |
 
 **Claude Code** maintains a long-running process. The shim writes JSON request objects to stdin and reads NDJSON response lines from stdout. State transitions (ready, thinking, tool-use, done) are derived from the structured event stream rather than terminal output classification.
 
@@ -209,8 +209,8 @@ When `use_sdk_mode: false`, the shim falls back to the original PTY-based runtim
 
 ### Key Files
 
-| File                        | Responsibility                                      |
-| --------------------------- | --------------------------------------------------- |
-| `shim/runtime_sdk.rs`       | Claude Code stream-json SDK runtime                 |
-| `shim/runtime_codex.rs`     | Codex CLI JSONL SDK runtime                         |
-| `shim/runtime_kiro.rs`      | Kiro CLI ACP JSON-RPC 2.0 SDK runtime               |
+| File                    | Responsibility                        |
+| ----------------------- | ------------------------------------- |
+| `shim/runtime_sdk.rs`   | Claude Code stream-json SDK runtime   |
+| `shim/runtime_codex.rs` | Codex CLI JSONL SDK runtime           |
+| `shim/runtime_kiro.rs`  | Kiro CLI ACP JSON-RPC 2.0 SDK runtime |
