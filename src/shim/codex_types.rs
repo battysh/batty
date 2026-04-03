@@ -4,7 +4,7 @@
 //! `codex exec --json` mode. Each line is a complete JSON object with
 //! a `type` tag discriminating the event kind.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
 // Top-level thread events (one per JSONL line)
