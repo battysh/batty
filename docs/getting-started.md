@@ -78,12 +78,21 @@ this to your `team.yaml`:
 
 ```yaml
 use_shim: true
+use_sdk_mode: true
 ```
+
+With `use_sdk_mode: true` (the default for Claude and Codex agents), the shim
+communicates with agent processes over typed JSON protocols instead of PTY
+screen-scraping. Claude Code uses stream-json NDJSON, Codex CLI uses JSONL
+structured output, and Kiro CLI uses ACP JSON-RPC 2.0. This gives more
+reliable state tracking and eliminates terminal-parsing heuristics. Set
+`use_sdk_mode: false` to fall back to the original PTY-based runtime.
 
 You can also chat with a single agent interactively using the shim protocol:
 
 ```sh
 batty chat --agent-type claude
+batty chat --agent-type kiro --sdk-mode
 ```
 
 See [Configuration Reference](reference/config.md) for details on shim-related

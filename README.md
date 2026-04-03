@@ -5,7 +5,7 @@
   <h1 align="center">Batty</h1>
   <p align="center"><strong>Hierarchical agent teams for software development.</strong></p>
   <p align="center">
-    Define a team of AI agents in YAML. Batty runs them through a shim-based runtime, routes work and messages between roles, manages engineer worktrees, and keeps the team moving while tmux remains the display and persistence layer.
+    Define a team of AI agents in YAML. Batty runs them through structured SDK protocols or a PTY-based shim, routes work and messages between roles, manages engineer worktrees, and keeps the team moving while tmux remains the display and persistence layer.
   </p>
 </p>
 
@@ -24,7 +24,7 @@
 
 ______________________________________________________________________
 
-Batty is a control plane for AI coding teams. Instead of one agent doing everything badly, you define roles like architect, manager, and engineers; Batty launches each agent through a PTY-owning shim, isolates engineer work in git worktrees, routes messages, tracks the board, and uses tmux for visibility and session persistence.
+Batty is a control plane for AI coding teams. Instead of one agent doing everything badly, you define roles like architect, manager, and engineers; Batty launches each agent through typed SDK protocols (the default) or a PTY-owning shim fallback, isolates engineer work in git worktrees, routes messages, tracks the board, and uses tmux for visibility and session persistence.
 
 ## Quick Start
 
@@ -66,7 +66,7 @@ Engineers (Codex / Claude / Aider)
    +---- isolated git worktrees ----+
 ```
 
-Batty keeps each role visible in its own tmux pane, while the shim handles PTY ownership, state detection, and structured message delivery. The daemon auto-dispatches board tasks, runs standups, and merges engineer branches back when they pass tests.
+Batty keeps each role visible in its own tmux pane. In SDK mode (the default since v0.7.x), each agent communicates over a typed JSON protocol -- Claude Code via stream-json NDJSON, Codex via JSONL, Kiro via ACP JSON-RPC 2.0 -- giving structured message delivery, completion detection, and auto-approval of tool use. When SDK mode is off, the PTY-owning shim with screen classification provides a universal fallback. The daemon auto-dispatches board tasks, runs standups, and merges engineer branches back when they pass tests.
 
 For unattended teams, leave `auto_respawn_on_crash: true` enabled. Turning it
 off is mainly useful when you want to debug crashes manually or supervise pane
@@ -119,17 +119,20 @@ team.yaml
    v
 batty start
    |
-   +--> shim process per agent
-   +--> PTY + screen classifier per shim
-   +--> tmux panes tail shim PTY logs
+   +--> SDK mode (default): typed JSON protocol per agent backend
+   |      Claude Code  -> stream-json NDJSON
+   |      Codex CLI    -> JSONL (exec --json)
+   |      Kiro CLI     -> ACP JSON-RPC 2.0
+   +--> PTY fallback: shim process with screen classifier (use_sdk_mode: false)
+   +--> tmux panes for operator visibility
    +--> engineer worktrees created when enabled
-   +--> daemon loop watches shim state, inboxes, board, retries, standups
+   +--> daemon loop watches agent state, inboxes, board, retries, standups
    |
    v
 batty send / assign / board / status / merge
 ```
 
-Batty does not embed a model. It orchestrates external agent CLIs, keeps state in files, uses shims as the execution boundary, and uses tmux plus git worktrees as the operator-facing runtime surface.
+Batty does not embed a model. It orchestrates external agent CLIs, keeps state in files, uses SDK protocols (or PTY shims) as the execution boundary, and uses tmux plus git worktrees as the operator-facing runtime surface.
 
 On restart, Batty resumes saved agent sessions when the launch identity still
 matches and the saved session is still available. If the saved session is stale
@@ -155,7 +158,8 @@ respawns panes that are already dead.
 ## Highlights
 
 - Hierarchical agent teams instead of one overloaded coding agent
-- Shim-driven runtime with PTY ownership, state classification, and structured delivery
+- SDK mode (default): structured JSON protocols for Claude Code (stream-json NDJSON), Codex CLI (JSONL), and Kiro CLI (ACP JSON-RPC 2.0) with completion detection and auto-approval
+- PTY shim fallback with screen classification and state detection when SDK mode is off
 - tmux-backed visibility with persistent panes and session resume
 - Agent-agnostic role assignment: Claude Code, Codex, Aider, Kiro, or similar — set the default with `batty init --agent <backend>`
 - Maildir inbox routing with explicit `talks_to` communication rules
