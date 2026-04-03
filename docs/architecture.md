@@ -214,3 +214,15 @@ When `use_sdk_mode: false`, the shim falls back to the original PTY-based runtim
 | `shim/runtime_sdk.rs`   | Claude Code stream-json SDK runtime   |
 | `shim/runtime_codex.rs` | Codex CLI JSONL SDK runtime           |
 | `shim/runtime_kiro.rs`  | Kiro CLI ACP JSON-RPC 2.0 SDK runtime |
+
+### Shim Configuration (team.yaml)
+
+| Key                               | Type    | Default | Description                                                  |
+| --------------------------------- | ------- | ------- | ------------------------------------------------------------ |
+| `use_shim`                        | boolean | `true`  | Run each agent through a PTY-owning shim subprocess          |
+| `use_sdk_mode`                    | boolean | `true`  | Use structured JSON protocols instead of PTY screen-scraping |
+| `auto_respawn_on_crash`           | boolean | `true`  | Automatically respawn crashed agent shims                    |
+| `shim_health_check_interval_secs` | integer | `30`    | How often to send health pings to agent shims                |
+| `shim_health_timeout_secs`        | integer | `90`    | Max time without a pong before considering agent stalled     |
+| `shim_shutdown_timeout_secs`      | integer | `10`    | Grace period for graceful shutdown before SIGKILL            |
+| `shim_working_state_timeout_secs` | integer | `3600`  | Max time an agent can stay in Working state                  |
