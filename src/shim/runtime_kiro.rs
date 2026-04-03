@@ -178,9 +178,7 @@ pub fn run_kiro_acp(args: ShimArgs, channel: Channel) -> Result<()> {
                 let msg_id = msg.id.unwrap();
 
                 if let Some(ref error) = msg.error {
-                    eprintln!(
-                        "[shim-kiro {shim_id}] JSON-RPC error (id={msg_id}): {error}"
-                    );
+                    eprintln!("[shim-kiro {shim_id}] JSON-RPC error (id={msg_id}): {error}");
                     // Check if this was a prompt request that failed
                     let mut st = state_stdout.lock().unwrap();
                     if st.pending_prompt_request_id == Some(msg_id) {
@@ -258,10 +256,7 @@ pub fn run_kiro_acp(args: ShimArgs, channel: Channel) -> Result<()> {
                             st.initialized = true;
                             st.state = ShimState::Idle;
                             st.state_changed_at = Instant::now();
-                            eprintln!(
-                                "[shim-kiro {shim_id}] session created: {}",
-                                st.session_id
-                            );
+                            eprintln!("[shim-kiro {shim_id}] session created: {}", st.session_id);
                             drop(st);
 
                             // Now emit Ready — agent is ready for messages
@@ -348,8 +343,7 @@ pub fn run_kiro_acp(args: ShimArgs, channel: Channel) -> Result<()> {
                 match method {
                     "session/update" => {
                         if let Some(params) = params {
-                            let update_type =
-                                kiro_types::extract_update_type(params).unwrap_or("");
+                            let update_type = kiro_types::extract_update_type(params).unwrap_or("");
 
                             match update_type {
                                 "agent_message_chunk" | "AgentMessageChunk" => {
@@ -363,8 +357,7 @@ pub fn run_kiro_acp(args: ShimArgs, channel: Channel) -> Result<()> {
                                             drop(st);
 
                                             if let Some(ref log) = pty_log_stdout {
-                                                let _ =
-                                                    log.lock().unwrap().write(text.as_bytes());
+                                                let _ = log.lock().unwrap().write(text.as_bytes());
                                             }
                                         }
                                     }
@@ -423,8 +416,7 @@ pub fn run_kiro_acp(args: ShimArgs, channel: Channel) -> Result<()> {
                             if let Some(usage) = kiro_types::extract_context_usage(params) {
                                 if usage >= CONTEXT_EXHAUSTION_THRESHOLD {
                                     let mut st = state_stdout.lock().unwrap();
-                                    let last_lines =
-                                        last_n_lines_of(&st.accumulated_response, 5);
+                                    let last_lines = last_n_lines_of(&st.accumulated_response, 5);
                                     let old = st.state;
                                     st.state = ShimState::ContextExhausted;
                                     st.state_changed_at = Instant::now();
@@ -440,9 +432,7 @@ pub fn run_kiro_acp(args: ShimArgs, channel: Channel) -> Result<()> {
                                         summary: last_lines.clone(),
                                     });
                                     let _ = evt_channel.send(&Event::ContextExhausted {
-                                        message: format!(
-                                            "context usage at {usage:.1}%"
-                                        ),
+                                        message: format!("context usage at {usage:.1}%"),
                                         last_lines,
                                     });
                                     for event in drain {
@@ -596,10 +586,7 @@ pub fn run_kiro_acp(args: ShimArgs, channel: Channel) -> Result<()> {
                 break;
             }
             if st.state == ShimState::Dead {
-                eprintln!(
-                    "[shim-kiro {}] agent died during initialization",
-                    args.id
-                );
+                eprintln!("[shim-kiro {}] agent died during initialization", args.id);
                 return Ok(());
             }
             drop(st);
@@ -805,10 +792,7 @@ pub fn run_kiro_acp(args: ShimArgs, channel: Channel) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Write an NDJSON line to the shared stdin, if it's still open.
-fn write_stdin(
-    stdin: &Arc<Mutex<Option<std::process::ChildStdin>>>,
-    line: &str,
-) -> bool {
+fn write_stdin(stdin: &Arc<Mutex<Option<std::process::ChildStdin>>>, line: &str) -> bool {
     if let Ok(mut guard) = stdin.lock() {
         if let Some(ref mut writer) = *guard {
             if writeln!(writer, "{line}").is_ok() {
@@ -934,8 +918,9 @@ mod tests {
 
     #[test]
     fn context_exhaustion_threshold() {
-        assert!(CONTEXT_EXHAUSTION_THRESHOLD >= 95.0);
-        assert!(CONTEXT_EXHAUSTION_THRESHOLD <= 100.0);
+        let threshold = CONTEXT_EXHAUSTION_THRESHOLD;
+        assert!(threshold >= 95.0);
+        assert!(threshold <= 100.0);
     }
 
     #[test]

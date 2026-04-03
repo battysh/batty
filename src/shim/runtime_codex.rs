@@ -10,7 +10,7 @@
 //! PTY runtime, making it transparent to all upstream consumers.
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Write as IoWrite};
+use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -56,8 +56,6 @@ struct CodexState {
     program: String,
     /// Working directory for spawning subprocesses.
     cwd: std::path::PathBuf,
-    /// Base command template (without the prompt).
-    base_env: Vec<(String, String)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +82,6 @@ pub fn run_codex_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
         cumulative_output_bytes: 0,
         program: "codex".to_string(),
         cwd: args.cwd.clone(),
-        base_env: Vec::new(),
     }));
 
     // PTY log writer (optional — writes readable text for tmux display)
@@ -610,7 +607,6 @@ mod tests {
             cumulative_output_bytes: 0,
             program: "codex".into(),
             cwd: std::path::PathBuf::from("/tmp"),
-            base_env: Vec::new(),
         };
         assert_eq!(st.state, ShimState::Idle);
         assert!(st.thread_id.is_none());

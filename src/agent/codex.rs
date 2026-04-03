@@ -82,12 +82,10 @@ impl AgentAdapter for CodexCliAdapter {
                 "{program} resume '{sid}' --dangerously-bypass-approvals-and-sandbox || {fallback}",
                 program = self.program,
             ))
+        } else if idle {
+            Ok(format!("exec {prefix}"))
         } else {
-            if idle {
-                Ok(format!("exec {prefix}"))
-            } else {
-                Ok(format!("{prefix} '{escaped}'"))
-            }
+            Ok(format!("{prefix} '{escaped}'"))
         }
     }
 
@@ -108,7 +106,7 @@ impl CodexCliAdapter {
     /// task messages are sent per-turn by the runtime.
     ///
     /// `system_prompt`: role context passed as the initial exec prompt.
-    pub fn sdk_launch_command(&self, system_prompt: Option<&str>) -> String {
+    pub fn sdk_launch_command(&self, _system_prompt: Option<&str>) -> String {
         // In Codex SDK mode, the shim runtime handles spawning per-message.
         // The launch script just needs to set up the environment (PATH, CWD).
         // We use a simple sleep loop as a placeholder process — the actual

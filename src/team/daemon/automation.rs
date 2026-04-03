@@ -690,11 +690,9 @@ impl TeamDaemon {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn handle_planning_response(&mut self, response: &str) -> Result<usize> {
         let specs = crate::team::tact::parser::parse_planning_response(response);
-        let result = (|| {
-            let board_dir = self.board_dir();
-            crate::team::tact::create_board_tasks(&specs, &board_dir)
-                .map(|created: Vec<u32>| created.len())
-        })();
+        let board_dir = self.board_dir();
+        let result = crate::team::tact::create_board_tasks(&specs, &board_dir)
+            .map(|created: Vec<u32>| created.len());
 
         self.planning_cycle_active = false;
 
