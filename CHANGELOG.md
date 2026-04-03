@@ -2,6 +2,56 @@
 
 All notable changes to Batty are documented here.
 
+## 0.7.2 — 2026-04-02
+
+SDK communication modes for all three agent backends, replacing PTY
+screen-scraping as the primary agent I/O mechanism. Each backend now
+communicates via its native structured protocol when `use_sdk_mode: true`
+(the default).
+
+### Features
+
+- **Claude Code SDK mode** — stream-json NDJSON protocol on stdin/stdout
+  (`claude -p --input-format=stream-json --output-format=stream-json`).
+  Persistent subprocess with auto-approval of tool use, structured
+  completion detection, and context exhaustion handling.
+- **Codex CLI SDK mode** — JSONL spawn-per-message model (`codex exec
+  --json`). Each message spawns a new subprocess; multi-turn context
+  preserved via thread ID resume.
+- **Kiro CLI ACP SDK mode** — Agent Client Protocol (ACP) JSON-RPC 2.0
+  on stdin/stdout (`kiro-cli acp --trust-all-tools`). Initialization
+  handshake (`initialize` + `session/new`), streaming via
+  `session/update` notifications, permission auto-approval via
+  `session/request_permission`, and session resume via `session/load`.
+- **`use_sdk_mode: true` default** — all three backends default to
+  structured JSON protocols. PTY screen-scraping remains as fallback.
+- **`batty chat --sdk-mode`** — test SDK mode interactively for any
+  agent type.
+
+### Stability
+
+- Context pressure tracking with proactive warnings
+- Narration loop detection for agents stuck in output cycles
+- Stale Codex resume degrades to cold respawn instead of hanging
+- Crash auto-respawn defaults to on for unattended teams
+- Tact planning engine with harness tests
+- Comprehensive stall prevention and system stabilization
+- Dynamic scaling via `batty scale` commands
+- Daemon config hot-reload
+
+### Fixes
+
+- Dispatch queue retry loop and shim warning noise
+- Poll_shim now uses `agent_supports_sdk_mode()` instead of hardcoded
+  claude-only checks for SDK mode dispatch
+- Clippy warnings resolved for CI compliance (Rust 1.94)
+
+### Documentation
+
+- README, architecture, getting-started, and config reference updated
+  to document SDK modes as the primary agent communication mechanism
+- Config reference now includes team.yaml shim settings table
+
 ## 0.7.1 — 2026-03-26
 
 Patch release focused on shim hardening and live-runtime defaults.
