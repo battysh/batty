@@ -10,23 +10,23 @@ Optional runtime defaults are read from `.batty/config.toml` when the file is pr
 
 ## Fields
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `defaults.agent` | string | `claude` | Default agent name for runtime paths that consult `.batty/config.toml`. |
-| `defaults.policy` | enum (`observe`, `suggest`, `act`) | `observe` | Default policy tier for prompt handling. |
-| `defaults.dod` | string or null | `(none)` | Definition of done command run after task completion. |
-| `defaults.max_retries` | integer | `3` | Maximum retries for failed DoD commands. |
-| `supervisor.enabled` | boolean | `true` | Enable Tier 2 supervisor escalation. |
-| `supervisor.program` | string | `claude` | Program used for supervisor calls. |
-| `supervisor.args` | array[string] | `[-p, --output-format, text]` | Arguments passed to the supervisor program. |
-| `supervisor.timeout_secs` | integer | `60` | Supervisor command timeout in seconds. |
-| `supervisor.trace_io` | boolean | `true` | Log supervisor prompts and responses for debugging. |
-| `detector.silence_timeout_secs` | integer | `3` | Silence threshold before unknown-request fallback triggers. |
-| `detector.answer_cooldown_millis` | integer | `1000` | Minimum delay between automatic answers. |
-| `detector.unknown_request_fallback` | boolean | `true` | Escalate unresolved output to supervisor when no known prompt matches. |
-| `detector.idle_input_fallback` | boolean | `true` | Allow idle-output input prompts to trigger response handling. |
-| `dangerous_mode.enabled` | boolean | `false` | Enable dangerous-mode flags for supported agent wrappers. |
-| `policy.auto_answer` | table[string -> string] | `{}` | Prompt-to-answer overrides for runtime paths that use this config. |
+| Key                                 | Type                               | Default                       | Description                                                             |
+| ----------------------------------- | ---------------------------------- | ----------------------------- | ----------------------------------------------------------------------- |
+| `defaults.agent`                    | string                             | `claude`                      | Default agent name for runtime paths that consult `.batty/config.toml`. |
+| `defaults.policy`                   | enum (`observe`, `suggest`, `act`) | `observe`                     | Default policy tier for prompt handling.                                |
+| `defaults.dod`                      | string or null                     | `(none)`                      | Definition of done command run after task completion.                   |
+| `defaults.max_retries`              | integer                            | `3`                           | Maximum retries for failed DoD commands.                                |
+| `supervisor.enabled`                | boolean                            | `true`                        | Enable Tier 2 supervisor escalation.                                    |
+| `supervisor.program`                | string                             | `claude`                      | Program used for supervisor calls.                                      |
+| `supervisor.args`                   | array[string]                      | `[-p, --output-format, text]` | Arguments passed to the supervisor program.                             |
+| `supervisor.timeout_secs`           | integer                            | `60`                          | Supervisor command timeout in seconds.                                  |
+| `supervisor.trace_io`               | boolean                            | `true`                        | Log supervisor prompts and responses for debugging.                     |
+| `detector.silence_timeout_secs`     | integer                            | `3`                           | Silence threshold before unknown-request fallback triggers.             |
+| `detector.answer_cooldown_millis`   | integer                            | `1000`                        | Minimum delay between automatic answers.                                |
+| `detector.unknown_request_fallback` | boolean                            | `true`                        | Escalate unresolved output to supervisor when no known prompt matches.  |
+| `detector.idle_input_fallback`      | boolean                            | `true`                        | Allow idle-output input prompts to trigger response handling.           |
+| `dangerous_mode.enabled`            | boolean                            | `false`                       | Enable dangerous-mode flags for supported agent wrappers.               |
+| `policy.auto_answer`                | table[string -> string]            | `{}`                          | Prompt-to-answer overrides for runtime paths that use this config.      |
 
 ## Default Template
 
@@ -60,14 +60,14 @@ enabled = false
 
 The following settings are specified in `.batty/team_config/team.yaml` at the top level (not under a role). They control the agent shim runtime that wraps each agent process.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `use_shim` | boolean | `true` | Run each agent through a PTY-owning shim subprocess |
-| `use_sdk_mode` | boolean | `true` | Use structured JSON protocols (stream-json, JSONL, ACP) instead of PTY screen-scraping |
-| `auto_respawn_on_crash` | boolean | `true` | Automatically respawn crashed agent shims |
-| `shim_health_check_interval_secs` | integer | `30` | How often to send health pings to agent shims |
-| `shim_health_timeout_secs` | integer | `90` | Max time without a pong before considering agent stalled |
-| `shim_shutdown_timeout_secs` | integer | `10` | Grace period for graceful shutdown before SIGKILL |
-| `shim_working_state_timeout_secs` | integer | `3600` | Max time an agent can stay in Working state |
+| Key                               | Type    | Default | Description                                                                            |
+| --------------------------------- | ------- | ------- | -------------------------------------------------------------------------------------- |
+| `use_shim`                        | boolean | `true`  | Run each agent through a PTY-owning shim subprocess                                    |
+| `use_sdk_mode`                    | boolean | `true`  | Use structured JSON protocols (stream-json, JSONL, ACP) instead of PTY screen-scraping |
+| `auto_respawn_on_crash`           | boolean | `true`  | Automatically respawn crashed agent shims                                              |
+| `shim_health_check_interval_secs` | integer | `30`    | How often to send health pings to agent shims                                          |
+| `shim_health_timeout_secs`        | integer | `90`    | Max time without a pong before considering agent stalled                               |
+| `shim_shutdown_timeout_secs`      | integer | `10`    | Grace period for graceful shutdown before SIGKILL                                      |
+| `shim_working_state_timeout_secs` | integer | `3600`  | Max time an agent can stay in Working state                                            |
 
 When `use_sdk_mode` is enabled (the default), each agent backend communicates via its native structured protocol: Claude Code uses stream-json NDJSON, Codex CLI uses JSONL (`exec --json`), and Kiro CLI uses ACP JSON-RPC 2.0 (`kiro-cli acp`). PTY screen-scraping is used as fallback when SDK mode is disabled.
