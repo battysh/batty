@@ -55,19 +55,3 @@ enabled = false
 [policy.auto_answer]
 "Continue? [y/n]" = "y"
 ```
-
-## Team YAML Shim Settings
-
-The following settings are specified in `.batty/team_config/team.yaml` at the top level (not under a role). They control the agent shim runtime that wraps each agent process.
-
-| Key                               | Type    | Default | Description                                                                            |
-| --------------------------------- | ------- | ------- | -------------------------------------------------------------------------------------- |
-| `use_shim`                        | boolean | `true`  | Run each agent through a PTY-owning shim subprocess                                    |
-| `use_sdk_mode`                    | boolean | `true`  | Use structured JSON protocols (stream-json, JSONL, ACP) instead of PTY screen-scraping |
-| `auto_respawn_on_crash`           | boolean | `true`  | Automatically respawn crashed agent shims                                              |
-| `shim_health_check_interval_secs` | integer | `30`    | How often to send health pings to agent shims                                          |
-| `shim_health_timeout_secs`        | integer | `90`    | Max time without a pong before considering agent stalled                               |
-| `shim_shutdown_timeout_secs`      | integer | `10`    | Grace period for graceful shutdown before SIGKILL                                      |
-| `shim_working_state_timeout_secs` | integer | `3600`  | Max time an agent can stay in Working state                                            |
-
-When `use_sdk_mode` is enabled (the default), each agent backend communicates via its native structured protocol: Claude Code uses stream-json NDJSON, Codex CLI uses JSONL (`exec --json`), and Kiro CLI uses ACP JSON-RPC 2.0 (`kiro-cli acp`). PTY screen-scraping is used as fallback when SDK mode is disabled.
