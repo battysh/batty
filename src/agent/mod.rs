@@ -269,7 +269,7 @@ mod tests {
         let kiro = adapter_from_name("kiro").unwrap();
         assert!(claude.supports_resume());
         assert!(codex.supports_resume());
-        assert!(!kiro.supports_resume());
+        assert!(kiro.supports_resume()); // ACP supports session/load
     }
 
     #[test]

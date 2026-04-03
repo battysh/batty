@@ -857,10 +857,17 @@ fn main() -> Result<()> {
                 agent_type.parse().map_err(|e: String| anyhow::anyhow!(e))?;
 
             let cmd = if sdk_mode && cmd.is_none() {
-                // In SDK mode, default to Claude stream-json command
-                use batty_cli::agent::claude::ClaudeCodeAdapter;
-                let adapter = ClaudeCodeAdapter::new(None);
-                adapter.sdk_launch_command(None, None)
+                // In SDK mode, select the right protocol per agent type
+                match at {
+                    shim::classifier::AgentType::Kiro => {
+                        use batty_cli::agent::kiro::KiroCliAdapter;
+                        KiroCliAdapter::new(None).sdk_launch_command()
+                    }
+                    _ => {
+                        use batty_cli::agent::claude::ClaudeCodeAdapter;
+                        ClaudeCodeAdapter::new(None).sdk_launch_command(None, None)
+                    }
+                }
             } else {
                 cmd.unwrap_or_else(|| shim::chat::default_cmd(at).to_string())
             };
@@ -907,6 +914,9 @@ fn main() -> Result<()> {
                 match at {
                     shim::classifier::AgentType::Codex => {
                         shim::runtime_codex::run_codex_sdk(args, channel)?;
+                    }
+                    shim::classifier::AgentType::Kiro => {
+                        shim::runtime_kiro::run_kiro_acp(args, channel)?;
                     }
                     _ => {
                         shim::runtime_sdk::run_sdk(args, channel)?;

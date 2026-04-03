@@ -119,8 +119,23 @@ impl AgentAdapter for KiroCliAdapter {
         Some(Uuid::new_v4().to_string())
     }
 
+    fn supports_resume(&self) -> bool {
+        // ACP supports session/load for session resumption
+        true
+    }
+
     fn health_check(&self) -> super::BackendHealth {
         super::check_binary_available(&self.program)
+    }
+}
+
+impl KiroCliAdapter {
+    /// Build the launch command for ACP (JSON-RPC) SDK mode.
+    ///
+    /// Returns a shell command that starts kiro-cli in ACP mode with
+    /// structured JSON-RPC 2.0 I/O on stdin/stdout.
+    pub fn sdk_launch_command(&self) -> String {
+        crate::shim::kiro_types::kiro_acp_command(&self.program)
     }
 }
 
@@ -235,8 +250,24 @@ mod tests {
     }
 
     #[test]
-    fn supports_resume_is_false() {
+    fn supports_resume_is_true() {
         let adapter = KiroCliAdapter::new(None);
-        assert!(!adapter.supports_resume());
+        assert!(adapter.supports_resume());
+    }
+
+    // --- SDK launch command tests ---
+
+    #[test]
+    fn sdk_launch_command_uses_acp_mode() {
+        let adapter = KiroCliAdapter::new(None);
+        let cmd = adapter.sdk_launch_command();
+        assert_eq!(cmd, "exec kiro-cli acp --trust-all-tools");
+    }
+
+    #[test]
+    fn sdk_launch_command_custom_binary() {
+        let adapter = KiroCliAdapter::new(Some("/opt/kiro-cli".to_string()));
+        let cmd = adapter.sdk_launch_command();
+        assert_eq!(cmd, "exec /opt/kiro-cli acp --trust-all-tools");
     }
 }
