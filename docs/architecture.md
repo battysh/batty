@@ -186,3 +186,31 @@ PID is stored at `.batty/daemon.pid`. Logs go to `.batty/daemon.log`.
 | < 3.1        | Not supported (fails fast)      |
 
 Even in shim mode, tmux remains required for pane layout, visibility, attach/detach, and session persistence.
+
+## SDK Communication Modes
+
+When `use_sdk_mode: true` is set in `team.yaml` (the default for Claude and Codex agents), the shim uses a typed JSON protocol to communicate with the agent process instead of PTY screen-scraping. The shim remains the process model (it owns the subprocess, manages lifecycle, and reports state to the daemon), but the I/O channel switches from raw PTY bytes to structured messages.
+
+Three backend-specific protocols are supported:
+
+| Backend    | Protocol                    | Agent invocation                                                        |
+| ---------- | --------------------------- | ----------------------------------------------------------------------- |
+| Claude Code | stream-json NDJSON          | `claude -p --input-format=stream-json --output-format=stream-json`     |
+| Codex CLI   | JSONL spawn-per-message     | `codex exec --json`                                                     |
+| Kiro CLI    | ACP JSON-RPC 2.0            | `kiro-cli acp --trust-all-tools`                                        |
+
+**Claude Code** maintains a long-running process. The shim writes JSON request objects to stdin and reads NDJSON response lines from stdout. State transitions (ready, thinking, tool-use, done) are derived from the structured event stream rather than terminal output classification.
+
+**Codex CLI** uses a spawn-per-message model. Each message dispatches a new `codex exec --json` invocation whose stdout is a JSONL stream of structured events. The shim collects the response and maps completion back to the daemon's state model.
+
+**Kiro CLI** speaks ACP (Agent Communication Protocol), a JSON-RPC 2.0 protocol on stdin/stdout. The shim sends RPC requests and receives typed responses, with tool invocations handled as nested RPC calls.
+
+When `use_sdk_mode: false`, the shim falls back to the original PTY-based runtime: it owns a pseudo-terminal, feeds keystrokes, and classifies agent state from screen content.
+
+### Key Files
+
+| File                        | Responsibility                                      |
+| --------------------------- | --------------------------------------------------- |
+| `shim/runtime_sdk.rs`       | Claude Code stream-json SDK runtime                 |
+| `shim/runtime_codex.rs`     | Codex CLI JSONL SDK runtime                         |
+| `shim/runtime_kiro.rs`      | Kiro CLI ACP JSON-RPC 2.0 SDK runtime               |
