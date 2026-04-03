@@ -291,7 +291,8 @@ mod tests {
 
     #[test]
     fn parse_response_message() {
-        let line = r#"{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}"#;
+        let line =
+            r#"{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}"#;
         let msg: AcpMessage = serde_json::from_str(line).unwrap();
         assert!(msg.is_response());
         assert!(!msg.is_notification());
@@ -320,7 +321,8 @@ mod tests {
 
     #[test]
     fn parse_error_response() {
-        let line = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"invalid request"}}"#;
+        let line =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"invalid request"}}"#;
         let msg: AcpMessage = serde_json::from_str(line).unwrap();
         assert!(msg.is_response());
         assert!(msg.error.is_some());
@@ -380,10 +382,7 @@ mod tests {
                 "content": { "type": "text", "text": "Here is the fix" }
             }
         });
-        assert_eq!(
-            extract_message_chunk_text(&params),
-            Some("Here is the fix")
-        );
+        assert_eq!(extract_message_chunk_text(&params), Some("Here is the fix"));
     }
 
     #[test]
