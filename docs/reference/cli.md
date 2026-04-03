@@ -275,6 +275,9 @@ Options:
           
           [default: .]
 
+      --sdk-mode
+          Use SDK mode (NDJSON stdin/stdout) instead of PTY screen-scraping
+
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 
@@ -1067,6 +1070,9 @@ Options:
 
       --pty-log-path <PTY_LOG_PATH>
           Path to write raw PTY output for tmux display panes
+
+      --sdk-mode
+          Use SDK mode (NDJSON stdin/stdout) instead of PTY screen-scraping
 
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
