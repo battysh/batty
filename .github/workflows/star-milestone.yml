@@ -1,0 +1,65 @@
+name: Star Milestone
+
+on:
+  watch:
+    types: [started]
+  workflow_dispatch:
+    inputs:
+      test_count:
+        description: 'Simulate star count for testing'
+        required: false
+        type: number
+
+jobs:
+  check-milestone:
+    runs-on: ubuntu-latest
+    permissions:
+      discussions: write
+    steps:
+      - name: Get star count
+        id: stars
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "${{ inputs.test_count }}" ]; then
+            COUNT="${{ inputs.test_count }}"
+          else
+            COUNT=$(gh api repos/${{ github.repository }} --jq '.stargazers_count')
+          fi
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+          # Check if this is a milestone
+          MILESTONE=""
+          for m in 15 20 25 50 75 100 150 200 250 500 1000; do
+            if [ "$COUNT" -eq "$m" ]; then
+              MILESTONE="$m"
+              break
+            fi
+          done
+          echo "milestone=$MILESTONE" >> "$GITHUB_OUTPUT"
+
+      - name: Post milestone discussion
+        if: steps.stars.outputs.milestone != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MILESTONE: ${{ steps.stars.outputs.milestone }}
+        run: |
+          gh api graphql -f query='
+            mutation($repoId: ID!, $catId: ID!, $title: String!, $body: String!) {
+              createDiscussion(input: {repositoryId: $repoId, categoryId: $catId, title: $title, body: $body}) {
+                discussion { url }
+              }
+            }
+          ' \
+            -f repoId="$(gh api repos/${{ github.repository }} --jq '.node_id')" \
+            -f catId="$(gh api graphql -f query='{ repository(owner: "${{ github.repository_owner }}", name: "${{ github.event.repository.name }}") { discussionCategories(first: 10) { nodes { id name } } } }' --jq '.data.repository.discussionCategories.nodes[] | select(.name == "Announcements") | .id')" \
+            -f title="${MILESTONE} stars — thank you!" \
+            -f body="Batty just hit **${MILESTONE} stars** on GitHub. Thank you to everyone who starred, tried it, filed issues, or gave feedback.
+
+          If you're new here — Batty is a terminal-native supervisor for AI coding agent teams. Define roles in YAML, run agents in tmux panes, isolate work in git worktrees, gate merges on passing tests.
+
+          - [Getting Started](https://battysh.github.io/batty/getting-started/)
+          - [Good First Issues](https://github.com/${{ github.repository }}/labels/good%20first%20issue)
+          - [Discussions](https://github.com/${{ github.repository }}/discussions)
+
+          What should we build next? Drop your ideas in [Feature Requests](https://github.com/${{ github.repository }}/discussions/6)."
