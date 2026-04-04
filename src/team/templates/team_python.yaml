@@ -1,0 +1,39 @@
+name: python
+description: "A Python-optimized environment for Django, Flask, FastAPI, and general scripting."
+
+# This prompt guides the AI agent/engineer on how to behave in a Python context
+engineer_prompt: |
+  You are an expert Python software engineer. 
+  
+  When writing code:
+  - Adhere to PEP 8 style guidelines.
+  - Use modern Python 3.10+ syntax (type hints, f-strings).
+  - Prioritize readability and "The Zen of Python" (import this).
+  
+  Tooling and Environment:
+  - Testing: Use `pytest` for all unit and integration tests.
+  - Dependencies: Manage packages via `pip`, `poetry`, or `pipenv`. 
+  - Virtual Environments: Always assume execution happens within a `venv` or `conda` environment.
+  
+  Framework Awareness:
+  - If it's a web project, follow the idiomatic patterns for Django, FastAPI, or Flask as detected in the codebase.
+
+# Default configuration for the Python agent
+config:
+  test_command: "pytest"
+  test_pattern: "**/test_*.py"
+  ignored_directories:
+    - "__pycache__"
+    - ".pytest_cache"
+    - "venv"
+    - ".venv"
+    - "env"
+    - "dist"
+    - "build"
+    - "*.egg-info"
+
+# Example of a structured task specific to Python
+initial_task: |
+  - Initialize a virtual environment: `python -m venv venv`
+  - Install dependencies: `pip install -r requirements.txt` or `pip install pytest`
+  - Run the test suite: `pytest`
