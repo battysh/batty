@@ -344,6 +344,23 @@ Pre-configured alerts:
 - [Good First Issues](https://github.com/battysh/batty/labels/good%20first%20issue)
 - [GitHub](https://github.com/battysh/batty)
 
+## FAQ
+
+**How is Batty different from vibe-kanban?**
+vibe-kanban is web-based (React frontend, runs in a browser). Batty is terminal-native — tmux panes, no web server. Batty also gates task completion on test results, which vibe-kanban doesn't. Different tools for different workflows.
+
+**Why not just tmux and a bash script?**
+You could script the basics. The complexity that justified a tool: worktree lifecycle management (create on task start, merge on pass, clean up), Maildir-style message routing with delivery guarantees, agent idle/crash detection via session file parsing, and a kanban dispatcher that prevents two agents grabbing the same task.
+
+**Does this work with [my agent]?**
+If it runs in a terminal, Batty can supervise it. Claude Code, Codex, and Aider have first-class support with session file detection for idle monitoring. Custom agents just need a shell command in the YAML config.
+
+**What does running 5 agents cost in tokens?**
+More agents = more tokens, but parallelism saves wall-clock time. In practice, a 5-agent session costs roughly 3-4x a single session (not 5x, because each task is more scoped). The real question is whether your time is worth more than the tokens.
+
+**Why Rust?**
+Startup time matters when launching 5+ agent processes. The type system enforces communication routing at config load — `talks_to` rules are validated before anything starts. Single binary via `cargo install`, no runtime to install.
+
 ## License
 
 MIT
