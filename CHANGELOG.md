@@ -2,6 +2,12 @@
 
 All notable changes to Batty are documented here.
 
+## 0.7.3 — 2026-04-04
+
+Patch release to fix the failed v0.7.2 release workflow (crate already
+published when tag was force-updated, causing a duplicate publish attempt).
+No code changes — identical to v0.7.2.
+
 ## 0.7.2 — 2026-04-02
 
 SDK communication modes for all three agent backends, replacing PTY
