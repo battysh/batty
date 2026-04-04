@@ -18,7 +18,7 @@ impl TeamDaemon {
     /// (`claude --resume <session-id>` / `codex resume --last`) instead of fresh starts.
     pub fn run(&mut self, resume: bool) -> Result<()> {
         self.record_daemon_started();
-        self.acknowledge_hot_reload_marker();
+        let is_hot_reload = self.acknowledge_hot_reload_marker();
         info!(session = %self.config.session, resume, "daemon started");
         self.record_orchestrator_action(format!(
             "runtime: orchestrator started (mode={}, resume={resume})",
@@ -40,6 +40,17 @@ impl TeamDaemon {
         self.spawn_all_agents(resume)?;
         if resume {
             self.restore_runtime_state();
+        }
+        // After a hot-reload, agents are freshly spawned and have no memory of
+        // their prior tasks. Clear active_tasks so replay_owned_tasks_for_idle_engineers
+        // can immediately re-dispatch tasks on the next poll cycle, instead of
+        // waiting for the 20-minute intervention grace period.
+        if is_hot_reload {
+            info!(
+                cleared = self.active_tasks.len(),
+                "hot-reload: clearing active_tasks to allow immediate task replay"
+            );
+            self.active_tasks.clear();
         }
         self.persist_runtime_state(false)?;
 
