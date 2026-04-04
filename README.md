@@ -340,6 +340,7 @@ Pre-configured alerts:
 - [Architecture](docs/architecture.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Full docs site](https://battysh.github.io/batty/)
+- [Examples](examples/) — Ready-to-run team configs
 - [Use Cases](USECASES.md)
 - [Contributing](CONTRIBUTING.md)
 - [Good First Issues](https://github.com/battysh/batty/labels/good%20first%20issue)

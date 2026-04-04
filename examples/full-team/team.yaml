@@ -1,0 +1,47 @@
+name: full-team
+auto_respawn_on_crash: true
+
+board:
+  rotation_threshold: 20
+  auto_dispatch: true
+
+standup:
+  interval_secs: 600
+  output_lines: 40
+
+automation:
+  timeout_nudges: true
+  standups: true
+  triage_interventions: true
+  review_interventions: true
+  owned_task_interventions: true
+  manager_dispatch_interventions: true
+
+layout:
+  zones:
+    - name: architect
+      width_pct: 30
+    - name: managers
+      width_pct: 20
+    - name: engineers
+      width_pct: 50
+
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+    instances: 1
+    talks_to: [manager]
+
+  - name: manager
+    role_type: manager
+    agent: claude
+    instances: 1
+    talks_to: [architect, engineer]
+
+  - name: engineer
+    role_type: engineer
+    agent: claude
+    instances: 3
+    talks_to: [manager]
+    use_worktrees: true

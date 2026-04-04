@@ -1,0 +1,16 @@
+name: solo-claude
+auto_respawn_on_crash: true
+
+board:
+  rotation_threshold: 20
+
+standup:
+  interval_secs: 1800
+  output_lines: 20
+
+roles:
+  - name: engineer
+    role_type: engineer
+    agent: claude
+    instances: 1
+    use_worktrees: false
