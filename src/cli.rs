@@ -506,6 +506,8 @@ pub enum InitTemplate {
     Software,
     /// Batty self-development: human + architect + manager + 4 Rust engineers (6 panes)
     Batty,
+    /// Python development: tailored for Django, flask,fastApi.
+    Python,    
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1970,6 +1972,7 @@ mod tests {
             ("research", InitTemplate::Research),
             ("software", InitTemplate::Software),
             ("batty", InitTemplate::Batty),
+            ("python", InitTemplate::Python),
         ] {
             let cli = Cli::parse_from(["batty", "init", "--template", arg]);
             match cli.command {
