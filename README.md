@@ -26,6 +26,12 @@ ______________________________________________________________________
 
 Batty is a control plane for AI coding teams. Instead of one agent doing everything badly, you define roles like architect, manager, and engineers; Batty launches each agent through typed SDK protocols (the default) or a PTY-owning shim fallback, isolates engineer work in git worktrees, routes messages, tracks the board, and uses tmux for visibility and session persistence.
 
+<p align="center">
+  <img src="assets/batty-supervision-flow.png" alt="How Batty works: Define → Supervise → Execute → Verify → Deliver" width="900">
+  <br>
+  <em>How Batty works: Define → Supervise → Execute → Verify → Deliver</em>
+</p>
+
 ## Quick Start
 
 ```sh
