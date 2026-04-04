@@ -12,8 +12,9 @@
 <p align="center">
   <a href="https://github.com/battysh/batty/actions"><img src="https://img.shields.io/github/actions/workflow/status/battysh/batty/ci.yml?style=for-the-badge&label=CI" alt="CI"></a>
   <a href="https://crates.io/crates/batty-cli"><img src="https://img.shields.io/crates/v/batty-cli?style=for-the-badge" alt="crates.io"></a>
-  <a href="https://github.com/battysh/batty/releases"><img src="https://img.shields.io/github/v/release/battysh/batty?style=for-the-badge" alt="Release"></a>
+  <a href="https://crates.io/crates/batty-cli"><img src="https://img.shields.io/crates/d/batty-cli?style=for-the-badge&label=downloads" alt="Downloads"></a>
   <a href="https://github.com/battysh/batty/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="MIT License"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/built_with-Rust-dea584?style=for-the-badge&logo=rust" alt="Built with Rust"></a>
 </p>
 
 <p align="center">
