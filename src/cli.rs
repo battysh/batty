@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[command(
     name = "batty",
     about = "Hierarchical agent team system for software development",
-    version
+    version = concat!("0.1.0\nhttps://github.com/battysh/batty")
 )]
 pub struct Cli {
     #[command(subcommand)]

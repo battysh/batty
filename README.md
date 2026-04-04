@@ -363,6 +363,8 @@ More agents = more tokens, but parallelism saves wall-clock time. In practice, a
 **Why Rust?**
 Startup time matters when launching 5+ agent processes. The type system enforces communication routing at config load — `talks_to` rules are validated before anything starts. Single binary via `cargo install`, no runtime to install.
 
+If Batty helps your workflow, [a star](https://github.com/battysh/batty) helps us know.
+
 ## License
 
 MIT
