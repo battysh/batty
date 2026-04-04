@@ -79,6 +79,7 @@ pub fn init_team_with_overrides(
         "research" => include_str!("templates/team_research.yaml"),
         "software" => include_str!("templates/team_software.yaml"),
         "batty" => include_str!("templates/team_batty.yaml"),
+        "python" => include_str!("templates/team_python.yaml"),
         _ => include_str!("templates/team_simple.yaml"),
     };
     let mut yaml_content = yaml_content.to_string();
