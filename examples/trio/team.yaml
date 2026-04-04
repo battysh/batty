@@ -1,0 +1,23 @@
+name: trio
+auto_respawn_on_crash: true
+
+board:
+  rotation_threshold: 20
+
+standup:
+  interval_secs: 900
+  output_lines: 30
+
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+    instances: 1
+    talks_to: [engineer]
+
+  - name: engineer
+    role_type: engineer
+    agent: claude
+    instances: 2
+    talks_to: [architect]
+    use_worktrees: true
