@@ -173,14 +173,15 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::message_routed(from, to));
     }
 
-    pub(super) fn acknowledge_hot_reload_marker(&mut self) {
+    pub(super) fn acknowledge_hot_reload_marker(&mut self) -> bool {
         if !consume_hot_reload_marker(&self.config.project_root) {
-            return;
+            return false;
         }
 
         self.record_daemon_reloaded();
         self.record_orchestrator_action("runtime: daemon hot-reloaded");
         info!("daemon restarted via hot reload");
+        true
     }
 
     pub(super) fn maybe_notify_failure_patterns(&mut self) -> Result<()> {
