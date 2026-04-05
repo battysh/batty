@@ -615,6 +615,33 @@ impl TeamDaemon {
             .role_barrier_group(&member.role_name)
     }
 
+    fn barrier_worktree_root(&self, barrier_group: &str) -> PathBuf {
+        self.config
+            .project_root
+            .join(".batty")
+            .join("worktrees")
+            .join(barrier_group)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn analysis_dir(&self, member_name: &str) -> Result<PathBuf> {
+        let Some(group) = self.member_barrier_group(member_name) else {
+            bail!(
+                "member '{}' is not assigned to a clean-room barrier group",
+                member_name
+            );
+        };
+        if group != "analysis" {
+            bail!(
+                "member '{}' is in barrier group '{}' and cannot write analysis artifacts",
+                member_name,
+                group
+            );
+        }
+
+        Ok(self.worktree_dir(member_name).join("analysis"))
+    }
+
     pub(super) fn validate_member_work_dir(
         &self,
         member_name: &str,
@@ -651,8 +678,12 @@ impl TeamDaemon {
             return Ok(());
         };
         let member_root = self.worktree_dir(member_name);
+        let barrier_root = self.barrier_worktree_root(group);
         let handoff_root = self.handoff_dir();
-        if path.starts_with(&member_root) || path.starts_with(&handoff_root) {
+        if path.starts_with(&member_root)
+            || path.starts_with(&barrier_root)
+            || path.starts_with(&handoff_root)
+        {
             return Ok(());
         }
 
@@ -711,6 +742,91 @@ impl TeamDaemon {
             &content_hash,
         );
         Ok(artifact_path)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn write_analysis_artifact(
+        &mut self,
+        author_role: &str,
+        relative_path: &Path,
+        content: &[u8],
+    ) -> Result<PathBuf> {
+        if relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            self.record_barrier_violation_attempt(
+                author_role,
+                &relative_path.display().to_string(),
+                "analysis artifact writes must stay within the analysis worktree",
+            );
+            bail!(
+                "invalid analysis artifact path '{}': must be relative and stay under analysis/",
+                relative_path.display()
+            );
+        }
+
+        let artifact_path = self.analysis_dir(author_role)?.join(relative_path);
+        let Some(parent) = artifact_path.parent() else {
+            bail!(
+                "analysis artifact path '{}' has no parent",
+                artifact_path.display()
+            );
+        };
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+        std::fs::write(&artifact_path, content)
+            .with_context(|| format!("failed to write {}", artifact_path.display()))?;
+
+        let content_hash = format!("{:x}", Sha256::digest(content));
+        self.record_barrier_artifact_created(
+            author_role,
+            &artifact_path.display().to_string(),
+            &content_hash,
+        );
+        Ok(artifact_path)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn run_skoolkit_disassembly(
+        &mut self,
+        author_role: &str,
+        snapshot_path: &Path,
+        output_relative_path: &Path,
+    ) -> Result<PathBuf> {
+        let snapshot_extension = snapshot_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase());
+        if !matches!(snapshot_extension.as_deref(), Some("z80" | "sna")) {
+            bail!(
+                "unsupported SkoolKit snapshot '{}': expected .z80 or .sna",
+                snapshot_path.display()
+            );
+        }
+
+        let sna2skool =
+            std::env::var("BATTY_SKOOLKIT_SNA2SKOOL").unwrap_or_else(|_| "sna2skool".to_string());
+        let output = std::process::Command::new(&sna2skool)
+            .arg(snapshot_path)
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to launch '{}' for snapshot '{}'",
+                    sna2skool,
+                    snapshot_path.display()
+                )
+            })?;
+        if !output.status.success() {
+            bail!(
+                "SkoolKit disassembly failed for '{}': {}",
+                snapshot_path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+
+        self.write_analysis_artifact(author_role, output_relative_path, &output.stdout)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
