@@ -40,6 +40,8 @@ Commands:
   grafana          Manage Grafana monitoring (setup, status, open)
   telegram         Set up Telegram bot for human communication
   load             Estimate team load and show recent load history
+  parity           Show clean-room parity summary from PARITY.md
+  verify           Run clean-room equivalence verification from PARITY.md
   queue            Show pending dispatch queue entries
   cost             Estimate current run cost from agent session files
   scale            Dynamically scale team topology (add/remove agents)
@@ -613,15 +615,15 @@ Options:
           Template to use for scaffolding
 
           Possible values:
-          - solo:     Single agent, no hierarchy (1 pane)
-          - pair:     Architect + 1 engineer pair (2 panes)
-          - simple:   1 architect + 1 manager + 3 engineers (5 panes)
-          - squad:    1 architect + 1 manager + 5 engineers with layout (7 panes)
-          - large:    Human + architect + 3 managers + 15 engineers with Telegram (19 panes)
-          - research: PI + 3 sub-leads + 6 researchers — research lab style (10 panes)
-          - software: Human + tech lead + 2 eng managers + 8 developers — full product team (11 panes)
+          - solo:      Single agent, no hierarchy (1 pane)
+          - pair:      Architect + 1 engineer pair (2 panes)
+          - simple:    1 architect + 1 manager + 3 engineers (5 panes)
+          - squad:     1 architect + 1 manager + 5 engineers with layout (7 panes)
+          - large:     Human + architect + 3 managers + 15 engineers with Telegram (19 panes)
+          - research:  PI + 3 sub-leads + 6 researchers — research lab style (10 panes)
+          - software:  Human + tech lead + 2 eng managers + 8 developers — full product team (11 panes)
           - cleanroom: Clean-room workflow: decompiler + spec-writer + test-writer + implementer (4 panes)
-          - batty:    Batty self-development: human + architect + manager + 4 Rust engineers (6 panes)
+          - batty:     Batty self-development: human + architect + manager + 4 Rust engineers (6 panes)
 
       --from <FROM>
           Copy team config from $HOME/.batty/templates/<name>/
@@ -773,6 +775,29 @@ Show status of all interventions
 Usage: batty nudge status [OPTIONS]
 
 Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty parity`
+
+Show clean-room parity summary from PARITY.md
+
+```text
+Show clean-room parity summary from PARITY.md
+
+Usage: batty parity [OPTIONS]
+
+Options:
+      --detail
+          Show the full parity table
+
+      --gaps
+          Show only behaviors with missing tests or implementation
+
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 
@@ -1071,6 +1096,17 @@ Options:
 
       --pty-log-path <PTY_LOG_PATH>
           Path to write raw PTY output for tmux display panes
+
+      --graceful-shutdown-timeout-secs <GRACEFUL_SHUTDOWN_TIMEOUT_SECS>
+          Seconds to wait for auto-commit before force-killing
+          
+          [default: 5]
+
+      --auto-commit-on-restart <AUTO_COMMIT_ON_RESTART>
+          Auto-commit dirty worktrees before restart/shutdown
+          
+          [default: true]
+          [possible values: true, false]
 
       --sdk-mode
           Use SDK mode (NDJSON stdin/stdout) instead of PTY screen-scraping
@@ -1481,6 +1517,23 @@ Options:
       --show-checks
           Show all individual checks with pass/fail status
 
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty verify`
+
+Run clean-room equivalence verification from PARITY.md
+
+```text
+Run clean-room equivalence verification from PARITY.md
+
+Usage: batty verify [OPTIONS]
+
+Options:
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 

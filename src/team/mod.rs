@@ -71,6 +71,7 @@ pub mod test_helpers;
 #[cfg(test)]
 pub mod test_support;
 pub mod validation;
+pub mod verification;
 pub mod watcher;
 pub mod workflow;
 
