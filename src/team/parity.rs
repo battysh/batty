@@ -139,6 +139,58 @@ impl ParityReport {
             })
             .collect()
     }
+
+    pub fn update_verification(
+        &mut self,
+        behavior: &str,
+        verified: VerificationStatus,
+        notes: &str,
+    ) -> Result<()> {
+        let mut updated = false;
+        for row in &mut self.rows {
+            if row.behavior == behavior {
+                row.verified = verified;
+                row.notes = notes.to_string();
+                updated = true;
+                break;
+            }
+        }
+        if !updated {
+            bail!("behavior `{behavior}` not found in PARITY.md");
+        }
+        self.metadata.last_verified = chrono::Utc::now().date_naive().to_string();
+        self.metadata.overall_parity = Some(format!("{}%", self.summary().overall_parity_pct));
+        Ok(())
+    }
+
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        out.push_str("---\n");
+        out.push_str(&format!("project: {}\n", self.metadata.project));
+        out.push_str(&format!("target: {}\n", self.metadata.target));
+        out.push_str(&format!(
+            "source_platform: {}\n",
+            self.metadata.source_platform
+        ));
+        out.push_str(&format!(
+            "target_language: {}\n",
+            self.metadata.target_language
+        ));
+        out.push_str(&format!("last_verified: {}\n", self.metadata.last_verified));
+        if let Some(overall_parity) = &self.metadata.overall_parity {
+            out.push_str(&format!("overall_parity: {}\n", overall_parity));
+        }
+        out.push_str("---\n\n");
+        out.push_str("| Behavior | Spec | Test | Implementation | Verified | Notes |\n");
+        out.push_str("| --- | --- | --- | --- | --- | --- |\n");
+        for row in &self.rows {
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} |\n",
+                row.behavior, row.spec, row.test, row.implementation, row.verified, row.notes
+            ));
+        }
+        out
+    }
 }
 
 impl fmt::Display for ParityStatus {
@@ -220,6 +272,20 @@ pub fn sync_gap_tasks(project_root: &Path) -> Result<Vec<String>> {
         created.push(spec.title);
     }
     Ok(created)
+}
+
+pub fn update_parity_verification(
+    project_root: &Path,
+    behavior: &str,
+    verified: VerificationStatus,
+    notes: &str,
+) -> Result<()> {
+    let path = project_root.join(PARITY_FILE);
+    let mut report = ParityReport::load(project_root)?;
+    report.update_verification(behavior, verified, notes)?;
+    std::fs::write(&path, report.render())
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
 }
 
 fn print_parity_table(report: &ParityReport, gaps_only: bool) {
@@ -491,5 +557,29 @@ overall_parity: 73%
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].title, "Parity gap: Sound timing");
         assert!(specs[0].body.contains("Implementation: --"));
+    }
+
+    #[test]
+    fn update_parity_verification_marks_behavior_and_recomputes_summary() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(PARITY_FILE), SAMPLE).unwrap();
+
+        update_parity_verification(
+            tmp.path(),
+            "Enemy AI",
+            VerificationStatus::Pass,
+            "matching_frames=12, divergent_frames=0, timing_difference=0",
+        )
+        .unwrap();
+
+        let updated = ParityReport::load(tmp.path()).unwrap();
+        let row = updated
+            .rows
+            .iter()
+            .find(|row| row.behavior == "Enemy AI")
+            .unwrap();
+        assert_eq!(row.verified, VerificationStatus::Pass);
+        assert!(row.notes.contains("matching_frames=12"));
+        assert_eq!(updated.metadata.overall_parity.as_deref(), Some("66%"));
     }
 }

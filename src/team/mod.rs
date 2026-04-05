@@ -32,6 +32,7 @@ mod daemon_mgmt;
 pub mod delivery;
 pub mod deps;
 pub mod doctor;
+pub mod equivalence;
 pub mod errors;
 pub mod estimation;
 pub mod events;
