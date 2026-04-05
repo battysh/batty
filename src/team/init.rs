@@ -1095,6 +1095,21 @@ mod tests {
     }
 
     #[test]
+    fn init_team_cleanroom_template_scaffolds_parseable_parity_report() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_team(tmp.path(), "cleanroom", None, None, false).unwrap();
+
+        let report = crate::team::parity::ParityReport::load(tmp.path()).unwrap();
+        let summary = report.summary();
+
+        assert_eq!(report.metadata.project, "clean-room-project");
+        assert_eq!(report.metadata.source_platform, "zx-spectrum-z80");
+        assert_eq!(summary.total_behaviors, 3);
+        assert_eq!(summary.spec_complete, 0);
+        assert_eq!(summary.verified_pass, 0);
+    }
+
+    #[test]
     fn init_with_agent_codex_sets_backend() {
         let tmp = tempfile::tempdir().unwrap();
         let _created = init_team(tmp.path(), "simple", None, Some("codex"), false).unwrap();
