@@ -312,13 +312,30 @@ impl TeamDaemon {
 
         let path = config_dir.join(prompt_file);
         match std::fs::read_to_string(&path) {
-            Ok(content) => content
-                .replace("{{member_name}}", &member.name)
-                .replace("{{role_name}}", &member.role_name)
-                .replace(
-                    "{{reports_to}}",
-                    member.reports_to.as_deref().unwrap_or("none"),
-                ),
+            Ok(content) => {
+                let mut prompt = content
+                    .replace("{{member_name}}", &member.name)
+                    .replace("{{role_name}}", &member.role_name)
+                    .replace(
+                        "{{reports_to}}",
+                        member.reports_to.as_deref().unwrap_or("none"),
+                    );
+                if self.config.team_config.workflow_policy.clean_room_mode
+                    && let Some(group) = self
+                        .config
+                        .team_config
+                        .role_barrier_group(&member.role_name)
+                {
+                    let work_dir = self.worktree_dir(&member.name);
+                    let handoff_dir = self.handoff_dir();
+                    prompt.push_str(&format!(
+                        "\n\n## Information Barrier\n\n- Barrier group: {group}\n- Allowed working directory: {}\n- Shared cross-barrier handoff directory: {}\n- Do not read or write outside your worktree and the handoff directory.\n",
+                        work_dir.display(),
+                        handoff_dir.display()
+                    ));
+                }
+                prompt
+            }
             Err(e) => {
                 warn!(path = %path.display(), error = %e, "failed to load prompt template");
                 format!(

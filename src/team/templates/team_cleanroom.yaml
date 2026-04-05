@@ -24,6 +24,14 @@ automation:
 
 automation_sender: human
 
+workflow_policy:
+  clean_room_mode: true
+  handoff_directory: .batty/handoff
+  barrier_groups:
+    analysis: [decompiler, spec-writer]
+    implementation: [test-writer, implementer]
+
+
 layout:
   zones:
     - name: analyst
@@ -41,6 +49,7 @@ roles:
     instances: 1
     prompt: batty_decompiler.md
     talks_to: [spec-writer]
+    barrier_group: analysis
     nudge_interval_secs: 1200
     owns: ["analysis/**", "planning/cleanroom-process.md"]
 
@@ -50,6 +59,7 @@ roles:
     instances: 1
     prompt: batty_spec_writer.md
     talks_to: [decompiler, test-writer, implementer]
+    barrier_group: analysis
     owns: ["SPEC.md", "PARITY.md"]
 
   - name: test-writer
@@ -58,6 +68,7 @@ roles:
     instances: 1
     prompt: batty_test_writer.md
     talks_to: [spec-writer]
+    barrier_group: implementation
     use_worktrees: true
     owns: ["implementation/tests/**"]
 
@@ -67,5 +78,6 @@ roles:
     instances: 1
     prompt: batty_implementer.md
     talks_to: [spec-writer]
+    barrier_group: implementation
     use_worktrees: true
     owns: ["implementation/**"]

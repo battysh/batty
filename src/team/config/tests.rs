@@ -37,6 +37,11 @@ fn parse_minimal_config() {
         super::super::DEFAULT_EVENT_LOG_MAX_BYTES
     );
     assert!(config.auto_respawn_on_crash);
+    assert_eq!(config.workflow_policy.graceful_shutdown_timeout_secs, 5);
+    assert!(config.workflow_policy.auto_commit_on_restart);
+    assert!(!config.workflow_policy.clean_room_mode);
+    assert!(config.workflow_policy.barrier_groups.is_empty());
+    assert_eq!(config.workflow_policy.handoff_directory, ".batty/handoff");
 }
 
 #[test]
@@ -232,6 +237,61 @@ roles:
 "#;
     let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
     assert!(!config.auto_respawn_on_crash);
+}
+
+#[test]
+fn clean_room_policy_parses_with_barrier_groups() {
+    let yaml = r#"
+name: clean-room
+workflow_policy:
+  clean_room_mode: true
+  handoff_directory: shared/handoff
+  barrier_groups:
+    analysis: [architect]
+    implementation: [engineer]
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+    barrier_group: analysis
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    barrier_group: implementation
+"#;
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(config.workflow_policy.clean_room_mode);
+    assert_eq!(config.workflow_policy.handoff_directory, "shared/handoff");
+    assert_eq!(
+        config.workflow_policy.barrier_groups["analysis"],
+        vec!["architect".to_string()]
+    );
+    assert_eq!(
+        config.role_barrier_group("engineer"),
+        Some("implementation")
+    );
+}
+
+#[test]
+fn clean_room_validation_rejects_unknown_barrier_group() {
+    let yaml = r#"
+name: clean-room
+workflow_policy:
+  clean_room_mode: true
+  barrier_groups:
+    analysis: [architect]
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    barrier_group: implementation
+"#;
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("unknown barrier_group"));
 }
 
 #[test]
@@ -1015,6 +1075,23 @@ roles:
         config.workflow_policy.test_command.as_deref(),
         Some("./tests/fidelity/test_shell_starts.sh")
     );
+}
+
+#[test]
+fn parse_workflow_policy_restart_preservation_fields_from_yaml() {
+    let yaml = r#"
+name: test-team
+workflow_policy:
+  graceful_shutdown_timeout_secs: 9
+  auto_commit_on_restart: false
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+"#;
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(config.workflow_policy.graceful_shutdown_timeout_secs, 9);
+    assert!(!config.workflow_policy.auto_commit_on_restart);
 }
 
 // --- Backend health check tests ---

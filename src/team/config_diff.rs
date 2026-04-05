@@ -132,6 +132,7 @@ mod tests {
                     receives_standup: None,
                     standup_interval_secs: None,
                     owns: vec![],
+                    barrier_group: None,
                     use_worktrees: false,
                 },
                 RoleDef {
@@ -147,6 +148,7 @@ mod tests {
                     receives_standup: None,
                     standup_interval_secs: None,
                     owns: vec![],
+                    barrier_group: None,
                     use_worktrees: false,
                 },
                 RoleDef {
@@ -162,6 +164,7 @@ mod tests {
                     receives_standup: None,
                     standup_interval_secs: None,
                     owns: vec![],
+                    barrier_group: None,
                     use_worktrees: true,
                 },
             ],

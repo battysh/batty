@@ -889,6 +889,7 @@ mod tests {
             receives_standup: Some(true),
             standup_interval_secs: Some(600),
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         };
         let team_config = TeamConfig {
@@ -967,6 +968,7 @@ mod tests {
             receives_standup: Some(true),
             standup_interval_secs: Some(600),
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         };
         let team_config = TeamConfig {
@@ -1054,6 +1056,7 @@ mod tests {
             receives_standup: Some(true),
             standup_interval_secs: Some(1),
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         };
         let architect_role = RoleDef {
@@ -1069,6 +1072,7 @@ mod tests {
             receives_standup: Some(false),
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         };
         let team_config = TeamConfig {
@@ -1447,6 +1451,7 @@ last_verified: 2026-04-05
             receives_standup: Some(false),
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         };
         let team_config = TeamConfig {
@@ -1509,6 +1514,7 @@ last_verified: 2026-04-05
             receives_standup: Some(true),
             standup_interval_secs: Some(300),
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         };
         let team_config = TeamConfig {
@@ -1563,6 +1569,7 @@ last_verified: 2026-04-05
             receives_standup: None,      // defaults to true for Manager
             standup_interval_secs: None, // falls back to global
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         };
         let team_config = TeamConfig {
@@ -1617,6 +1624,7 @@ last_verified: 2026-04-05
             receives_standup: None, // defaults to false for Engineer
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         };
         let team_config = TeamConfig {
@@ -1703,6 +1711,7 @@ last_verified: 2026-04-05
             receives_standup: Some(true),
             standup_interval_secs: Some(60),
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         };
         let team_config = TeamConfig {
@@ -1776,6 +1785,7 @@ last_verified: 2026-04-05
             receives_standup: Some(true),
             standup_interval_secs: Some(1),
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         };
         let eng_role = RoleDef {
@@ -1791,6 +1801,7 @@ last_verified: 2026-04-05
             receives_standup: Some(false),
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         };
         let team_config = TeamConfig {
@@ -1865,6 +1876,7 @@ last_verified: 2026-04-05
             receives_standup: Some(true),
             standup_interval_secs: Some(1),
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         };
         let eng_role = RoleDef {
@@ -1880,6 +1892,7 @@ last_verified: 2026-04-05
             receives_standup: Some(false),
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         };
         let team_config = TeamConfig {

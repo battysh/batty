@@ -151,6 +151,18 @@ pub(in crate::team) fn spawn_shim(
 
     // Set BATTY_MEMBER so detect_sender() works in SDK mode subprocesses
     cmd.env("BATTY_MEMBER", member_name);
+    cmd.env(
+        "BATTY_GRACEFUL_SHUTDOWN_TIMEOUT_SECS",
+        graceful_shutdown_timeout_secs.to_string(),
+    );
+    cmd.env(
+        "BATTY_AUTO_COMMIT_ON_RESTART",
+        if auto_commit_on_restart {
+            "true"
+        } else {
+            "false"
+        },
+    );
 
     // Pass child socket as fd 3
     cmd.stdin(Stdio::null())

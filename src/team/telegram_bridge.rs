@@ -235,6 +235,7 @@ mod tests {
                     receives_standup: None,
                     standup_interval_secs: None,
                     owns: Vec::new(),
+                    barrier_group: None,
                     use_worktrees: false,
                 }],
             },
@@ -706,6 +707,7 @@ mod tests {
             receives_standup: None,
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         }];
 
@@ -730,6 +732,7 @@ mod tests {
             receives_standup: None,
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         }];
 
@@ -755,6 +758,7 @@ mod tests {
             receives_standup: None,
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         }];
         let tc = crate::team::test_helpers::team_config_with_roles(roles);
@@ -776,6 +780,7 @@ mod tests {
             receives_standup: None,
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         }];
         let tc = crate::team::test_helpers::team_config_with_roles(roles);
@@ -797,6 +802,7 @@ mod tests {
             receives_standup: None,
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         }];
         let tc = crate::team::test_helpers::team_config_with_roles(roles);
@@ -819,6 +825,7 @@ mod tests {
             receives_standup: None,
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         }];
         let config = daemon_config_with_roles(tmp.path(), roles);
@@ -852,6 +859,7 @@ mod tests {
             receives_standup: None,
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         }];
         let config = daemon_config_with_roles(tmp.path(), roles);
@@ -901,6 +909,7 @@ mod tests {
             receives_standup: None,
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         }];
         let config = daemon_config_with_roles(tmp.path(), roles);
@@ -1020,6 +1029,7 @@ mod tests {
             receives_standup: None,
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         }];
         let config = daemon_config_with_roles(tmp.path(), roles);
@@ -1062,6 +1072,7 @@ mod tests {
             receives_standup: None,
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         }];
         let config = daemon_config_with_roles(tmp.path(), roles);
@@ -1107,6 +1118,7 @@ mod tests {
                 receives_standup: None,
                 standup_interval_secs: None,
                 owns: Vec::new(),
+                barrier_group: None,
                 use_worktrees: false,
             },
             RoleDef {
@@ -1122,6 +1134,7 @@ mod tests {
                 receives_standup: None,
                 standup_interval_secs: None,
                 owns: Vec::new(),
+                barrier_group: None,
                 use_worktrees: false,
             },
         ];

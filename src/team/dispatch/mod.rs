@@ -138,6 +138,8 @@ impl TeamDaemon {
             self.config.project_root.clone()
         };
 
+        self.validate_member_work_dir(engineer, &work_dir)?;
+
         Ok(AssignmentLaunch {
             branch: task_branch,
             work_dir,
