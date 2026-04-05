@@ -11,6 +11,9 @@ use tracing::{debug, info, warn};
 use super::git_cmd;
 use super::retry::{RetryConfig, retry_sync};
 
+const SHARED_CARGO_CONFIG_MARKER: &str = "# Managed by Batty: shared cargo target";
+const WORKTREE_EXCLUDE_MARKER: &str = "# Managed by Batty worktree ignores";
+
 #[cfg_attr(not(test), allow(dead_code))]
 fn priority_rank(p: &str) -> u32 {
     match p {
@@ -54,17 +57,20 @@ pub(crate) fn run_tests_in_worktree(
     test_command: Option<&str>,
 ) -> Result<(bool, String)> {
     let command_text = test_command.unwrap_or("cargo test");
-    let output = std::process::Command::new("sh")
+    let mut command = std::process::Command::new("sh");
+    command
         .arg("-lc")
         .arg(command_text)
-        .current_dir(worktree_dir)
-        .output()
-        .with_context(|| {
-            format!(
-                "failed while running `{command_text}` in engineer worktree {}",
-                worktree_dir.display(),
-            )
-        })?;
+        .current_dir(worktree_dir);
+    if let Some(project_root) = engineer_worktree_project_root(worktree_dir) {
+        command.env("CARGO_TARGET_DIR", shared_cargo_target_dir(&project_root));
+    }
+    let output = command.output().with_context(|| {
+        format!(
+            "failed while running `{command_text}` in engineer worktree {}",
+            worktree_dir.display(),
+        )
+    })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -83,6 +89,10 @@ pub(crate) fn run_tests_in_worktree(
     };
 
     Ok((output.status.success(), trimmed))
+}
+
+pub(crate) fn shared_cargo_target_dir(project_root: &Path) -> PathBuf {
+    project_root.join(".batty").join("shared-target")
 }
 
 fn retry_git<T, F>(operation: F) -> std::result::Result<T, git_cmd::GitError>
@@ -156,6 +166,8 @@ pub(crate) fn setup_engineer_worktree(
     }
 
     ensure_engineer_worktree_links(worktree_dir, team_config_dir)?;
+    ensure_shared_cargo_target_config(project_root, worktree_dir)?;
+    ensure_engineer_worktree_excludes(worktree_dir)?;
 
     Ok(worktree_dir.to_path_buf())
 }
@@ -471,13 +483,108 @@ fn ensure_engineer_worktree_links(worktree_dir: &Path, team_config_dir: &Path) -
     Ok(())
 }
 
+fn ensure_shared_cargo_target_config(project_root: &Path, worktree_dir: &Path) -> Result<()> {
+    let cargo_dir = worktree_dir.join(".cargo");
+    std::fs::create_dir_all(&cargo_dir)
+        .with_context(|| format!("failed to create {}", cargo_dir.display()))?;
+    let config_path = cargo_dir.join("config.toml");
+    let target_dir = shared_cargo_target_dir(project_root);
+    std::fs::create_dir_all(&target_dir)
+        .with_context(|| format!("failed to create {}", target_dir.display()))?;
+
+    let managed = format!(
+        "{SHARED_CARGO_CONFIG_MARKER}\n[build]\ntarget-dir = {:?}\n",
+        target_dir
+    );
+
+    match std::fs::read_to_string(&config_path) {
+        Ok(existing) if existing == managed => return Ok(()),
+        Ok(existing) if !existing.is_empty() && !existing.contains(SHARED_CARGO_CONFIG_MARKER) => {
+            warn!(
+                config = %config_path.display(),
+                "leaving existing cargo config unchanged; shared target must be configured manually"
+            );
+            return Ok(());
+        }
+        Ok(_) | Err(_) => {}
+    }
+
+    std::fs::write(&config_path, managed)
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+    Ok(())
+}
+
+fn ensure_engineer_worktree_excludes(worktree_dir: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(worktree_dir)
+        .output()
+        .with_context(|| format!("failed to resolve git dir for {}", worktree_dir.display()))?;
+    if !output.status.success() {
+        bail!(
+            "failed to resolve git dir for {}: {}",
+            worktree_dir.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let git_dir_text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let git_dir = if Path::new(&git_dir_text).is_absolute() {
+        PathBuf::from(git_dir_text)
+    } else {
+        worktree_dir.join(git_dir_text)
+    };
+    let exclude_path = git_dir.join("info").join("exclude");
+    if let Some(parent) = exclude_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let mut content = std::fs::read_to_string(&exclude_path).unwrap_or_default();
+    if !content.contains(WORKTREE_EXCLUDE_MARKER) {
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(WORKTREE_EXCLUDE_MARKER);
+        content.push('\n');
+    }
+
+    for rule in [".cargo/", ".batty/team_config"] {
+        if !content.lines().any(|line| line.trim() == rule) {
+            content.push_str(rule);
+            content.push('\n');
+        }
+    }
+
+    std::fs::write(&exclude_path, content)
+        .with_context(|| format!("failed to write {}", exclude_path.display()))?;
+    Ok(())
+}
+
+fn engineer_worktree_project_root(worktree_dir: &Path) -> Option<PathBuf> {
+    for ancestor in worktree_dir.ancestors() {
+        if ancestor.file_name().is_some_and(|name| name == "worktrees")
+            && ancestor
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == ".batty")
+        {
+            return ancestor
+                .parent()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf);
+        }
+    }
+    None
+}
+
 pub(crate) fn worktree_has_user_changes(worktree_dir: &Path) -> Result<bool> {
     Ok(map_git_error(
         retry_git(|| git_cmd::status_porcelain(worktree_dir)),
         "failed to inspect worktree status",
     )?
     .lines()
-    .any(|line| !line.starts_with("?? .batty/")))
+    .any(|line| !line.starts_with("?? .batty/") && !line.starts_with("?? .cargo/")))
 }
 
 /// Returns `false` if the worktree has uncommitted changes on a task branch
@@ -1112,6 +1219,40 @@ mod tests {
     }
 
     #[test]
+    fn test_setup_engineer_worktree_writes_shared_cargo_target_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-shared");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-shared", &team_config_dir).unwrap();
+
+        let config =
+            std::fs::read_to_string(worktree_dir.join(".cargo").join("config.toml")).unwrap();
+        assert!(config.contains(SHARED_CARGO_CONFIG_MARKER));
+        assert!(config.contains(shared_cargo_target_dir(&repo).to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn test_setup_engineer_worktree_preserves_existing_cargo_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-preserve");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-preserve", &team_config_dir).unwrap();
+        let config_path = worktree_dir.join(".cargo").join("config.toml");
+        std::fs::write(&config_path, "[term]\nverbose = true\n").unwrap();
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-preserve", &team_config_dir).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(config_path).unwrap(),
+            "[term]\nverbose = true\n"
+        );
+    }
+
+    #[test]
     fn test_prepare_assignment_worktree_auto_cleans_dirty() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp);
@@ -1386,6 +1527,34 @@ mod tests {
         let (passed, output) = run_tests_in_worktree(worktree, Some("./check.sh")).unwrap();
         assert!(passed);
         assert!(output.contains("CONFIG_TEST_OK"));
+    }
+
+    #[test]
+    fn test_run_tests_in_worktree_sets_shared_target_dir_for_engineer_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-target");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-target", &team_config_dir).unwrap();
+        std::fs::write(
+            worktree_dir.join("check.sh"),
+            "#!/bin/sh\nprintf '%s\\n' \"$CARGO_TARGET_DIR\"\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                worktree_dir.join("check.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        let (passed, output) = run_tests_in_worktree(&worktree_dir, Some("./check.sh")).unwrap();
+        assert!(passed);
+        assert!(output.contains(shared_cargo_target_dir(&repo).to_string_lossy().as_ref()));
     }
 
     #[test]
