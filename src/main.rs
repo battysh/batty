@@ -888,6 +888,8 @@ fn main() -> Result<()> {
             rows,
             cols,
             pty_log_path,
+            graceful_shutdown_timeout_secs,
+            auto_commit_on_restart,
             sdk_mode,
         } => {
             use batty_cli::shim;
@@ -909,6 +911,8 @@ fn main() -> Result<()> {
                 rows,
                 cols,
                 pty_log_path: pty_log_path.map(PathBuf::from),
+                graceful_shutdown_timeout_secs,
+                auto_commit_on_restart,
             };
 
             if sdk_mode {
