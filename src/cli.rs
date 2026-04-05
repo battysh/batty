@@ -204,6 +204,16 @@ pub enum Command {
     /// Estimate team load and show recent load history
     Load,
 
+    /// Show clean-room parity summary from PARITY.md
+    Parity {
+        /// Show the full parity table
+        #[arg(long, default_value_t = false, conflicts_with = "gaps")]
+        detail: bool,
+        /// Show only behaviors with missing tests or implementation
+        #[arg(long, default_value_t = false)]
+        gaps: bool,
+    },
+
     /// Show pending dispatch queue entries
     Queue,
 
@@ -1269,6 +1279,30 @@ mod tests {
     fn load_subcommand_parses() {
         let cli = Cli::parse_from(["batty", "load"]);
         assert!(matches!(cli.command, Command::Load));
+    }
+
+    #[test]
+    fn parity_subcommand_parses_defaults() {
+        let cli = Cli::parse_from(["batty", "parity"]);
+        match cli.command {
+            Command::Parity { detail, gaps } => {
+                assert!(!detail);
+                assert!(!gaps);
+            }
+            other => panic!("expected parity command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parity_subcommand_parses_gaps_flag() {
+        let cli = Cli::parse_from(["batty", "parity", "--gaps"]);
+        match cli.command {
+            Command::Parity { detail, gaps } => {
+                assert!(!detail);
+                assert!(gaps);
+            }
+            other => panic!("expected parity command, got {other:?}"),
+        }
     }
 
     #[test]
