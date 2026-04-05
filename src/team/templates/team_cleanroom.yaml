@@ -51,7 +51,7 @@ roles:
     talks_to: [spec-writer]
     barrier_group: analysis
     nudge_interval_secs: 1200
-    owns: ["analysis/**", "planning/cleanroom-process.md"]
+    owns: ["analysis/**", "planning/cleanroom-process.md", "**/*.z80", "**/*.sna"]
 
   - name: spec-writer
     role_type: manager

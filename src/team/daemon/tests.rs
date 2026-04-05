@@ -6,8 +6,9 @@ use crate::team::config::{BoardConfig, RoleDef, StandupConfig, WorkflowMode, Wor
 use crate::team::events::EventSink;
 use crate::team::test_helpers::make_test_daemon;
 use crate::team::test_support::{
-    TestDaemonBuilder, architect_member, backdate_idle_grace, engineer_member, init_git_repo,
-    manager_member, write_board_task_file, write_open_task_file, write_owned_task_file,
+    EnvVarGuard, PATH_LOCK, TestDaemonBuilder, architect_member, backdate_idle_grace,
+    engineer_member, init_git_repo, manager_member, write_board_task_file, write_open_task_file,
+    write_owned_task_file,
 };
 use std::time::UNIX_EPOCH;
 
@@ -2543,7 +2544,14 @@ fn clean_room_test_daemon(project_root: &Path) -> TeamDaemon {
         workflow_policy: WorkflowPolicy {
             clean_room_mode: true,
             barrier_groups: HashMap::from([
-                ("analysis".to_string(), vec!["analyst".to_string()]),
+                (
+                    "analysis".to_string(),
+                    vec![
+                        "decompiler".to_string(),
+                        "spec-writer".to_string(),
+                        "analyst".to_string(),
+                    ],
+                ),
                 ("implementation".to_string(), vec!["engineer".to_string()]),
             ]),
             ..WorkflowPolicy::default()
@@ -2561,6 +2569,38 @@ fn clean_room_test_daemon(project_root: &Path) -> TeamDaemon {
         event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
         retro_min_duration_secs: 60,
         roles: vec![
+            RoleDef {
+                name: "decompiler".to_string(),
+                role_type: RoleType::Architect,
+                agent: Some("claude".to_string()),
+                instances: 1,
+                prompt: None,
+                talks_to: vec!["spec-writer".to_string()],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                barrier_group: Some("analysis".to_string()),
+                use_worktrees: true,
+            },
+            RoleDef {
+                name: "spec-writer".to_string(),
+                role_type: RoleType::Manager,
+                agent: Some("claude".to_string()),
+                instances: 1,
+                prompt: None,
+                talks_to: vec!["decompiler".to_string(), "engineer".to_string()],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                barrier_group: Some("analysis".to_string()),
+                use_worktrees: true,
+            },
             RoleDef {
                 name: "analyst".to_string(),
                 role_type: RoleType::Architect,
@@ -2601,6 +2641,24 @@ fn clean_room_test_daemon(project_root: &Path) -> TeamDaemon {
         team_config,
         session: "test".to_string(),
         members: vec![
+            MemberInstance {
+                name: "decompiler".to_string(),
+                role_name: "decompiler".to_string(),
+                role_type: RoleType::Architect,
+                agent: Some("claude".to_string()),
+                prompt: None,
+                reports_to: Some("spec-writer".to_string()),
+                use_worktrees: true,
+            },
+            MemberInstance {
+                name: "spec-writer".to_string(),
+                role_name: "spec-writer".to_string(),
+                role_type: RoleType::Manager,
+                agent: Some("claude".to_string()),
+                prompt: None,
+                reports_to: None,
+                use_worktrees: true,
+            },
             MemberInstance {
                 name: "analyst".to_string(),
                 role_name: "analyst".to_string(),
@@ -2802,6 +2860,86 @@ fn clean_room_handoff_rejects_parent_directory_escape() {
     let events = std::fs::read_to_string(events_path).unwrap();
     assert!(events.contains("barrier_violation_attempt"));
     assert!(events.contains("shared handoff directory"));
+}
+
+#[test]
+fn clean_room_analysis_artifact_stays_readable_to_analysis_and_blocked_from_implementation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut daemon = clean_room_test_daemon(tmp.path());
+    let events_path = tmp
+        .path()
+        .join(".batty")
+        .join("team_config")
+        .join("events.jsonl");
+    daemon.event_sink = EventSink::new(&events_path).unwrap();
+
+    let artifact = daemon
+        .write_analysis_artifact("decompiler", Path::new("snapshots/game.skool"), b"; notes")
+        .unwrap();
+    assert!(artifact.exists());
+
+    daemon
+        .validate_member_barrier_path("spec-writer", &artifact, "read")
+        .unwrap();
+
+    let err = daemon
+        .validate_member_barrier_path("eng-1", &artifact, "read")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("barrier violation"));
+
+    let events = std::fs::read_to_string(events_path).unwrap();
+    assert!(events.contains("barrier_artifact_created"));
+    assert!(events.contains("barrier_violation_attempt"));
+    assert!(events.contains("snapshots/game.skool"));
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_room_skoolkit_disassembly_supports_z80_and_sna_snapshots() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _path_lock = PATH_LOCK.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let mut daemon = clean_room_test_daemon(tmp.path());
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let sna2skool = bin_dir.join("sna2skool");
+    std::fs::write(
+        &sna2skool,
+        "#!/bin/sh\nprintf '; disassembly for %s\\n' \"$1\"\n",
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&sna2skool).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&sna2skool, perms).unwrap();
+    let _sna2skool_guard = EnvVarGuard::set(
+        "BATTY_SKOOLKIT_SNA2SKOOL",
+        sna2skool.to_string_lossy().as_ref(),
+    );
+
+    let z80 = tmp.path().join("game.z80");
+    let sna = tmp.path().join("game.sna");
+    std::fs::write(&z80, b"z80").unwrap();
+    std::fs::write(&sna, b"sna").unwrap();
+
+    let z80_output = daemon
+        .run_skoolkit_disassembly("decompiler", &z80, Path::new("snapshots/game.z80.skool"))
+        .unwrap();
+    let sna_output = daemon
+        .run_skoolkit_disassembly("decompiler", &sna, Path::new("snapshots/game.sna.skool"))
+        .unwrap();
+
+    assert!(
+        std::fs::read_to_string(z80_output)
+            .unwrap()
+            .contains("game.z80")
+    );
+    assert!(
+        std::fs::read_to_string(sna_output)
+            .unwrap()
+            .contains("game.sna")
+    );
 }
 
 // --- Stale review escalation tests ---
