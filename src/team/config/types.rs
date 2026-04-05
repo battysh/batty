@@ -459,6 +459,8 @@ pub struct BoardConfig {
     pub rotation_threshold: u32,
     #[serde(default = "default_board_auto_dispatch")]
     pub auto_dispatch: bool,
+    #[serde(default = "default_board_auto_replenish")]
+    pub auto_replenish: bool,
     #[serde(default = "default_state_reconciliation_interval_secs")]
     pub state_reconciliation_interval_secs: u64,
     #[serde(default = "default_dispatch_stabilization_delay_secs")]
@@ -474,6 +476,7 @@ impl Default for BoardConfig {
         Self {
             rotation_threshold: default_rotation_threshold(),
             auto_dispatch: default_board_auto_dispatch(),
+            auto_replenish: default_board_auto_replenish(),
             state_reconciliation_interval_secs: default_state_reconciliation_interval_secs(),
             dispatch_stabilization_delay_secs: default_dispatch_stabilization_delay_secs(),
             dispatch_dedup_window_secs: default_dispatch_dedup_window_secs(),
@@ -634,6 +637,10 @@ fn default_workflow_mode() -> WorkflowMode {
 }
 
 fn default_board_auto_dispatch() -> bool {
+    true
+}
+
+fn default_board_auto_replenish() -> bool {
     true
 }
 
