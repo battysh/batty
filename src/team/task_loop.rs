@@ -2051,9 +2051,12 @@ mod tests {
 
         std::fs::write(wt_dir.join("slow.txt"), "pending\n").unwrap();
 
-        let hooks_dir = wt_dir.join(".git").join("hooks");
-        std::fs::create_dir_all(&hooks_dir).unwrap();
-        let hook_path = hooks_dir.join("pre-commit");
+        let hook_path = PathBuf::from(git_stdout(
+            &wt_dir,
+            &["rev-parse", "--git-path", "hooks/pre-commit"],
+        ));
+        let hooks_dir = hook_path.parent().unwrap();
+        std::fs::create_dir_all(hooks_dir).unwrap();
         std::fs::write(&hook_path, "#!/bin/sh\nsleep 2\n").unwrap();
         #[cfg(unix)]
         {
