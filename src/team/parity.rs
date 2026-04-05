@@ -526,6 +526,19 @@ overall_parity: 73%
     }
 
     #[test]
+    fn parse_sample_parity_md_produces_expected_summary() {
+        let report = ParityReport::parse(SAMPLE).unwrap();
+        let summary = report.summary();
+
+        assert_eq!(summary.total_behaviors, 3);
+        assert_eq!(summary.spec_complete, 2);
+        assert_eq!(summary.tests_complete, 1);
+        assert_eq!(summary.implementation_complete, 1);
+        assert_eq!(summary.verified_pass, 1);
+        assert_eq!(summary.verified_fail, 1);
+    }
+
+    #[test]
     fn missing_gap_task_specs_skips_existing_titles() {
         let report = ParityReport::parse(SAMPLE).unwrap();
         let existing = vec![crate::task::Task {
