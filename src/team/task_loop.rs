@@ -1956,6 +1956,84 @@ mod tests {
     }
 
     #[test]
+    fn preserve_worktree_with_commit_saves_dirty_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let wt_dir = repo.join(".batty").join("worktrees").join("eng-preserve");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &wt_dir,
+            "eng-preserve",
+            "eng-preserve/103",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        std::fs::write(wt_dir.join("preserved.txt"), "keep this work\n").unwrap();
+
+        let saved = preserve_worktree_with_commit(
+            &wt_dir,
+            "wip: auto-save before restart [batty]",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(saved, "dirty worktree should be auto-committed");
+
+        let status = git_stdout(&wt_dir, &["status", "--porcelain"]);
+        assert!(status.trim().is_empty(), "worktree should be clean");
+
+        let log = git_stdout(&wt_dir, &["log", "--oneline", "-1"]);
+        assert!(
+            log.contains("wip: auto-save before restart [batty]"),
+            "expected restart preservation commit, got: {log}"
+        );
+    }
+
+    #[test]
+    fn preserve_worktree_with_commit_ignores_batty_untracked_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let wt_dir = repo
+            .join(".batty")
+            .join("worktrees")
+            .join("eng-batty-clean");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &wt_dir,
+            "eng-batty-clean",
+            "eng-batty-clean/104",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(wt_dir.join(".batty").join("scratch")).unwrap();
+        std::fs::write(
+            wt_dir.join(".batty").join("scratch").join("session.log"),
+            "transient\n",
+        )
+        .unwrap();
+
+        let head_before = git_stdout(&wt_dir, &["rev-parse", "HEAD"]);
+        let saved = preserve_worktree_with_commit(
+            &wt_dir,
+            "wip: auto-save before restart [batty]",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(
+            !saved,
+            "only .batty untracked files should not trigger commit"
+        );
+
+        let head_after = git_stdout(&wt_dir, &["rev-parse", "HEAD"]);
+        assert_eq!(head_before, head_after, "no commit should be created");
+    }
+
+    #[test]
     fn preserve_worktree_with_commit_times_out() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp);
