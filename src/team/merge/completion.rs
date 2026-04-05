@@ -1401,19 +1401,19 @@ mod tests {
         let repo = init_git_repo(&tmp, "batty-merge-test");
         write_task_file(&repo, 42, "merge-blocked-task");
 
-        std::fs::write(repo.join("journal.md"), "base\n").unwrap();
-        git_ok(&repo, &["add", "journal.md"]);
+        std::fs::write(repo.join("journal.rs"), "fn base() {}\n").unwrap();
+        git_ok(&repo, &["add", "journal.rs"]);
         git_ok(&repo, &["commit", "-m", "add journal"]);
 
         let team_config_dir = repo.join(".batty").join("team_config");
         let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
         setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
 
-        std::fs::write(worktree_dir.join("journal.md"), "engineer version\n").unwrap();
-        git_ok(&worktree_dir, &["add", "journal.md"]);
+        std::fs::write(worktree_dir.join("journal.rs"), "fn engineer() {}\n").unwrap();
+        git_ok(&worktree_dir, &["add", "journal.rs"]);
         git_ok(&worktree_dir, &["commit", "-m", "engineer update"]);
 
-        std::fs::write(repo.join("journal.md"), "dirty main\n").unwrap();
+        std::fs::write(repo.join("journal.rs"), "fn dirty_main() {}\n").unwrap();
 
         let members = vec![
             MemberInstance {
