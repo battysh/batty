@@ -2995,15 +2995,27 @@ fn clean_room_skoolkit_disassembly_supports_z80_and_sna_snapshots() {
 #[test]
 fn clean_room_pipeline_integration_flow_preserves_barrier_and_updates_parity() {
     let tmp = tempfile::tempdir().unwrap();
-    crate::team::init_team(tmp.path(), "cleanroom", Some("zx-spectrum-fixture"), None, false)
-        .unwrap();
+    crate::team::init_team(
+        tmp.path(),
+        "cleanroom",
+        Some("zx-spectrum-fixture"),
+        None,
+        false,
+    )
+    .unwrap();
 
     let config = TeamConfig::load(&crate::team::team_config_path(tmp.path())).unwrap();
     assert!(config.workflow_policy.clean_room_mode);
     assert_eq!(config.role_barrier_group("decompiler"), Some("analysis"));
     assert_eq!(config.role_barrier_group("spec-writer"), Some("analysis"));
-    assert_eq!(config.role_barrier_group("test-writer"), Some("implementation"));
-    assert_eq!(config.role_barrier_group("implementer"), Some("implementation"));
+    assert_eq!(
+        config.role_barrier_group("test-writer"),
+        Some("implementation")
+    );
+    assert_eq!(
+        config.role_barrier_group("implementer"),
+        Some("implementation")
+    );
 
     let mut daemon = cleanroom_pipeline_daemon(tmp.path());
     let events_path = tmp
@@ -3062,14 +3074,22 @@ Show a blue border flash before entering the playable state.
 - A black-box replay observes exactly one blue flash before play begins
 "#;
     let spec_path = daemon
-        .write_handoff_artifact("spec-writer", Path::new("pipeline/SPEC.md"), spec.as_bytes())
+        .write_handoff_artifact(
+            "spec-writer",
+            Path::new("pipeline/SPEC.md"),
+            spec.as_bytes(),
+        )
         .unwrap();
     assert!(spec_path.exists());
 
     let shared_spec = daemon
         .read_handoff_artifact("test-writer", Path::new("pipeline/SPEC.md"))
         .unwrap();
-    assert!(String::from_utf8(shared_spec).unwrap().contains("blue border flash"));
+    assert!(
+        String::from_utf8(shared_spec)
+            .unwrap()
+            .contains("blue border flash")
+    );
 
     let original_binary_err = daemon
         .validate_member_barrier_path("implementer", &fixture_path, "read")
@@ -3114,7 +3134,9 @@ overall_parity: 0%
     assert_eq!(draft_summary.verified_pass, 0);
 
     fn compare_fixture_behavior(original: &[u8], stub: &str) -> bool {
-        original.windows(b"BORDER:BLUE".len()).any(|window| window == b"BORDER:BLUE")
+        original
+            .windows(b"BORDER:BLUE".len())
+            .any(|window| window == b"BORDER:BLUE")
             && stub == "blue flash -> play"
     }
 

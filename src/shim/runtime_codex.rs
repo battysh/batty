@@ -21,8 +21,8 @@ use anyhow::{Context, Result};
 
 use super::codex_types::{self, CodexEvent};
 use super::common::{
-    self, drain_queue_errors, format_injected_message, QueuedMessage, MAX_QUEUE_DEPTH,
-    SESSION_STATS_INTERVAL_SECS,
+    self, MAX_QUEUE_DEPTH, QueuedMessage, SESSION_STATS_INTERVAL_SECS, drain_queue_errors,
+    format_injected_message,
 };
 use super::protocol::{Channel, Command as ShimCommand, Event, ShimState};
 use super::pty_log::PtyLogWriter;
@@ -104,24 +104,26 @@ pub fn run_codex_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
     let mut stats_channel = cmd_channel
         .try_clone()
         .context("failed to clone channel for stats")?;
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(SESSION_STATS_INTERVAL_SECS));
-        let st = state_stats.lock().unwrap();
-        if st.state == ShimState::Dead {
-            return;
-        }
-        let output_bytes = st.cumulative_output_bytes;
-        let uptime_secs = st.started_at.elapsed().as_secs();
-        drop(st);
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_secs(SESSION_STATS_INTERVAL_SECS));
+            let st = state_stats.lock().unwrap();
+            if st.state == ShimState::Dead {
+                return;
+            }
+            let output_bytes = st.cumulative_output_bytes;
+            let uptime_secs = st.started_at.elapsed().as_secs();
+            drop(st);
 
-        if stats_channel
-            .send(&Event::SessionStats {
-                output_bytes,
-                uptime_secs,
-            })
-            .is_err()
-        {
-            return;
+            if stats_channel
+                .send(&Event::SessionStats {
+                    output_bytes,
+                    uptime_secs,
+                })
+                .is_err()
+            {
+                return;
+            }
         }
     });
 

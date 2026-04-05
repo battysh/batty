@@ -2,6 +2,81 @@
 
 All notable changes to Batty are documented here.
 
+## 0.9.0 — 2026-04-05
+
+Clean-room re-implementation engine, narration quality gates, dispatch
+resilience improvements, and regression fixes. 39 commits since v0.8.0,
+2,854 tests passing.
+
+### Clean-Room Engine
+
+- **Clean-room spec generation and sync** — structured pipeline for
+  generating specifications from decompiled source, syncing artifacts
+  between analysis and implementation phases. Supports skoolkit
+  decompiler flow for ZX Spectrum binary analysis.
+- **Cleanroom init template scaffold** — `batty init --from cleanroom`
+  bootstraps a clean-room project with barrier groups, pipeline roles,
+  and ZX Spectrum snapshot fixtures.
+- **Information barrier enforcement** (#392) — worktree-level access
+  control prevents implementation roles from reading original source.
+  `validate_member_barrier_path()` gates file reads by role barrier
+  group.
+- **Context exhaustion handoff + parity tracking** (#386, #393) —
+  agents hitting context limits hand off work state to fresh sessions.
+  Parity tracking system compares clean-room output against original
+  binary behavior.
+- **Equivalence parity harness** — backend abstraction for comparing
+  original and re-implemented binaries, with refinement passes for
+  convergence.
+
+### Dispatch & Board
+
+- **Lightweight board replenishment** — daemon detects empty boards
+  and creates placeholder tasks to keep engineers productive, without
+  requiring architect intervention.
+- **Reconcile daemon state with board ownership** — daemon startup
+  reconciles its in-memory assignment state against board `claimed_by`
+  fields, fixing desync after restarts.
+- **Always rebuild dispatch task branches** — dispatch now force-creates
+  fresh branches for each task assignment instead of reusing stale ones.
+
+### Quality Gates
+
+- **Narration-only completion rejection** — agents that produce only
+  prose narration (no code changes, no commands) have their completions
+  rejected. Includes docs-only and non-code-only variants to catch
+  agents that describe work instead of doing it.
+
+### Fixes
+
+- **Fix Codex shim prompt stdin launch** (c6cd19f) — Codex stdin
+  launch regression where the shim failed to pipe the initial prompt
+  to stdin, leaving the agent idle on startup.
+- **Fix stray merge marker in daemon tests** (6375aae) — removed an
+  unresolved merge conflict marker in the daemon test module.
+- **Restore dynamic version strings and kanban wrapper arg order**
+  (316cfd0) — `batty --version` was printing a stale string and
+  `kanban-md` wrapper calls had swapped argument positions.
+- **Preserve manual task assignments during reconcile** — board
+  reconciliation no longer clobbers manually assigned tasks when
+  syncing daemon state.
+- **Guard BATTY_MEMBER in messaging tests** — tests that inspect
+  sender identity now set the expected env var dynamically, fixing
+  failures when run inside a batty tmux session.
+- **Share Cargo target across worktrees** — engineer worktrees now
+  share the top-level `target/` directory, eliminating redundant
+  rebuilds.
+
+### Tests
+
+- **Auto-dispatch regression test** (#400) — verifies that completion
+  frees the engineer slot and dispatch skips already-claimed tasks.
+- **Cleanroom pipeline verification** — end-to-end test for the
+  barrier enforcement, artifact handoff, and parity tracking pipeline.
+- **Work preservation helper coverage** — unit tests for the shim
+  work preservation mechanism used during agent restarts.
+- 2,854 unit tests passing (up from 2,722 in v0.8.0).
+
 ## 0.8.0 — 2026-04-05
 
 Agent health and dispatch reliability improvements, discovered during a
