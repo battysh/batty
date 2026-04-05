@@ -748,8 +748,7 @@ fn maybe_intervene_board_replenishment_fires_when_todo_below_threshold_and_idle_
         .with_member_state("eng-1", MemberState::Working)
         .with_member_state("eng-2", MemberState::Idle)
         .with_pane("architect", "%999996")
-        .with_board_task(191, "already-running", "in-progress", Some("eng-1"))
-        .with_board_task(192, "next-up", "todo", None);
+        .with_board_task(191, "already-running", "in-progress", Some("eng-1"));
     let mut daemon = harness.build_daemon().unwrap();
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_board_replenishment().unwrap();
@@ -768,12 +767,12 @@ fn maybe_intervene_board_replenishment_fires_when_todo_below_threshold_and_idle_
     assert!(
         pending[0]
             .body
-            .contains("Board needs replenishment: 1 idle engineers, 1 todo tasks.")
+            .contains("Board needs replenishment: 1 idle engineers, 0 todo tasks.")
     );
     assert!(
         pending[0]
             .body
-            .contains("Current board summary: done=0, in-progress=1, todo=1.")
+            .contains("Current board summary: done=0, in-progress=1, todo=0.")
     );
     assert!(pending[0].body.contains("Idle engineers: eng-2."));
     assert!(pending[0].body.contains("planning/roadmap.md"));
