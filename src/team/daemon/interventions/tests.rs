@@ -748,25 +748,34 @@ fn maybe_intervene_board_replenishment_fires_when_todo_below_threshold_and_idle_
         .with_member_state("eng-1", MemberState::Working)
         .with_member_state("eng-2", MemberState::Idle)
         .with_pane("architect", "%999996")
-        .with_board_task(191, "already-running", "in-progress", Some("eng-1"))
-        .with_board_task(192, "next-up", "todo", None);
+        .with_board_task(191, "already-running", "in-progress", Some("eng-1"));
     let mut daemon = harness.build_daemon().unwrap();
-    daemon.config.team_config.automation.replenishment_threshold = Some(2);
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_board_replenishment().unwrap();
+    assert!(
+        harness
+            .pending_inbox_messages("architect")
+            .unwrap()
+            .is_empty()
+    );
 
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_board_replenishment().unwrap();
-
     let pending = harness.pending_inbox_messages("architect").unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].from, "daemon");
-    assert!(pending[0].body.contains("Board replenishment needed"));
-    assert!(pending[0].body.contains("todo=1, in-progress=1, done=0"));
     assert!(
         pending[0]
             .body
-            .contains("Idle engineers without work: 1 (eng-2)")
+            .contains("Board needs replenishment: 1 idle engineers, 0 todo tasks.")
     );
-    assert!(pending[0].body.contains("Runnable todo threshold: 2"));
+    assert!(
+        pending[0]
+            .body
+            .contains("Current board summary: done=0, in-progress=1, todo=0.")
+    );
+    assert!(pending[0].body.contains("Idle engineers: eng-2."));
+    assert!(pending[0].body.contains("planning/roadmap.md"));
     assert!(
         daemon
             .owned_task_interventions
@@ -785,8 +794,8 @@ fn maybe_intervene_board_replenishment_respects_cooldown() {
         .with_board_task(191, "already-running", "in-progress", Some("eng-1"))
         .with_board_task(192, "next-up", "todo", None);
     let mut daemon = harness.build_daemon().unwrap();
-    daemon.config.team_config.automation.replenishment_threshold = Some(2);
-
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_board_replenishment().unwrap();
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_board_replenishment().unwrap();
     mark_pending_delivered(&harness, "architect");
@@ -794,6 +803,8 @@ fn maybe_intervene_board_replenishment_respects_cooldown() {
     daemon
         .owned_task_interventions
         .remove("replenishment::architect");
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_board_replenishment().unwrap();
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_board_replenishment().unwrap();
 
@@ -841,8 +852,8 @@ fn maybe_intervene_board_replenishment_includes_optional_context_file() {
             "%999996".to_string(),
         )]))
         .build();
-    daemon.config.team_config.automation.replenishment_threshold = Some(1);
-
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_board_replenishment().unwrap();
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_board_replenishment().unwrap();
 
@@ -868,8 +879,6 @@ fn maybe_intervene_board_replenishment_does_not_fire_when_all_engineers_busy() {
         .with_board_task(191, "already-running", "in-progress", Some("eng-1"))
         .with_board_task(192, "next-up", "todo", None);
     let mut daemon = harness.build_daemon().unwrap();
-    daemon.config.team_config.automation.replenishment_threshold = Some(2);
-
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_board_replenishment().unwrap();
 
@@ -897,8 +906,32 @@ fn maybe_intervene_board_replenishment_does_not_fire_when_todo_is_sufficient() {
         .with_board_task(191, "next-up", "todo", None)
         .with_board_task(192, "follow-up", "todo", None);
     let mut daemon = harness.build_daemon().unwrap();
-    daemon.config.team_config.automation.replenishment_threshold = Some(2);
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_board_replenishment().unwrap();
 
+    assert!(
+        harness
+            .pending_inbox_messages("architect")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn maybe_intervene_board_replenishment_respects_board_toggle() {
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("lead", MemberState::Working)
+        .with_member_state("eng-1", MemberState::Working)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("architect", "%999996")
+        .with_board_task(191, "already-running", "in-progress", Some("eng-1"))
+        .with_board_task(192, "next-up", "todo", None);
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.config.team_config.board.auto_replenish = false;
+
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_board_replenishment().unwrap();
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_board_replenishment().unwrap();
 
@@ -2448,15 +2481,16 @@ fn board_replenishment_blocked_todo_excluded_from_unblocked_count() {
     );
 
     let mut daemon = harness.build_daemon().unwrap();
-    daemon.config.team_config.automation.replenishment_threshold = Some(1);
 
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_board_replenishment().unwrap();
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_board_replenishment().unwrap();
 
     // The blocked todo should not count as unblocked, so replenishment fires
     let pending = harness.pending_inbox_messages("architect").unwrap();
     assert_eq!(pending.len(), 1);
-    assert!(pending[0].body.contains("Board replenishment needed"));
+    assert!(pending[0].body.contains("Board needs replenishment"));
 }
 
 #[test]
@@ -2488,15 +2522,16 @@ fn board_replenishment_dependency_unmet_excluded_from_unblocked() {
     );
 
     let mut daemon = harness.build_daemon().unwrap();
-    daemon.config.team_config.automation.replenishment_threshold = Some(1);
 
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_board_replenishment().unwrap();
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_board_replenishment().unwrap();
 
     // Task 191 has unmet dependency → not unblocked → replenishment fires
     let pending = harness.pending_inbox_messages("architect").unwrap();
     assert_eq!(pending.len(), 1);
-    assert!(pending[0].body.contains("Board replenishment needed"));
+    assert!(pending[0].body.contains("Board needs replenishment"));
 }
 
 #[test]
@@ -2581,7 +2616,6 @@ fn suppress_starvation_when_all_engineers_have_tasks() {
         .with_board_task(191, "task-for-eng-1", "in-progress", Some("eng-1"))
         .with_board_task(192, "task-for-eng-2", "in-progress", Some("eng-2"));
     let mut daemon = harness.build_daemon().unwrap();
-    daemon.config.team_config.automation.replenishment_threshold = Some(5);
 
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_board_replenishment().unwrap();
@@ -2610,14 +2644,15 @@ fn fire_starvation_when_engineer_truly_idle() {
         .with_pane("architect", "%999996")
         .with_board_task(191, "task-for-eng-1", "in-progress", Some("eng-1"));
     let mut daemon = harness.build_daemon().unwrap();
-    daemon.config.team_config.automation.replenishment_threshold = Some(5);
 
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_board_replenishment().unwrap();
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_board_replenishment().unwrap();
 
     let pending = harness.pending_inbox_messages("architect").unwrap();
     assert_eq!(pending.len(), 1);
-    assert!(pending[0].body.contains("Board replenishment needed"));
+    assert!(pending[0].body.contains("Board needs replenishment"));
 }
 
 #[test]
