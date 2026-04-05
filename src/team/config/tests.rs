@@ -119,6 +119,7 @@ name: mafia-solver
 board:
   rotation_threshold: 20
   auto_dispatch: false
+  auto_replenish: false
 workflow_mode: hybrid
 orchestrator_pane: false
 standup:
@@ -170,6 +171,7 @@ roles:
     assert_eq!(config.name, "mafia-solver");
     assert_eq!(config.board.rotation_threshold, 20);
     assert!(!config.board.auto_dispatch);
+    assert!(!config.board.auto_replenish);
     assert_eq!(config.board.state_reconciliation_interval_secs, 30);
     assert_eq!(config.workflow_mode, WorkflowMode::Hybrid);
     assert!(!config.orchestrator_pane);
@@ -197,6 +199,7 @@ roles:
     assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
     assert_eq!(config.board.rotation_threshold, 20);
     assert!(config.board.auto_dispatch);
+    assert!(config.board.auto_replenish);
     assert_eq!(config.board.state_reconciliation_interval_secs, 30);
     assert_eq!(config.standup.interval_secs, 300);
     assert_eq!(config.standup.output_lines, 30);

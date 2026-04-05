@@ -3,7 +3,7 @@
 //! engineers have no assigned work.
 
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tracing::{info, warn};
@@ -11,9 +11,11 @@ use tracing::{info, warn};
 use super::super::*;
 use super::{OwnedTaskInterventionState, task_needs_owned_intervention};
 
+const BOARD_REPLENISHMENT_STREAK_REQUIRED: u64 = 2;
+const BOARD_REPLENISHMENT_REQUEST_INTERVAL_SECS: u64 = 15 * 60;
+
 struct BoardReplenishmentContext<'a> {
     idle_engineers: &'a [String],
-    threshold: usize,
     unblocked_todo_tasks: &'a [&'a crate::task::Task],
     todo_count: usize,
     in_progress_count: usize,
@@ -24,6 +26,9 @@ struct BoardReplenishmentContext<'a> {
 impl TeamDaemon {
     pub(in super::super) fn maybe_intervene_board_replenishment(&mut self) -> Result<()> {
         if super::super::super::pause_marker_path(&self.config.project_root).exists() {
+            return Ok(());
+        }
+        if !self.config.team_config.board.auto_replenish {
             return Ok(());
         }
         if super::super::super::nudge_disabled_marker_path(&self.config.project_root, "replenish")
@@ -44,20 +49,20 @@ impl TeamDaemon {
             .iter()
             .map(|task| (task.id, task.status.clone()))
             .collect();
-        // Target both architects (who own the roadmap) and managers (who own the board).
-        // Architects need to send directives; managers need to create tasks directly.
         let replenishment_targets: Vec<MemberInstance> = self
             .config
             .members
             .iter()
-            .filter(|member| {
-                member.role_type == RoleType::Architect || member.role_type == RoleType::Manager
-            })
+            .filter(|member| member.role_type == RoleType::Architect)
             .cloned()
             .collect();
         if replenishment_targets.is_empty() {
             return Ok(());
         }
+        let replenishment_keys: Vec<String> = replenishment_targets
+            .iter()
+            .map(|member| board_replenishment_intervention_key(&member.name))
+            .collect();
 
         let engineer_names: Vec<String> = self
             .config
@@ -73,6 +78,7 @@ impl TeamDaemon {
         // Suppress when all engineers have active tasks — transient idle is not starvation.
         if super::all_engineers_have_active_tasks(&engineer_names, &tasks) {
             tracing::debug!("suppressing board replenishment: all engineers have active tasks");
+            self.clear_board_replenishment_streaks(&replenishment_keys);
             return Ok(());
         }
 
@@ -88,6 +94,7 @@ impl TeamDaemon {
             .cloned()
             .collect();
         if idle_unassigned_engineers.is_empty() {
+            self.clear_board_replenishment_streaks(&replenishment_keys);
             return Ok(());
         }
 
@@ -106,13 +113,8 @@ impl TeamDaemon {
             })
             .collect();
 
-        let threshold = self
-            .config
-            .team_config
-            .automation
-            .replenishment_threshold
-            .unwrap_or(engineer_names.len());
-        if unblocked_todo_tasks.len() >= threshold {
+        if idle_unassigned_engineers.len() <= unblocked_todo_tasks.len() {
+            self.clear_board_replenishment_streaks(&replenishment_keys);
             return Ok(());
         }
 
@@ -154,14 +156,26 @@ impl TeamDaemon {
                 in_progress_count,
                 done_count,
             );
-            if self
+            let prior_streak = self
                 .owned_task_interventions
                 .get(&replenishment_key)
-                .is_some_and(|state| state.signature == signature)
-            {
+                .filter(|state| state.signature == signature)
+                .map(|state| state.idle_epoch)
+                .unwrap_or(0);
+            let streak = prior_streak.saturating_add(1);
+            self.owned_task_interventions.insert(
+                replenishment_key.clone(),
+                OwnedTaskInterventionState {
+                    idle_epoch: streak,
+                    signature: signature.clone(),
+                    detected_at: Instant::now(),
+                    escalation_sent: false,
+                },
+            );
+            if streak < BOARD_REPLENISHMENT_STREAK_REQUIRED {
                 continue;
             }
-            if self.intervention_on_cooldown(&replenishment_key) {
+            if self.board_replenishment_on_cooldown(&replenishment_key) {
                 continue;
             }
 
@@ -169,7 +183,6 @@ impl TeamDaemon {
                 architect,
                 BoardReplenishmentContext {
                     idle_engineers: &idle_unassigned_engineers,
-                    threshold,
                     unblocked_todo_tasks: &unblocked_todo_tasks,
                     todo_count,
                     in_progress_count,
@@ -181,7 +194,6 @@ impl TeamDaemon {
                 member = %architect.name,
                 idle_engineers = idle_unassigned_engineers.len(),
                 unblocked_todo = unblocked_todo_tasks.len(),
-                threshold,
                 "firing board replenishment intervention"
             );
             let delivered_live = match self.queue_daemon_message(&architect.name, &text) {
@@ -193,27 +205,21 @@ impl TeamDaemon {
                 }
             };
             self.record_orchestrator_action(format!(
-                "recovery: board replenishment intervention for {} (idle engineers: {}, unblocked todo: {}, threshold: {}, todo/in-progress/done: {}/{}/{})",
+                "recovery: board replenishment intervention for {} (idle engineers: {}, dispatchable todo: {}, board summary done/in-progress/todo: {}/{}/{})",
                 architect.name,
                 idle_unassigned_engineers.len(),
                 unblocked_todo_tasks.len(),
-                threshold,
-                todo_count,
+                done_count,
                 in_progress_count,
-                done_count
+                todo_count,
             ));
-            let idle_epoch = self
-                .triage_idle_epochs
-                .get(&architect.name)
-                .copied()
-                .unwrap_or(0);
             self.owned_task_interventions.insert(
                 replenishment_key.clone(),
                 OwnedTaskInterventionState {
-                    idle_epoch,
+                    idle_epoch: streak,
                     signature,
                     detected_at: Instant::now(),
-                    escalation_sent: false,
+                    escalation_sent: true,
                 },
             );
             self.intervention_cooldowns
@@ -233,20 +239,12 @@ impl TeamDaemon {
     ) -> String {
         let BoardReplenishmentContext {
             idle_engineers,
-            threshold,
             unblocked_todo_tasks,
             todo_count,
             in_progress_count,
             done_count,
             directive_context,
         } = context;
-        let board_dir = self
-            .config
-            .project_root
-            .join(".batty")
-            .join("team_config")
-            .join("board");
-        let board_dir_str = board_dir.display();
         let idle_engineer_summary = idle_engineers.join(", ");
         let todo_summary = if unblocked_todo_tasks.is_empty() {
             "none".to_string()
@@ -260,8 +258,9 @@ impl TeamDaemon {
         };
 
         let mut message = format!(
-            "Board replenishment needed: unblocked todo queue is below threshold. Current counts: todo={todo_count}, in-progress={in_progress_count}, done={done_count}. Idle engineers without work: {} ({idle_engineer_summary}). Runnable todo threshold: {threshold}. Current runnable todo tasks: {todo_summary}.",
-            idle_engineers.len()
+            "Board needs replenishment: {} idle engineers, {} todo tasks. Current board summary: done={done_count}, in-progress={in_progress_count}, todo={todo_count}. Idle engineers: {idle_engineer_summary}. Dispatchable todo tasks: {todo_summary}. Create tasks from planning/roadmap.md.",
+            idle_engineers.len(),
+            unblocked_todo_tasks.len()
         );
 
         if let Some(context) = directive_context {
@@ -269,36 +268,9 @@ impl TeamDaemon {
             message.push_str(context);
         }
 
-        // For architects: tell them to send a concrete directive to the manager
         if member.role_type == RoleType::Architect {
-            let manager_names: Vec<String> = self
-                .config
-                .members
-                .iter()
-                .filter(|m| m.role_type == RoleType::Manager)
-                .map(|m| m.name.clone())
-                .collect();
-            let manager_target = manager_names
-                .first()
-                .map(|s| s.as_str())
-                .unwrap_or("manager");
             message.push_str(&format!(
-                "\n\nACTION REQUIRED: Send the manager a concrete directive NOW with `batty send {manager_target} \"<directive>\"`. \
-                The directive must contain 2-5 specific work lanes with deliverables and success criteria \
-                so the manager can immediately run `kanban-md create` to populate the board. \
-                Do NOT just update the roadmap file — you MUST send the directive to the manager via batty send."
-            ));
-        }
-
-        // For managers: tell them to create board tasks directly
-        if member.role_type == RoleType::Manager {
-            message.push_str(&format!(
-                "\n\nACTION REQUIRED: Create board tasks NOW. Run:\n\
-                1. `cat planning/roadmap.md` to find the next unstarted milestone\n\
-                2. `kanban-md create --dir {board_dir_str} \"Task title\" --body \"Detailed spec with file paths and acceptance criteria\" --priority high`\n\
-                3. Repeat for each idle engineer\n\
-                4. Assign tasks to idle engineers with `batty assign {idle_engineer_summary} \"<task description>\"`\n\
-                Do NOT narrate what should happen — RUN the commands."
+                "\n\nACTION REQUIRED: Create concrete tasks from `planning/roadmap.md` and send the manager a structured directive now. This request is rate-limited to once every 15 minutes."
             ));
         }
 
@@ -312,6 +284,19 @@ impl TeamDaemon {
             "\nDo not leave idle engineers without executable work. Create the next concrete tasks or explain the exact blocker now.",
         );
         message
+    }
+
+    fn board_replenishment_on_cooldown(&self, key: &str) -> bool {
+        let cooldown = Duration::from_secs(BOARD_REPLENISHMENT_REQUEST_INTERVAL_SECS);
+        self.intervention_cooldowns
+            .get(key)
+            .is_some_and(|fired_at| fired_at.elapsed() < cooldown)
+    }
+
+    fn clear_board_replenishment_streaks(&mut self, keys: &[String]) {
+        for key in keys {
+            self.owned_task_interventions.remove(key);
+        }
     }
 }
 
