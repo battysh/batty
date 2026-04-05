@@ -150,12 +150,16 @@ impl TeamDaemon {
                     }
                 }
 
+                // Only preserve Working state if the *shim handle* was Working
+                // (meaning work was mid-flight when the SDK connection dropped).
+                // Do NOT use self.states (persisted daemon state) here — after a
+                // full daemon restart the agent is freshly spawned and not working
+                // on anything, even if the persisted state said Working.
                 let preserve_working = self
                     .shim_handles
                     .get(member_name)
                     .map(|handle| handle.state == ShimState::Working)
-                    .unwrap_or(false)
-                    || self.states.get(member_name) == Some(&MemberState::Working);
+                    .unwrap_or(false);
 
                 if preserve_working {
                     debug!(

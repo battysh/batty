@@ -102,6 +102,9 @@ impl ContextPressureTracker {
     }
 }
 
+/// Minimum uptime (seconds) before a zero-output agent is considered dead.
+const ZERO_OUTPUT_THRESHOLD_SECS: u64 = 600;
+
 impl TeamDaemon {
     pub(in super::super) fn handle_context_pressure_stats(
         &mut self,
@@ -109,6 +112,25 @@ impl TeamDaemon {
         output_bytes: u64,
         uptime_secs: u64,
     ) -> Result<()> {
+        // Detect dead agents: running for a long time with zero output bytes.
+        // This catches agents that spawned but never produced any work.
+        if output_bytes == 0 && uptime_secs >= ZERO_OUTPUT_THRESHOLD_SECS {
+            if self.shim_handles.contains_key(member_name) {
+                warn!(
+                    member = %member_name,
+                    uptime_secs,
+                    "zero-output agent detected — restarting"
+                );
+                self.record_orchestrator_action(format!(
+                    "health: restarting {} after {}s with zero output",
+                    member_name, uptime_secs
+                ));
+                self.handle_shim_cold_respawn(member_name, "zero output")?;
+                self.context_pressure_tracker.clear_member(member_name);
+            }
+            return Ok(());
+        }
+
         let is_working = self.states.get(member_name) == Some(&MemberState::Working);
         let threshold_bytes = self
             .config
@@ -287,6 +309,14 @@ mod tests {
         assert!(
             tracker.members["eng-1"].over_threshold_since.is_none(),
             "idle transition should clear the restart timer"
+        );
+    }
+
+    #[test]
+    fn zero_output_threshold_is_ten_minutes() {
+        assert_eq!(
+            ZERO_OUTPUT_THRESHOLD_SECS, 600,
+            "zero-output detection should trigger after 10 minutes"
         );
     }
 }

@@ -2,6 +2,30 @@
 
 All notable changes to Batty are documented here.
 
+## 0.8.0 — 2026-04-05
+
+Agent health and dispatch reliability improvements, discovered during a
+24-hour marketing team run where one agent was silently dead for 22 hours.
+
+### Fixes
+
+- **Fix `preserve_working` state desync after daemon restart** — when a
+  shim sends `Event::Ready` after respawn, only the shim handle's own
+  state is used to decide whether to preserve Working. Previously the
+  persisted daemon state (`self.states`) was also checked, causing freshly
+  spawned agents to get permanently stuck as Working after a daemon restart.
+  This was the root cause of priya-writer-1-1 being dead for 22+ hours.
+- **Dispatch queue prunes stale entries regardless of engineer state** —
+  `process_dispatch_queue()` now checks task validity (done/claimed/missing)
+  before checking if the engineer is idle. Previously, entries for non-idle
+  engineers were retained forever even when the underlying task was already
+  completed by another engineer.
+- **Zero-output agent detection and auto-restart** — agents with 0 output
+  bytes after 10 minutes of uptime are now detected and cold-respawned.
+  The health system previously had context *pressure* detection (too much
+  output) and stall detection (no output *change*), but nothing to catch
+  agents that never produced any output at all.
+
 ## 0.7.3 — 2026-04-04
 
 Patch release to fix the failed v0.7.2 release workflow (crate already
