@@ -72,6 +72,44 @@ impl DiffReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Z80Snapshot {
+    pub program_counter: u16,
+    pub stack_pointer: u16,
+    pub memory: Vec<u8>,
+}
+
+pub fn load_z80_snapshot(bytes: &[u8]) -> Result<Z80Snapshot> {
+    const HEADER_LEN: usize = 30;
+    const MEMORY_LEN: usize = 48 * 1024;
+
+    if bytes.len() < HEADER_LEN + MEMORY_LEN {
+        bail!(
+            ".z80 snapshot too short: expected at least {} bytes, got {}",
+            HEADER_LEN + MEMORY_LEN,
+            bytes.len()
+        );
+    }
+
+    let program_counter = u16::from_le_bytes([bytes[6], bytes[7]]);
+    if program_counter == 0 {
+        bail!("version 2/3 .z80 snapshots are not supported by this fixture loader");
+    }
+
+    let flags = bytes[12];
+    if flags & 0x20 != 0 {
+        bail!("compressed version 1 .z80 snapshots are not supported by this fixture loader");
+    }
+
+    let stack_pointer = u16::from_le_bytes([bytes[8], bytes[9]]);
+    let memory = bytes[HEADER_LEN..HEADER_LEN + MEMORY_LEN].to_vec();
+    Ok(Z80Snapshot {
+        program_counter,
+        stack_pointer,
+        memory,
+    })
+}
+
 pub trait EmulatorBackend {
     fn run(&self, binary: &Path, inputs: &InputSequence) -> Result<OutputCapture>;
 }
@@ -203,6 +241,15 @@ pub fn update_parity_from_diff(
 mod tests {
     use super::*;
 
+    const FIXTURE_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/zx_spectrum/minimal_test_program.z80"
+    );
+    const FIXTURE_BYTES: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/zx_spectrum/minimal_test_program.z80"
+    ));
+
     fn parity_fixture() -> String {
         r#"---
 project: trivial
@@ -230,6 +277,36 @@ overall_parity: 0%
         assert_eq!(diff.divergent_frames, 1);
         assert_eq!(diff.timing_difference, 0);
         assert_eq!(diff.divergent_indices, vec![1]);
+    }
+
+    #[test]
+    fn z80_fixture_loads_with_expected_header_and_program_bytes() {
+        let snapshot = load_z80_snapshot(FIXTURE_BYTES).unwrap();
+
+        assert_eq!(snapshot.program_counter, 0x8000);
+        assert_eq!(snapshot.stack_pointer, 0x5c00);
+        assert_eq!(snapshot.memory.len(), 48 * 1024);
+
+        let program_offset = 0x8000usize - 0x4000usize;
+        assert_eq!(snapshot.memory[program_offset], 0xF3);
+        assert_eq!(
+            &snapshot.memory[program_offset..program_offset + 7],
+            &[0xF3, 0x21, 0x00, 0x40, 0x11, 0x01, 0x40]
+        );
+        assert_eq!(
+            &snapshot.memory[0x9000usize - 0x4000usize..0x9003usize - 0x4000usize],
+            &[0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn z80_fixture_behavior_doc_mentions_observable_outputs() {
+        let behavior =
+            std::fs::read_to_string(Path::new(FIXTURE_PATH).with_file_name("BEHAVIOR.md")).unwrap();
+
+        assert!(behavior.contains("Fills the 6912-byte display file"));
+        assert!(behavior.contains("Toggles port `0xFE` twice"));
+        assert!(behavior.contains("Writes `0x42` to address `0x9000`"));
     }
 
     #[test]
