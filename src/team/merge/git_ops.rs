@@ -4,7 +4,7 @@
 //! to errors so that callers (and operators reading logs) can tell which
 //! high-level operation failed and why.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -98,22 +98,86 @@ pub(crate) fn diff_stat_from_main(worktree_dir: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Count files changed between main and HEAD using `git diff --stat main..HEAD`.
-/// Returns 0 if the diff stat is empty (narration-only: commits exist but no file changes).
-pub(crate) fn files_changed_from_main(worktree_dir: &Path) -> Result<u32> {
-    let stdout = diff_stat_from_main(worktree_dir)?;
-    let count = stdout
+pub(crate) fn changed_paths_from_main(worktree_dir: &Path) -> Result<Vec<PathBuf>> {
+    let output = run_git_with_context(
+        worktree_dir,
+        &["diff", "--name-only", "main..HEAD"],
+        "list changed paths between main and HEAD for narration-only detection",
+    )?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "{}",
+            describe_git_failure(
+                worktree_dir,
+                &["diff", "--name-only", "main..HEAD"],
+                "list changed paths between main and HEAD for narration-only detection",
+                &stderr,
+            )
+        );
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter(|line| {
-            let line = line.trim();
-            !line.is_empty()
-                && line
-                    .chars()
-                    .next()
-                    .is_some_and(|first| !first.is_ascii_digit())
-        })
-        .count();
-    Ok(count as u32)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .collect())
+}
+
+pub(crate) fn is_non_code_path(path: &Path) -> bool {
+    let root_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if matches!(
+        root_name,
+        "README" | "README.md" | "CHANGELOG.md" | "LICENSE" | "LICENSE.md"
+    ) {
+        return true;
+    }
+
+    let first_component = path
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        .unwrap_or_default();
+    if matches!(first_component, "docs" | "planning" | "assets") {
+        return true;
+    }
+
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some(
+            "md" | "markdown"
+                | "txt"
+                | "rst"
+                | "adoc"
+                | "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "svg"
+                | "webp"
+                | "bmp"
+                | "ico"
+                | "pdf"
+        )
+    )
+}
+
+/// Count files changed between main and HEAD.
+pub(crate) fn files_changed_from_main(worktree_dir: &Path) -> Result<u32> {
+    Ok(changed_paths_from_main(worktree_dir)?.len() as u32)
+}
+
+/// Count code-relevant files changed between main and HEAD.
+pub(crate) fn code_files_changed_from_main(worktree_dir: &Path) -> Result<u32> {
+    Ok(changed_paths_from_main(worktree_dir)?
+        .into_iter()
+        .filter(|path| !is_non_code_path(path))
+        .count() as u32)
 }
 
 pub(crate) fn now_unix() -> u64 {
@@ -266,5 +330,60 @@ mod tests {
         assert!(diff_stat.contains("src.rs"));
         assert!(diff_stat.contains("test.rs"));
         assert_eq!(files_changed_from_main(repo).unwrap(), 2);
+    }
+
+    #[test]
+    fn code_files_changed_from_main_ignores_docs_only_diff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "main"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join("README.md"), "hello").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "task-branch"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs").join("notes.md"), "narration only").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "docs only"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert_eq!(files_changed_from_main(repo).unwrap(), 1);
+        assert_eq!(code_files_changed_from_main(repo).unwrap(), 0);
+    }
+
+    #[test]
+    fn is_non_code_path_preserves_code_adjacent_files() {
+        assert!(!is_non_code_path(Path::new("Cargo.toml")));
+        assert!(!is_non_code_path(Path::new("Cargo.lock")));
+        assert!(!is_non_code_path(Path::new("src/main.rs")));
+        assert!(is_non_code_path(Path::new("docs/guide.md")));
+        assert!(is_non_code_path(Path::new("assets/logo.svg")));
     }
 }
