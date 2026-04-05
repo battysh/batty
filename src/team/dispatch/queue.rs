@@ -747,9 +747,7 @@ mod tests {
                 manager_member("mgr", None),
                 engineer_member("eng-1", Some("mgr"), false),
             ])
-            .states(HashMap::from([
-                ("eng-1".to_string(), MemberState::Working),
-            ]))
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Working)]))
             .build();
 
         daemon.dispatch_queue.push(DispatchQueueEntry {
@@ -780,9 +778,7 @@ mod tests {
                 manager_member("mgr", None),
                 engineer_member("eng-1", Some("mgr"), false),
             ])
-            .states(HashMap::from([
-                ("eng-1".to_string(), MemberState::Working),
-            ]))
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Working)]))
             .build();
 
         daemon.dispatch_queue.push(DispatchQueueEntry {
