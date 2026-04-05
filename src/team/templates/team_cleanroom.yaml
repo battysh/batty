@@ -60,7 +60,7 @@ roles:
     prompt: batty_spec_writer.md
     talks_to: [decompiler, test-writer, implementer]
     barrier_group: analysis
-    owns: ["SPEC.md", "PARITY.md"]
+    owns: ["SPEC.md", "PARITY.md", "specs/**"]
 
   - name: test-writer
     role_type: engineer

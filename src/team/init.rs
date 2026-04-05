@@ -234,10 +234,12 @@ fn scaffold_cleanroom_assets(
     let analysis_dir = project_root.join("analysis");
     let implementation_dir = project_root.join("implementation");
     let planning_dir = project_root.join("planning");
+    let specs_dir = project_root.join("specs");
 
     create_dir_if_missing(&analysis_dir, created)?;
     create_dir_if_missing(&implementation_dir, created)?;
     create_dir_if_missing(&planning_dir, created)?;
+    create_dir_if_missing(&specs_dir, created)?;
 
     write_scaffold_file(
         &project_root.join("PARITY.md"),

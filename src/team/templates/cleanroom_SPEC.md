@@ -1,43 +1,41 @@
-# Behavior Specification
+# Clean-Room Spec Index
 
-This document must describe observable behavior only.
+Store one behavior-only spec per unit under `specs/<behavior-slug>/SPEC.md`.
 
-## Rules
+Each behavior spec must use this shape:
+
+```md
+# Behavior: <name>
+
+## Purpose
+
+Describe the observable behavior only.
+
+## Inputs
+
+- <external input>
+
+## Outputs
+
+- <visible output>
+
+## State Transitions
+
+- <externally observable state change>
+
+## Edge Cases
+
+- <edge case>
+
+## Acceptance Criteria
+
+- <black-box expectation>
+```
+
+Hard rules:
 
 - No source code
 - No pseudocode
 - No register names
 - No addresses or instruction sequences
 - No decompiler output
-
-## Feature Template
-
-### Feature: <name>
-
-#### Purpose
-
-Describe the user-visible behavior or external system effect.
-
-#### Inputs
-
-- `<input>`
-
-#### Outputs
-
-- `<output>`
-
-#### State Transitions
-
-- `<state change>`
-
-#### Timing And Ordering
-
-- `<ordering or timing requirement>`
-
-#### Edge Cases
-
-- `<edge case>`
-
-#### Acceptance Criteria
-
-- `<black-box expectation>`
