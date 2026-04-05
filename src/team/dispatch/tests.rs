@@ -7,6 +7,7 @@ use crate::team::standup::MemberState;
 use crate::team::task_loop::{engineer_base_branch_name, setup_engineer_worktree};
 use crate::team::test_support::{
     TestDaemonBuilder, engineer_member, init_git_repo, manager_member, write_open_task_file,
+    write_owned_task_file,
 };
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -586,6 +587,54 @@ fn dispatch_includes_past_scheduled_task() {
 
     assert_eq!(daemon.dispatch_queue.len(), 1);
     assert_eq!(daemon.dispatch_queue[0].task_id, 101);
+}
+
+#[test]
+fn completion_frees_engineer_and_dispatch_skips_already_claimed_tasks() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_owned_task_file(tmp.path(), 90, "finished-task", "done", "eng-1");
+    write_owned_task_file(tmp.path(), 101, "claimed-next", "todo", "eng-2");
+    write_open_task_file(tmp.path(), 102, "dispatchable-next", "todo");
+
+    let members = vec![
+        manager_member("manager", None),
+        engineer_member("eng-1", Some("manager"), false),
+        engineer_member("eng-2", Some("manager"), false),
+    ];
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(members)
+        .board(BoardConfig {
+            auto_dispatch: true,
+            dispatch_stabilization_delay_secs: 0,
+            ..BoardConfig::default()
+        })
+        .states(HashMap::from([
+            ("eng-1".to_string(), MemberState::Idle),
+            ("eng-2".to_string(), MemberState::Idle),
+        ]))
+        .build();
+    daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+    daemon.idle_started_at.insert(
+        "eng-1".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+    daemon.idle_started_at.insert(
+        "eng-2".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+
+    daemon.maybe_auto_dispatch().unwrap();
+
+    assert_eq!(
+        daemon.dispatch_queue.len(),
+        1,
+        "only the next unclaimed todo task should be queued"
+    );
+    assert_eq!(daemon.dispatch_queue[0].engineer, "eng-1");
+    assert_eq!(
+        daemon.dispatch_queue[0].task_id, 102,
+        "claimed todo task should not be re-dispatched after completion"
+    );
 }
 
 #[test]
