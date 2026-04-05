@@ -78,6 +78,7 @@ pub fn init_team_with_overrides(
         "large" => include_str!("templates/team_large.yaml"),
         "research" => include_str!("templates/team_research.yaml"),
         "software" => include_str!("templates/team_software.yaml"),
+        "cleanroom" => include_str!("templates/team_cleanroom.yaml"),
         "batty" => include_str!("templates/team_batty.yaml"),
         _ => include_str!("templates/team_simple.yaml"),
     };
@@ -128,6 +129,24 @@ pub fn init_team_with_overrides(
                 include_str!("templates/batty_engineer.md"),
             ),
         ],
+        "cleanroom" => &[
+            (
+                "batty_decompiler.md",
+                include_str!("templates/batty_decompiler.md"),
+            ),
+            (
+                "batty_spec_writer.md",
+                include_str!("templates/batty_spec_writer.md"),
+            ),
+            (
+                "batty_test_writer.md",
+                include_str!("templates/batty_test_writer.md"),
+            ),
+            (
+                "batty_implementer.md",
+                include_str!("templates/batty_implementer.md"),
+            ),
+        ],
         _ => &[
             ("architect.md", include_str!("templates/architect.md")),
             ("manager.md", include_str!("templates/manager.md")),
@@ -167,6 +186,10 @@ pub fn init_team_with_overrides(
         }
     }
 
+    if template == "cleanroom" {
+        scaffold_cleanroom_assets(project_root, force, &mut created)?;
+    }
+
     // Initialize kanban-md board in the team config directory
     let board_dir = config_dir.join("board");
     if !board_dir.exists() {
@@ -201,6 +224,68 @@ pub fn init_team_with_overrides(
 
     info!(dir = %config_dir.display(), files = created.len(), "scaffolded team config");
     Ok(created)
+}
+
+fn scaffold_cleanroom_assets(
+    project_root: &Path,
+    force: bool,
+    created: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let analysis_dir = project_root.join("analysis");
+    let implementation_dir = project_root.join("implementation");
+    let planning_dir = project_root.join("planning");
+
+    create_dir_if_missing(&analysis_dir, created)?;
+    create_dir_if_missing(&implementation_dir, created)?;
+    create_dir_if_missing(&planning_dir, created)?;
+
+    write_scaffold_file(
+        &project_root.join("PARITY.md"),
+        include_str!("templates/cleanroom_PARITY.md"),
+        force,
+        created,
+    )?;
+    write_scaffold_file(
+        &project_root.join("SPEC.md"),
+        include_str!("templates/cleanroom_SPEC.md"),
+        force,
+        created,
+    )?;
+    write_scaffold_file(
+        &planning_dir.join("cleanroom-process.md"),
+        include_str!("templates/cleanroom_process.md"),
+        force,
+        created,
+    )?;
+
+    Ok(())
+}
+
+fn create_dir_if_missing(path: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
+    if !path.exists() {
+        std::fs::create_dir_all(path)
+            .with_context(|| format!("failed to create {}", path.display()))?;
+        created.push(path.to_path_buf());
+    }
+    Ok(())
+}
+
+fn write_scaffold_file(
+    path: &Path,
+    content: &str,
+    force: bool,
+    created: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if force || !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        std::fs::write(path, content)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        created.push(path.to_path_buf());
+    }
+    Ok(())
 }
 
 /// Apply interactive overrides to template YAML content via text replacement.
@@ -377,6 +462,8 @@ pub fn list_available_templates() -> Result<Vec<String>> {
     Ok(templates)
 }
 
+const TEMPLATE_PROJECT_ROOT_DIR: &str = "project_root";
+
 fn copy_template_dir(src: &Path, dst: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
     std::fs::create_dir_all(dst).with_context(|| format!("failed to create {}", dst.display()))?;
     for entry in
@@ -436,7 +523,24 @@ pub fn init_from_template(project_root: &Path, template_name: &str) -> Result<Ve
 
     let source_dir = templates_dir.join(template_name);
     let mut created = Vec::new();
-    copy_template_dir(&source_dir, &config_dir, &mut created)?;
+    std::fs::create_dir_all(&config_dir)
+        .with_context(|| format!("failed to create {}", config_dir.display()))?;
+    for entry in std::fs::read_dir(&source_dir)
+        .with_context(|| format!("failed to read {}", source_dir.display()))?
+    {
+        let entry = entry?;
+        let src_path = entry.path();
+        let file_name = entry.file_name();
+        if file_name == TEMPLATE_PROJECT_ROOT_DIR {
+            copy_template_dir(&src_path, project_root, &mut created)?;
+        } else if src_path.is_dir() {
+            copy_template_dir(&src_path, &config_dir.join(file_name), &mut created)?;
+        } else {
+            let dst_path = config_dir.join(file_name);
+            copy_template_file(&src_path, &dst_path)?;
+            created.push(dst_path);
+        }
+    }
     info!(
         template = template_name,
         source = %source_dir.display(),
@@ -481,6 +585,62 @@ pub fn export_template(project_root: &Path, name: &str) -> Result<usize> {
             .context("template source missing file name")?;
         copy_template_file(&source, &template_dir.join(file_name))?;
         copied += 1;
+    }
+
+    copied += export_project_template_assets(project_root, &template_dir)?;
+
+    Ok(copied)
+}
+
+fn export_project_template_assets(project_root: &Path, template_dir: &Path) -> Result<usize> {
+    let mut copied = 0usize;
+    let export_root = template_dir.join(TEMPLATE_PROJECT_ROOT_DIR);
+
+    let optional_dirs = [
+        (
+            project_root.join("analysis"),
+            export_root.join("analysis"),
+            false,
+        ),
+        (
+            project_root.join("implementation"),
+            export_root.join("implementation"),
+            false,
+        ),
+        (
+            project_root.join("planning"),
+            export_root.join("planning"),
+            true,
+        ),
+    ];
+    for (source, destination, cleanroom_only) in optional_dirs {
+        if cleanroom_only && source.file_name() == Some(std::ffi::OsStr::new("planning")) {
+            let cleanroom_doc = source.join("cleanroom-process.md");
+            if cleanroom_doc.is_file() {
+                copy_template_file(&cleanroom_doc, &destination.join("cleanroom-process.md"))?;
+                copied += 1;
+            }
+            continue;
+        }
+        if source.is_dir() {
+            let mut created = Vec::new();
+            copy_template_dir(&source, &destination, &mut created)?;
+            copied += count_files_in_dir(&source)?;
+        }
+    }
+
+    let optional_files = [
+        (
+            project_root.join("PARITY.md"),
+            export_root.join("PARITY.md"),
+        ),
+        (project_root.join("SPEC.md"), export_root.join("SPEC.md")),
+    ];
+    for (source, destination) in optional_files {
+        if source.is_file() {
+            copy_template_file(&source, &destination)?;
+            copied += 1;
+        }
     }
 
     Ok(copied)
@@ -581,6 +741,22 @@ fn copy_dir_if_exists(source: &Path, destination: &Path) -> Result<()> {
         copy_template_dir(source, destination, &mut created)?;
     }
     Ok(())
+}
+
+fn count_files_in_dir(path: &Path) -> Result<usize> {
+    let mut count = 0usize;
+    for entry in
+        std::fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))?
+    {
+        let entry = entry?;
+        let child = entry.path();
+        if child.is_dir() {
+            count += count_files_in_dir(&child)?;
+        } else {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -690,6 +866,61 @@ mod tests {
                 .join("board")
                 .join("task.md")
                 .exists()
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn init_from_template_restores_project_root_assets() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = HomeGuard::set(home.path());
+
+        let template_dir = home
+            .path()
+            .join(".batty")
+            .join("templates")
+            .join("cleanroom");
+        let export_root = template_dir.join(TEMPLATE_PROJECT_ROOT_DIR);
+        std::fs::create_dir_all(export_root.join("analysis")).unwrap();
+        std::fs::create_dir_all(export_root.join("implementation")).unwrap();
+        std::fs::create_dir_all(export_root.join("planning")).unwrap();
+        std::fs::write(template_dir.join("team.yaml"), "name: custom\nroles: []\n").unwrap();
+        std::fs::write(template_dir.join("batty_decompiler.md"), "# Decompiler\n").unwrap();
+        std::fs::write(export_root.join("PARITY.md"), "# Parity\n").unwrap();
+        std::fs::write(export_root.join("SPEC.md"), "# Spec\n").unwrap();
+        std::fs::write(
+            export_root.join("planning").join("cleanroom-process.md"),
+            "# Process\n",
+        )
+        .unwrap();
+
+        let created = init_from_template(project.path(), "cleanroom").unwrap();
+
+        assert!(!created.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(team_config_path(project.path())).unwrap(),
+            "name: custom\nroles: []\n"
+        );
+        assert!(
+            team_config_dir(project.path())
+                .join("batty_decompiler.md")
+                .exists()
+        );
+        assert!(project.path().join("analysis").is_dir());
+        assert!(project.path().join("implementation").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("PARITY.md")).unwrap(),
+            "# Parity\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("SPEC.md")).unwrap(),
+            "# Spec\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("planning").join("cleanroom-process.md"))
+                .unwrap(),
+            "# Process\n"
         );
     }
 
@@ -834,6 +1065,36 @@ mod tests {
     }
 
     #[test]
+    fn init_team_cleanroom_template() {
+        let tmp = tempfile::tempdir().unwrap();
+        let created = init_team(tmp.path(), "cleanroom", None, None, false).unwrap();
+        assert!(!created.is_empty());
+
+        let content = std::fs::read_to_string(team_config_path(tmp.path())).unwrap();
+        assert!(content.contains("decompiler"));
+        assert!(content.contains("spec-writer"));
+        assert!(content.contains("test-writer"));
+        assert!(content.contains("implementer"));
+        assert!(content.contains("batty_decompiler.md"));
+
+        let config_dir = team_config_dir(tmp.path());
+        assert!(config_dir.join("batty_decompiler.md").exists());
+        assert!(config_dir.join("batty_spec_writer.md").exists());
+        assert!(config_dir.join("batty_test_writer.md").exists());
+        assert!(config_dir.join("batty_implementer.md").exists());
+        assert!(tmp.path().join("analysis").is_dir());
+        assert!(tmp.path().join("implementation").is_dir());
+        assert!(tmp.path().join("PARITY.md").exists());
+        assert!(tmp.path().join("SPEC.md").exists());
+        assert!(
+            tmp.path()
+                .join("planning")
+                .join("cleanroom-process.md")
+                .exists()
+        );
+    }
+
+    #[test]
     fn init_with_agent_codex_sets_backend() {
         let tmp = tempfile::tempdir().unwrap();
         let _created = init_team(tmp.path(), "simple", None, Some("codex"), false).unwrap();
@@ -944,6 +1205,55 @@ mod tests {
         let error = export_template(&project_root, "demo-template").unwrap_err();
 
         assert!(error.to_string().contains("team config missing"));
+    }
+
+    #[test]
+    #[serial]
+    fn export_template_includes_cleanroom_project_assets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(tmp.path());
+        let project_root = tmp.path().join("project");
+        let config_dir = team_config_dir(&project_root);
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(project_root.join("analysis")).unwrap();
+        std::fs::create_dir_all(project_root.join("implementation")).unwrap();
+        std::fs::create_dir_all(project_root.join("planning")).unwrap();
+        std::fs::write(config_dir.join("team.yaml"), "name: demo\n").unwrap();
+        std::fs::write(config_dir.join("batty_decompiler.md"), "prompt\n").unwrap();
+        std::fs::write(project_root.join("PARITY.md"), "# Parity\n").unwrap();
+        std::fs::write(project_root.join("SPEC.md"), "# Spec\n").unwrap();
+        std::fs::write(
+            project_root.join("planning").join("cleanroom-process.md"),
+            "# Process\n",
+        )
+        .unwrap();
+
+        let copied = export_template(&project_root, "cleanroom-template").unwrap();
+        let template_dir = templates_base_dir().unwrap().join("cleanroom-template");
+        let export_root = template_dir.join(TEMPLATE_PROJECT_ROOT_DIR);
+
+        assert_eq!(copied, 5);
+        assert_eq!(
+            std::fs::read_to_string(template_dir.join("team.yaml")).unwrap(),
+            "name: demo\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(template_dir.join("batty_decompiler.md")).unwrap(),
+            "prompt\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(export_root.join("PARITY.md")).unwrap(),
+            "# Parity\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(export_root.join("SPEC.md")).unwrap(),
+            "# Spec\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(export_root.join("planning").join("cleanroom-process.md"))
+                .unwrap(),
+            "# Process\n"
+        );
     }
 
     #[test]
