@@ -42,13 +42,13 @@ impl TeamDaemon {
             self.restore_runtime_state();
         }
         // After a hot-reload, agents are freshly spawned and have no memory of
-        // their prior tasks. Clear active_tasks so replay_owned_tasks_for_idle_engineers
-        // can immediately re-dispatch tasks on the next poll cycle, instead of
-        // waiting for the 20-minute intervention grace period.
+        // their prior tasks. Clear active_tasks so the board becomes the source
+        // of truth again; reconcile will not reconstruct in-progress ownership
+        // from stale worktree branches.
         if is_hot_reload {
             info!(
                 cleared = self.active_tasks.len(),
-                "hot-reload: clearing active_tasks to allow immediate task replay"
+                "hot-reload: clearing active_tasks to rely on board state after restart"
             );
             self.active_tasks.clear();
         }
