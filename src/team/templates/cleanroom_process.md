@@ -9,6 +9,19 @@ This project follows a two-side clean-room workflow.
 - `spec-writer` may read `analysis/` and translate findings into behavior-only specs under `specs/<behavior>/SPEC.md`
 - `test-writer` and `implementer` may read `SPEC.md`, `PARITY.md`, and files under `implementation/`
 
+## Backend Selection
+
+- Detect the binary format first, then choose the analysis backend.
+- Use SkoolKit for ZX Spectrum Z80 snapshots (`.z80`, `.sna`).
+- Use Ghidra headless analysis for other supported targets, including NES/6502, Game Boy/SM83, and DOS/x86 binaries.
+- Capture the selected backend, target, and detection evidence in `analysis/DISASSEMBLY.md`.
+
+## Normalized Analysis Output
+
+- Regardless of backend, publish one normalized analysis artifact at `analysis/DISASSEMBLY.md`.
+- The normalized artifact must include backend metadata, target metadata, memory layout, routines, data structures, and observed behaviors.
+- Backend-specific raw exports may stay under `analysis/`, but the normalized artifact is the contract consumed by `spec-writer`.
+
 ## Information Barrier
 
 - The implementation side must not read the original binary, decompiler output, memory maps, or files under `analysis/`
