@@ -591,6 +591,9 @@ impl TeamDaemon {
             let inbox_msg = inbox::InboxMessage::new_send(&visible_sender, architect, &message);
             inbox::deliver_to_inbox(&inbox_root, &inbox_msg)?;
         }
+        self.emit_event(TeamEvent::pipeline_starvation_detected(
+            idle_count, todo_count,
+        ));
         self.pipeline_starvation_fired = true;
         self.pipeline_starvation_last_fired = Some(Instant::now());
         Ok(())

@@ -1043,10 +1043,14 @@ fn main() -> Result<()> {
                 team::grafana::DEFAULT_PORT
             };
             match command {
-                GrafanaCommand::Setup => team::grafana::setup(port)?,
+                GrafanaCommand::Setup => team::grafana::setup(&root, port)?,
                 GrafanaCommand::Status => team::grafana::status(port)?,
                 GrafanaCommand::Open => team::grafana::open(port)?,
             }
+        }
+
+        Command::GrafanaWebhook { project_root, port } => {
+            team::grafana::run_alert_webhook(std::path::Path::new(&project_root), port)?;
         }
 
         Command::Telegram => {

@@ -331,6 +331,18 @@ pub enum Command {
         pty_log_path: String,
     },
 
+    /// Internal: receive Grafana webhook alerts and append them to alerts.log
+    #[command(hide = true)]
+    GrafanaWebhook {
+        /// Project root directory
+        #[arg(long)]
+        project_root: String,
+
+        /// Local port to bind for webhook delivery
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+    },
+
     /// Internal: run the daemon loop (spawned by `batty start`)
     #[command(hide = true)]
     Daemon {
