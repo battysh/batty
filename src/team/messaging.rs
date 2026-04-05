@@ -534,6 +534,7 @@ roles:
     fn send_message_delivers_to_unique_instance_inbox() {
         let tmp = tempfile::tempdir().unwrap();
         let _tmux_pane = EnvVarGuard::unset("TMUX_PANE");
+        let _batty_member = EnvVarGuard::unset("BATTY_MEMBER");
         write_team_config(
             tmp.path(),
             r#"
