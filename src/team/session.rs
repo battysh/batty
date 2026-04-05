@@ -145,10 +145,11 @@ pub(crate) struct SessionSummary {
 impl SessionSummary {
     pub fn display(&self) -> String {
         format!(
-            "Session summary: {} tasks completed, {} merged, runtime {}\nBatty v0.1.0 — https://github.com/battysh/batty",
+            "Session summary: {} tasks completed, {} merged, runtime {}\nBatty v{} — https://github.com/battysh/batty",
             self.tasks_completed,
             self.tasks_merged,
             format_runtime(self.runtime_secs),
+            env!("CARGO_PKG_VERSION"),
         )
     }
 }
@@ -1177,7 +1178,10 @@ roles:
         };
         assert_eq!(
             summary.display(),
-            "Session summary: 5 tasks completed, 4 merged, runtime 2h 15m\nBatty v0.1.0 — https://github.com/battysh/batty"
+            format!(
+                "Session summary: 5 tasks completed, 4 merged, runtime 2h 15m\nBatty v{} — https://github.com/battysh/batty",
+                env!("CARGO_PKG_VERSION")
+            )
         );
     }
 

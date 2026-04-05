@@ -629,7 +629,7 @@ pub(super) fn write_launch_script(
     std::fs::write(
         &kanban_wrapper,
         format!(
-            "#!/bin/bash\nexec '{}' \"$@\" --dir '{}'\n",
+            "#!/bin/bash\nexec '{}' --dir '{}' \"$@\"\n",
             real_kanban,
             board_dir.to_string_lossy()
         ),
@@ -1091,6 +1091,40 @@ mod tests {
         ));
         assert!(content.contains("--append-system-prompt"));
         assert!(!content.contains("'You are the manager.''\n"));
+    }
+
+    #[test]
+    fn generated_kanban_wrapper_puts_dir_before_passthrough_args() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+
+        write_launch_script(
+            "eng-1",
+            "claude",
+            "idle role prompt",
+            None,
+            project,
+            project,
+            true,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
+
+        let slug = project.file_name().unwrap().to_string_lossy();
+        let wrapper_path = std::env::temp_dir()
+            .join(format!("batty-bin-{slug}-eng-1"))
+            .join("kanban-md");
+        let content = std::fs::read_to_string(&wrapper_path).unwrap();
+        let board_dir = project.join(".batty").join("team_config").join("board");
+        let expected = format!(
+            "exec '{}' --dir '{}' \"$@\"",
+            resolve_binary("kanban-md"),
+            board_dir.display()
+        );
+        assert!(content.contains(&expected));
+        assert!(!content.contains("\"$@\" --dir"));
     }
 
     #[test]
