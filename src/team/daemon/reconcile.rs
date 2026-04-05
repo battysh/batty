@@ -129,6 +129,14 @@ impl TeamDaemon {
                 &agent_cmd,
                 &work_dir,
                 Some(&pty_log_path),
+                self.config
+                    .team_config
+                    .workflow_policy
+                    .graceful_shutdown_timeout_secs,
+                self.config
+                    .team_config
+                    .workflow_policy
+                    .auto_commit_on_restart,
                 sdk_mode,
             ) {
                 Ok(handle) => {

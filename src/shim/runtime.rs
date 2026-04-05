@@ -6,7 +6,8 @@
 
 use std::collections::VecDeque;
 use std::io::{Read, Write as IoWrite};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -192,6 +193,93 @@ pub struct ShimArgs {
     /// Optional path for the PTY log file. When set, raw PTY output is
     /// streamed to this file so tmux display panes can `tail -F` it.
     pub pty_log_path: Option<PathBuf>,
+    pub graceful_shutdown_timeout_secs: u64,
+    pub auto_commit_on_restart: bool,
+}
+
+impl ShimArgs {
+    fn preserve_work_before_kill(&self, worktree_path: &Path) -> Result<bool> {
+        if !self.auto_commit_on_restart {
+            return Ok(false);
+        }
+
+        let status = ProcessCommand::new("git")
+            .arg("-C")
+            .arg(worktree_path)
+            .args(["status", "--porcelain"])
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to inspect git status in {}",
+                    worktree_path.display()
+                )
+            })?;
+        if !status.status.success() {
+            anyhow::bail!("git status failed in {}", worktree_path.display());
+        }
+
+        let dirty = String::from_utf8_lossy(&status.stdout)
+            .lines()
+            .any(|line| !line.starts_with("?? .batty/"));
+        if !dirty {
+            return Ok(false);
+        }
+
+        let timeout = Duration::from_secs(self.graceful_shutdown_timeout_secs);
+        run_git_preserve_with_timeout(worktree_path, &["add", "-A"], timeout)?;
+        run_git_preserve_with_timeout(
+            worktree_path,
+            &["commit", "-m", "wip: auto-save before restart [batty]"],
+            timeout,
+        )?;
+        Ok(true)
+    }
+}
+
+fn run_git_preserve_with_timeout(
+    worktree_path: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<()> {
+    let mut child = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .args(args)
+        .spawn()
+        .with_context(|| {
+            format!(
+                "failed to launch `git {}` in {}",
+                args.join(" "),
+                worktree_path.display()
+            )
+        })?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            if status.success() {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "`git {}` failed in {} with status {}",
+                args.join(" "),
+                worktree_path.display(),
+                status
+            );
+        }
+
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!(
+                "`git {}` timed out after {}s in {}",
+                args.join(" "),
+                timeout.as_secs(),
+                worktree_path.display()
+            );
+        }
+
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 // QueuedMessage is imported from super::common
@@ -940,6 +1028,12 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                     "[shim {}] shutdown requested (timeout: {}s)",
                     args.id, timeout_secs
                 );
+                if let Err(error) = args.preserve_work_before_kill(&args.cwd) {
+                    eprintln!(
+                        "[shim {}] auto-save before shutdown failed: {}",
+                        args.id, error
+                    );
+                }
                 {
                     let mut writer = pty_writer.lock().unwrap();
                     writer.write_all(b"\x03").ok(); // Ctrl-C
@@ -964,6 +1058,9 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
             }
 
             Command::Kill => {
+                if let Err(error) = args.preserve_work_before_kill(&args.cwd) {
+                    eprintln!("[shim {}] auto-save before kill failed: {}", args.id, error);
+                }
                 terminate_agent_group(&mut child, Duration::from_secs(GROUP_TERM_GRACE_SECS)).ok();
                 break;
             }

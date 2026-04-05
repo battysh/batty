@@ -54,6 +54,8 @@ mod tests {
             rows: 24,
             cols: 80,
             pty_log_path: None,
+            graceful_shutdown_timeout_secs: 5,
+            auto_commit_on_restart: true,
         };
 
         std::thread::spawn(move || {

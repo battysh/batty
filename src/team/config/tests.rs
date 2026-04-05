@@ -207,6 +207,8 @@ roles:
         config.workflow_policy.context_pressure_restart_delay_secs,
         120
     );
+    assert_eq!(config.workflow_policy.graceful_shutdown_timeout_secs, 5);
+    assert!(config.workflow_policy.auto_commit_on_restart);
     assert!(config.cost.models.is_empty());
     assert_eq!(config.roles[0].instances, 1);
     assert_eq!(config.workflow_mode, WorkflowMode::Legacy);

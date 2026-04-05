@@ -9,6 +9,7 @@ use super::config_reload::ConfigReloadMonitor;
 use super::hot_reload::HotReloadMonitor;
 use super::{TeamDaemon, standup, status};
 use crate::team;
+use crate::team::config::RoleType;
 use crate::tmux;
 
 impl TeamDaemon {
@@ -262,11 +263,30 @@ impl TeamDaemon {
             return;
         }
 
+        let mut preserved = Vec::new();
+        let active_engineers: Vec<String> = self
+            .config
+            .members
+            .iter()
+            .filter(|member| member.role_type == RoleType::Engineer)
+            .filter(|member| self.active_tasks.contains_key(&member.name))
+            .map(|member| member.name.clone())
+            .collect();
+        for member_name in active_engineers {
+            if self.preserve_member_worktree(&member_name, "wip: auto-save before restart [batty]")
+            {
+                preserved.push(member_name);
+            }
+        }
+
         let timeout_secs = self.config.team_config.shim_shutdown_timeout_secs;
         info!(
             count = self.shim_handles.len(),
             timeout_secs, "sending graceful shutdown to shim subprocesses"
         );
+        if !preserved.is_empty() {
+            info!(members = ?preserved, "auto-saved worktrees before daemon shutdown");
+        }
 
         // Phase 1: Send Shutdown command to all handles
         let names: Vec<String> = self.shim_handles.keys().cloned().collect();

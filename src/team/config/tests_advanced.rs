@@ -1013,3 +1013,20 @@ roles:
         "expected unknown agent detail in failure"
     );
 }
+
+#[test]
+fn parse_workflow_policy_restart_preservation_toggles() {
+    let yaml = r#"
+name: test
+workflow_policy:
+  graceful_shutdown_timeout_secs: 9
+  auto_commit_on_restart: false
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#;
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(config.workflow_policy.graceful_shutdown_timeout_secs, 9);
+    assert!(!config.workflow_policy.auto_commit_on_restart);
+}

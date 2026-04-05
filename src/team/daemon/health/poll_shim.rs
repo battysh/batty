@@ -548,6 +548,8 @@ impl TeamDaemon {
             return Ok(());
         };
 
+        let _ = self.preserve_member_worktree(member_name, "wip: auto-save before restart [batty]");
+
         if let Some(handle) = self.shim_handles.get_mut(member_name)
             && let Err(error) = handle.send_shutdown(5)
         {
@@ -572,6 +574,14 @@ impl TeamDaemon {
             &plan.agent_cmd,
             &plan.work_dir,
             Some(&log_path),
+            self.config
+                .team_config
+                .workflow_policy
+                .graceful_shutdown_timeout_secs,
+            self.config
+                .team_config
+                .workflow_policy
+                .auto_commit_on_restart,
             sdk_mode,
         )?;
 
@@ -608,6 +618,8 @@ impl TeamDaemon {
             )
         };
 
+        let _ = self.preserve_member_worktree(member_name, "wip: auto-save before restart [batty]");
+
         info!(member = member_name, "auto-respawning shim after crash");
 
         let sdk_mode = agent_supports_sdk_mode(&agent_type) && self.config.team_config.use_sdk_mode;
@@ -617,6 +629,14 @@ impl TeamDaemon {
             &agent_cmd,
             &work_dir,
             None,
+            self.config
+                .team_config
+                .workflow_policy
+                .graceful_shutdown_timeout_secs,
+            self.config
+                .team_config
+                .workflow_policy
+                .auto_commit_on_restart,
             sdk_mode,
         )?;
         self.shim_handles

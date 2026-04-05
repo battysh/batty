@@ -46,7 +46,8 @@ use super::task_cmd;
 use super::task_loop::next_unclaimed_task;
 use super::task_loop::{
     branch_is_merged_into, checkout_worktree_branch_from_main, current_worktree_branch,
-    engineer_base_branch_name, is_worktree_safe_to_mutate, setup_engineer_worktree,
+    engineer_base_branch_name, is_worktree_safe_to_mutate, preserve_worktree_with_commit,
+    setup_engineer_worktree,
 };
 use super::watcher::{SessionWatcher, WatcherState};
 use super::{AssignmentDeliveryResult, AssignmentResultStatus, now_unix, store_assignment_result};
@@ -191,6 +192,61 @@ pub struct TeamDaemon {
 }
 
 impl TeamDaemon {
+    pub(super) fn preserve_member_worktree(&self, member_name: &str, commit_message: &str) -> bool {
+        let policy = &self.config.team_config.workflow_policy;
+        if !policy.auto_commit_on_restart {
+            return false;
+        }
+
+        let Some(member) = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+        else {
+            return false;
+        };
+        if member.role_type != RoleType::Engineer || !member.use_worktrees {
+            return false;
+        }
+
+        let worktree_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("worktrees")
+            .join(member_name);
+        if !worktree_dir.exists() {
+            return false;
+        }
+
+        match preserve_worktree_with_commit(
+            &worktree_dir,
+            commit_message,
+            Duration::from_secs(policy.graceful_shutdown_timeout_secs),
+        ) {
+            Ok(saved) => {
+                if saved {
+                    info!(
+                        member = member_name,
+                        worktree = %worktree_dir.display(),
+                        "auto-saved worktree before restart/shutdown"
+                    );
+                }
+                saved
+            }
+            Err(error) => {
+                warn!(
+                    member = member_name,
+                    worktree = %worktree_dir.display(),
+                    error = %error,
+                    "failed to auto-save worktree before restart/shutdown"
+                );
+                false
+            }
+        }
+    }
+
     #[allow(dead_code)]
     pub(super) fn watcher_mut(&mut self, name: &str) -> Result<&mut SessionWatcher> {
         self.watchers

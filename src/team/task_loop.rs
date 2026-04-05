@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use tracing::{debug, info, warn};
@@ -513,6 +515,63 @@ pub(crate) fn is_worktree_safe_to_mutate(worktree_dir: &Path) -> Result<bool> {
     Ok(false)
 }
 
+fn run_git_with_timeout(worktree_dir: &Path, args: &[&str], timeout: Duration) -> Result<()> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(worktree_dir)
+        .args(args)
+        .spawn()
+        .with_context(|| {
+            format!(
+                "failed to launch `git {}` in {}",
+                args.join(" "),
+                worktree_dir.display()
+            )
+        })?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            if status.success() {
+                return Ok(());
+            }
+            bail!(
+                "`git {}` failed in {} with status {}",
+                args.join(" "),
+                worktree_dir.display(),
+                status
+            );
+        }
+
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "`git {}` timed out after {}s in {}",
+                args.join(" "),
+                timeout.as_secs(),
+                worktree_dir.display()
+            );
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+pub(crate) fn preserve_worktree_with_commit(
+    worktree_dir: &Path,
+    commit_message: &str,
+    timeout: Duration,
+) -> Result<bool> {
+    if !worktree_has_user_changes(worktree_dir)? {
+        return Ok(false);
+    }
+
+    run_git_with_timeout(worktree_dir, &["add", "-A"], timeout)?;
+    run_git_with_timeout(worktree_dir, &["commit", "-m", commit_message], timeout)?;
+    Ok(true)
+}
+
 fn auto_clean_worktree(worktree_dir: &Path) -> Result<()> {
     // Try commit first — preserves work in git history (no stash accumulation).
     if auto_commit_before_reset(worktree_dir) {
@@ -540,30 +599,10 @@ fn auto_clean_worktree(worktree_dir: &Path) -> Result<()> {
 /// accumulation. Returns `true` if changes were successfully committed or
 /// there was nothing to commit.
 pub(crate) fn auto_commit_before_reset(worktree_dir: &Path) -> bool {
-    // Check for user changes first (excludes .batty/ untracked files).
-    let has_changes = match worktree_has_user_changes(worktree_dir) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    if !has_changes {
-        return true;
-    }
-
-    // Stage all changes including untracked files.
-    if retry_git(|| git_cmd::run_git(worktree_dir, &["add", "-A"])).is_err() {
-        warn!(
-            worktree = %worktree_dir.display(),
-            "auto-commit: git add failed"
-        );
-        return false;
-    }
-
-    // Build a descriptive commit message.
     let branch = retry_git(|| git_cmd::rev_parse_branch(worktree_dir)).unwrap_or_default();
     let msg = format!("wip: auto-save before worktree reset [{}]", branch);
-
-    match retry_git(|| git_cmd::run_git(worktree_dir, &["commit", "-m", &msg])) {
-        Ok(_) => {
+    match preserve_worktree_with_commit(worktree_dir, &msg, Duration::from_secs(5)) {
+        Ok(true) => {
             info!(
                 worktree = %worktree_dir.display(),
                 branch = %branch,
@@ -571,6 +610,7 @@ pub(crate) fn auto_commit_before_reset(worktree_dir: &Path) -> bool {
             );
             true
         }
+        Ok(false) => true,
         Err(e) => {
             warn!(
                 worktree = %worktree_dir.display(),
@@ -1885,6 +1925,72 @@ mod tests {
             log.contains("wip: auto-save"),
             "should have wip commit, got: {log}"
         );
+    }
+
+    #[test]
+    fn preserve_worktree_with_commit_returns_false_when_clean() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let wt_dir = repo
+            .join(".batty")
+            .join("worktrees")
+            .join("eng-clean-preserve");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &wt_dir,
+            "eng-clean-preserve",
+            "eng-clean-preserve/101",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        let saved = preserve_worktree_with_commit(
+            &wt_dir,
+            "wip: auto-save before restart [batty]",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(!saved);
+    }
+
+    #[test]
+    fn preserve_worktree_with_commit_times_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let wt_dir = repo.join(".batty").join("worktrees").join("eng-timeout");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &wt_dir,
+            "eng-timeout",
+            "eng-timeout/102",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        std::fs::write(wt_dir.join("slow.txt"), "pending\n").unwrap();
+
+        let hooks_dir = wt_dir.join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let hook_path = hooks_dir.join("pre-commit");
+        std::fs::write(&hook_path, "#!/bin/sh\nsleep 2\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let err = preserve_worktree_with_commit(
+            &wt_dir,
+            "wip: auto-save before restart [batty]",
+            Duration::from_millis(200),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("timed out"), "unexpected error: {err}");
     }
 
     // --- priority_rank tests ---

@@ -42,6 +42,8 @@ fn spawn_bash_shim() -> Channel {
         rows: 24,
         cols: 80,
         pty_log_path: None,
+        graceful_shutdown_timeout_secs: 5,
+        auto_commit_on_restart: true,
     };
 
     std::thread::spawn(move || {
@@ -504,6 +506,8 @@ fn spawn_bash_shim_with_log(id: &str, log_path: PathBuf) -> Channel {
         rows: 24,
         cols: 80,
         pty_log_path: Some(log_path),
+        graceful_shutdown_timeout_secs: 5,
+        auto_commit_on_restart: true,
     };
     spawn_shim_with_args(args)
 }
@@ -518,6 +522,8 @@ fn spawn_named_bash_shim(id: &str) -> Channel {
         rows: 24,
         cols: 80,
         pty_log_path: None,
+        graceful_shutdown_timeout_secs: 5,
+        auto_commit_on_restart: true,
     };
     spawn_shim_with_args(args)
 }
@@ -972,6 +978,8 @@ fn shim_channel_lifecycle_e2e() {
         rows: 24,
         cols: 80,
         pty_log_path: None,
+        graceful_shutdown_timeout_secs: 5,
+        auto_commit_on_restart: true,
     };
 
     std::thread::spawn(move || {

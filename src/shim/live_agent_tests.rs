@@ -91,6 +91,8 @@ fn spawn_agent_shim(agent_type: AgentType, cmd: &str) -> Channel {
         rows: 50,
         cols: 220,
         pty_log_path: None,
+        graceful_shutdown_timeout_secs: 5,
+        auto_commit_on_restart: true,
     };
 
     std::thread::spawn(move || {
@@ -115,6 +117,8 @@ fn spawn_agent_shim_with_log(agent_type: AgentType, cmd: &str, log_path: PathBuf
         rows: 50,
         cols: 220,
         pty_log_path: Some(log_path),
+        graceful_shutdown_timeout_secs: 5,
+        auto_commit_on_restart: true,
     };
 
     std::thread::spawn(move || {
