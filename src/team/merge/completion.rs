@@ -21,8 +21,8 @@ use crate::team::task_loop::{
 };
 
 use super::git_ops::{
-    commits_ahead_of_main, diff_stat_from_main, files_changed_from_main, now_unix,
-    run_git_with_context,
+    code_files_changed_from_main, commits_ahead_of_main, diff_stat_from_main,
+    files_changed_from_main, now_unix, run_git_with_context,
 };
 use super::lock::{MergeLock, MergeOutcome};
 use super::operations::merge_engineer_branch;
@@ -191,8 +191,13 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     } else {
         files_changed_from_main(&worktree_dir)?
     };
+    let code_files_changed = if daemon.is_multi_repo {
+        multi_repo_code_files_changed_from_main(&worktree_dir, &daemon.sub_repo_names)?
+    } else {
+        code_files_changed_from_main(&worktree_dir)?
+    };
 
-    if files_changed == 0 {
+    if files_changed == 0 || code_files_changed == 0 {
         let narration_count = daemon
             .narration_rejection_counts
             .entry(task_id)
@@ -207,7 +212,9 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
             task_id,
             narration_rejection_count = count,
             diff_stat = %diff_stat,
-            "commits exist but no file diff — narration-only completion"
+            files_changed,
+            code_files_changed,
+            "commits exist but only narration/non-code diff — narration-only completion"
         );
         daemon.record_narration_rejection(engineer, task_id, count);
 
@@ -216,7 +223,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
             if let Some(ref manager_name) = manager_name {
                 let msg = format!(
                     "[daemon] Engineer {engineer} hit the narration-only quality gate {count} times on task #{task_id}. \
-                     Branch has {total_commits} commit(s) ahead of main but `git diff --stat main..HEAD` is empty.\n\
+                     Branch has {total_commits} commit(s) ahead of main, but the completion diff is narration-only ({files_changed} total file(s), {code_files_changed} code file(s)).\n\
                      Follow-up prompt sent: \"Your previous attempt only produced commentary. Execute the actual commands to make the code changes.\"\n\
                      Diff stat: {}\n\
                      The agent may need a more directive prompt or task restart.",
@@ -232,8 +239,10 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
 
         let msg = format!(
             "Your previous attempt only produced commentary. Execute the actual commands to make the code changes.\n\
-             Batty checked `git diff --stat main..HEAD` and found no file changes.\n\
+             Batty checked `git diff --stat main..HEAD` and found no code changes.\n\
              Commits ahead of main: {total_commits}\n\
+             Files changed: {files_changed}\n\
+             Code files changed: {code_files_changed}\n\
              Diff stat: {}",
             if diff_stat.is_empty() {
                 "(empty)".to_string()
@@ -805,6 +814,20 @@ fn multi_repo_files_changed_from_main(
     Ok(total)
 }
 
+fn multi_repo_code_files_changed_from_main(
+    worktree_dir: &Path,
+    sub_repo_names: &[String],
+) -> Result<u32> {
+    let mut total = 0u32;
+    for name in sub_repo_names {
+        let sub_wt = worktree_dir.join(name);
+        if sub_wt.exists() {
+            total += code_files_changed_from_main(&sub_wt).unwrap_or(0);
+        }
+    }
+    Ok(total)
+}
+
 fn multi_repo_diff_stat_from_main(
     worktree_dir: &Path,
     sub_repo_names: &[String],
@@ -1133,7 +1156,7 @@ mod tests {
         assert!(
             manager_messages[0]
                 .body
-                .contains("git diff --stat main..HEAD` is empty")
+                .contains("completion diff is narration-only")
         );
 
         let events_path = repo.join(".batty").join("team_config").join("events.jsonl");
@@ -1176,6 +1199,46 @@ mod tests {
         daemon.set_active_task_for_test("eng-1", 43);
         handle_engineer_completion(&mut daemon, "eng-1").unwrap();
         assert_eq!(daemon.narration_rejection_counts.get(&43), Some(&1));
+    }
+
+    #[test]
+    fn narration_only_completion_rejects_docs_only_diff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        write_task_file(&repo, 42, "docs-only-task");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        std::fs::create_dir_all(worktree_dir.join("docs")).unwrap();
+        std::fs::write(
+            worktree_dir.join("docs").join("notes.md"),
+            "commentary only\n",
+        )
+        .unwrap();
+        git_ok(&worktree_dir, &["add", "docs/notes.md"]);
+        git_ok(&worktree_dir, &["commit", "-m", "docs only"]);
+
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        let engineer_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
+        assert_eq!(engineer_messages.len(), 1);
+        assert!(engineer_messages[0].body.contains("found no code changes"));
+        assert!(engineer_messages[0].body.contains("Code files changed: 0"));
+
+        let events_path = repo.join(".batty").join("team_config").join("events.jsonl");
+        let events = read_events(&events_path).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "narration_rejection"
+                && event.task.as_deref() == Some("42")
+                && event.role.as_deref() == Some("eng-1")
+        }));
     }
 
     #[test]
