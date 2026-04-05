@@ -1,0 +1,71 @@
+name: my-cleanroom-project
+use_shim: true
+auto_respawn_on_crash: true
+orchestrator_pane: true
+orchestrator_position: left
+
+board:
+  rotation_threshold: 10
+  auto_dispatch: false
+
+standup:
+  interval_secs: 900
+  output_lines: 30
+
+automation:
+  timeout_nudges: true
+  standups: true
+  triage_interventions: true
+  review_interventions: true
+  owned_task_interventions: true
+  manager_dispatch_interventions: true
+  architect_utilization_interventions: true
+  intervention_idle_grace_secs: 60
+
+automation_sender: human
+
+layout:
+  zones:
+    - name: analyst
+      width_pct: 25
+    - name: spec
+      width_pct: 25
+    - name: implementation
+      width_pct: 50
+      split: { horizontal: 2 }
+
+roles:
+  - name: decompiler
+    role_type: architect
+    agent: claude
+    instances: 1
+    prompt: batty_decompiler.md
+    talks_to: [spec-writer]
+    nudge_interval_secs: 1200
+    owns: ["analysis/**", "planning/cleanroom-process.md"]
+
+  - name: spec-writer
+    role_type: manager
+    agent: claude
+    instances: 1
+    prompt: batty_spec_writer.md
+    talks_to: [decompiler, test-writer, implementer]
+    owns: ["SPEC.md", "PARITY.md"]
+
+  - name: test-writer
+    role_type: engineer
+    agent: codex
+    instances: 1
+    prompt: batty_test_writer.md
+    talks_to: [spec-writer]
+    use_worktrees: true
+    owns: ["implementation/tests/**"]
+
+  - name: implementer
+    role_type: engineer
+    agent: codex
+    instances: 1
+    prompt: batty_implementer.md
+    talks_to: [spec-writer]
+    use_worktrees: true
+    owns: ["implementation/**"]

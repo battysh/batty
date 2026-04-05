@@ -1,0 +1,24 @@
+# Clean-Room Process
+
+This project follows a two-side clean-room workflow.
+
+## Roles
+
+- `decompiler` may inspect the original binary and produce analysis artifacts in `analysis/`
+- `spec-writer` may read `analysis/` and translate findings into behavior-only specs
+- `test-writer` and `implementer` may read `SPEC.md`, `PARITY.md`, and files under `implementation/`
+
+## Information Barrier
+
+- The implementation side must not read the original binary, decompiler output, memory maps, or files under `analysis/`
+- The analysis side must not write production implementation code
+- `SPEC.md` is the only document allowed to cross from analysis to implementation
+- `PARITY.md` may track coverage and verification state, but it must not contain implementation detail from the original binary
+
+## Audit Requirements
+
+- Keep analysis artifacts in `analysis/`
+- Keep implementation code and tests in `implementation/`
+- Record each behavior in `PARITY.md`
+- Route ambiguity resolution through `spec-writer`
+- Preserve commit history so the analysis-side and implementation-side outputs remain reviewable

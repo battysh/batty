@@ -620,6 +620,7 @@ Options:
           - large:    Human + architect + 3 managers + 15 engineers with Telegram (19 panes)
           - research: PI + 3 sub-leads + 6 researchers — research lab style (10 panes)
           - software: Human + tech lead + 2 eng managers + 8 developers — full product team (11 panes)
+          - cleanroom: Clean-room workflow: decompiler + spec-writer + test-writer + implementer (4 panes)
           - batty:    Batty self-development: human + architect + manager + 4 Rust engineers (6 panes)
 
       --from <FROM>

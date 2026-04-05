@@ -52,7 +52,7 @@ Edit .batty/team_config/team.yaml to configure your team.
 Then run: batty start
 ```
 
-If you want a different scaffold, use `batty init --template solo|pair|simple|squad|large|research|software|batty`.
+If you want a different scaffold, use `batty init --template solo|pair|simple|squad|large|research|software|cleanroom|batty`.
 
 To set the default agent backend for all roles at init time:
 
@@ -539,7 +539,7 @@ batty init --from my-team
 ```
 
 Built-in templates (`solo`, `pair`, `simple`, `squad`, `large`, `research`,
-`software`, `batty`) are always available via `batty init --template <name>`.
+`software`, `cleanroom`, `batty`) are always available via `batty init --template <name>`.
 
 ## Stall Detection And Auto-Restart
 
