@@ -151,7 +151,6 @@ pub(crate) fn is_non_code_path(path: &Path) -> bool {
         path.extension().and_then(|ext| ext.to_str()),
         Some(
             "md" | "markdown"
-                | "txt"
                 | "rst"
                 | "adoc"
                 | "png"
