@@ -10,6 +10,7 @@
 //! PTY runtime, making it transparent to all upstream consumers.
 
 use std::collections::VecDeque;
+use std::io::Write;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -20,8 +21,8 @@ use anyhow::{Context, Result};
 
 use super::codex_types::{self, CodexEvent};
 use super::common::{
-    self, MAX_QUEUE_DEPTH, QueuedMessage, SESSION_STATS_INTERVAL_SECS, drain_queue_errors,
-    format_injected_message,
+    self, drain_queue_errors, format_injected_message, QueuedMessage, MAX_QUEUE_DEPTH,
+    SESSION_STATS_INTERVAL_SECS,
 };
 use super::protocol::{Channel, Command as ShimCommand, Event, ShimState};
 use super::pty_log::PtyLogWriter;
@@ -103,26 +104,24 @@ pub fn run_codex_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
     let mut stats_channel = cmd_channel
         .try_clone()
         .context("failed to clone channel for stats")?;
-    thread::spawn(move || {
-        loop {
-            thread::sleep(Duration::from_secs(SESSION_STATS_INTERVAL_SECS));
-            let st = state_stats.lock().unwrap();
-            if st.state == ShimState::Dead {
-                return;
-            }
-            let output_bytes = st.cumulative_output_bytes;
-            let uptime_secs = st.started_at.elapsed().as_secs();
-            drop(st);
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(SESSION_STATS_INTERVAL_SECS));
+        let st = state_stats.lock().unwrap();
+        if st.state == ShimState::Dead {
+            return;
+        }
+        let output_bytes = st.cumulative_output_bytes;
+        let uptime_secs = st.started_at.elapsed().as_secs();
+        drop(st);
 
-            if stats_channel
-                .send(&Event::SessionStats {
-                    output_bytes,
-                    uptime_secs,
-                })
-                .is_err()
-            {
-                return;
-            }
+        if stats_channel
+            .send(&Event::SessionStats {
+                output_bytes,
+                uptime_secs,
+            })
+            .is_err()
+        {
+            return;
         }
     });
 
@@ -168,8 +167,8 @@ pub fn run_codex_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
 
                         // Spawn codex exec subprocess for this message
                         let text = format_injected_message(&from, &body);
-                        let exec_cmd =
-                            codex_types::codex_sdk_command(&program, &text, thread_id.as_deref());
+                        let (exec_program, exec_args) =
+                            codex_types::codex_sdk_args(&program, thread_id.as_deref());
 
                         let mut evt_channel = cmd_channel
                             .try_clone()
@@ -182,7 +181,9 @@ pub fn run_codex_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                         thread::spawn(move || {
                             run_codex_exec(
                                 &shim_id_exec,
-                                &exec_cmd,
+                                &exec_program,
+                                &exec_args,
+                                &text,
                                 &cwd,
                                 &state_exec,
                                 &mut evt_channel,
@@ -318,17 +319,19 @@ pub fn run_codex_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
 /// When the subprocess exits, transition back to Idle and drain the queue.
 fn run_codex_exec(
     shim_id: &str,
-    exec_cmd: &str,
+    program: &str,
+    args: &[String],
+    prompt: &str,
     cwd: &std::path::Path,
     state: &Arc<Mutex<CodexState>>,
     evt_channel: &mut Channel,
     pty_log: Option<&Arc<Mutex<PtyLogWriter>>>,
 ) {
     // Spawn the subprocess
-    let mut child = match Command::new("bash")
-        .args(["-lc", exec_cmd])
+    let mut child = match Command::new(program)
+        .args(args)
         .current_dir(cwd)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env_remove("CLAUDECODE")
@@ -362,6 +365,12 @@ fn run_codex_exec(
 
     let child_pid = child.id();
     eprintln!("[shim-codex {shim_id}] codex exec spawned (pid {child_pid})");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(e) = stdin.write_all(prompt.as_bytes()) {
+            eprintln!("[shim-codex {shim_id}] failed to write prompt to stdin: {e}");
+        }
+    }
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -541,10 +550,19 @@ fn run_codex_exec(
         });
 
         let text = format_injected_message(&qm.from, &qm.body);
-        let exec_cmd = codex_types::codex_sdk_command(&program, &text, thread_id.as_deref());
+        let (exec_program, exec_args) = codex_types::codex_sdk_args(&program, thread_id.as_deref());
 
         // Recursive call for queued message (same thread)
-        run_codex_exec(shim_id, &exec_cmd, &cwd_owned, state, evt_channel, pty_log);
+        run_codex_exec(
+            shim_id,
+            &exec_program,
+            &exec_args,
+            &text,
+            &cwd_owned,
+            state,
+            evt_channel,
+            pty_log,
+        );
     }
 }
 

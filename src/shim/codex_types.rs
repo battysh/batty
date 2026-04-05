@@ -92,6 +92,29 @@ impl CodexItem {
 // Launch command builder
 // ---------------------------------------------------------------------------
 
+/// Build the Codex exec argv for SDK (JSONL) mode.
+///
+/// `thread_id`: if provided, resumes an existing thread for multi-turn.
+/// The final `-` instructs Codex to read the prompt from stdin.
+pub fn codex_sdk_args(program: &str, thread_id: Option<&str>) -> (String, Vec<String>) {
+    let mut args = vec![
+        "exec".to_string(),
+        "--json".to_string(),
+        "-m".to_string(),
+        "gpt-5.4".to_string(),
+        "--dangerously-bypass-approvals-and-sandbox".to_string(),
+    ];
+
+    if let Some(tid) = thread_id {
+        args.push("resume".to_string());
+        args.push(tid.to_string());
+    }
+
+    args.push("-".to_string());
+
+    (program.to_string(), args)
+}
+
 /// Build the Codex exec command for SDK (JSONL) mode.
 ///
 /// `thread_id`: if provided, resumes an existing thread for multi-turn.
@@ -102,12 +125,12 @@ pub fn codex_sdk_command(program: &str, prompt: &str, thread_id: Option<&str>) -
         Some(tid) => {
             let escaped_tid = tid.replace('\'', "'\\''");
             format!(
-                "exec {program} exec --json --dangerously-bypass-approvals-and-sandbox resume '{escaped_tid}' '{escaped_prompt}'"
+                "exec {program} exec --json -m gpt-5.4 --dangerously-bypass-approvals-and-sandbox resume '{escaped_tid}' '{escaped_prompt}'"
             )
         }
         None => {
             format!(
-                "exec {program} exec --json --dangerously-bypass-approvals-and-sandbox '{escaped_prompt}'"
+                "exec {program} exec --json -m gpt-5.4 --dangerously-bypass-approvals-and-sandbox '{escaped_prompt}'"
             )
         }
     }
@@ -195,6 +218,7 @@ mod tests {
     fn codex_sdk_command_new_session() {
         let cmd = codex_sdk_command("codex", "fix the bug", None);
         assert!(cmd.contains("exec codex exec --json"));
+        assert!(cmd.contains("-m gpt-5.4"));
         assert!(cmd.contains("--dangerously-bypass-approvals-and-sandbox"));
         assert!(cmd.contains("'fix the bug'"));
         assert!(!cmd.contains("resume"));
@@ -203,6 +227,7 @@ mod tests {
     #[test]
     fn codex_sdk_command_resume() {
         let cmd = codex_sdk_command("codex", "next step", Some("tid-123"));
+        assert!(cmd.contains("-m gpt-5.4"));
         assert!(cmd.contains("resume 'tid-123'"));
         assert!(cmd.contains("'next step'"));
     }
@@ -211,5 +236,41 @@ mod tests {
     fn codex_sdk_command_escapes_quotes() {
         let cmd = codex_sdk_command("codex", "fix user's bug", None);
         assert!(cmd.contains("user'\\''s"));
+    }
+
+    #[test]
+    fn codex_sdk_args_new_session() {
+        let (program, args) = codex_sdk_args("codex", None);
+        assert_eq!(program, "codex");
+        assert_eq!(
+            args,
+            vec![
+                "exec",
+                "--json",
+                "-m",
+                "gpt-5.4",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-"
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_sdk_args_resume() {
+        let (program, args) = codex_sdk_args("codex", Some("tid-123"));
+        assert_eq!(program, "codex");
+        assert_eq!(
+            args,
+            vec![
+                "exec",
+                "--json",
+                "-m",
+                "gpt-5.4",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "resume",
+                "tid-123",
+                "-"
+            ]
+        );
     }
 }
