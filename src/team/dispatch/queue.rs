@@ -187,6 +187,20 @@ impl TeamDaemon {
         let mut retained = Vec::new();
 
         for mut entry in pending.drain(..) {
+            // Prune stale entries first: if the task is done, claimed by someone
+            // else, or no longer exists, drop the entry regardless of engineer
+            // state. Without this, entries for non-idle engineers persist forever.
+            let task_still_dispatchable =
+                self.task_for_dispatch_entry(&board_dir, &entry)?.is_some();
+            if !task_still_dispatchable {
+                debug!(
+                    engineer = %entry.engineer,
+                    task_id = entry.task_id,
+                    "dispatch queue: pruning stale entry (task done/claimed/missing)"
+                );
+                continue;
+            }
+
             if self.states.get(&entry.engineer) != Some(&MemberState::Idle) {
                 retained.push(entry);
                 continue;
@@ -717,5 +731,74 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(task.id, 10, "backlog status should be dispatchable");
+    }
+
+    // -- process_dispatch_queue pruning tests --
+
+    #[test]
+    fn process_queue_prunes_entry_for_done_task_even_when_engineer_not_idle() {
+        use super::DispatchQueueEntry;
+        let tmp = tempfile::tempdir().unwrap();
+        // Task is done and claimed by someone else.
+        write_owned_task_file(tmp.path(), 10, "finished", "done", "other-eng");
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+            ])
+            .states(HashMap::from([
+                ("eng-1".to_string(), MemberState::Working),
+            ]))
+            .build();
+
+        daemon.dispatch_queue.push(DispatchQueueEntry {
+            engineer: "eng-1".to_string(),
+            task_id: 10,
+            task_title: "finished".to_string(),
+            queued_at: 0,
+            validation_failures: 0,
+            last_failure: None,
+        });
+
+        daemon.process_dispatch_queue().unwrap();
+        assert!(
+            daemon.dispatch_queue.is_empty(),
+            "entry for done task should be pruned even when engineer is Working"
+        );
+    }
+
+    #[test]
+    fn process_queue_retains_valid_entry_for_non_idle_engineer() {
+        use super::DispatchQueueEntry;
+        let tmp = tempfile::tempdir().unwrap();
+        // Task is still todo and unclaimed — valid for dispatch.
+        write_open_task_file(tmp.path(), 10, "pending-work", "todo");
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+            ])
+            .states(HashMap::from([
+                ("eng-1".to_string(), MemberState::Working),
+            ]))
+            .build();
+
+        daemon.dispatch_queue.push(DispatchQueueEntry {
+            engineer: "eng-1".to_string(),
+            task_id: 10,
+            task_title: "pending-work".to_string(),
+            queued_at: 0,
+            validation_failures: 0,
+            last_failure: None,
+        });
+
+        daemon.process_dispatch_queue().unwrap();
+        assert_eq!(
+            daemon.dispatch_queue.len(),
+            1,
+            "entry for valid todo task should be retained while engineer is Working"
+        );
     }
 }
