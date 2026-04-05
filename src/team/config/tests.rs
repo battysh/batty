@@ -297,6 +297,41 @@ roles:
 }
 
 #[test]
+fn team_cleanroom_template_parses_correctly() {
+    let config: TeamConfig =
+        serde_yaml::from_str(include_str!("../templates/team_cleanroom.yaml")).unwrap();
+
+    assert!(config.use_shim);
+    assert!(config.auto_respawn_on_crash);
+    assert!(config.workflow_policy.clean_room_mode);
+    assert_eq!(
+        config.workflow_policy.barrier_groups["analysis"],
+        vec!["decompiler".to_string(), "spec-writer".to_string()]
+    );
+    assert_eq!(
+        config.workflow_policy.barrier_groups["implementation"],
+        vec!["test-writer".to_string(), "implementer".to_string()]
+    );
+}
+
+#[test]
+fn team_cleanroom_template_roles_define_barrier_groups() {
+    let config: TeamConfig =
+        serde_yaml::from_str(include_str!("../templates/team_cleanroom.yaml")).unwrap();
+
+    assert_eq!(config.role_barrier_group("decompiler"), Some("analysis"));
+    assert_eq!(config.role_barrier_group("spec-writer"), Some("analysis"));
+    assert_eq!(
+        config.role_barrier_group("test-writer"),
+        Some("implementation")
+    );
+    assert_eq!(
+        config.role_barrier_group("implementer"),
+        Some("implementation")
+    );
+}
+
+#[test]
 fn validate_accepts_kiro_agent() {
     let yaml = r#"
 name: test-team
