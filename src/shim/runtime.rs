@@ -5,6 +5,7 @@
 //! `tail -F` it and render agent output in real time.
 
 use std::collections::VecDeque;
+use std::fs;
 use std::io::{Read, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -20,6 +21,7 @@ use super::classifier::{self, AgentType, ScreenVerdict};
 use super::common::{self, QueuedMessage};
 use super::protocol::{Channel, Command, Event, ShimState};
 use super::pty_log::PtyLogWriter;
+use crate::prompt::strip_ansi;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -50,6 +52,106 @@ use common::SESSION_STATS_INTERVAL_SECS;
 const PROCESS_EXIT_POLL_MS: u64 = 100;
 const PARENT_DEATH_POLL_SECS: u64 = 1;
 const GROUP_TERM_GRACE_SECS: u64 = 2;
+pub(crate) const HANDOFF_FILE_NAME: &str = "handoff.md";
+
+/// Capture a work summary (git diff + recent commits) and write it to
+/// a handoff file in the given worktree. Called before an agent restart
+/// so the new session can pick up where the old one left off.
+pub(crate) fn preserve_handoff(worktree: &Path, recent_output: Option<&str>) -> Result<()> {
+    let diff_stat = git_capture(worktree, &["diff", "--stat"]).unwrap_or_default();
+    let recent_commits = git_capture(worktree, &["log", "--oneline", "-5"]).unwrap_or_default();
+    let tests_run = recent_output
+        .map(extract_test_commands)
+        .unwrap_or_default()
+        .join("\n");
+    let recent_activity = recent_output
+        .map(summarize_recent_activity)
+        .unwrap_or_default();
+
+    let handoff = format!(
+        "# Handoff\n## Modified Files\n{}\n\n## Tests Run\n{}\n\n## Recent Activity\n{}\n\n## Recent Commits\n{}\n",
+        empty_section_fallback(&diff_stat),
+        empty_section_fallback(&tests_run),
+        empty_section_fallback(&recent_activity),
+        empty_section_fallback(&recent_commits)
+    );
+    fs::write(worktree.join(HANDOFF_FILE_NAME), handoff)
+        .with_context(|| format!("failed to write handoff file in {}", worktree.display()))?;
+    Ok(())
+}
+
+fn git_capture(worktree: &Path, args: &[&str]) -> Result<String> {
+    let output = ProcessCommand::new("git")
+        .args(args)
+        .current_dir(worktree)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to run `git {}` in {}",
+                args.join(" "),
+                worktree.display()
+            )
+        })?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "`git {}` failed in {}: {}",
+            args.join(" "),
+            worktree.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn empty_section_fallback(content: &str) -> &str {
+    if content.trim().is_empty() {
+        "(none)"
+    } else {
+        content
+    }
+}
+
+fn summarize_recent_activity(output: &str) -> String {
+    let cleaned = strip_ansi(output);
+    let lines: Vec<&str> = cleaned
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let start = lines.len().saturating_sub(40);
+    lines[start..].join("\n")
+}
+
+fn extract_test_commands(output: &str) -> Vec<String> {
+    let cleaned = strip_ansi(output);
+    let mut commands = Vec::new();
+
+    for line in cleaned.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.contains("cargo test")
+            || lower.contains("cargo nextest")
+            || lower.contains("pytest")
+            || lower.contains("npm test")
+            || lower.contains("pnpm test")
+            || lower.contains("yarn test")
+            || lower.contains("go test")
+            || lower.contains("bundle exec rspec")
+            || lower.contains("mix test")
+        {
+            if !commands.iter().any(|existing| existing == trimmed) {
+                commands.push(trimmed.to_string());
+            }
+        }
+    }
+
+    commands
+}
 
 fn format_injected_message(sender: &str, body: &str) -> String {
     common::format_injected_message(sender, body)
@@ -1735,6 +1837,86 @@ mod tests {
         assert!(
             !resp.contains('\u{23FA}'),
             "should strip bullet marker: {resp}"
+        );
+    }
+
+    #[test]
+    fn preserve_handoff_writes_diff_and_commit_summary() {
+        let repo = tempfile::tempdir().unwrap();
+        init_test_git_repo(repo.path());
+
+        std::fs::write(repo.path().join("tracked.txt"), "one\n").unwrap();
+        run_test_git(repo.path(), &["add", "tracked.txt"]);
+        run_test_git(repo.path(), &["commit", "-m", "initial commit"]);
+        std::fs::write(repo.path().join("tracked.txt"), "one\ntwo\n").unwrap();
+
+        let recent_output = "\
+running cargo test --lib\n\
+test result: ok\n\
+editing src/lib.rs\n";
+        preserve_handoff(repo.path(), Some(recent_output)).unwrap();
+
+        let handoff = std::fs::read_to_string(repo.path().join(HANDOFF_FILE_NAME)).unwrap();
+        assert!(handoff.contains("# Handoff"));
+        assert!(handoff.contains("## Modified Files"));
+        assert!(handoff.contains("tracked.txt"));
+        assert!(handoff.contains("## Tests Run"));
+        assert!(handoff.contains("cargo test --lib"));
+        assert!(handoff.contains("## Recent Activity"));
+        assert!(handoff.contains("editing src/lib.rs"));
+        assert!(handoff.contains("## Recent Commits"));
+        assert!(handoff.contains("initial commit"));
+    }
+
+    #[test]
+    fn preserve_handoff_uses_none_when_repo_has_no_changes_or_commits() {
+        let repo = tempfile::tempdir().unwrap();
+        init_test_git_repo(repo.path());
+
+        preserve_handoff(repo.path(), None).unwrap();
+
+        let handoff = std::fs::read_to_string(repo.path().join(HANDOFF_FILE_NAME)).unwrap();
+        assert!(handoff.contains("## Modified Files\n(none)"));
+        assert!(handoff.contains("## Tests Run\n(none)"));
+        assert!(handoff.contains("## Recent Activity\n(none)"));
+        assert!(handoff.contains("## Recent Commits\n(none)"));
+    }
+
+    #[test]
+    fn extract_test_commands_deduplicates_known_test_invocations() {
+        let output = "\
+\u{1b}[31mcargo test --lib\u{1b}[0m\n\
+pytest tests/test_api.py\n\
+cargo test --lib\n\
+plain output\n";
+        let tests = extract_test_commands(output);
+        assert_eq!(
+            tests,
+            vec![
+                "cargo test --lib".to_string(),
+                "pytest tests/test_api.py".to_string()
+            ]
+        );
+    }
+
+    fn init_test_git_repo(path: &Path) {
+        run_test_git(path, &["init"]);
+        run_test_git(path, &["config", "user.name", "Batty Tests"]);
+        run_test_git(path, &["config", "user.email", "batty-tests@example.com"]);
+    }
+
+    fn run_test_git(path: &Path, args: &[&str]) {
+        use std::process::Command;
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 }

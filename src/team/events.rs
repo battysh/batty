@@ -436,6 +436,22 @@ impl TeamEvent {
         }
     }
 
+    pub fn parity_updated(summary: &crate::team::parity::ParitySummary) -> Self {
+        Self {
+            load: Some(summary.overall_parity_pct as f64 / 100.0),
+            reason: Some(format!(
+                "total={} spec={} tests={} implementation={} verified_pass={} verified_fail={}",
+                summary.total_behaviors,
+                summary.spec_complete,
+                summary.tests_complete,
+                summary.implementation_complete,
+                summary.verified_pass,
+                summary.verified_fail
+            )),
+            ..Self::base("parity_updated")
+        }
+    }
+
     pub fn worktree_reconciled(role: &str, branch: &str) -> Self {
         Self {
             role: Some(role.into()),
@@ -726,6 +742,18 @@ mod tests {
             ("task_reworked", TeamEvent::task_reworked("eng-1", "42")),
             ("load_snapshot", TeamEvent::load_snapshot(2, 5, true)),
             (
+                "parity_updated",
+                TeamEvent::parity_updated(&crate::team::parity::ParitySummary {
+                    total_behaviors: 10,
+                    spec_complete: 8,
+                    tests_complete: 6,
+                    implementation_complete: 5,
+                    verified_pass: 4,
+                    verified_fail: 1,
+                    overall_parity_pct: 40,
+                }),
+            ),
+            (
                 "worktree_reconciled",
                 TeamEvent::worktree_reconciled("eng-1", "eng-1/42"),
             ),
@@ -748,6 +776,27 @@ mod tests {
         assert_eq!(parsed["working_members"].as_u64().unwrap(), 3);
         assert_eq!(parsed["total_members"].as_u64().unwrap(), 7);
         assert!(!parsed["session_running"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn parity_updated_serializes_summary_metrics() {
+        let event = TeamEvent::parity_updated(&crate::team::parity::ParitySummary {
+            total_behaviors: 10,
+            spec_complete: 8,
+            tests_complete: 6,
+            implementation_complete: 5,
+            verified_pass: 4,
+            verified_fail: 1,
+            overall_parity_pct: 40,
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"].as_str().unwrap(), "parity_updated");
+        assert_eq!(parsed["load"].as_f64().unwrap(), 0.4);
+        let reason = parsed["reason"].as_str().unwrap();
+        assert!(reason.contains("total=10"));
+        assert!(reason.contains("spec=8"));
+        assert!(reason.contains("verified_pass=4"));
     }
 
     #[test]

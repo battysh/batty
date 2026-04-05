@@ -11,6 +11,7 @@ use tracing::warn;
 use super::config::{PlanningDirectiveFile, RoleType, TeamConfig, load_planning_directive};
 use super::hierarchy::MemberInstance;
 use super::metrics;
+use super::parity::ParityReport;
 use super::telegram::TelegramBot;
 use super::watcher::SessionWatcher;
 use super::{pause_marker_path, team_config_dir};
@@ -267,7 +268,7 @@ pub(crate) fn maybe_generate_standup(context: StandupGenerationContext<'_>) -> R
         }
 
         let board_dir = team_config_dir(project_root).join("board");
-        let report = generate_board_aware_standup_for(
+        let mut report = generate_board_aware_standup_for(
             recipient,
             members,
             watchers,
@@ -276,6 +277,9 @@ pub(crate) fn maybe_generate_standup(context: StandupGenerationContext<'_>) -> R
             Some(&board_dir),
             backend_health,
         );
+        if team_config.automation.clean_room_mode {
+            report = append_parity_summary(project_root, report);
+        }
 
         match recipient.role_type {
             RoleType::User => {
@@ -346,6 +350,32 @@ pub(crate) fn maybe_generate_standup(context: StandupGenerationContext<'_>) -> R
     }
 
     Ok(generated_recipients)
+}
+
+fn append_parity_summary(project_root: &Path, mut report: String) -> String {
+    let Ok(parity) = ParityReport::load(project_root) else {
+        return report;
+    };
+    let summary = parity.summary();
+    let gap_count = parity.gaps().len();
+    report.push_str("\nClean room parity:\n");
+    report.push_str(&format!(
+        "  overall parity: {}%\n",
+        summary.overall_parity_pct
+    ));
+    report.push_str(&format!(
+        "  behaviors tracked: {}\n",
+        summary.total_behaviors
+    ));
+    report.push_str(&format!("  spec complete: {}\n", summary.spec_complete));
+    report.push_str(&format!("  tests complete: {}\n", summary.tests_complete));
+    report.push_str(&format!(
+        "  implementation complete: {}\n",
+        summary.implementation_complete
+    ));
+    report.push_str(&format!("  verified PASS: {}\n", summary.verified_pass));
+    report.push_str(&format!("  parity gaps: {}\n", gap_count));
+    report
 }
 
 pub(crate) fn update_timer_for_state(
@@ -1102,6 +1132,34 @@ mod tests {
         let report = std::fs::read_to_string(entries[0].path()).unwrap();
         assert!(report.contains("=== STANDUP for user ==="));
         assert!(report.contains("[architect] status: working"));
+    }
+
+    #[test]
+    fn append_parity_summary_includes_clean_room_metrics() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("PARITY.md"),
+            r#"---
+project: manic-miner
+target: original-binary.z80
+source_platform: zx-spectrum-z80
+target_language: rust
+last_verified: 2026-04-05
+---
+
+| Behavior | Spec | Test | Implementation | Verified | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Input handling | complete | complete | complete | PASS | matched |
+| Enemy AI | complete | -- | draft | -- | pending |
+"#,
+        )
+        .unwrap();
+
+        let report = append_parity_summary(tmp.path(), "=== STANDUP ===\n".to_string());
+        assert!(report.contains("Clean room parity:"));
+        assert!(report.contains("overall parity: 50%"));
+        assert!(report.contains("behaviors tracked: 2"));
+        assert!(report.contains("parity gaps: 1"));
     }
 
     #[test]

@@ -50,6 +50,7 @@ pub mod message;
 pub mod metrics;
 pub mod metrics_cmd;
 pub mod nudge;
+pub mod parity;
 pub mod policy;
 pub mod resolver;
 pub mod retrospective;
