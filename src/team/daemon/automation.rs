@@ -19,7 +19,6 @@ impl TeamDaemon {
         } else {
             Vec::new()
         };
-        self.replay_owned_tasks_for_idle_engineers(&board_tasks)?;
         if self.active_tasks.is_empty() {
             return Ok(());
         }
@@ -81,6 +80,18 @@ impl TeamDaemon {
                 })
                 .collect();
             if claimed.len() <= 1 {
+                continue;
+            }
+            let in_progress_count = claimed
+                .iter()
+                .filter(|task| task.status == "in-progress")
+                .count();
+            if in_progress_count > 1 {
+                warn!(
+                    engineer = eng.as_str(),
+                    in_progress_count,
+                    "WIP reconciliation: skipping auto-unclaim because multiple in-progress tasks are claimed"
+                );
                 continue;
             }
             // Keep the in-progress one, or the lowest ID if none in-progress
@@ -155,108 +166,6 @@ impl TeamDaemon {
             }
         }
         Ok(())
-    }
-
-    fn replay_owned_tasks_for_idle_engineers(
-        &mut self,
-        board_tasks: &[crate::task::Task],
-    ) -> Result<()> {
-        let inbox_root = inbox::inboxes_root(&self.config.project_root);
-        let engineers: Vec<String> = self
-            .config
-            .members
-            .iter()
-            .filter(|member| member.role_type == RoleType::Engineer)
-            .map(|member| member.name.clone())
-            .collect();
-
-        for engineer in engineers {
-            let engineer_idle = self
-                .watchers
-                .get(&engineer)
-                .map(|watcher| {
-                    matches!(
-                        watcher.state,
-                        crate::team::watcher::WatcherState::Ready
-                            | crate::team::watcher::WatcherState::Idle
-                    )
-                })
-                .unwrap_or(matches!(
-                    self.states.get(&engineer),
-                    Some(MemberState::Idle) | None
-                ));
-            if !engineer_idle {
-                continue;
-            }
-            if self.active_tasks.contains_key(&engineer) {
-                continue;
-            }
-            let has_pending_inbox = match inbox::pending_message_count(&inbox_root, &engineer) {
-                Ok(count) => count > 0,
-                Err(error) => {
-                    warn!(
-                        engineer = %engineer,
-                        error = %error,
-                        "failed to count pending inbox before owned-task replay"
-                    );
-                    true
-                }
-            };
-            if has_pending_inbox {
-                continue;
-            }
-            let Some(task) = board_tasks.iter().find(|task| {
-                task.claimed_by.as_deref() == Some(engineer.as_str())
-                    && super::interventions::task_needs_owned_intervention(task.status.as_str())
-            }) else {
-                continue;
-            };
-
-            if self.engineer_worktree_already_tracks_task(&engineer, task) {
-                self.active_tasks.insert(engineer.clone(), task.id);
-                continue;
-            }
-
-            let assignment = format!("Task #{}: {}\n\n{}", task.id, task.title, task.description);
-            let sender = self.assignment_sender(&engineer);
-            match self.assign_task_with_task_id_as(&sender, &engineer, &assignment, Some(task.id)) {
-                Ok(_) => {
-                    self.record_orchestrator_action(format!(
-                        "replay: resumed owned task #{} for {}",
-                        task.id, engineer
-                    ));
-                }
-                Err(error) => {
-                    warn!(
-                        engineer = %engineer,
-                        task_id = task.id,
-                        error = %error,
-                        "failed to replay owned task to idle engineer"
-                    );
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn engineer_worktree_already_tracks_task(
-        &self,
-        engineer: &str,
-        task: &crate::task::Task,
-    ) -> bool {
-        let worktree_dir = self.worktree_dir(engineer);
-        let Ok(current_branch) = current_worktree_branch(&worktree_dir) else {
-            return false;
-        };
-
-        let matches_recorded_branch = task
-            .branch
-            .as_deref()
-            .is_some_and(|branch| branch == current_branch);
-        let matches_task_branch_suffix = branch_task_id(&current_branch) == Some(task.id);
-
-        matches_recorded_branch || matches_task_branch_suffix
     }
 
     pub(super) fn maybe_escalate_stale_reviews(&mut self) -> Result<()> {
@@ -966,15 +875,6 @@ impl TeamDaemon {
     }
 }
 
-fn branch_task_id(branch: &str) -> Option<u32> {
-    let (_, suffix) = branch.split_once('/')?;
-    suffix
-        .strip_prefix("task-")
-        .unwrap_or(suffix)
-        .parse::<u32>()
-        .ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::*;
@@ -989,15 +889,6 @@ mod tests {
         init_git_repo, write_board_task_file, write_owned_task_file,
     };
     use std::collections::HashMap;
-
-    #[test]
-    fn branch_task_id_accepts_legacy_and_ticket_scoped_patterns() {
-        assert_eq!(super::branch_task_id("eng-1/42"), Some(42));
-        assert_eq!(super::branch_task_id("eng-1/task-42"), Some(42));
-        assert_eq!(super::branch_task_id("eng-1-4/42"), Some(42));
-        assert_eq!(super::branch_task_id("main"), None);
-        assert_eq!(super::branch_task_id("eng-1/feature"), None);
-    }
 
     fn setup_fake_kanban_for_planning(
         tmp: &tempfile::TempDir,
@@ -1727,7 +1618,7 @@ Second body.
     }
 
     #[test]
-    fn reconcile_active_tasks_marks_owned_task_active_when_worktree_already_on_task_branch() {
+    fn reconcile_active_tasks_does_not_replay_owned_in_progress_task_from_worktree_branch() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "replay-owned-task");
         let manager = MemberInstance {
@@ -1771,7 +1662,7 @@ Second body.
         git_ok(&worktree_dir, &["commit", "-m", "task work"]);
 
         daemon.reconcile_active_tasks().unwrap();
-        assert_eq!(daemon.active_task_id("eng-1"), Some(10));
+        assert_eq!(daemon.active_task_id("eng-1"), None);
     }
 
     #[test]
@@ -1781,6 +1672,68 @@ Second body.
         // No active tasks — should return immediately
         daemon.reconcile_active_tasks().unwrap();
         assert!(daemon.active_tasks.is_empty());
+    }
+
+    #[test]
+    fn reconcile_active_tasks_keeps_multiple_in_progress_claims_for_manager_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+        };
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![manager, engineer]);
+        daemon.active_tasks.insert("eng-1".to_string(), 10);
+
+        write_board_task_file(
+            tmp.path(),
+            10,
+            "old-task",
+            "in-progress",
+            Some("eng-1"),
+            &[],
+            None,
+        );
+        write_board_task_file(
+            tmp.path(),
+            20,
+            "manual-override-task",
+            "in-progress",
+            Some("eng-1"),
+            &[],
+            None,
+        );
+
+        daemon.reconcile_active_tasks().unwrap();
+
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        let tasks = crate::task::load_tasks_from_dir(&tasks_dir).unwrap();
+        let eng_tasks: Vec<_> = tasks
+            .iter()
+            .filter(|task| task.claimed_by.as_deref() == Some("eng-1"))
+            .map(|task| (task.id, task.status.as_str()))
+            .collect();
+
+        assert!(eng_tasks.contains(&(10, "in-progress")));
+        assert!(eng_tasks.contains(&(20, "in-progress")));
     }
 
     // ── manager_for_member_name ──────────────────────────────────
