@@ -1,5 +1,7 @@
 //! Dead member restart and pane death recovery.
 
+use std::fs;
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -8,6 +10,45 @@ use tracing::warn;
 use super::super::*;
 
 impl TeamDaemon {
+    /// Build a restart assignment message that includes handoff context from the
+    /// previous session, if `context_handoff_enabled` is true and a handoff file
+    /// exists.  The handoff file is deleted after injection.
+    pub(in super::super) fn restart_assignment_with_handoff(
+        &self,
+        task: &crate::task::Task,
+        work_dir: &Path,
+    ) -> String {
+        let assignment = Self::restart_assignment_message(task);
+        if !self
+            .config
+            .team_config
+            .workflow_policy
+            .context_handoff_enabled
+        {
+            return assignment;
+        }
+
+        let handoff_path = work_dir.join(crate::shim::runtime::HANDOFF_FILE_NAME);
+        let Ok(handoff) = fs::read_to_string(&handoff_path) else {
+            return assignment;
+        };
+        if let Err(error) = fs::remove_file(&handoff_path) {
+            warn!(
+                task_id = task.id,
+                path = %handoff_path.display(),
+                error = %error,
+                "failed to remove restart handoff file after injection"
+            );
+        }
+
+        format!(
+            "You are continuing work on Task #{}. Previous session progress:\n{}\n\nResume from where you left off.\n\n{}",
+            task.id,
+            handoff.trim_end(),
+            assignment
+        )
+    }
+
     #[allow(dead_code)]
     pub(in super::super) fn restart_dead_members(&mut self) -> Result<()> {
         let member_names: Vec<String> = self.config.pane_map.keys().cloned().collect();
@@ -501,5 +542,133 @@ mod tests {
 
         crate::tmux::kill_session(&session).unwrap();
         let _ = std::fs::remove_dir_all(&fake_bin);
+    }
+
+    #[test]
+    fn restart_assignment_with_handoff_injects_and_cleans_up() {
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let task = crate::task::Task {
+            id: 42,
+            title: "resume widget".to_string(),
+            description: "Continue widget implementation.".to_string(),
+            status: "in-progress".to_string(),
+            priority: "high".to_string(),
+            claimed_by: Some("eng-1".into()),
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            batty_config: None,
+            source_path: tmp.path().join("task-42.md"),
+        };
+        let handoff_path = tmp.path().join(crate::shim::runtime::HANDOFF_FILE_NAME);
+        std::fs::write(&handoff_path, "# Handoff\nchanged files").unwrap();
+
+        let message = daemon.restart_assignment_with_handoff(&task, tmp.path());
+
+        assert!(message.contains("You are continuing work on Task #42."));
+        assert!(message.contains("# Handoff"));
+        assert!(message.contains("Continue widget implementation."));
+        assert!(
+            !handoff_path.exists(),
+            "handoff file should be removed after injection"
+        );
+    }
+
+    #[test]
+    fn restart_assignment_with_handoff_skips_when_disabled() {
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = TestDaemonBuilder::new(tmp.path())
+            .workflow_policy(WorkflowPolicy {
+                context_handoff_enabled: false,
+                ..WorkflowPolicy::default()
+            })
+            .build();
+        let task = crate::task::Task {
+            id: 7,
+            title: "no handoff".to_string(),
+            description: "Disabled path.".to_string(),
+            status: "in-progress".to_string(),
+            priority: "low".to_string(),
+            claimed_by: Some("eng-1".into()),
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            batty_config: None,
+            source_path: tmp.path().join("task-7.md"),
+        };
+        let handoff_path = tmp.path().join(crate::shim::runtime::HANDOFF_FILE_NAME);
+        std::fs::write(&handoff_path, "should stay on disk").unwrap();
+
+        let message = daemon.restart_assignment_with_handoff(&task, tmp.path());
+
+        assert!(!message.contains("Previous session progress:"));
+        assert!(
+            handoff_path.exists(),
+            "disabled handoff should leave the file untouched"
+        );
+    }
+
+    #[test]
+    fn restart_assignment_with_handoff_returns_plain_when_no_file() {
+        use crate::team::test_support::TestDaemonBuilder;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let task = crate::task::Task {
+            id: 99,
+            title: "no file test".to_string(),
+            description: "No handoff file exists.".to_string(),
+            status: "in-progress".to_string(),
+            priority: "medium".to_string(),
+            claimed_by: Some("eng-1".into()),
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            batty_config: None,
+            source_path: tmp.path().join("task-99.md"),
+        };
+
+        let message = daemon.restart_assignment_with_handoff(&task, tmp.path());
+
+        assert!(!message.contains("Previous session progress:"));
+        assert!(message.contains("Continuing Task #99"));
     }
 }
