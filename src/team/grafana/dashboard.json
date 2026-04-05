@@ -1173,6 +1173,48 @@
       ],
       "title": "Messages Per Task (Efficiency)",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2
+          },
+          "max": 1,
+          "min": 0,
+          "unit": "percentunit"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 79
+      },
+      "id": 113,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events)\n), narration AS (\n  SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='narration_rejection' GROUP BY hr\n), claims AS (\n  SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type IN ('narration_rejection', 'task_completed') GROUP BY hr\n) SELECT h * 3600 AS time, CASE WHEN COALESCE(claims.cnt, 0) = 0 THEN 0.0 ELSE CAST(COALESCE(narration.cnt, 0) AS REAL) / claims.cnt END AS narration_rejection_rate FROM hours LEFT JOIN narration ON hours.h = narration.hr LEFT JOIN claims ON hours.h = claims.hr ORDER BY time;",
+          "queryType": "table",
+          "rawQueryText": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events)\n), narration AS (\n  SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='narration_rejection' GROUP BY hr\n), claims AS (\n  SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type IN ('narration_rejection', 'task_completed') GROUP BY hr\n) SELECT h * 3600 AS time, CASE WHEN COALESCE(claims.cnt, 0) = 0 THEN 0.0 ELSE CAST(COALESCE(narration.cnt, 0) AS REAL) / claims.cnt END AS narration_rejection_rate FROM hours LEFT JOIN narration ON hours.h = narration.hr LEFT JOIN claims ON hours.h = claims.hr ORDER BY time;",
+          "rawSql": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events)\n), narration AS (\n  SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='narration_rejection' GROUP BY hr\n), claims AS (\n  SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type IN ('narration_rejection', 'task_completed') GROUP BY hr\n) SELECT h * 3600 AS time, CASE WHEN COALESCE(claims.cnt, 0) = 0 THEN 0.0 ELSE CAST(COALESCE(narration.cnt, 0) AS REAL) / claims.cnt END AS narration_rejection_rate FROM hours LEFT JOIN narration ON hours.h = narration.hr LEFT JOIN claims ON hours.h = claims.hr ORDER BY time;",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Narration Rejection Rate Per Hour (%)",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",

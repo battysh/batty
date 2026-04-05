@@ -302,6 +302,7 @@ mod tests {
             "Recent Completions",
             "Events Per Hour",
             "Delivery Success Rate Per Hour (%)",
+            "Narration Rejection Rate Per Hour (%)",
         ];
         for expected in required {
             assert!(
@@ -344,8 +345,8 @@ mod tests {
             .filter(|p| p["type"].as_str() != Some("row"))
             .collect();
         assert!(
-            non_row_panels.len() >= 15,
-            "expected at least 15 data panels, got {}",
+            non_row_panels.len() >= 16,
+            "expected at least 16 data panels, got {}",
             non_row_panels.len()
         );
     }

@@ -66,6 +66,7 @@ fn init_schema(conn: &Connection) -> Result<()> {
             started_at       INTEGER,
             completed_at     INTEGER,
             retries          INTEGER NOT NULL DEFAULT 0,
+            narration_rejections INTEGER NOT NULL DEFAULT 0,
             escalations      INTEGER NOT NULL DEFAULT 0,
             merge_time_secs  INTEGER,
             confidence_score REAL
@@ -154,6 +155,15 @@ fn update_metrics_for_event(conn: &Connection, event: &TeamEvent) -> Result<()> 
                 conn.execute(
                     "INSERT INTO task_metrics (task_id, escalations) VALUES (?1, 1)
                      ON CONFLICT(task_id) DO UPDATE SET escalations = escalations + 1",
+                    params![task],
+                )?;
+            }
+        }
+        "narration_rejection" => {
+            if let Some(task) = &event.task {
+                conn.execute(
+                    "INSERT INTO task_metrics (task_id, narration_rejections) VALUES (?1, 1)
+                     ON CONFLICT(task_id) DO UPDATE SET narration_rejections = narration_rejections + 1",
                     params![task],
                 )?;
             }
@@ -329,6 +339,7 @@ pub struct TaskMetricsRow {
     pub started_at: Option<i64>,
     pub completed_at: Option<i64>,
     pub retries: i64,
+    pub narration_rejections: i64,
     pub escalations: i64,
     pub merge_time_secs: Option<i64>,
     pub confidence_score: Option<f64>,
@@ -336,7 +347,7 @@ pub struct TaskMetricsRow {
 
 pub fn query_task_metrics(conn: &Connection) -> Result<Vec<TaskMetricsRow>> {
     let mut stmt = conn.prepare(
-        "SELECT task_id, started_at, completed_at, retries, escalations, merge_time_secs, confidence_score
+        "SELECT task_id, started_at, completed_at, retries, narration_rejections, escalations, merge_time_secs, confidence_score
          FROM task_metrics ORDER BY started_at DESC NULLS LAST LIMIT 50",
     )?;
     let rows = stmt
@@ -346,9 +357,10 @@ pub fn query_task_metrics(conn: &Connection) -> Result<Vec<TaskMetricsRow>> {
                 started_at: row.get(1)?,
                 completed_at: row.get(2)?,
                 retries: row.get(3)?,
-                escalations: row.get(4)?,
-                merge_time_secs: row.get(5)?,
-                confidence_score: row.get(6)?,
+                narration_rejections: row.get(4)?,
+                escalations: row.get(5)?,
+                merge_time_secs: row.get(6)?,
+                confidence_score: row.get(7)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -510,6 +522,18 @@ mod tests {
 
         let tasks = query_task_metrics(&conn).unwrap();
         assert_eq!(tasks[0].escalations, 2);
+    }
+
+    #[test]
+    fn narration_rejection_increments_task_metric() {
+        let conn = open_in_memory().unwrap();
+        insert_event(&conn, &TeamEvent::narration_rejection("eng-1", 42, 1)).unwrap();
+        insert_event(&conn, &TeamEvent::narration_rejection("eng-1", 42, 2)).unwrap();
+
+        let tasks = query_task_metrics(&conn).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, "42");
+        assert_eq!(tasks[0].narration_rejections, 2);
     }
 
     #[test]
