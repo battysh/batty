@@ -6,13 +6,14 @@
 
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use crate::team::task_loop::{
     branch_is_merged_into, checkout_worktree_branch_from_main, current_worktree_branch,
     delete_branch, engineer_base_branch_name, is_worktree_safe_to_mutate,
 };
+use crate::team::verification::{self, VerifyStatus};
 
 use super::git_ops::{describe_git_failure, force_clean_worktree, run_git_with_context};
 use super::lock::MergeOutcome;
@@ -84,6 +85,26 @@ pub(crate) fn merge_engineer_branch(
                 "rebase engineer branch '{branch}' onto main before merging for '{engineer_name}'"
             ),
             &stderr,
+        )));
+    }
+
+    let verification =
+        verification::verify_project(&worktree_dir, project_root).with_context(|| {
+            format!("run verification before merging branch '{branch}' for '{engineer_name}'")
+        })?;
+    if verification.status == VerifyStatus::Failed {
+        let regressions = if verification.regressions.is_empty() {
+            "unknown".to_string()
+        } else {
+            verification.regressions.join(", ")
+        };
+        let report_path = verification
+            .report_path
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "(none)".to_string());
+        return Ok(MergeOutcome::MergeFailure(format!(
+            "verification detected regressions for behavior(s): {regressions}. Report: {report_path}"
         )));
     }
 
@@ -206,12 +227,21 @@ mod tests {
         engineer_base_branch_name, prepare_engineer_assignment_worktree, setup_engineer_worktree,
     };
     use crate::team::test_support::{git, git_ok, git_stdout, init_git_repo};
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     fn engineer_worktree_paths(repo: &Path, engineer: &str) -> (PathBuf, PathBuf) {
         let worktree_dir = repo.join(".batty").join("worktrees").join(engineer);
         let team_config_dir = repo.join(".batty").join("team_config");
         (worktree_dir, team_config_dir)
+    }
+
+    fn write_script(path: &Path, lines: &[&str]) {
+        let body = format!("#!/bin/sh\nprintf '%s\\n' {}\n", lines.join(" "));
+        std::fs::write(path, body).unwrap();
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
     }
 
     #[test]
@@ -242,6 +272,75 @@ mod tests {
         assert!(matches!(result, MergeOutcome::Success));
         assert!(repo.join("feature.txt").exists());
         assert!(repo.join("other.txt").exists());
+    }
+
+    #[test]
+    fn merge_blocks_when_verification_detects_regression() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        std::fs::create_dir_all(repo.join(".batty")).unwrap();
+        std::fs::create_dir_all(repo.join("scripts")).unwrap();
+        std::fs::write(
+            repo.join("PARITY.md"),
+            r#"---
+project: trivial
+target: trivial.z80
+source_platform: zx-spectrum-z80
+target_language: rust
+last_verified: 2026-04-05
+overall_parity: 100%
+---
+
+| Behavior | Spec | Test | Implementation | Verified | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Screen fill | complete | complete | complete | PASS | previous |
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join(".batty/verification.yml"),
+            r#"behaviors:
+  - behavior: Screen fill
+    baseline: scripts/baseline.sh
+    candidate: scripts/candidate.sh
+    inputs: []
+"#,
+        )
+        .unwrap();
+        write_script(&repo.join("scripts/baseline.sh"), &["frame-a", "frame-b"]);
+        write_script(&repo.join("scripts/candidate.sh"), &["frame-a", "frame-b"]);
+        git_ok(
+            &repo,
+            &["add", "PARITY.md", ".batty/verification.yml", "scripts"],
+        );
+        git_ok(&repo, &["commit", "-m", "add verification fixtures"]);
+
+        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-verify");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-verify", &team_config_dir).unwrap();
+
+        write_script(
+            &worktree_dir.join("scripts/candidate.sh"),
+            &["frame-a", "frame-x"],
+        );
+        git_ok(&worktree_dir, &["add", "scripts/candidate.sh"]);
+        git_ok(&worktree_dir, &["commit", "-m", "introduce regression"]);
+
+        let result = merge_engineer_branch(&repo, "eng-verify").unwrap();
+        match result {
+            MergeOutcome::MergeFailure(message) => {
+                assert!(message.contains("verification detected regressions"));
+                assert!(message.contains("Screen fill"));
+            }
+            other => panic!("expected verification failure, got {other:?}"),
+        }
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "main"
+        );
+        assert_eq!(
+            git_stdout(&repo, &["show", "main:scripts/candidate.sh"]),
+            "#!/bin/sh\nprintf '%s\\n' frame-a frame-b"
+        );
     }
 
     #[test]

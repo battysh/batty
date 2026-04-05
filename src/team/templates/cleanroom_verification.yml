@@ -1,0 +1,13 @@
+behaviors:
+  - behavior: Startup behavior
+    baseline: scripts/verification/placeholder-baseline.sh
+    candidate: scripts/verification/placeholder-candidate.sh
+    inputs: []
+  - behavior: Error handling
+    baseline: scripts/verification/placeholder-baseline.sh
+    candidate: scripts/verification/placeholder-candidate.sh
+    inputs: []
+  - behavior: State persistence
+    baseline: scripts/verification/placeholder-baseline.sh
+    candidate: scripts/verification/placeholder-candidate.sh
+    inputs: []

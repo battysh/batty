@@ -11,9 +11,9 @@ overall_parity: 0%
 
 | Behavior | Spec | Test | Implementation | Verified | Notes |
 | --- | --- | --- | --- | --- | --- |
-| Startup behavior | -- | -- | -- | -- | Waiting for analysis artifacts |
-| Error handling | -- | -- | -- | -- | Waiting for observable failure cases |
-| State persistence | -- | -- | -- | -- | Waiting for persistence requirements |
+| Startup behavior | draft | -- | -- | -- | Add verification fixture |
+| Error handling | draft | -- | -- | -- | Add verification fixture |
+| State persistence | draft | -- | -- | -- | Add verification fixture |
 
 - `--` means not started.
 - `draft` means the stage has partial coverage and still needs review.
