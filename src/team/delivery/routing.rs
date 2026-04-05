@@ -474,7 +474,12 @@ impl TeamDaemon {
                             // window where auto-dispatch grabs the unclaimed
                             // task and assigns it to a different engineer.
                             if let Some(tid) = task_id {
-                                if let Err(e) = crate::team::task_cmd::assign_task_owners(&board_dir, tid, Some(name), None) {
+                                if let Err(e) = crate::team::task_cmd::assign_task_owners(
+                                    &board_dir,
+                                    tid,
+                                    Some(name),
+                                    None,
+                                ) {
                                     debug!(task_id = tid, error = %e, "could not set claimed_by on manual assign");
                                 }
                             }
@@ -708,6 +713,7 @@ mod tests {
             last_uncommitted_warn: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
             completion_rejection_counts: HashMap::new(),
+            narration_rejection_counts: HashMap::new(),
             shim_handles: HashMap::new(),
             planning_cycle_last_fired: None,
             planning_cycle_active: false,

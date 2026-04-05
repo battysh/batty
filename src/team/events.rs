@@ -267,6 +267,15 @@ impl TeamEvent {
         }
     }
 
+    pub fn narration_rejection(role: &str, task_id: u32, rejection_count: u32) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task_id.to_string()),
+            reason: Some(format!("rejection_count={rejection_count}")),
+            ..Self::base("narration_rejection")
+        }
+    }
+
     pub fn context_pressure_warning(
         role: &str,
         task: Option<u32>,
@@ -1428,6 +1437,15 @@ mod tests {
         fs::write(&path, "x").unwrap();
         let did_rotate = rotate_event_log_if_needed(&path, 0, 0).unwrap();
         assert!(did_rotate); // non-empty file at 0-byte limit → rotation
+    }
+
+    #[test]
+    fn narration_rejection_event_has_correct_fields() {
+        let event = TeamEvent::narration_rejection("eng-1-1", 42, 2);
+        assert_eq!(event.event, "narration_rejection");
+        assert_eq!(event.role.as_deref(), Some("eng-1-1"));
+        assert_eq!(event.task.as_deref(), Some("42"));
+        assert_eq!(event.reason.as_deref(), Some("rejection_count=2"));
     }
 
     #[test]

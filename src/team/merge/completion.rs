@@ -20,7 +20,9 @@ use crate::team::task_loop::{
     read_task_title, run_tests_in_worktree,
 };
 
-use super::git_ops::{commits_ahead_of_main, now_unix, run_git_with_context};
+use super::git_ops::{
+    commits_ahead_of_main, files_changed_from_main, now_unix, run_git_with_context,
+};
 use super::lock::{MergeLock, MergeOutcome};
 use super::operations::merge_engineer_branch;
 
@@ -174,6 +176,56 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
 
     // Clear rejection counter on successful completion
     daemon.completion_rejection_counts.remove(engineer);
+
+    // --- Narration-only quality gate ---
+    // Commits exist, but check if any files actually changed. If the agent produced
+    // commits with only commentary (e.g. empty commits, metadata-only), reject.
+    let files_changed = if daemon.is_multi_repo {
+        multi_repo_files_changed_from_main(&worktree_dir, &daemon.sub_repo_names)?
+    } else {
+        files_changed_from_main(&worktree_dir)?
+    };
+
+    if files_changed == 0 {
+        let narration_count = daemon
+            .narration_rejection_counts
+            .entry(engineer.to_string())
+            .or_insert(0);
+        *narration_count += 1;
+        let count = *narration_count;
+
+        const MAX_NARRATION_REJECTIONS: u32 = 2;
+
+        warn!(
+            engineer,
+            task_id,
+            narration_rejection_count = count,
+            "commits exist but no files changed — narration-only completion"
+        );
+        daemon.record_narration_rejection(engineer, task_id, count);
+
+        if count >= MAX_NARRATION_REJECTIONS {
+            // Escalate to manager
+            if let Some(ref manager_name) = manager_name {
+                let msg = format!(
+                    "[daemon] Engineer {engineer} has submitted {count} narration-only completions for task #{task_id}. \
+                     Branch has commits but zero file changes. The agent may need a more directive prompt or task restart."
+                );
+                daemon.queue_message("daemon", manager_name, &msg)?;
+            }
+            daemon.narration_rejection_counts.remove(engineer);
+        }
+
+        let msg = format!(
+            "Your previous attempt only produced commentary — your branch has {total_commits} commit(s) but zero file changes. \
+             Execute the actual commands to make the code changes, then commit them."
+        );
+        daemon.queue_message("batty", engineer, &msg)?;
+        return Ok(());
+    }
+
+    // Clear narration rejection counter on real file changes
+    daemon.narration_rejection_counts.remove(engineer);
 
     let task_branch = if daemon.is_multi_repo {
         multi_repo_task_branch(&worktree_dir, &daemon.sub_repo_names)?
@@ -715,6 +767,21 @@ fn multi_repo_task_branch(worktree_dir: &Path, sub_repo_names: &[String]) -> Res
         }
     }
     bail!("no sub-repo worktrees found in {}", worktree_dir.display())
+}
+
+/// For multi-repo: sum files changed from main across all sub-repo worktrees.
+fn multi_repo_files_changed_from_main(
+    worktree_dir: &Path,
+    sub_repo_names: &[String],
+) -> Result<u32> {
+    let mut total = 0u32;
+    for name in sub_repo_names {
+        let sub_wt = worktree_dir.join(name);
+        if sub_wt.exists() {
+            total += files_changed_from_main(&sub_wt).unwrap_or(0);
+        }
+    }
+    Ok(total)
 }
 
 #[cfg(test)]

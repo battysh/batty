@@ -178,6 +178,9 @@ pub struct TeamDaemon {
     /// Tracks consecutive "no commits ahead of main" rejections per engineer.
     /// Used to detect and auto-recover from branches that never diverged.
     pub(super) completion_rejection_counts: HashMap<String, u32>,
+    /// Tracks consecutive narration-only rejections per engineer (commits exist
+    /// but no file changes). After threshold, escalates to manager.
+    pub(super) narration_rejection_counts: HashMap<String, u32>,
     /// Messages deferred because the target agent was still starting.
     /// Drained automatically when the agent transitions to ready.
     pub(super) pending_delivery_queue: HashMap<String, Vec<PendingMessage>>,
@@ -372,6 +375,7 @@ impl TeamDaemon {
             last_health_check: Instant::now() - Duration::from_secs(3600),
             last_uncommitted_warn: HashMap::new(),
             completion_rejection_counts: HashMap::new(),
+            narration_rejection_counts: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
             shim_handles: HashMap::new(),
             last_shim_health_check: Instant::now(),
