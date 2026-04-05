@@ -381,6 +381,14 @@ impl TeamDaemon {
                         &plan.short_cmd,
                         &plan.work_dir,
                         Some(&log_path),
+                        self.config
+                            .team_config
+                            .workflow_policy
+                            .graceful_shutdown_timeout_secs,
+                        self.config
+                            .team_config
+                            .workflow_policy
+                            .auto_commit_on_restart,
                         sdk_mode,
                     ) {
                         Ok(handle) => {

@@ -251,6 +251,10 @@ pub struct WorkflowPolicy {
     pub context_pressure_threshold_bytes: u64,
     #[serde(default = "default_context_pressure_restart_delay_secs")]
     pub context_pressure_restart_delay_secs: u64,
+    #[serde(default = "default_graceful_shutdown_timeout_secs")]
+    pub graceful_shutdown_timeout_secs: u64,
+    #[serde(default = "default_auto_commit_on_restart")]
+    pub auto_commit_on_restart: bool,
     #[serde(default = "default_uncommitted_warn_threshold")]
     pub uncommitted_warn_threshold: usize,
     #[serde(default)]
@@ -289,11 +293,21 @@ impl Default for WorkflowPolicy {
             narration_detection_threshold: default_narration_detection_threshold(),
             context_pressure_threshold_bytes: default_context_pressure_threshold_bytes(),
             context_pressure_restart_delay_secs: default_context_pressure_restart_delay_secs(),
+            graceful_shutdown_timeout_secs: default_graceful_shutdown_timeout_secs(),
+            auto_commit_on_restart: default_auto_commit_on_restart(),
             uncommitted_warn_threshold: default_uncommitted_warn_threshold(),
             test_command: None,
             auto_merge: AutoMergePolicy::default(),
         }
     }
+}
+
+fn default_graceful_shutdown_timeout_secs() -> u64 {
+    5
+}
+
+fn default_auto_commit_on_restart() -> bool {
+    true
 }
 
 fn default_planning_cycle_cooldown_secs() -> u64 {

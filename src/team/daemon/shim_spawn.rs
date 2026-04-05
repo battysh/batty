@@ -103,6 +103,8 @@ pub(in crate::team) fn spawn_shim(
     agent_cmd: &str,
     work_dir: &Path,
     pty_log_path: Option<&Path>,
+    graceful_shutdown_timeout_secs: u64,
+    auto_commit_on_restart: bool,
     sdk_mode: bool,
 ) -> Result<AgentHandle> {
     let (parent_sock, child_sock) =
@@ -127,6 +129,10 @@ pub(in crate::team) fn spawn_shim(
         cmd.arg("--pty-log-path")
             .arg(log_path.to_string_lossy().as_ref());
     }
+    cmd.arg("--graceful-shutdown-timeout-secs")
+        .arg(graceful_shutdown_timeout_secs.to_string());
+    cmd.arg("--auto-commit-on-restart")
+        .arg(auto_commit_on_restart.to_string());
 
     if sdk_mode {
         cmd.arg("--sdk-mode");
