@@ -2923,7 +2923,6 @@ fn clean_room_analysis_artifact_stays_readable_to_analysis_and_blocked_from_impl
         .join("events.jsonl");
     daemon.event_sink = EventSink::new(&events_path).unwrap();
 
-<<<<<<< HEAD
     let artifact = daemon
         .write_analysis_artifact("decompiler", Path::new("snapshots/game.skool"), b"; notes")
         .unwrap();
