@@ -2625,6 +2625,56 @@ fn clean_room_test_daemon(project_root: &Path) -> TeamDaemon {
     .unwrap()
 }
 
+fn cleanroom_pipeline_daemon(project_root: &Path) -> TeamDaemon {
+    let config_path = crate::team::team_config_path(project_root);
+    let team_config = TeamConfig::load(&config_path).unwrap();
+    TeamDaemon::new(DaemonConfig {
+        project_root: project_root.to_path_buf(),
+        team_config,
+        session: "cleanroom-test".to_string(),
+        members: vec![
+            MemberInstance {
+                name: "decompiler".to_string(),
+                role_name: "decompiler".to_string(),
+                role_type: RoleType::Architect,
+                agent: Some("claude".to_string()),
+                prompt: Some("batty_decompiler.md".to_string()),
+                reports_to: None,
+                use_worktrees: false,
+            },
+            MemberInstance {
+                name: "spec-writer".to_string(),
+                role_name: "spec-writer".to_string(),
+                role_type: RoleType::Manager,
+                agent: Some("claude".to_string()),
+                prompt: Some("batty_spec_writer.md".to_string()),
+                reports_to: Some("decompiler".to_string()),
+                use_worktrees: false,
+            },
+            MemberInstance {
+                name: "test-writer".to_string(),
+                role_name: "test-writer".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("codex".to_string()),
+                prompt: Some("batty_test_writer.md".to_string()),
+                reports_to: Some("spec-writer".to_string()),
+                use_worktrees: true,
+            },
+            MemberInstance {
+                name: "implementer".to_string(),
+                role_name: "implementer".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("codex".to_string()),
+                prompt: Some("batty_implementer.md".to_string()),
+                reports_to: Some("spec-writer".to_string()),
+                use_worktrees: true,
+            },
+        ],
+        pane_map: HashMap::new(),
+    })
+    .unwrap()
+}
+
 #[test]
 fn clean_room_worktree_dir_uses_barrier_group_root() {
     let tmp = tempfile::tempdir().unwrap();
@@ -2719,6 +2769,166 @@ fn clean_room_handoff_rejects_parent_directory_escape() {
     let events = std::fs::read_to_string(events_path).unwrap();
     assert!(events.contains("barrier_violation_attempt"));
     assert!(events.contains("shared handoff directory"));
+}
+
+#[test]
+fn clean_room_pipeline_integration_flow_preserves_barrier_and_updates_parity() {
+    let tmp = tempfile::tempdir().unwrap();
+    crate::team::init_team(tmp.path(), "cleanroom", Some("zx-spectrum-fixture"), None, false)
+        .unwrap();
+
+    let config = TeamConfig::load(&crate::team::team_config_path(tmp.path())).unwrap();
+    assert!(config.workflow_policy.clean_room_mode);
+    assert_eq!(config.role_barrier_group("decompiler"), Some("analysis"));
+    assert_eq!(config.role_barrier_group("spec-writer"), Some("analysis"));
+    assert_eq!(config.role_barrier_group("test-writer"), Some("implementation"));
+    assert_eq!(config.role_barrier_group("implementer"), Some("implementation"));
+
+    let mut daemon = cleanroom_pipeline_daemon(tmp.path());
+    let events_path = tmp
+        .path()
+        .join(".batty")
+        .join("team_config")
+        .join("events.jsonl");
+    daemon.event_sink = EventSink::new(&events_path).unwrap();
+
+    let fixture_path = tmp.path().join("analysis").join("zx-spectrum-fixture.z80");
+    std::fs::write(&fixture_path, b"FRAME:STARTUP\nBORDER:BLUE\nINPUT:START").unwrap();
+
+    let disassembly_path = tmp.path().join("analysis").join("annotated-disassembly.md");
+    std::fs::write(
+        &disassembly_path,
+        "# Annotated disassembly\n- Observable boot frame flashes blue before start.\n",
+    )
+    .unwrap();
+
+    let disassembly_err = daemon
+        .validate_member_barrier_path("test-writer", &disassembly_path, "read")
+        .unwrap_err()
+        .to_string();
+    assert!(disassembly_err.contains("barrier violation"));
+
+    let spec = r#"# Behavior Specification
+
+## Feature: Startup behavior
+
+#### Purpose
+
+Show a blue border flash before entering the playable state.
+
+#### Inputs
+
+- Pressing start from the title snapshot
+
+#### Outputs
+
+- The game leaves the title frame and begins play
+
+#### State Transitions
+
+- Title snapshot transitions to active play after the start input
+
+#### Timing And Ordering
+
+- One blue border flash occurs before the first playable frame
+
+#### Edge Cases
+
+- Ignoring idle frames must not skip the border flash
+
+#### Acceptance Criteria
+
+- A black-box replay observes exactly one blue flash before play begins
+"#;
+    let spec_path = daemon
+        .write_handoff_artifact("spec-writer", Path::new("pipeline/SPEC.md"), spec.as_bytes())
+        .unwrap();
+    assert!(spec_path.exists());
+
+    let shared_spec = daemon
+        .read_handoff_artifact("test-writer", Path::new("pipeline/SPEC.md"))
+        .unwrap();
+    assert!(String::from_utf8(shared_spec).unwrap().contains("blue border flash"));
+
+    let original_binary_err = daemon
+        .validate_member_barrier_path("implementer", &fixture_path, "read")
+        .unwrap_err()
+        .to_string();
+    assert!(original_binary_err.contains("barrier violation"));
+
+    let tests_dir = tmp.path().join("implementation").join("tests");
+    std::fs::create_dir_all(&tests_dir).unwrap();
+    std::fs::write(
+        tests_dir.join("startup_behavior.md"),
+        "- assert one blue border flash before the first playable frame\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("implementation").join("stub_runtime.rs"),
+        "pub fn replay_startup() -> &'static str { \"blue flash -> play\" }\n",
+    )
+    .unwrap();
+
+    let parity_draft = r#"---
+project: zx-spectrum-fixture
+target: zx-spectrum-fixture.z80
+source_platform: zx-spectrum-z80
+target_language: rust
+last_verified: in-progress
+overall_parity: 0%
+---
+
+| Behavior | Spec | Test | Implementation | Verified | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Startup behavior | complete | complete | draft | -- | Acceptance test drafted from behavior-only spec |
+"#;
+    std::fs::write(tmp.path().join("PARITY.md"), parity_draft).unwrap();
+
+    let draft_report = crate::team::parity::ParityReport::load(tmp.path()).unwrap();
+    let draft_summary = draft_report.summary();
+    assert_eq!(draft_summary.total_behaviors, 1);
+    assert_eq!(draft_summary.spec_complete, 1);
+    assert_eq!(draft_summary.tests_complete, 1);
+    assert_eq!(draft_summary.implementation_complete, 0);
+    assert_eq!(draft_summary.verified_pass, 0);
+
+    fn compare_fixture_behavior(original: &[u8], stub: &str) -> bool {
+        original.windows(b"BORDER:BLUE".len()).any(|window| window == b"BORDER:BLUE")
+            && stub == "blue flash -> play"
+    }
+
+    let original_snapshot = std::fs::read(&fixture_path).unwrap();
+    let stub_behavior = "blue flash -> play";
+    assert!(compare_fixture_behavior(&original_snapshot, stub_behavior));
+
+    let parity_complete = r#"---
+project: zx-spectrum-fixture
+target: zx-spectrum-fixture.z80
+source_platform: zx-spectrum-z80
+target_language: rust
+last_verified: 2026-04-05
+overall_parity: 100%
+---
+
+| Behavior | Spec | Test | Implementation | Verified | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Startup behavior | complete | complete | complete | PASS | Replay matched the fixture snapshot |
+"#;
+    std::fs::write(tmp.path().join("PARITY.md"), parity_complete).unwrap();
+
+    let final_report = crate::team::parity::ParityReport::load(tmp.path()).unwrap();
+    let final_summary = final_report.summary();
+    assert_eq!(final_summary.total_behaviors, 1);
+    assert_eq!(final_summary.spec_complete, 1);
+    assert_eq!(final_summary.tests_complete, 1);
+    assert_eq!(final_summary.implementation_complete, 1);
+    assert_eq!(final_summary.verified_pass, 1);
+    assert_eq!(final_summary.overall_parity_pct, 100);
+
+    let events = std::fs::read_to_string(events_path).unwrap();
+    assert!(events.contains("barrier_artifact_created"));
+    assert!(events.contains("barrier_artifact_read"));
+    assert!(events.contains("barrier_violation_attempt"));
 }
 
 // --- Stale review escalation tests ---
