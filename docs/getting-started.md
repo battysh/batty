@@ -187,6 +187,12 @@ worktree per engineer at `.batty/worktrees/<engineer>`. New assignments reuse
 that path but switch the engineer onto a fresh task branch from current `main`.
 After merge, the engineer returns to `eng-main/<engineer>`.
 
+Batty also configures each engineer worktree to share a single Cargo target
+directory at `.batty/shared-target/` instead of creating a separate `target/`
+tree per worktree. On a 4-engineer team this avoids multi-gigabyte duplicate
+Rust build artifacts. Plan for roughly one full debug target cache plus your
+git worktrees, not one cache per engineer.
+
 ## Launch
 
 Start the daemon and attach to tmux immediately:
