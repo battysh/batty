@@ -70,6 +70,26 @@ impl TeamDaemon {
             "context exhausted; restarting agent with task context"
         );
 
+        let work_dir = self.member_work_dir(&member);
+        if self
+            .config
+            .team_config
+            .workflow_policy
+            .context_handoff_enabled
+        {
+            let recent_output = self.capture_context_handoff_output(&pane_id);
+            if let Err(error) =
+                crate::shim::runtime::preserve_handoff(&work_dir, recent_output.as_deref())
+            {
+                warn!(
+                    member = %member_name,
+                    task_id = task.id,
+                    error = %error,
+                    "failed to preserve restart handoff"
+                );
+            }
+        }
+
         // Write progress checkpoint before restarting.
         let checkpoint = super::super::super::checkpoint::gather_checkpoint(
             &self.config.project_root,
@@ -86,7 +106,7 @@ impl TeamDaemon {
         tmux::respawn_pane(&pane_id, "bash")?;
         std::thread::sleep(std::time::Duration::from_millis(200));
 
-        let assignment = Self::restart_assignment_message(&task);
+        let assignment = self.restart_assignment_with_handoff(&task, &work_dir);
         let launch = self.launch_task_assignment(member_name, &assignment, Some(task.id), false)?;
         let mut restart_notice = format!(
             "Restarted after context exhaustion. Continue task #{} from the current worktree state.",
@@ -121,6 +141,20 @@ impl TeamDaemon {
             info!(member = %member_name, task_id = task.id, branch, "context restart relaunched assignment");
         }
         Ok(())
+    }
+
+    fn capture_context_handoff_output(&self, pane_id: &str) -> Option<String> {
+        let screen_history = self
+            .config
+            .team_config
+            .workflow_policy
+            .handoff_screen_history
+            .max(1);
+        let rows = crate::tmux::pane_dimensions(pane_id)
+            .map(|(_, rows)| rows as usize)
+            .unwrap_or(50);
+        let line_count = rows.saturating_mul(screen_history).min(u32::MAX as usize) as u32;
+        crate::tmux::capture_pane_recent(pane_id, line_count).ok()
     }
 
     fn escalate_context_exhaustion(

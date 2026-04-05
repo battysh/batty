@@ -992,6 +992,10 @@ fn main() -> Result<()> {
             team::show_load(&root)?;
         }
 
+        Command::Parity { detail, gaps } => {
+            team::parity::show_parity(&root, detail, gaps)?;
+        }
+
         Command::Queue => {
             let entries = team::daemon::load_dispatch_queue_snapshot(&root);
             if entries.is_empty() {

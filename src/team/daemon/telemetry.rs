@@ -178,6 +178,10 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::standup_generated(recipient));
     }
 
+    pub(super) fn record_parity_updated(&mut self, summary: &crate::team::parity::ParitySummary) {
+        self.emit_event(TeamEvent::parity_updated(summary));
+    }
+
     pub(super) fn record_retro_generated(&mut self) {
         self.emit_event(TeamEvent::retro_generated());
     }

@@ -82,10 +82,7 @@ pub fn send_message_as(
     role: &str,
     msg: &str,
 ) -> Result<()> {
-    let from = from_override
-        .map(str::to_string)
-        .or_else(detect_sender)
-        .unwrap_or_else(|| "human".to_string());
+    let from = effective_sender(project_root, from_override);
     let recipient = resolve_member_name(project_root, role)?;
 
     // Enforce routing: check talks_to rules
@@ -137,9 +134,41 @@ pub(crate) fn detect_sender() -> Option<String> {
     }
 }
 
+fn effective_sender(project_root: &Path, from_override: Option<&str>) -> String {
+    let candidate = from_override
+        .map(str::to_string)
+        .or_else(detect_sender)
+        .unwrap_or_else(|| "human".to_string());
+
+    if sender_belongs_to_project(project_root, &candidate) {
+        candidate
+    } else {
+        "human".to_string()
+    }
+}
+
+fn sender_belongs_to_project(project_root: &Path, sender: &str) -> bool {
+    if matches!(sender, "human" | "daemon") {
+        return true;
+    }
+
+    let config_path = team_config_path(project_root);
+    let Ok(team_config) = config::TeamConfig::load(&config_path) else {
+        return false;
+    };
+
+    if team_config.roles.iter().any(|role| role.name == sender) {
+        return true;
+    }
+
+    hierarchy::resolve_hierarchy(&team_config)
+        .map(|members| members.iter().any(|member| member.name == sender))
+        .unwrap_or(false)
+}
+
 /// Assign a task to an engineer via their Maildir inbox.
 pub fn assign_task(project_root: &Path, engineer: &str, task: &str) -> Result<String> {
-    let from = detect_sender().unwrap_or_else(|| "human".to_string());
+    let from = effective_sender(project_root, None);
     let recipient = resolve_member_name(project_root, engineer)?;
 
     let config_path = team_config_path(project_root);
@@ -405,7 +434,8 @@ mod tests {
         let root = inbox::inboxes_root(tmp.path());
         let pending = inbox::pending_messages(&root, "architect").unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].from, "human");
+        let expected_from = effective_sender(tmp.path(), None);
+        assert_eq!(pending[0].from, expected_from);
         assert_eq!(pending[0].to, "architect");
         assert_eq!(pending[0].body, "hello");
     }
@@ -459,10 +489,38 @@ mod tests {
         let root = inbox::inboxes_root(tmp.path());
         let pending = inbox::pending_messages(&root, "eng-1-1").unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].from, "human");
+        let expected_from = effective_sender(tmp.path(), None);
+        assert_eq!(pending[0].from, expected_from);
         assert_eq!(pending[0].to, "eng-1-1");
         assert_eq!(pending[0].body, "fix bug");
         assert_eq!(pending[0].msg_type, inbox::MessageType::Assign);
+    }
+
+    #[test]
+    #[serial]
+    fn send_message_ignores_detected_sender_outside_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _member = EnvVarGuard::unset("TMUX_PANE");
+        let original_member = std::env::var("BATTY_MEMBER").ok();
+        unsafe {
+            std::env::set_var("BATTY_MEMBER", "foreign-engineer-9-9");
+        }
+
+        send_message(tmp.path(), "architect", "hello").unwrap();
+
+        match original_member.as_deref() {
+            Some(value) => unsafe {
+                std::env::set_var("BATTY_MEMBER", value);
+            },
+            None => unsafe {
+                std::env::remove_var("BATTY_MEMBER");
+            },
+        }
+
+        let root = inbox::inboxes_root(tmp.path());
+        let pending = inbox::pending_messages(&root, "architect").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].from, "human");
     }
 
     #[test]

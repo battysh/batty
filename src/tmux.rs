@@ -330,6 +330,44 @@ pub fn pane_id(target: &str) -> Result<String> {
     Ok(pane)
 }
 
+/// Return `(pane_width, pane_height)` for a tmux pane target.
+pub fn pane_dimensions(target: &str) -> Result<(u16, u16)> {
+    let output = Command::new("tmux")
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            target,
+            "#{pane_width} #{pane_height}",
+        ])
+        .output()
+        .with_context(|| format!("failed to query pane dimensions for target '{target}'"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TmuxError::command_failed(
+            "display-message #{pane_width} #{pane_height}",
+            Some(target),
+            &stderr,
+        )
+        .into());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut parts = stdout.split_whitespace();
+    let width = parts
+        .next()
+        .context("tmux pane width missing")?
+        .parse()
+        .context("invalid tmux pane width")?;
+    let height = parts
+        .next()
+        .context("tmux pane height missing")?
+        .parse()
+        .context("invalid tmux pane height")?;
+    Ok((width, height))
+}
+
 /// Get the current working directory for a pane target.
 pub fn pane_current_path(target: &str) -> Result<String> {
     let output = Command::new("tmux")

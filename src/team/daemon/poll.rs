@@ -177,6 +177,17 @@ impl TeamDaemon {
             self.run_recoverable_step("maybe_warn_uncommitted_work", |daemon| {
                 daemon.maybe_warn_uncommitted_work()
             });
+            self.run_recoverable_step("record_parity_snapshot", |daemon| {
+                if daemon.config.team_config.automation.clean_room_mode {
+                    if let Ok(report) =
+                        crate::team::parity::ParityReport::load(&daemon.config.project_root)
+                    {
+                        daemon.record_parity_updated(&report.summary());
+                    }
+                    crate::team::parity::sync_gap_tasks(&daemon.config.project_root)?;
+                }
+                Ok(())
+            });
             self.run_recoverable_step_with_catch_unwind("maybe_generate_standup", |daemon| {
                 let generated =
                     standup::maybe_generate_standup(standup::StandupGenerationContext {

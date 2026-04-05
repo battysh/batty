@@ -261,6 +261,14 @@ pub struct WorkflowPolicy {
     pub test_command: Option<String>,
     #[serde(default)]
     pub auto_merge: AutoMergePolicy,
+    /// When true, context exhaustion restarts capture a work summary and
+    /// inject it into the new agent session so it can continue where the
+    /// old session left off.
+    #[serde(default = "default_context_handoff_enabled")]
+    pub context_handoff_enabled: bool,
+    /// Number of PTY screen pages to include in the handoff summary.
+    #[serde(default = "default_handoff_screen_history")]
+    pub handoff_screen_history: usize,
 }
 
 /// Per-priority override for review timeout thresholds.
@@ -298,6 +306,8 @@ impl Default for WorkflowPolicy {
             uncommitted_warn_threshold: default_uncommitted_warn_threshold(),
             test_command: None,
             auto_merge: AutoMergePolicy::default(),
+            context_handoff_enabled: default_context_handoff_enabled(),
+            handoff_screen_history: default_handoff_screen_history(),
         }
     }
 }
@@ -308,6 +318,14 @@ fn default_graceful_shutdown_timeout_secs() -> u64 {
 
 fn default_auto_commit_on_restart() -> bool {
     true
+}
+
+fn default_context_handoff_enabled() -> bool {
+    true
+}
+
+fn default_handoff_screen_history() -> usize {
+    20
 }
 
 fn default_planning_cycle_cooldown_secs() -> u64 {
@@ -471,6 +489,8 @@ pub struct AutomationConfig {
     pub timeout_nudges: bool,
     #[serde(default = "default_enabled")]
     pub standups: bool,
+    #[serde(default)]
+    pub clean_room_mode: bool,
     #[serde(default = "default_enabled")]
     pub failure_pattern_detection: bool,
     #[serde(default = "default_enabled")]
@@ -500,6 +520,7 @@ impl Default for AutomationConfig {
         Self {
             timeout_nudges: default_enabled(),
             standups: default_enabled(),
+            clean_room_mode: false,
             failure_pattern_detection: default_enabled(),
             triage_interventions: default_enabled(),
             review_interventions: default_enabled(),
