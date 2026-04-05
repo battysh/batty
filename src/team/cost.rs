@@ -701,6 +701,7 @@ mod tests {
                     receives_standup: None,
                     standup_interval_secs: None,
                     owns: Vec::new(),
+                    barrier_group: None,
                     use_worktrees: false,
                 },
                 crate::team::config::RoleDef {
@@ -716,6 +717,7 @@ mod tests {
                     receives_standup: None,
                     standup_interval_secs: None,
                     owns: Vec::new(),
+                    barrier_group: None,
                     use_worktrees: true,
                 },
             ],
@@ -925,6 +927,7 @@ mod tests {
                 receives_standup: None,
                 standup_interval_secs: None,
                 owns: Vec::new(),
+                barrier_group: None,
                 use_worktrees: false,
             },
         );
@@ -941,6 +944,7 @@ mod tests {
             receives_standup: None,
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         });
 

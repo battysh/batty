@@ -190,6 +190,44 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::message_routed(from, to));
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn record_barrier_artifact_created(
+        &mut self,
+        role: &str,
+        filename: &str,
+        content_hash: &str,
+    ) {
+        self.emit_event(TeamEvent::barrier_artifact_created(
+            role,
+            filename,
+            content_hash,
+        ));
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn record_barrier_artifact_read(
+        &mut self,
+        role: &str,
+        filename: &str,
+        content_hash: &str,
+    ) {
+        self.emit_event(TeamEvent::barrier_artifact_read(
+            role,
+            filename,
+            content_hash,
+        ));
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn record_barrier_violation_attempt(
+        &mut self,
+        role: &str,
+        filename: &str,
+        reason: &str,
+    ) {
+        self.emit_event(TeamEvent::barrier_violation_attempt(role, filename, reason));
+    }
+
     pub(super) fn acknowledge_hot_reload_marker(&mut self) -> bool {
         if !consume_hot_reload_marker(&self.config.project_root) {
             return false;
@@ -576,6 +614,7 @@ mod tests {
                 receives_standup: None,
                 standup_interval_secs: None,
                 owns: Vec::new(),
+                barrier_group: None,
                 use_worktrees: false,
             },
             RoleDef {
@@ -591,6 +630,7 @@ mod tests {
                 receives_standup: None,
                 standup_interval_secs: None,
                 owns: Vec::new(),
+                barrier_group: None,
                 use_worktrees: false,
             },
         ];

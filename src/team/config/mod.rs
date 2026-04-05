@@ -45,6 +45,15 @@ pub struct ValidationCheck {
 }
 
 impl TeamConfig {
+    pub fn role_def(&self, role_name: &str) -> Option<&RoleDef> {
+        self.roles.iter().find(|role| role.name == role_name)
+    }
+
+    pub fn role_barrier_group(&self, role_name: &str) -> Option<&str> {
+        self.role_def(role_name)
+            .and_then(|role| role.barrier_group.as_deref())
+    }
+
     pub fn orchestrator_enabled(&self) -> bool {
         self.workflow_mode.enables_runtime_surface() && self.orchestrator_pane
     }
@@ -188,6 +197,43 @@ impl TeamConfig {
                     agent_name,
                     valid_agents
                 );
+            }
+        }
+
+        if self.workflow_policy.clean_room_mode {
+            if self.workflow_policy.handoff_directory.trim().is_empty() {
+                bail!("workflow_policy.handoff_directory cannot be empty in clean_room_mode");
+            }
+
+            for group_name in self.workflow_policy.barrier_groups.keys() {
+                if group_name.trim().is_empty() {
+                    bail!("workflow_policy.barrier_groups cannot contain an empty group name");
+                }
+            }
+
+            for (group_name, roles) in &self.workflow_policy.barrier_groups {
+                for role_name in roles {
+                    if !role_names.contains(role_name.as_str()) {
+                        bail!(
+                            "workflow_policy.barrier_groups['{}'] references unknown role '{}'",
+                            group_name,
+                            role_name
+                        );
+                    }
+                }
+            }
+
+            for role in &self.roles {
+                if let Some(group) = role.barrier_group.as_deref()
+                    && !self.workflow_policy.barrier_groups.is_empty()
+                    && !self.workflow_policy.barrier_groups.contains_key(group)
+                {
+                    bail!(
+                        "role '{}' references unknown barrier_group '{}'",
+                        role.name,
+                        group
+                    );
+                }
             }
         }
 

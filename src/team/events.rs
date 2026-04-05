@@ -60,6 +60,10 @@ pub struct TeamEvent {
     pub session_size_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
     pub ts: u64,
 }
 
@@ -91,6 +95,8 @@ impl TeamEvent {
             uptime_secs: None,
             session_size_bytes: None,
             output_bytes: None,
+            filename: None,
+            content_hash: None,
             ts: Self::now(),
         }
     }
@@ -418,6 +424,33 @@ impl TeamEvent {
             task: Some(format!("#{task_id}")),
             reason: Some(cron_expr.into()),
             ..Self::base("task_recycled")
+        }
+    }
+
+    pub fn barrier_artifact_created(role: &str, filename: &str, content_hash: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            filename: Some(filename.into()),
+            content_hash: Some(content_hash.into()),
+            ..Self::base("barrier_artifact_created")
+        }
+    }
+
+    pub fn barrier_artifact_read(role: &str, filename: &str, content_hash: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            filename: Some(filename.into()),
+            content_hash: Some(content_hash.into()),
+            ..Self::base("barrier_artifact_read")
+        }
+    }
+
+    pub fn barrier_violation_attempt(role: &str, filename: &str, reason: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            filename: Some(filename.into()),
+            reason: Some(reason.into()),
+            ..Self::base("barrier_violation_attempt")
         }
     }
 
