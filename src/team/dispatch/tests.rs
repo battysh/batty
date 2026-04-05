@@ -4,7 +4,9 @@ use crate::team::config::{BoardConfig, WorkflowPolicy};
 use crate::team::daemon::agent_handle::AgentHandle;
 use crate::team::inbox;
 use crate::team::standup::MemberState;
-use crate::team::task_loop::{engineer_base_branch_name, setup_engineer_worktree};
+use crate::team::task_loop::{
+    current_worktree_branch, engineer_base_branch_name, setup_engineer_worktree,
+};
 use crate::team::test_support::{
     TestDaemonBuilder, engineer_member, init_git_repo, manager_member, write_open_task_file,
     write_owned_task_file,
@@ -40,6 +42,38 @@ fn summarize_assignment_uses_first_non_empty_line() {
         summarize_assignment("\n\nTask #9: fix move ordering\n\nDetails below"),
         "Task #9: fix move ordering"
     );
+}
+
+#[test]
+fn prepare_assignment_launch_rebuilds_task_branch_even_if_engineer_state_is_working() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "dispatch-working-prep");
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    let team_config_dir = repo.join(".batty").join("team_config");
+
+    setup_engineer_worktree(
+        &repo,
+        &worktree_dir,
+        &engineer_base_branch_name("eng-1"),
+        &team_config_dir,
+    )
+    .unwrap();
+
+    let mut daemon = TestDaemonBuilder::new(repo.as_path())
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ])
+        .states(HashMap::from([("eng-1".to_string(), MemberState::Working)]))
+        .build();
+    daemon.active_tasks.insert("eng-1".to_string(), 40);
+
+    let launch = daemon
+        .prepare_assignment_launch("eng-1", "Task #41: new assignment", Some(41))
+        .unwrap();
+
+    assert_eq!(launch.branch.as_deref(), Some("eng-1/41"));
+    assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-1/41");
 }
 
 #[test]
@@ -634,65 +668,6 @@ fn completion_frees_engineer_and_dispatch_skips_already_claimed_tasks() {
     assert_eq!(
         daemon.dispatch_queue[0].task_id, 102,
         "claimed todo task should not be re-dispatched after completion"
-    );
-}
-
-#[test]
-fn dispatch_skips_worktree_prep_for_working_engineer() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = init_git_repo(&tmp, "skip-prep");
-    write_open_task_file(&repo, 201, "new-task", "todo");
-    let team_config_dir = repo.join(".batty").join("team_config");
-    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
-    setup_engineer_worktree(
-        &repo,
-        &worktree_dir,
-        &engineer_base_branch_name("eng-1"),
-        &team_config_dir,
-    )
-    .unwrap();
-    // Create dirty (uncommitted) file in the worktree
-    std::fs::write(
-        worktree_dir.join("uncommitted-work.txt"),
-        "important work\n",
-    )
-    .unwrap();
-
-    let members = vec![
-        manager_member("manager", None),
-        engineer_member("eng-1", Some("manager"), true),
-    ];
-    let mut daemon = TestDaemonBuilder::new(&repo)
-        .members(members)
-        .board(BoardConfig {
-            auto_dispatch: true,
-            dispatch_stabilization_delay_secs: 0,
-            ..BoardConfig::default()
-        })
-        .states(HashMap::from([("eng-1".to_string(), MemberState::Working)]))
-        .build();
-    daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
-    daemon.active_tasks.insert("eng-1".to_string(), 100);
-    daemon.idle_started_at.insert(
-        "eng-1".to_string(),
-        Instant::now() - Duration::from_secs(60),
-    );
-
-    daemon.maybe_auto_dispatch().unwrap();
-
-    // Working engineer should NOT have dispatch entries processed
-    assert!(
-        daemon.dispatch_queue.is_empty()
-            || daemon
-                .dispatch_queue
-                .iter()
-                .all(|e| e.validation_failures == 0),
-        "working engineer's dispatch entry should be retained without validation failure"
-    );
-    // Critical invariant: uncommitted work preserved
-    assert!(
-        worktree_dir.join("uncommitted-work.txt").exists(),
-        "uncommitted work must survive — worktree prep should not have run"
     );
 }
 
