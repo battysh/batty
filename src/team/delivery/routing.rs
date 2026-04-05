@@ -468,6 +468,16 @@ impl TeamDaemon {
                             self.manual_assign_cooldowns
                                 .insert(name.to_string(), Instant::now());
                             let task_id = extract_task_id_from_body(&msg.body);
+                            // Claim the task on the board BEFORE launching the
+                            // assignment so auto-dispatch sees claimed_by and
+                            // skips this task. Without this, there is a race
+                            // window where auto-dispatch grabs the unclaimed
+                            // task and assigns it to a different engineer.
+                            if let Some(tid) = task_id {
+                                if let Err(e) = crate::team::task_cmd::assign_task_owners(&board_dir, tid, Some(name), None) {
+                                    debug!(task_id = tid, error = %e, "could not set claimed_by on manual assign");
+                                }
+                            }
                             self.assign_task_with_task_id_as(&msg.from, name, &msg.body, task_id)
                             .map(|launch| {
                                 if let Some(tid) = task_id {
