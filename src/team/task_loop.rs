@@ -1065,6 +1065,53 @@ mod tests {
     }
 
     #[test]
+    fn test_prepare_assignment_worktree_recreates_stale_task_branch_from_current_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-5b");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-5b",
+            "eng-5b/123",
+            &team_config_dir,
+        )
+        .unwrap();
+        let stale_commit = git_stdout(&repo, &["rev-parse", "eng-5b/123"]);
+
+        git_ok(&repo, &["checkout", "main"]);
+        std::fs::write(repo.join("fresh.txt"), "fresh main content\n").unwrap();
+        git_ok(&repo, &["add", "fresh.txt"]);
+        git_ok(&repo, &["commit", "-m", "advance main"]);
+        let current_main = git_stdout(&repo, &["rev-parse", "main"]);
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-5b",
+            "eng-5b/123",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        assert_ne!(stale_commit, current_main);
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "eng-5b/123"]),
+            current_main
+        );
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "HEAD"]),
+            current_main
+        );
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "eng-5b/123"
+        );
+    }
+
+    #[test]
     fn test_prepare_assignment_worktree_auto_cleans_dirty() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp);
