@@ -73,13 +73,13 @@ pub(crate) fn commits_ahead_of_main(worktree_dir: &Path) -> Result<u32> {
     })
 }
 
-/// Count files changed between main and HEAD using `git diff --stat main..HEAD`.
-/// Returns 0 if the diff is empty (narration-only: commits exist but no file changes).
-pub(crate) fn files_changed_from_main(worktree_dir: &Path) -> Result<u32> {
+/// Return the diff stat between main and HEAD using `git diff --stat main..HEAD`.
+/// An empty string means the branch has no material file changes relative to main.
+pub(crate) fn diff_stat_from_main(worktree_dir: &Path) -> Result<String> {
     let output = run_git_with_context(
         worktree_dir,
-        &["diff", "--name-only", "main..HEAD"],
-        "check file changes between main and HEAD for narration-only detection",
+        &["diff", "--stat", "main..HEAD"],
+        "check diff stat between main and HEAD for narration-only detection",
     )?;
 
     if !output.status.success() {
@@ -88,17 +88,30 @@ pub(crate) fn files_changed_from_main(worktree_dir: &Path) -> Result<u32> {
             "{}",
             describe_git_failure(
                 worktree_dir,
-                &["diff", "--name-only", "main..HEAD"],
-                "check file changes between main and HEAD for narration-only detection",
+                &["diff", "--stat", "main..HEAD"],
+                "check diff stat between main and HEAD for narration-only detection",
                 &stderr,
             )
         );
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Count files changed between main and HEAD using `git diff --stat main..HEAD`.
+/// Returns 0 if the diff stat is empty (narration-only: commits exist but no file changes).
+pub(crate) fn files_changed_from_main(worktree_dir: &Path) -> Result<u32> {
+    let stdout = diff_stat_from_main(worktree_dir)?;
     let count = stdout
         .lines()
-        .filter(|line| !line.trim().is_empty())
+        .filter(|line| {
+            let line = line.trim();
+            !line.is_empty()
+                && line
+                    .chars()
+                    .next()
+                    .is_some_and(|first| !first.is_ascii_digit())
+        })
         .count();
     Ok(count as u32)
 }
@@ -202,6 +215,7 @@ mod tests {
             .current_dir(repo)
             .output()
             .unwrap();
+        assert_eq!(diff_stat_from_main(repo).unwrap(), "");
         assert_eq!(files_changed_from_main(repo).unwrap(), 0);
     }
 
@@ -248,6 +262,9 @@ mod tests {
             .current_dir(repo)
             .output()
             .unwrap();
+        let diff_stat = diff_stat_from_main(repo).unwrap();
+        assert!(diff_stat.contains("src.rs"));
+        assert!(diff_stat.contains("test.rs"));
         assert_eq!(files_changed_from_main(repo).unwrap(), 2);
     }
 }

@@ -178,9 +178,9 @@ pub struct TeamDaemon {
     /// Tracks consecutive "no commits ahead of main" rejections per engineer.
     /// Used to detect and auto-recover from branches that never diverged.
     pub(super) completion_rejection_counts: HashMap<String, u32>,
-    /// Tracks consecutive narration-only rejections per engineer (commits exist
-    /// but no file changes). After threshold, escalates to manager.
-    pub(super) narration_rejection_counts: HashMap<String, u32>,
+    /// Tracks consecutive narration-only rejections per task (commits exist
+    /// but the branch still has no file diff). After threshold, escalates.
+    pub(super) narration_rejection_counts: HashMap<u32, u32>,
     /// Messages deferred because the target agent was still starting.
     /// Drained automatically when the agent transitions to ready.
     pub(super) pending_delivery_queue: HashMap<String, Vec<PendingMessage>>,
@@ -524,7 +524,9 @@ impl TeamDaemon {
     }
 
     pub(super) fn clear_active_task(&mut self, engineer: &str) {
-        self.active_tasks.remove(engineer);
+        if let Some(task_id) = self.active_tasks.remove(engineer) {
+            self.narration_rejection_counts.remove(&task_id);
+        }
         self.retry_counts.remove(engineer);
         // Clean up any progress checkpoint left from a prior restart.
         super::checkpoint::remove_checkpoint(&self.config.project_root, engineer);
