@@ -1,21 +1,24 @@
-//! Grafana monitoring: bundled dashboard template and CLI commands.
+//! Grafana monitoring: bundled dashboard template, alert provisioning, and CLI commands.
 //!
 //! The JSON is compiled into the binary via `include_str!()` so `batty init`
 //! can write it without needing a network fetch or external file.
-//!
-//! CLI commands:
-//! - `batty grafana setup` — install Grafana + SQLite plugin, start the service
-//! - `batty grafana status` — check if the Grafana server is reachable
-//! - `batty grafana open` — open the dashboard in the default browser
 
 use anyhow::{Context, Result, bail};
-use std::process::Command as ProcessCommand;
+use serde_json::json;
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, Stdio};
+use std::time::Duration;
 
 /// Raw JSON for the Grafana dashboard template.
 pub const DASHBOARD_JSON: &str = include_str!("grafana/dashboard.json");
 
 /// Default Grafana port.
 pub const DEFAULT_PORT: u16 = 3000;
+/// Local webhook receiver used by the file-backed contact point.
+pub const ALERT_WEBHOOK_PORT: u16 = 8787;
 
 /// Expected row titles in the dashboard (used for validation).
 pub const REQUIRED_ROWS: &[&str] = &[
@@ -28,11 +31,115 @@ pub const REQUIRED_ROWS: &[&str] = &[
     "Throughput Over Time",
 ];
 
-/// Expected alert names in the dashboard (currently none — alerts are planned).
-pub const REQUIRED_ALERTS: &[&str] = &[];
+/// Expected alert names provisioned alongside the dashboard.
+pub const REQUIRED_ALERTS: &[&str] = &[
+    "Zero Activity",
+    "Crash Spike",
+    "Stall Detection",
+    "Pipeline Starvation",
+    "Review Queue Aging",
+    "Narration Loop",
+];
+
+const ALERT_RULE_GROUP: &str = "batty-operational-anomalies";
+const ALERT_FOLDER: &str = "Batty";
+const ALERT_CONTACT_POINT: &str = "batty-file-log";
+
+#[derive(Clone, Copy)]
+struct AlertRuleDefinition {
+    uid: &'static str,
+    title: &'static str,
+    severity: &'static str,
+    window_secs: u64,
+    for_duration: &'static str,
+    threshold: f64,
+    sql: &'static str,
+    description: &'static str,
+}
+
+const ALERT_RULES: &[AlertRuleDefinition] = &[
+    AlertRuleDefinition {
+        uid: "batty_zero_activity",
+        title: "Zero Activity",
+        severity: "warning",
+        window_secs: 30 * 60,
+        for_duration: "5m",
+        threshold: 0.5,
+        sql: "SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END AS value \
+              FROM events \
+              WHERE event_type IN ('task_assigned', 'task_completed') \
+                AND timestamp BETWEEN $__from / 1000 AND $__to / 1000;",
+        description: "No task assignment or completion activity in the last 30 minutes.",
+    },
+    AlertRuleDefinition {
+        uid: "batty_crash_spike",
+        title: "Crash Spike",
+        severity: "critical",
+        window_secs: 10 * 60,
+        for_duration: "2m",
+        threshold: 3.0,
+        sql: "SELECT COUNT(*) AS value \
+              FROM events \
+              WHERE event_type = 'member_crashed' \
+                AND timestamp BETWEEN $__from / 1000 AND $__to / 1000;",
+        description: "More than three agent crashes in the last 10 minutes.",
+    },
+    AlertRuleDefinition {
+        uid: "batty_stall_detection",
+        title: "Stall Detection",
+        severity: "warning",
+        window_secs: 20 * 60,
+        for_duration: "2m",
+        threshold: 0.5,
+        sql: "SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END AS value \
+              FROM events \
+              WHERE event_type = 'stall_detected' \
+                AND timestamp BETWEEN $__from / 1000 AND $__to / 1000;",
+        description: "A stall_detected event occurred in the last 20 minutes.",
+    },
+    AlertRuleDefinition {
+        uid: "batty_pipeline_starvation",
+        title: "Pipeline Starvation",
+        severity: "warning",
+        window_secs: 10 * 60,
+        for_duration: "2m",
+        threshold: 0.5,
+        sql: "SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END AS value \
+              FROM events \
+              WHERE event_type = 'pipeline_starvation_detected' \
+                AND timestamp BETWEEN $__from / 1000 AND $__to / 1000;",
+        description: "Idle engineers outnumber runnable todo tasks and the pipeline is running dry.",
+    },
+    AlertRuleDefinition {
+        uid: "batty_review_queue_aging",
+        title: "Review Queue Aging",
+        severity: "warning",
+        window_secs: 30 * 60,
+        for_duration: "2m",
+        threshold: 0.5,
+        sql: "SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END AS value \
+              FROM events \
+              WHERE event_type IN ('review_nudge_sent', 'review_escalated') \
+                AND timestamp BETWEEN $__from / 1000 AND $__to / 1000;",
+        description: "Review backlog has aged long enough to trigger a nudge or escalation.",
+    },
+    AlertRuleDefinition {
+        uid: "batty_narration_loop",
+        title: "Narration Loop",
+        severity: "warning",
+        window_secs: 15 * 60,
+        for_duration: "90s",
+        threshold: 2.0,
+        sql: "SELECT COUNT(*) AS value \
+              FROM events \
+              WHERE event_type = 'narration_detected' \
+                AND timestamp BETWEEN $__from / 1000 AND $__to / 1000;",
+        description: "Narration detection tripped more than twice in the last 15 minutes.",
+    },
+];
 
 /// Write the bundled Grafana dashboard JSON to a file.
-pub fn write_dashboard(path: &std::path::Path) -> anyhow::Result<()> {
+pub fn write_dashboard(path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -45,19 +152,43 @@ pub fn grafana_url(port: u16) -> String {
     format!("http://localhost:{port}")
 }
 
-/// Install Grafana and the SQLite datasource plugin via Homebrew, then start
-/// the service.
-///
-/// Steps:
-/// 1. `brew install grafana`
-/// 2. `grafana-cli plugins install frser-sqlite-datasource`
-/// 3. `brew services start grafana`
-pub fn setup(port: u16) -> Result<()> {
+fn alert_webhook_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/grafana-alerts")
+}
+
+fn alerts_log_path(project_root: &Path) -> PathBuf {
+    project_root.join(".batty").join("alerts.log")
+}
+
+fn project_alerting_dir(project_root: &Path) -> PathBuf {
+    project_root.join(".batty").join("grafana").join("alerting")
+}
+
+fn grafana_provisioning_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("BATTY_GRAFANA_PROVISIONING_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+
+    [
+        "/opt/homebrew/etc/grafana/provisioning",
+        "/usr/local/etc/grafana/provisioning",
+        "/etc/grafana/provisioning",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .find(|path| path.exists())
+}
+
+fn provisioning_target_dir(project_root: &Path) -> PathBuf {
+    grafana_provisioning_dir().unwrap_or_else(|| project_root.join(".batty").join("grafana"))
+}
+
+/// Install Grafana, provision alerting resources, and start the service.
+pub fn setup(project_root: &Path, port: u16) -> Result<()> {
     println!("Installing Grafana via Homebrew...");
     run_cmd("brew", &["install", "grafana"])?;
 
     println!("Installing SQLite datasource plugin...");
-    // Try homebrew plugin path first, fall back to grafana cli
     let plugin_result = ProcessCommand::new("grafana")
         .args([
             "cli",
@@ -71,23 +202,38 @@ pub fn setup(port: u16) -> Result<()> {
         ])
         .status();
     if plugin_result.is_err() || !plugin_result.unwrap().success() {
-        // Fallback: try grafana-cli directly
         let _ = run_cmd(
             "grafana-cli",
             &["plugins", "install", "frser-sqlite-datasource"],
         );
     }
 
+    println!("Provisioning alert rules and notification policy...");
+    provision_alerting(project_root, ALERT_WEBHOOK_PORT)?;
+    ensure_alert_webhook_running(project_root, ALERT_WEBHOOK_PORT)?;
+
     println!("Starting Grafana service...");
     run_cmd("brew", &["services", "start", "grafana"])?;
 
-    // Wait for Grafana to become ready
     println!("Waiting for Grafana to start...");
     for _ in 0..10 {
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(Duration::from_secs(1));
         if check_health(&format!("{}/api/health", grafana_url(port))).is_ok() {
             break;
         }
+    }
+
+    let _ = reload_alerting_provisioning(port);
+
+    let db_path = project_root.join(".batty").join("telemetry.db");
+    if db_path.exists() {
+        provision_dashboard(project_root, port)?;
+    } else {
+        println!(
+            "telemetry.db not found at {}. Alerting files were written, but dashboard import \
+will complete after `batty start` creates the database.",
+            db_path.display()
+        );
     }
 
     println!("Grafana setup complete. Dashboard at {}", grafana_url(port));
@@ -95,8 +241,7 @@ pub fn setup(port: u16) -> Result<()> {
 }
 
 /// Provision a SQLite datasource and import the bundled dashboard for a project.
-/// Call this after `setup()` to connect Grafana to the project's telemetry.db.
-pub fn provision_dashboard(project_root: &std::path::Path, port: u16) -> Result<()> {
+pub fn provision_dashboard(project_root: &Path, port: u16) -> Result<()> {
     let db_path = project_root.join(".batty").join("telemetry.db");
     if !db_path.exists() {
         bail!(
@@ -106,7 +251,6 @@ pub fn provision_dashboard(project_root: &std::path::Path, port: u16) -> Result<
     }
     let base_url = grafana_url(port);
 
-    // Flush WAL so Grafana can read the data
     let _ = ProcessCommand::new("sqlite3")
         .args([
             db_path.to_str().unwrap_or(""),
@@ -114,7 +258,6 @@ pub fn provision_dashboard(project_root: &std::path::Path, port: u16) -> Result<
         ])
         .status();
 
-    // Create datasource
     println!("Creating SQLite datasource...");
     let ds_body = format!(
         r#"{{"name":"Batty Telemetry","uid":"batty-telemetry","type":"frser-sqlite-datasource","access":"proxy","jsonData":{{"path":"{}"}}}}"#,
@@ -139,7 +282,6 @@ pub fn provision_dashboard(project_root: &std::path::Path, port: u16) -> Result<
         _ => println!("Datasource may already exist (continuing)."),
     }
 
-    // Import dashboard
     println!("Importing dashboard...");
     let dashboard_payload = format!(
         r#"{{"dashboard":{},"overwrite":true,"folderId":0}}"#,
@@ -190,9 +332,7 @@ pub fn status(port: u16) -> Result<()> {
             println!("{body}");
             Ok(())
         }
-        Err(e) => {
-            bail!("Grafana is not reachable at {}: {e}", grafana_url(port));
-        }
+        Err(e) => bail!("Grafana is not reachable at {}: {e}", grafana_url(port)),
     }
 }
 
@@ -204,7 +344,307 @@ pub fn open(port: u16) -> Result<()> {
     Ok(())
 }
 
-// --- internal helpers -------------------------------------------------------
+/// Run the local webhook receiver used by Grafana's webhook contact point.
+pub fn run_alert_webhook(project_root: &Path, port: u16) -> Result<()> {
+    let listener = TcpListener::bind(("127.0.0.1", port))
+        .with_context(|| format!("failed to bind Grafana alert webhook on port {port}"))?;
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                if let Err(error) = handle_alert_webhook(stream, project_root) {
+                    eprintln!("grafana alert webhook error: {error}");
+                }
+            }
+            Err(error) => eprintln!("grafana alert webhook accept failed: {error}"),
+        }
+    }
+    Ok(())
+}
+
+pub fn render_alert_rules_yaml() -> Result<String> {
+    let rules = ALERT_RULES
+        .iter()
+        .map(|rule| {
+            json!({
+                "uid": rule.uid,
+                "title": rule.title,
+                "condition": "B",
+                "data": [
+                    {
+                        "refId": "A",
+                        "datasourceUid": "batty-telemetry",
+                        "relativeTimeRange": {
+                            "from": rule.window_secs,
+                            "to": 0
+                        },
+                        "model": {
+                            "datasource": {
+                                "type": "frser-sqlite-datasource",
+                                "uid": "batty-telemetry"
+                            },
+                            "intervalMs": 1000,
+                            "maxDataPoints": 43200,
+                            "queryText": rule.sql,
+                            "queryType": "table",
+                            "rawQueryText": rule.sql,
+                            "rawSql": rule.sql,
+                            "refId": "A"
+                        }
+                    },
+                    {
+                        "refId": "B",
+                        "datasourceUid": "__expr__",
+                        "relativeTimeRange": {
+                            "from": rule.window_secs,
+                            "to": 0
+                        },
+                        "model": {
+                            "conditions": [
+                                {
+                                    "evaluator": {
+                                        "params": [rule.threshold],
+                                        "type": "gt"
+                                    },
+                                    "operator": {
+                                        "type": "and"
+                                    },
+                                    "query": {
+                                        "params": ["A"]
+                                    },
+                                    "reducer": {
+                                        "type": "last"
+                                    },
+                                    "type": "query"
+                                }
+                            ],
+                            "datasource": {
+                                "type": "__expr__",
+                                "uid": "__expr__"
+                            },
+                            "expression": "A",
+                            "intervalMs": 1000,
+                            "maxDataPoints": 43200,
+                            "refId": "B",
+                            "type": "classic_conditions"
+                        }
+                    }
+                ],
+                "noDataState": "OK",
+                "execErrState": "Alerting",
+                "for": rule.for_duration,
+                "annotations": {
+                    "summary": rule.description
+                },
+                "labels": {
+                    "severity": rule.severity,
+                    "team": "batty"
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_yaml::to_string(&json!({
+        "apiVersion": 1,
+        "groups": [
+            {
+                "orgId": 1,
+                "name": ALERT_RULE_GROUP,
+                "folder": ALERT_FOLDER,
+                "interval": "60s",
+                "rules": rules
+            }
+        ]
+    }))
+    .context("failed to render Grafana alert rules YAML")
+}
+
+fn render_contact_points_yaml(port: u16) -> Result<String> {
+    serde_yaml::to_string(&json!({
+        "apiVersion": 1,
+        "contactPoints": [
+            {
+                "orgId": 1,
+                "name": ALERT_CONTACT_POINT,
+                "receivers": [
+                    {
+                        "uid": "batty_file_log",
+                        "type": "webhook",
+                        "disableResolveMessage": false,
+                        "settings": {
+                            "url": alert_webhook_url(port),
+                            "httpMethod": "POST",
+                            "title": "{{ template \"default.title\" . }}",
+                            "message": "{{ template \"default.message\" . }}"
+                        }
+                    }
+                ]
+            }
+        ]
+    }))
+    .context("failed to render Grafana contact points YAML")
+}
+
+fn render_notification_policies_yaml() -> Result<String> {
+    serde_yaml::to_string(&json!({
+        "apiVersion": 1,
+        "policies": [
+            {
+                "orgId": 1,
+                "receiver": ALERT_CONTACT_POINT,
+                "group_by": ["alertname", "severity"],
+                "group_wait": "30s",
+                "group_interval": "5m",
+                "repeat_interval": "4h"
+            }
+        ]
+    }))
+    .context("failed to render Grafana notification policy YAML")
+}
+
+fn provision_alerting(project_root: &Path, port: u16) -> Result<()> {
+    let project_dir = project_alerting_dir(project_root);
+    std::fs::create_dir_all(&project_dir)?;
+    if let Some(parent) = alerts_log_path(project_root).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _ = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(alerts_log_path(project_root))?;
+
+    let rules_yaml = render_alert_rules_yaml()?;
+    let contact_points_yaml = render_contact_points_yaml(port)?;
+    let policies_yaml = render_notification_policies_yaml()?;
+
+    write_alerting_file(&project_dir.join("rules.yaml"), &rules_yaml)?;
+    write_alerting_file(
+        &project_dir.join("contact-points.yaml"),
+        &contact_points_yaml,
+    )?;
+    write_alerting_file(&project_dir.join("policies.yaml"), &policies_yaml)?;
+
+    let target_dir = provisioning_target_dir(project_root).join("alerting");
+    std::fs::create_dir_all(&target_dir)?;
+    write_alerting_file(&target_dir.join("batty-rules.yaml"), &rules_yaml)?;
+    write_alerting_file(
+        &target_dir.join("batty-contact-points.yaml"),
+        &contact_points_yaml,
+    )?;
+    write_alerting_file(&target_dir.join("batty-policies.yaml"), &policies_yaml)?;
+    Ok(())
+}
+
+fn write_alerting_file(path: &Path, content: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, content)
+        .with_context(|| format!("failed to write alerting file {}", path.display()))
+}
+
+fn ensure_alert_webhook_running(project_root: &Path, port: u16) -> Result<()> {
+    if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+        return Ok(());
+    }
+
+    let current_exe = std::env::current_exe().context("failed to resolve current batty binary")?;
+    ProcessCommand::new(current_exe)
+        .args([
+            "grafana-webhook",
+            "--project-root",
+            &project_root.display().to_string(),
+            "--port",
+            &port.to_string(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to start Grafana webhook receiver")?;
+    std::thread::sleep(Duration::from_millis(250));
+    Ok(())
+}
+
+fn handle_alert_webhook(mut stream: TcpStream, project_root: &Path) -> Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let mut buf = Vec::new();
+    let _ = stream.read_to_end(&mut buf);
+    let request = String::from_utf8_lossy(&buf);
+    let body = request
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or_default();
+    let line = format_alert_notification(body);
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(alerts_log_path(project_root))
+        .with_context(|| {
+            format!(
+                "failed to open alert log at {}",
+                alerts_log_path(project_root).display()
+            )
+        })?;
+    writeln!(file, "{line}")?;
+    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")?;
+    Ok(())
+}
+
+fn format_alert_notification(body: &str) -> String {
+    let ts = crate::team::now_unix();
+    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(body) {
+        let status = payload
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let alerts = payload
+            .get("alerts")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let names = alerts
+            .iter()
+            .filter_map(|alert| {
+                alert
+                    .get("labels")
+                    .and_then(|labels| labels.get("alertname"))
+                    .and_then(|name| name.as_str())
+            })
+            .collect::<Vec<_>>();
+        if !names.is_empty() {
+            return format!(
+                "[{ts}] status={status} alerts={} raw={}",
+                names.join(","),
+                body.trim()
+            );
+        }
+    }
+    format!("[{ts}] raw={}", body.trim())
+}
+
+fn reload_alerting_provisioning(port: u16) -> Result<()> {
+    let output = ProcessCommand::new("curl")
+        .args([
+            "-sf",
+            "-X",
+            "POST",
+            &format!(
+                "{}/api/admin/provisioning/alerting/reload",
+                grafana_url(port)
+            ),
+            "-u",
+            "admin:admin",
+        ])
+        .output()
+        .context("failed to run curl for alerting reload")?;
+    if !output.status.success() {
+        bail!(
+            "Grafana alerting reload failed with status {}",
+            output.status
+        );
+    }
+    Ok(())
+}
 
 fn run_cmd(program: &str, args: &[&str]) -> Result<()> {
     let status = ProcessCommand::new(program)
@@ -270,20 +710,61 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_has_all_alerts() {
-        let parsed: serde_json::Value = serde_json::from_str(DASHBOARD_JSON).unwrap();
-        if REQUIRED_ALERTS.is_empty() {
-            return; // no alerts expected yet
-        }
-        let alerts = parsed["alerts"].as_array().unwrap();
-        let alert_names: Vec<&str> = alerts.iter().filter_map(|a| a["name"].as_str()).collect();
-
+    fn required_alerts_match_rule_definitions() {
+        let titles: Vec<&str> = ALERT_RULES.iter().map(|rule| rule.title).collect();
         for expected in REQUIRED_ALERTS {
-            assert!(
-                alert_names.contains(expected),
-                "missing alert: {expected}. Found: {alert_names:?}"
-            );
+            assert!(titles.contains(expected), "missing alert rule {expected}");
         }
+        assert_eq!(titles.len(), REQUIRED_ALERTS.len());
+    }
+
+    #[test]
+    fn alert_rules_yaml_contains_expected_rules() {
+        let yaml = render_alert_rules_yaml().unwrap();
+        for expected in REQUIRED_ALERTS {
+            assert!(yaml.contains(expected), "missing {expected} from YAML");
+        }
+        assert!(yaml.contains("pipeline_starvation_detected"));
+        assert!(yaml.contains("narration_detected"));
+    }
+
+    #[test]
+    fn alert_contact_points_yaml_uses_local_webhook() {
+        let yaml = render_contact_points_yaml(ALERT_WEBHOOK_PORT).unwrap();
+        assert!(yaml.contains("type: webhook"));
+        assert!(yaml.contains("http://127.0.0.1:8787/grafana-alerts"));
+        assert!(yaml.contains(ALERT_CONTACT_POINT));
+    }
+
+    #[test]
+    fn notification_formatting_extracts_alert_names() {
+        let body = r#"{"status":"firing","alerts":[{"labels":{"alertname":"Crash Spike"}},{"labels":{"alertname":"Zero Activity"}}]}"#;
+        let formatted = format_alert_notification(body);
+        assert!(formatted.contains("status=firing"));
+        assert!(formatted.contains("Crash Spike,Zero Activity"));
+    }
+
+    #[test]
+    fn provision_alerting_writes_expected_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        provision_alerting(tmp.path(), 9911).unwrap();
+
+        assert!(tmp.path().join(".batty/alerts.log").exists());
+        assert!(
+            tmp.path()
+                .join(".batty/grafana/alerting/rules.yaml")
+                .exists()
+        );
+        assert!(
+            tmp.path()
+                .join(".batty/grafana/alerting/contact-points.yaml")
+                .exists()
+        );
+        assert!(
+            tmp.path()
+                .join(".batty/grafana/alerting/policies.yaml")
+                .exists()
+        );
     }
 
     #[test]
@@ -314,7 +795,6 @@ mod tests {
 
     #[test]
     fn dashboard_uses_consistent_datasource_uid() {
-        // All datasource uids should reference "batty-telemetry"
         let parsed: serde_json::Value = serde_json::from_str(DASHBOARD_JSON).unwrap();
         let panels = parsed["panels"].as_array().unwrap();
         for panel in panels {
@@ -331,15 +811,13 @@ mod tests {
 
     #[test]
     fn dashboard_alert_count_matches_expected() {
-        // Currently no alerts defined; update when alerts are added.
-        assert_eq!(REQUIRED_ALERTS.len(), 0);
+        assert_eq!(REQUIRED_ALERTS.len(), 6);
     }
 
     #[test]
     fn dashboard_panel_count() {
         let parsed: serde_json::Value = serde_json::from_str(DASHBOARD_JSON).unwrap();
         let panels = parsed["panels"].as_array().unwrap();
-        // 6 rows + data panels
         let non_row_panels: Vec<_> = panels
             .iter()
             .filter(|p| p["type"].as_str() != Some("row"))
@@ -370,8 +848,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // --- CLI command tests ---
-
     #[test]
     fn grafana_url_default_port() {
         assert_eq!(grafana_url(3000), "http://localhost:3000");
@@ -389,7 +865,6 @@ mod tests {
 
     #[test]
     fn check_health_unreachable() {
-        // Port 1 is almost certainly not running Grafana
         let result = check_health("http://localhost:1/api/health");
         assert!(result.is_err());
     }

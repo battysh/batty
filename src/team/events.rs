@@ -420,6 +420,15 @@ impl TeamEvent {
         }
     }
 
+    pub fn pipeline_starvation_detected(idle_engineers: usize, todo_tasks: usize) -> Self {
+        Self {
+            reason: Some(format!(
+                "idle_engineers={idle_engineers} todo_tasks={todo_tasks}"
+            )),
+            ..Self::base("pipeline_starvation_detected")
+        }
+    }
+
     pub fn task_reworked(role: &str, task: &str) -> Self {
         Self {
             role: Some(role.into()),
@@ -780,6 +789,10 @@ mod tests {
             (
                 "review_escalated",
                 TeamEvent::review_escalated("42", "stale review"),
+            ),
+            (
+                "pipeline_starvation_detected",
+                TeamEvent::pipeline_starvation_detected(3, 0),
             ),
             (
                 "state_reconciliation",
