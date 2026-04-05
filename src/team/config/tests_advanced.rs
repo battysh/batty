@@ -798,6 +798,7 @@ fn parse_board_config_zero_thresholds() {
 name: test
 board:
   rotation_threshold: 0
+  state_reconciliation_interval_secs: 0
   dispatch_stabilization_delay_secs: 0
   dispatch_dedup_window_secs: 0
   dispatch_manual_cooldown_secs: 0
@@ -808,6 +809,7 @@ roles:
 "#;
     let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(config.board.rotation_threshold, 0);
+    assert_eq!(config.board.state_reconciliation_interval_secs, 0);
     assert_eq!(config.board.dispatch_stabilization_delay_secs, 0);
     assert_eq!(config.board.dispatch_dedup_window_secs, 0);
     assert_eq!(config.board.dispatch_manual_cooldown_secs, 0);
