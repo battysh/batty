@@ -57,6 +57,7 @@ pub mod retrospective;
 pub mod retry;
 pub mod review;
 pub mod scale;
+pub mod spec_gen;
 pub mod standup;
 pub mod status;
 pub mod tact;

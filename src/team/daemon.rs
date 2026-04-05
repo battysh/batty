@@ -84,6 +84,8 @@ mod reconcile;
 mod shim_spawn;
 #[path = "daemon/shim_state.rs"]
 mod shim_state;
+#[path = "daemon/spec_gen.rs"]
+mod spec_gen;
 #[path = "daemon/state.rs"]
 mod state;
 #[path = "telegram_bridge.rs"]
