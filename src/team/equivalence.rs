@@ -1,5 +1,6 @@
-//! Equivalence testing harness for comparing recorded runs.
+//! Equivalence testing harness for comparing synthetic emulator runs.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -7,13 +8,47 @@ use anyhow::{Context, Result, bail};
 
 use super::parity::{self, VerificationStatus};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TestRun {
-    pub name: String,
-    pub inputs: Vec<String>,
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InputSequence {
+    pub events: Vec<String>,
+}
+
+impl InputSequence {
+    pub fn new(events: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            events: events.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OutputCapture {
     pub frames: Vec<String>,
     pub audio_events: Vec<String>,
     pub io_events: Vec<String>,
+}
+
+impl OutputCapture {
+    pub fn new(frames: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            frames: frames.into_iter().map(Into::into).collect(),
+            audio_events: Vec::new(),
+            io_events: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestRun {
+    pub name: String,
+    pub inputs: InputSequence,
+    pub outputs: OutputCapture,
+}
+
+impl TestRun {
+    pub fn frames(&self) -> &[String] {
+        &self.outputs.frames
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,55 +72,94 @@ impl DiffReport {
     }
 }
 
-pub fn run_command_capture_frames(
-    name: &str,
-    command: &str,
-    inputs: &[String],
-    work_dir: &Path,
-) -> Result<TestRun> {
-    let mut child = Command::new("sh")
-        .args(["-c", command])
-        .current_dir(work_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("failed to spawn equivalence command `{command}`"))?;
+pub trait EmulatorBackend {
+    fn run(&self, binary: &Path, inputs: &InputSequence) -> Result<OutputCapture>;
+}
 
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        for input in inputs {
-            writeln!(stdin, "{input}")
-                .with_context(|| format!("failed to write input to `{command}`"))?;
+#[derive(Debug, Default, Clone)]
+pub struct MockBackend {
+    fixtures: HashMap<String, OutputCapture>,
+}
+
+impl MockBackend {
+    pub fn with_fixture(mut self, binary: impl Into<String>, capture: OutputCapture) -> Self {
+        self.fixtures.insert(binary.into(), capture);
+        self
+    }
+}
+
+impl EmulatorBackend for MockBackend {
+    fn run(&self, binary: &Path, _inputs: &InputSequence) -> Result<OutputCapture> {
+        let key = binary.to_string_lossy().into_owned();
+        self.fixtures
+            .get(&key)
+            .cloned()
+            .with_context(|| format!("no mock fixture registered for `{key}`"))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CommandBackend;
+
+impl EmulatorBackend for CommandBackend {
+    fn run(&self, binary: &Path, inputs: &InputSequence) -> Result<OutputCapture> {
+        let mut child = Command::new(binary)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to spawn `{}`", binary.display()))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            for input in &inputs.events {
+                writeln!(stdin, "{input}")
+                    .with_context(|| format!("failed to write input to `{}`", binary.display()))?;
+            }
         }
+
+        let output = child
+            .wait_with_output()
+            .with_context(|| format!("failed to read output from `{}`", binary.display()))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "backend command `{}` failed: {}",
+                binary.display(),
+                stderr.trim()
+            );
+        }
+
+        let frames = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToString::to_string)
+            .collect();
+
+        Ok(OutputCapture {
+            frames,
+            audio_events: Vec::new(),
+            io_events: Vec::new(),
+        })
     }
+}
 
-    let output = child
-        .wait_with_output()
-        .with_context(|| format!("failed to read output from `{command}`"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("equivalence command `{command}` failed: {}", stderr.trim());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let frames = stdout
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToString::to_string)
-        .collect();
-
+pub fn execute_test_run(
+    backend: &dyn EmulatorBackend,
+    name: &str,
+    binary: &Path,
+    inputs: InputSequence,
+) -> Result<TestRun> {
+    let outputs = backend.run(binary, &inputs)?;
     Ok(TestRun {
         name: name.to_string(),
-        inputs: inputs.to_vec(),
-        frames,
-        audio_events: Vec::new(),
-        io_events: Vec::new(),
+        inputs,
+        outputs,
     })
 }
 
-pub fn compare_outputs(expected: &TestRun, actual: &TestRun) -> DiffReport {
+pub fn compare_outputs(expected: &OutputCapture, actual: &OutputCapture) -> DiffReport {
     let compared_len = expected.frames.len().min(actual.frames.len());
     let mut matching_frames = 0;
     let mut divergent_indices = Vec::new();
@@ -148,20 +222,8 @@ overall_parity: 0%
 
     #[test]
     fn compare_outputs_counts_matching_and_divergent_frames() {
-        let expected = TestRun {
-            name: "expected".to_string(),
-            inputs: vec!["A".to_string()],
-            frames: vec!["frame-1".to_string(), "frame-2".to_string()],
-            audio_events: Vec::new(),
-            io_events: Vec::new(),
-        };
-        let actual = TestRun {
-            name: "actual".to_string(),
-            inputs: vec!["A".to_string()],
-            frames: vec!["frame-1".to_string(), "frame-x".to_string()],
-            audio_events: Vec::new(),
-            io_events: Vec::new(),
-        };
+        let expected = OutputCapture::new(["frame-1", "frame-2"]);
+        let actual = OutputCapture::new(["frame-1", "frame-x"]);
 
         let diff = compare_outputs(&expected, &actual);
         assert_eq!(diff.matching_frames, 1);
@@ -171,46 +233,30 @@ overall_parity: 0%
     }
 
     #[test]
-    fn trivial_program_end_to_end_updates_parity() {
+    fn mock_backend_runs_trivial_fixture_and_updates_parity() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("PARITY.md"), parity_fixture()).unwrap();
 
-        let original = tmp.path().join("original.sh");
-        let reimpl = tmp.path().join("reimpl.sh");
-        std::fs::write(
-            &original,
-            "#!/bin/sh\nwhile IFS= read -r line; do printf 'FRAME:%s\\n' \"$line\"; done\n",
-        )
-        .unwrap();
-        std::fs::write(
-            &reimpl,
-            "#!/bin/sh\nwhile IFS= read -r line; do printf 'FRAME:%s\\n' \"$line\"; done\n",
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&original, std::fs::Permissions::from_mode(0o755)).unwrap();
-            std::fs::set_permissions(&reimpl, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let inputs = InputSequence::new(["fill", "flip"]);
+        let backend = MockBackend::default()
+            .with_fixture("original.bin", OutputCapture::new(["frame-a", "frame-b"]))
+            .with_fixture("reimpl.bin", OutputCapture::new(["frame-a", "frame-b"]));
 
-        let inputs = vec!["fill".to_string(), "flip".to_string()];
-        let expected = run_command_capture_frames(
+        let expected = execute_test_run(
+            &backend,
             "original",
-            original.to_string_lossy().as_ref(),
-            &inputs,
-            tmp.path(),
+            Path::new("original.bin"),
+            inputs.clone(),
         )
         .unwrap();
-        let actual = run_command_capture_frames(
-            "reimpl",
-            reimpl.to_string_lossy().as_ref(),
-            &inputs,
-            tmp.path(),
-        )
-        .unwrap();
+        let actual = execute_test_run(&backend, "reimpl", Path::new("reimpl.bin"), inputs).unwrap();
 
-        let diff = compare_outputs(&expected, &actual);
+        assert_eq!(
+            expected.frames(),
+            &["frame-a".to_string(), "frame-b".to_string()]
+        );
+
+        let diff = compare_outputs(&expected.outputs, &actual.outputs);
         assert!(diff.passed(), "diff should match: {diff:?}");
 
         update_parity_from_diff(tmp.path(), "Screen fill", &diff).unwrap();
