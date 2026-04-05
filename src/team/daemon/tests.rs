@@ -3173,7 +3173,6 @@ overall_parity: 100%
     assert!(events.contains("barrier_artifact_read"));
     assert!(events.contains("barrier_violation_attempt"));
 }
-
 // --- Stale review escalation tests ---
 
 fn write_review_task(project_root: &Path, id: u32, review_owner: &str) {
