@@ -73,6 +73,36 @@ pub(crate) fn commits_ahead_of_main(worktree_dir: &Path) -> Result<u32> {
     })
 }
 
+/// Count files changed between main and HEAD using `git diff --stat main..HEAD`.
+/// Returns 0 if the diff is empty (narration-only: commits exist but no file changes).
+pub(crate) fn files_changed_from_main(worktree_dir: &Path) -> Result<u32> {
+    let output = run_git_with_context(
+        worktree_dir,
+        &["diff", "--name-only", "main..HEAD"],
+        "check file changes between main and HEAD for narration-only detection",
+    )?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "{}",
+            describe_git_failure(
+                worktree_dir,
+                &["diff", "--name-only", "main..HEAD"],
+                "check file changes between main and HEAD for narration-only detection",
+                &stderr,
+            )
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let count = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    Ok(count as u32)
+}
+
 pub(crate) fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -126,5 +156,98 @@ mod tests {
         let error = commits_ahead_of_main(tmp.path()).unwrap_err().to_string();
         assert!(error.contains("count commits ahead of main before accepting engineer completion"));
         assert!(error.contains("git rev-list --count main..HEAD"));
+    }
+
+    #[test]
+    fn files_changed_from_main_error_on_non_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let error = files_changed_from_main(tmp.path()).unwrap_err().to_string();
+        assert!(error.contains("narration-only detection"));
+    }
+
+    #[test]
+    fn files_changed_from_main_zero_when_no_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        // Set up a git repo with main branch
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "main"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join("README.md"), "hello").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        // Create branch with empty commit (no file changes)
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "task-branch"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "narration only"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert_eq!(files_changed_from_main(repo).unwrap(), 0);
+    }
+
+    #[test]
+    fn files_changed_from_main_counts_changed_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "main"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join("README.md"), "hello").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        // Create branch with actual file change
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "task-branch"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join("src.rs"), "fn main() {}").unwrap();
+        std::fs::write(repo.join("test.rs"), "fn test() {}").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "real changes"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert_eq!(files_changed_from_main(repo).unwrap(), 2);
     }
 }

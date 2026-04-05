@@ -161,6 +161,19 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::merge_confidence_scored(info));
     }
 
+    pub(crate) fn record_narration_rejection(
+        &mut self,
+        engineer: &str,
+        task_id: u32,
+        rejection_count: u32,
+    ) {
+        self.emit_event(TeamEvent::narration_rejection(
+            engineer,
+            task_id,
+            rejection_count,
+        ));
+    }
+
     pub(super) fn record_standup_generated(&mut self, recipient: &str) {
         self.emit_event(TeamEvent::standup_generated(recipient));
     }
@@ -517,6 +530,7 @@ mod tests {
             last_uncommitted_warn: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
             completion_rejection_counts: HashMap::new(),
+            narration_rejection_counts: HashMap::new(),
             shim_handles: HashMap::new(),
             planning_cycle_last_fired: None,
             planning_cycle_active: false,
@@ -928,6 +942,7 @@ mod tests {
             last_uncommitted_warn: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
             completion_rejection_counts: HashMap::new(),
+            narration_rejection_counts: HashMap::new(),
             shim_handles: HashMap::new(),
             planning_cycle_last_fired: None,
             planning_cycle_active: false,
