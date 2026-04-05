@@ -220,6 +220,12 @@ pub struct ModelPricing {
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorkflowPolicy {
     #[serde(default)]
+    pub clean_room_mode: bool,
+    #[serde(default)]
+    pub barrier_groups: HashMap<String, Vec<String>>,
+    #[serde(default = "default_handoff_directory")]
+    pub handoff_directory: String,
+    #[serde(default)]
     pub wip_limit_per_engineer: Option<u32>,
     #[serde(default)]
     pub wip_limit_per_reviewer: Option<u32>,
@@ -285,6 +291,9 @@ pub struct ReviewTimeoutOverride {
 impl Default for WorkflowPolicy {
     fn default() -> Self {
         Self {
+            clean_room_mode: false,
+            barrier_groups: HashMap::new(),
+            handoff_directory: default_handoff_directory(),
             wip_limit_per_engineer: None,
             wip_limit_per_reviewer: None,
             pipeline_starvation_threshold: default_pipeline_starvation_threshold(),
@@ -326,6 +335,10 @@ fn default_context_handoff_enabled() -> bool {
 
 fn default_handoff_screen_history() -> usize {
     20
+}
+
+fn default_handoff_directory() -> String {
+    ".batty/handoff".to_string()
 }
 
 fn default_planning_cycle_cooldown_secs() -> u64 {
@@ -579,6 +592,8 @@ pub struct RoleDef {
     #[serde(default)]
     #[allow(dead_code)] // Parsed for future ownership semantics but not yet enforced.
     pub owns: Vec<String>,
+    #[serde(default)]
+    pub barrier_group: Option<String>,
     #[serde(default)]
     pub use_worktrees: bool,
 }

@@ -903,6 +903,7 @@ mod tests {
                         receives_standup: None,
                         standup_interval_secs: None,
                         owns: Vec::new(),
+                        barrier_group: None,
                         use_worktrees: false,
                     }],
                 },
@@ -961,6 +962,7 @@ mod tests {
                 receives_standup: None,
                 standup_interval_secs: None,
                 owns: Vec::new(),
+                barrier_group: None,
                 use_worktrees: false,
             },
             RoleDef {
@@ -976,6 +978,7 @@ mod tests {
                 receives_standup: None,
                 standup_interval_secs: None,
                 owns: Vec::new(),
+                barrier_group: None,
                 use_worktrees: false,
             },
         ];
@@ -1147,6 +1150,7 @@ mod tests {
             receives_standup: None,
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         }];
         daemon.config.members = vec![MemberInstance {
@@ -1202,6 +1206,7 @@ mod tests {
                 receives_standup: None,
                 standup_interval_secs: None,
                 owns: Vec::new(),
+                barrier_group: None,
                 use_worktrees: false,
             },
             RoleDef {
@@ -1217,6 +1222,7 @@ mod tests {
                 receives_standup: None,
                 standup_interval_secs: None,
                 owns: Vec::new(),
+                barrier_group: None,
                 use_worktrees: false,
             },
         ];

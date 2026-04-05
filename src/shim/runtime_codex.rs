@@ -280,6 +280,11 @@ pub fn run_codex_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
 
             ShimCommand::Shutdown { .. } => {
                 eprintln!("[shim-codex {shim_id}] shutdown requested");
+                if let Err(error) = super::runtime::preserve_work_before_kill(&args.cwd) {
+                    eprintln!(
+                        "[shim-codex {shim_id}] failed to preserve work before shutdown: {error:#}"
+                    );
+                }
                 let mut st = state_cmd.lock().unwrap();
                 st.state = ShimState::Dead;
                 st.state_changed_at = Instant::now();
@@ -288,6 +293,11 @@ pub fn run_codex_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
             }
 
             ShimCommand::Kill => {
+                if let Err(error) = super::runtime::preserve_work_before_kill(&args.cwd) {
+                    eprintln!(
+                        "[shim-codex {shim_id}] failed to preserve work before kill: {error:#}"
+                    );
+                }
                 let mut st = state_cmd.lock().unwrap();
                 st.state = ShimState::Dead;
                 st.state_changed_at = Instant::now();

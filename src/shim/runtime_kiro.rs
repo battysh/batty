@@ -754,6 +754,9 @@ pub fn run_kiro_acp(args: ShimArgs, channel: Channel) -> Result<()> {
                     "[shim-kiro {}] shutdown requested (timeout: {}s)",
                     args.id, timeout_secs
                 );
+                if let Err(error) = super::runtime::preserve_work_before_kill(&args.cwd) {
+                    eprintln!("[shim-kiro {}] work preservation failed: {error}", args.id);
+                }
                 // Take stdin out of the shared Option to truly close it.
                 // The stdout reader thread also holds an Arc clone, but taking
                 // from the Option means both sides see None.
@@ -777,6 +780,9 @@ pub fn run_kiro_acp(args: ShimArgs, channel: Channel) -> Result<()> {
             }
 
             ShimCommand::Kill => {
+                if let Err(error) = super::runtime::preserve_work_before_kill(&args.cwd) {
+                    eprintln!("[shim-kiro {}] work preservation failed: {error}", args.id);
+                }
                 terminate_child(&mut child);
                 break;
             }

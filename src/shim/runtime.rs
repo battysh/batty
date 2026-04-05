@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{Read, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -53,6 +54,8 @@ const PROCESS_EXIT_POLL_MS: u64 = 100;
 const PARENT_DEATH_POLL_SECS: u64 = 1;
 const GROUP_TERM_GRACE_SECS: u64 = 2;
 pub(crate) const HANDOFF_FILE_NAME: &str = "handoff.md";
+const AUTO_COMMIT_MESSAGE: &str = "wip: auto-save before restart [batty]";
+const AUTO_COMMIT_TIMEOUT_SECS: u64 = 5;
 
 /// Capture a work summary (git diff + recent commits) and write it to
 /// a handoff file in the given worktree. Called before an agent restart
@@ -224,6 +227,59 @@ fn terminate_agent_group(
 
     #[allow(unreachable_code)]
     child.kill()
+}
+
+fn graceful_shutdown_timeout() -> Duration {
+    let secs = std::env::var("BATTY_GRACEFUL_SHUTDOWN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(AUTO_COMMIT_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+fn auto_commit_on_restart_enabled() -> bool {
+    std::env::var("BATTY_AUTO_COMMIT_ON_RESTART")
+        .map(|value| !matches!(value.as_str(), "0" | "false" | "FALSE"))
+        .unwrap_or(true)
+}
+
+fn preserve_work_before_kill_with<F>(
+    worktree_path: &Path,
+    timeout: Duration,
+    enabled: bool,
+    commit_fn: F,
+) -> Result<bool>
+where
+    F: FnOnce(PathBuf) -> Result<bool> + Send + 'static,
+{
+    if !enabled {
+        return Ok(false);
+    }
+
+    let (tx, rx) = mpsc::channel();
+    let path = worktree_path.to_path_buf();
+    thread::spawn(move || {
+        let _ = tx.send(commit_fn(path));
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Ok(false),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Ok(false),
+    }
+}
+
+pub(crate) fn preserve_work_before_kill(worktree_path: &Path) -> Result<bool> {
+    let timeout = graceful_shutdown_timeout();
+    preserve_work_before_kill_with(
+        worktree_path,
+        timeout,
+        auto_commit_on_restart_enabled(),
+        move |path| {
+            crate::team::git_cmd::auto_commit_if_dirty(&path, AUTO_COMMIT_MESSAGE, timeout)
+                .map_err(anyhow::Error::from)
+        },
+    )
 }
 
 /// Write body bytes to the PTY in small chunks with micro-delays, then
@@ -1897,6 +1953,31 @@ plain output\n";
                 "pytest tests/test_api.py".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn preserve_work_before_kill_respects_config_toggle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let preserved =
+            preserve_work_before_kill_with(tmp.path(), Duration::from_millis(10), false, |_path| {
+                panic!("commit should not run when disabled")
+            })
+            .unwrap();
+
+        assert!(!preserved);
+    }
+
+    #[test]
+    fn preserve_work_before_kill_times_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let preserved =
+            preserve_work_before_kill_with(tmp.path(), Duration::from_millis(10), true, |_path| {
+                std::thread::sleep(Duration::from_millis(50));
+                Ok(true)
+            })
+            .unwrap();
+
+        assert!(!preserved);
     }
 
     fn init_test_git_repo(path: &Path) {

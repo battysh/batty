@@ -548,7 +548,7 @@ impl TeamDaemon {
             return Ok(());
         };
 
-        let _ = self.preserve_member_worktree(member_name, "wip: auto-save before restart [batty]");
+        self.preserve_worktree_before_restart(member_name, &plan.work_dir, reason);
 
         if let Some(handle) = self.shim_handles.get_mut(member_name)
             && let Err(error) = handle.send_shutdown(5)
@@ -618,7 +618,7 @@ impl TeamDaemon {
             )
         };
 
-        let _ = self.preserve_member_worktree(member_name, "wip: auto-save before restart [batty]");
+        self.preserve_worktree_before_restart(member_name, &work_dir, "shim crash respawn");
 
         info!(member = member_name, "auto-respawning shim after crash");
 

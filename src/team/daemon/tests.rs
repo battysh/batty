@@ -220,6 +220,7 @@ fn daemon_registers_per_role_nudge_intervals_from_prompt_sections() {
                     receives_standup: None,
                     standup_interval_secs: None,
                     owns: Vec::new(),
+                    barrier_group: None,
                     use_worktrees: false,
                 },
                 RoleDef {
@@ -235,6 +236,7 @@ fn daemon_registers_per_role_nudge_intervals_from_prompt_sections() {
                     receives_standup: None,
                     standup_interval_secs: None,
                     owns: Vec::new(),
+                    barrier_group: None,
                     use_worktrees: false,
                 },
             ],
@@ -375,6 +377,7 @@ fn test_auto_dispatch_filters_idle_engineers_only() {
             receives_standup: None,
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         },
         RoleDef {
@@ -390,6 +393,7 @@ fn test_auto_dispatch_filters_idle_engineers_only() {
             receives_standup: None,
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         },
         RoleDef {
@@ -405,6 +409,7 @@ fn test_auto_dispatch_filters_idle_engineers_only() {
             receives_standup: None,
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         },
         RoleDef {
@@ -420,6 +425,7 @@ fn test_auto_dispatch_filters_idle_engineers_only() {
             receives_standup: None,
             standup_interval_secs: None,
             owns: Vec::new(),
+            barrier_group: None,
             use_worktrees: false,
         },
     ];
@@ -2519,6 +2525,200 @@ fn git_repo_enables_worktrees() {
         daemon.member_uses_worktrees("eng-1"),
         "worktrees should be enabled when project is a git repo and member has use_worktrees=true"
     );
+}
+
+fn clean_room_test_daemon(project_root: &Path) -> TeamDaemon {
+    let team_config = TeamConfig {
+        name: "clean-room".to_string(),
+        agent: None,
+        workflow_mode: WorkflowMode::Legacy,
+        board: BoardConfig::default(),
+        standup: StandupConfig::default(),
+        automation: AutomationConfig::default(),
+        automation_sender: None,
+        external_senders: Vec::new(),
+        orchestrator_pane: true,
+        orchestrator_position: OrchestratorPosition::Bottom,
+        layout: None,
+        workflow_policy: WorkflowPolicy {
+            clean_room_mode: true,
+            barrier_groups: HashMap::from([
+                ("analysis".to_string(), vec!["analyst".to_string()]),
+                ("implementation".to_string(), vec!["engineer".to_string()]),
+            ]),
+            ..WorkflowPolicy::default()
+        },
+        cost: Default::default(),
+        grafana: Default::default(),
+        use_shim: false,
+        use_sdk_mode: false,
+        auto_respawn_on_crash: false,
+        shim_health_check_interval_secs: 60,
+        shim_health_timeout_secs: 120,
+        shim_shutdown_timeout_secs: 30,
+        shim_working_state_timeout_secs: 1800,
+        pending_queue_max_age_secs: 600,
+        event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+        retro_min_duration_secs: 60,
+        roles: vec![
+            RoleDef {
+                name: "analyst".to_string(),
+                role_type: RoleType::Architect,
+                agent: Some("claude".to_string()),
+                instances: 1,
+                prompt: None,
+                talks_to: vec![],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                barrier_group: Some("analysis".to_string()),
+                use_worktrees: true,
+            },
+            RoleDef {
+                name: "engineer".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("codex".to_string()),
+                instances: 1,
+                prompt: None,
+                talks_to: vec![],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                barrier_group: Some("implementation".to_string()),
+                use_worktrees: true,
+            },
+        ],
+    };
+
+    TeamDaemon::new(DaemonConfig {
+        project_root: project_root.to_path_buf(),
+        team_config,
+        session: "test".to_string(),
+        members: vec![
+            MemberInstance {
+                name: "analyst".to_string(),
+                role_name: "analyst".to_string(),
+                role_type: RoleType::Architect,
+                agent: Some("claude".to_string()),
+                prompt: None,
+                reports_to: None,
+                use_worktrees: true,
+            },
+            MemberInstance {
+                name: "eng-1".to_string(),
+                role_name: "engineer".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("codex".to_string()),
+                prompt: None,
+                reports_to: None,
+                use_worktrees: true,
+            },
+        ],
+        pane_map: HashMap::new(),
+    })
+    .unwrap()
+}
+
+#[test]
+fn clean_room_worktree_dir_uses_barrier_group_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let daemon = clean_room_test_daemon(tmp.path());
+    assert_eq!(
+        daemon.worktree_dir("eng-1"),
+        tmp.path()
+            .join(".batty")
+            .join("worktrees")
+            .join("implementation")
+            .join("eng-1")
+    );
+}
+
+#[test]
+fn clean_room_handoff_write_and_read_emit_audit_events() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut daemon = clean_room_test_daemon(tmp.path());
+    let events_path = tmp
+        .path()
+        .join(".batty")
+        .join("team_config")
+        .join("events.jsonl");
+    daemon.event_sink = EventSink::new(&events_path).unwrap();
+
+    let artifact_path = daemon
+        .write_handoff_artifact(
+            "analyst",
+            Path::new("specs/spec.md"),
+            b"observable behavior",
+        )
+        .unwrap();
+    assert!(artifact_path.exists());
+
+    let content = daemon
+        .read_handoff_artifact("eng-1", Path::new("specs/spec.md"))
+        .unwrap();
+    assert_eq!(content, b"observable behavior");
+
+    let events = std::fs::read_to_string(events_path).unwrap();
+    assert!(events.contains("barrier_artifact_created"));
+    assert!(events.contains("barrier_artifact_read"));
+    assert!(events.contains("content_hash"));
+    assert!(events.contains("specs/spec.md"));
+}
+
+#[test]
+fn clean_room_barrier_violation_attempt_is_logged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut daemon = clean_room_test_daemon(tmp.path());
+    let events_path = tmp
+        .path()
+        .join(".batty")
+        .join("team_config")
+        .join("events.jsonl");
+    daemon.event_sink = EventSink::new(&events_path).unwrap();
+
+    let forbidden = tmp
+        .path()
+        .join(".batty")
+        .join("worktrees")
+        .join("analysis")
+        .join("analyst");
+    let err = daemon
+        .validate_member_barrier_path("eng-1", &forbidden, "read")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("barrier violation"));
+
+    let events = std::fs::read_to_string(events_path).unwrap();
+    assert!(events.contains("barrier_violation_attempt"));
+    assert!(events.contains("outside barrier group"));
+}
+
+#[test]
+fn clean_room_handoff_rejects_parent_directory_escape() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut daemon = clean_room_test_daemon(tmp.path());
+    let events_path = tmp
+        .path()
+        .join(".batty")
+        .join("team_config")
+        .join("events.jsonl");
+    daemon.event_sink = EventSink::new(&events_path).unwrap();
+
+    let err = daemon
+        .write_handoff_artifact("analyst", Path::new("../analysis/raw.txt"), b"nope")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("invalid handoff artifact path"));
+
+    let events = std::fs::read_to_string(events_path).unwrap();
+    assert!(events.contains("barrier_violation_attempt"));
+    assert!(events.contains("shared handoff directory"));
 }
 
 // --- Stale review escalation tests ---

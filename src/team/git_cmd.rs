@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc;
+use std::time::Duration;
 
 pub use super::errors::GitError;
 
@@ -214,6 +216,48 @@ pub fn status_porcelain(repo: &Path) -> Result<String, GitError> {
     Ok(run_git(repo, &["status", "--porcelain"])?.stdout)
 }
 
+pub fn has_user_changes(repo: &Path) -> Result<bool, GitError> {
+    Ok(status_porcelain(repo)?
+        .lines()
+        .any(|line| !line.starts_with("?? .batty/")))
+}
+
+pub fn auto_commit_if_dirty(
+    repo: &Path,
+    message: &str,
+    timeout: Duration,
+) -> Result<bool, GitError> {
+    if !has_user_changes(repo)? {
+        return Ok(false);
+    }
+
+    let repo = repo.to_path_buf();
+    let message = message.to_string();
+    let command = format_git_command(&repo, &["add", "-A"]);
+    let (tx, rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let result = (|| -> Result<bool, GitError> {
+            run_git(&repo, &["add", "-A"])?;
+            run_git(&repo, &["commit", "-m", &message])?;
+            Ok(true)
+        })();
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(GitError::Exec {
+            command,
+            source: std::io::Error::new(std::io::ErrorKind::TimedOut, "git auto-commit timed out"),
+        }),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(GitError::Exec {
+            command,
+            source: std::io::Error::other("git auto-commit worker disconnected"),
+        }),
+    }
+}
+
 pub fn checkout_new_branch(repo: &Path, branch: &str, start: &str) -> Result<(), GitError> {
     run_git(repo, &["checkout", "-B", branch, start])?;
     Ok(())
@@ -366,6 +410,33 @@ mod tests {
             .output()
             .unwrap();
         assert!(is_git_repo(tmp.path()));
+    }
+
+    #[test]
+    fn has_user_changes_ignores_batty_untracked_files() {
+        let tmp = init_repo();
+        std::fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+        std::fs::write(tmp.path().join(".batty").join("state.json"), "{}\n").unwrap();
+
+        assert!(!has_user_changes(tmp.path()).unwrap());
+    }
+
+    #[test]
+    fn auto_commit_if_dirty_commits_changes() {
+        let tmp = init_repo();
+        std::fs::write(tmp.path().join("note.txt"), "hello\n").unwrap();
+
+        let committed = auto_commit_if_dirty(
+            tmp.path(),
+            "wip: auto-save before restart [batty]",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert!(committed);
+        assert!(!has_user_changes(tmp.path()).unwrap());
+        let log = run_git(tmp.path(), &["log", "--oneline", "-1"]).unwrap();
+        assert!(log.stdout.contains("wip: auto-save before restart [batty]"));
     }
 
     // --- Error path and recovery tests (Task #265) ---

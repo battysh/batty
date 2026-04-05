@@ -539,6 +539,9 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                     "[shim-sdk {}] shutdown requested (timeout: {}s)",
                     args.id, timeout_secs
                 );
+                if let Err(error) = super::runtime::preserve_work_before_kill(&args.cwd) {
+                    eprintln!("[shim-sdk {}] work preservation failed: {error}", args.id);
+                }
                 // Close stdin to signal EOF to the subprocess
                 drop(stdin_writer);
 
@@ -557,6 +560,9 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
             }
 
             ShimCommand::Kill => {
+                if let Err(error) = super::runtime::preserve_work_before_kill(&args.cwd) {
+                    eprintln!("[shim-sdk {}] work preservation failed: {error}", args.id);
+                }
                 terminate_child(&mut child);
                 break;
             }
