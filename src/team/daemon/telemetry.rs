@@ -125,6 +125,20 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::task_unblocked(role, &task));
     }
 
+    pub(super) fn record_state_reconciliation(
+        &mut self,
+        role: Option<&str>,
+        task_id: Option<u32>,
+        correction: &str,
+    ) {
+        let task = task_id.map(|id| id.to_string());
+        self.emit_event(TeamEvent::state_reconciliation(
+            role,
+            task.as_deref(),
+            correction,
+        ));
+    }
+
     pub(crate) fn record_performance_regression(&mut self, task: impl Into<String>, reason: &str) {
         let task = task.into();
         self.emit_event(TeamEvent::performance_regression(&task, reason));
