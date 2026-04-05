@@ -265,6 +265,7 @@ fn main() -> Result<()> {
                     cli::InitTemplate::Large => "large",
                     cli::InitTemplate::Research => "research",
                     cli::InitTemplate::Software => "software",
+                    cli::InitTemplate::Cleanroom => "cleanroom",
                     cli::InitTemplate::Batty => "batty",
                 };
                 // Interactive prompts for project name and agent

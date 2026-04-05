@@ -504,6 +504,8 @@ pub enum InitTemplate {
     Research,
     /// Human + tech lead + 2 eng managers + 8 developers — full product team (11 panes)
     Software,
+    /// Clean-room workflow: decompiler + spec-writer + test-writer + implementer (4 panes)
+    Cleanroom,
     /// Batty self-development: human + architect + manager + 4 Rust engineers (6 panes)
     Batty,
 }
@@ -1969,6 +1971,7 @@ mod tests {
             ("large", InitTemplate::Large),
             ("research", InitTemplate::Research),
             ("software", InitTemplate::Software),
+            ("cleanroom", InitTemplate::Cleanroom),
             ("batty", InitTemplate::Batty),
         ] {
             let cli = Cli::parse_from(["batty", "init", "--template", arg]);
