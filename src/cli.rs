@@ -285,6 +285,14 @@ pub enum Command {
         #[arg(long)]
         pty_log_path: Option<String>,
 
+        /// Seconds to wait for auto-commit before force-killing.
+        #[arg(long, default_value_t = 5)]
+        graceful_shutdown_timeout_secs: u64,
+
+        /// Auto-commit dirty worktrees before restart/shutdown.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        auto_commit_on_restart: bool,
+
         /// Use SDK mode (NDJSON stdin/stdout) instead of PTY screen-scraping
         #[arg(long, default_value_t = false)]
         sdk_mode: bool,
