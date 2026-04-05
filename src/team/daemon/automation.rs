@@ -3,7 +3,7 @@
 //! Review timeout, dependency unblocking, pipeline starvation,
 //! worktree reconciliation, board rotation, cron, retrospectives.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -11,6 +11,9 @@ use tracing::{info, warn};
 
 use super::helpers::MemberWorktreeContext;
 use super::*;
+
+const STATE_RECONCILIATION_AUDIT_KEY: &str = "state-reconciliation::audit";
+
 impl TeamDaemon {
     pub(super) fn reconcile_active_tasks(&mut self) -> Result<()> {
         let tasks_dir = self.board_dir().join("tasks");
@@ -19,10 +22,14 @@ impl TeamDaemon {
         } else {
             Vec::new()
         };
+        if self.state_reconciliation_audit_due() {
+            self.adopt_board_owned_tasks(&board_tasks);
+            self.mark_state_reconciliation_audit();
+        }
         if self.active_tasks.is_empty() {
             return Ok(());
         }
-        let stale: Vec<(String, u32, &str)> = self
+        let stale: Vec<(String, u32, &'static str)> = self
             .active_tasks
             .iter()
             .filter_map(|(engineer, task_id)| {
@@ -53,6 +60,11 @@ impl TeamDaemon {
                 reason,
                 "Reconciled stale active_task: {engineer} was tracking task #{task_id} ({reason})"
             );
+            self.record_state_reconciliation(Some(&engineer), Some(task_id), "clear");
+            self.record_orchestrator_action(format!(
+                "state reconciliation: cleared stale active task #{} for {} ({})",
+                task_id, engineer, reason
+            ));
             self.clear_active_task(&engineer);
         }
 
@@ -168,6 +180,59 @@ impl TeamDaemon {
         Ok(())
     }
 
+    fn state_reconciliation_audit_due(&self) -> bool {
+        let interval = Duration::from_secs(
+            self.config
+                .team_config
+                .board
+                .state_reconciliation_interval_secs,
+        );
+        self.intervention_cooldowns
+            .get(STATE_RECONCILIATION_AUDIT_KEY)
+            .is_none_or(|last| last.elapsed() >= interval)
+    }
+
+    fn mark_state_reconciliation_audit(&mut self) {
+        self.intervention_cooldowns
+            .insert(STATE_RECONCILIATION_AUDIT_KEY.to_string(), Instant::now());
+    }
+
+    fn adopt_board_owned_tasks(&mut self, board_tasks: &[crate::task::Task]) {
+        let mut candidates: HashMap<String, Vec<u32>> = HashMap::new();
+        for task in board_tasks {
+            if !super::interventions::task_needs_owned_intervention(task.status.as_str()) {
+                continue;
+            }
+            let Some(engineer) = task.claimed_by.as_deref() else {
+                continue;
+            };
+            if self.active_tasks.contains_key(engineer) {
+                continue;
+            }
+            candidates
+                .entry(engineer.to_string())
+                .or_default()
+                .push(task.id);
+        }
+
+        for (engineer, task_ids) in candidates {
+            if let [task_id] = task_ids.as_slice() {
+                self.active_tasks.insert(engineer.clone(), *task_id);
+                self.record_state_reconciliation(Some(&engineer), Some(*task_id), "adopt");
+                self.record_orchestrator_action(format!(
+                    "state reconciliation: adopted board-owned task #{} for {}",
+                    task_id, engineer
+                ));
+            } else {
+                warn!(
+                    engineer = %engineer,
+                    ?task_ids,
+                    "state reconciliation: skipping adopt due to multiple claimed board tasks"
+                );
+            }
+        }
+    }
+
     pub(super) fn maybe_escalate_stale_reviews(&mut self) -> Result<()> {
         let board_dir = self.board_dir();
         let tasks_dir = board_dir.join("tasks");
@@ -189,18 +254,50 @@ impl TeamDaemon {
             .map(|t| t.id)
             .collect();
 
-        // Prune tracking maps for tasks no longer in review
-        self.review_first_seen
-            .retain(|id, _| review_task_ids.contains(id));
-        self.review_nudge_sent
-            .retain(|id| review_task_ids.contains(id));
+        // Prune tracking maps for tasks no longer in review and log the repair.
+        let stale_review_first_seen: Vec<u32> = self
+            .review_first_seen
+            .keys()
+            .copied()
+            .filter(|id| !review_task_ids.contains(id))
+            .collect();
+        for task_id in stale_review_first_seen {
+            self.review_first_seen.remove(&task_id);
+            self.record_state_reconciliation(None, Some(task_id), "review_fix");
+            self.record_orchestrator_action(format!(
+                "state reconciliation: cleared stale review tracking for task #{}",
+                task_id
+            ));
+        }
+        let stale_review_nudges: Vec<u32> = self
+            .review_nudge_sent
+            .iter()
+            .copied()
+            .filter(|id| !review_task_ids.contains(id))
+            .collect();
+        for task_id in stale_review_nudges {
+            self.review_nudge_sent.remove(&task_id);
+            self.record_state_reconciliation(None, Some(task_id), "review_fix");
+            self.record_orchestrator_action(format!(
+                "state reconciliation: cleared stale review nudge state for task #{}",
+                task_id
+            ));
+        }
 
         for task in &tasks {
             if task.status != "review" {
                 continue;
             }
 
-            let first_seen = *self.review_first_seen.entry(task.id).or_insert(now);
+            if !self.review_first_seen.contains_key(&task.id) {
+                self.record_state_reconciliation(None, Some(task.id), "review_fix");
+                self.record_orchestrator_action(format!(
+                    "state reconciliation: seeded missing review tracking for task #{}",
+                    task.id
+                ));
+                self.review_first_seen.insert(task.id, now);
+            }
+            let first_seen = *self.review_first_seen.get(&task.id).unwrap_or(&now);
             let age = now.saturating_sub(first_seen);
 
             // Resolve per-priority thresholds (falls back to global defaults)
@@ -1618,7 +1715,50 @@ Second body.
     }
 
     #[test]
-    fn reconcile_active_tasks_does_not_replay_owned_in_progress_task_from_worktree_branch() {
+    fn reconcile_active_tasks_adopts_single_board_owned_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
+
+        write_board_task_file(
+            tmp.path(),
+            20,
+            "owned-task",
+            "in-progress",
+            Some("eng-1"),
+            &[],
+            None,
+        );
+
+        daemon.reconcile_active_tasks().unwrap();
+
+        assert_eq!(daemon.active_task_id("eng-1"), Some(20));
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "state_reconciliation"
+                && event.role.as_deref() == Some("eng-1")
+                && event.task.as_deref() == Some("20")
+                && event.reason.as_deref() == Some("adopt")
+        }));
+    }
+
+    #[test]
+    fn reconcile_active_tasks_adopts_owned_in_progress_task_from_worktree_branch() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "replay-owned-task");
         let manager = MemberInstance {
@@ -1662,7 +1802,7 @@ Second body.
         git_ok(&worktree_dir, &["commit", "-m", "task work"]);
 
         daemon.reconcile_active_tasks().unwrap();
-        assert_eq!(daemon.active_task_id("eng-1"), None);
+        assert_eq!(daemon.active_task_id("eng-1"), Some(10));
     }
 
     #[test]
@@ -2302,6 +2442,67 @@ Second body.
         assert!(!daemon.review_first_seen.contains_key(&80));
         assert!(!daemon.review_first_seen.contains_key(&81));
         assert!(!daemon.review_nudge_sent.contains(&80));
+    }
+
+    #[test]
+    fn stale_review_tracking_emits_state_reconciliation_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let mut daemon = make_test_daemon(tmp.path(), Vec::new());
+        std::fs::create_dir_all(
+            tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks"),
+        )
+        .unwrap();
+        daemon.event_sink = EventSink::new(&events_path).unwrap();
+        daemon.review_first_seen.insert(80, 1000);
+        daemon.review_nudge_sent.insert(80);
+
+        daemon.maybe_escalate_stale_reviews().unwrap();
+
+        let events = crate::team::events::read_events(&events_path).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "state_reconciliation"
+                && event.task.as_deref() == Some("80")
+                && event.reason.as_deref() == Some("review_fix")
+        }));
+    }
+
+    #[test]
+    fn missing_review_tracking_emits_state_reconciliation_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let mut daemon = make_test_daemon(tmp.path(), Vec::new());
+        daemon.event_sink = EventSink::new(&events_path).unwrap();
+        write_board_task_file(
+            tmp.path(),
+            60,
+            "review-task",
+            "review",
+            Some("eng-1"),
+            &[],
+            None,
+        );
+
+        daemon.maybe_escalate_stale_reviews().unwrap();
+
+        let events = crate::team::events::read_events(&events_path).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "state_reconciliation"
+                && event.task.as_deref() == Some("60")
+                && event.reason.as_deref() == Some("review_fix")
+        }));
     }
 
     // ── maybe_rotate_board ───────────────────────────────────────

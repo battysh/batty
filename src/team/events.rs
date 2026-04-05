@@ -192,6 +192,15 @@ impl TeamEvent {
         }
     }
 
+    pub fn state_reconciliation(role: Option<&str>, task: Option<&str>, correction: &str) -> Self {
+        Self {
+            role: role.map(str::to_string),
+            task: task.map(str::to_string),
+            reason: Some(correction.into()),
+            ..Self::base("state_reconciliation")
+        }
+    }
+
     pub fn task_escalated(role: &str, task: &str, reason: Option<&str>) -> Self {
         Self {
             role: Some(role.into()),
@@ -771,6 +780,10 @@ mod tests {
             (
                 "review_escalated",
                 TeamEvent::review_escalated("42", "stale review"),
+            ),
+            (
+                "state_reconciliation",
+                TeamEvent::state_reconciliation(Some("eng-1"), Some("42"), "adopt"),
             ),
             ("task_reworked", TeamEvent::task_reworked("eng-1", "42")),
             ("load_snapshot", TeamEvent::load_snapshot(2, 5, true)),
