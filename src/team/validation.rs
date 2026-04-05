@@ -338,6 +338,45 @@ mod tests {
     }
 
     #[test]
+    fn team_cleanroom_template_validation_uses_real_capabilities() {
+        let members = assert_template_topology(
+            include_str!("templates/team_cleanroom.yaml"),
+            &TemplateExpectation {
+                users: 0,
+                architects: 1,
+                managers: 1,
+                engineers: 2,
+                role_capabilities: vec![
+                    (
+                        "decompiler",
+                        &[WorkflowCapability::Planner, WorkflowCapability::Reviewer],
+                    ),
+                    (
+                        "spec-writer",
+                        &[WorkflowCapability::Dispatcher, WorkflowCapability::Reviewer],
+                    ),
+                    ("test-writer", &[WorkflowCapability::Executor]),
+                    ("implementer", &[WorkflowCapability::Executor]),
+                ],
+                operator_caps: &[WorkflowCapability::Operator],
+            },
+        );
+
+        assert!(members.iter().any(|member| member.name == "decompiler"));
+        assert!(members.iter().any(|member| member.name == "spec-writer"));
+        assert!(
+            members
+                .iter()
+                .any(|member| member.name == "test-writer-1-1")
+        );
+        assert!(
+            members
+                .iter()
+                .any(|member| member.name == "implementer-1-1")
+        );
+    }
+
+    #[test]
     fn orchestrator_enabled_uses_real_workflow_modes() {
         let legacy: TeamConfig = serde_yaml::from_str(
             r#"
@@ -474,6 +513,7 @@ roles:
             include_str!("templates/team_squad.yaml"),
             include_str!("templates/team_research.yaml"),
             include_str!("templates/team_software.yaml"),
+            include_str!("templates/team_cleanroom.yaml"),
         ];
 
         for yaml in templates {
@@ -529,6 +569,7 @@ roles:
             include_str!("templates/team_squad.yaml"),
             include_str!("templates/team_research.yaml"),
             include_str!("templates/team_software.yaml"),
+            include_str!("templates/team_cleanroom.yaml"),
         ];
 
         for yaml in templates {
