@@ -348,6 +348,8 @@ mod tests {
             uptime_secs: None,
             session_size_bytes: None,
             output_bytes: None,
+            filename: None,
+            content_hash: None,
             ts,
         }
     }
@@ -378,6 +380,8 @@ mod tests {
             uptime_secs: None,
             session_size_bytes: None,
             output_bytes: None,
+            filename: None,
+            content_hash: None,
             ts,
         }
     }

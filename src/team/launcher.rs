@@ -126,6 +126,7 @@ impl TeamDaemon {
     ) -> Result<MemberLaunchPlan> {
         let team_config_dir = self.config.project_root.join(".batty").join("team_config");
         let work_dir = self.member_work_dir(member);
+        self.validate_member_work_dir(&member.name, &work_dir)?;
 
         let agent_name = member.agent.as_deref().unwrap_or("claude");
         let prompt_text = strip_nudge_section(&self.load_prompt(member, &team_config_dir));

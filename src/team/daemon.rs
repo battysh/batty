@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -499,6 +500,50 @@ impl TeamDaemon {
         self.active_tasks.get(engineer).copied()
     }
 
+    pub(super) fn preserve_worktree_before_restart(
+        &self,
+        member_name: &str,
+        worktree_dir: &Path,
+        reason: &str,
+    ) {
+        if !self
+            .config
+            .team_config
+            .workflow_policy
+            .auto_commit_on_restart
+            || !worktree_dir.exists()
+        {
+            return;
+        }
+
+        let timeout = Duration::from_secs(
+            self.config
+                .team_config
+                .workflow_policy
+                .graceful_shutdown_timeout_secs,
+        );
+        match super::git_cmd::auto_commit_if_dirty(
+            worktree_dir,
+            "wip: auto-save before restart [batty]",
+            timeout,
+        ) {
+            Ok(true) => info!(
+                member = member_name,
+                worktree = %worktree_dir.display(),
+                reason,
+                "auto-saved dirty worktree before restart"
+            ),
+            Ok(false) => {}
+            Err(error) => warn!(
+                member = member_name,
+                worktree = %worktree_dir.display(),
+                reason,
+                error = %error,
+                "failed to auto-save dirty worktree before restart"
+            ),
+        }
+    }
+
     pub(super) fn project_root(&self) -> &Path {
         &self.config.project_root
     }
@@ -518,11 +563,13 @@ impl TeamDaemon {
     }
 
     pub(super) fn worktree_dir(&self, engineer: &str) -> PathBuf {
-        self.config
-            .project_root
-            .join(".batty")
-            .join("worktrees")
-            .join(engineer)
+        let base = self.config.project_root.join(".batty").join("worktrees");
+        match self.member_barrier_group(engineer) {
+            Some(group) if self.config.team_config.workflow_policy.clean_room_mode => {
+                base.join(group).join(engineer)
+            }
+            _ => base.join(engineer),
+        }
     }
 
     pub(super) fn board_dir(&self) -> PathBuf {
@@ -543,6 +590,159 @@ impl TeamDaemon {
             .find(|member| member.name == engineer)
             .map(|member| member.use_worktrees)
             .unwrap_or(false)
+    }
+
+    pub(super) fn handoff_dir(&self) -> PathBuf {
+        self.config.project_root.join(
+            self.config
+                .team_config
+                .workflow_policy
+                .handoff_directory
+                .as_str(),
+        )
+    }
+
+    pub(super) fn member_barrier_group(&self, member_name: &str) -> Option<&str> {
+        let member = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)?;
+        self.config
+            .team_config
+            .role_barrier_group(&member.role_name)
+    }
+
+    pub(super) fn validate_member_work_dir(
+        &self,
+        member_name: &str,
+        work_dir: &Path,
+    ) -> Result<()> {
+        if !self.config.team_config.workflow_policy.clean_room_mode {
+            return Ok(());
+        }
+
+        let expected = self.worktree_dir(member_name);
+        if work_dir == expected {
+            return Ok(());
+        }
+        bail!(
+            "clean-room barrier violation: member '{}' launch dir '{}' does not match '{}'",
+            member_name,
+            work_dir.display(),
+            expected.display()
+        );
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn validate_member_barrier_path(
+        &mut self,
+        member_name: &str,
+        path: &Path,
+        access: &str,
+    ) -> Result<()> {
+        if !self.config.team_config.workflow_policy.clean_room_mode {
+            return Ok(());
+        }
+
+        let Some(group) = self.member_barrier_group(member_name) else {
+            return Ok(());
+        };
+        let member_root = self.worktree_dir(member_name);
+        let handoff_root = self.handoff_dir();
+        if path.starts_with(&member_root) || path.starts_with(&handoff_root) {
+            return Ok(());
+        }
+
+        self.record_barrier_violation_attempt(
+            member_name,
+            &path.display().to_string(),
+            &format!("{access} outside barrier group '{group}'"),
+        );
+        bail!(
+            "clean-room barrier violation: '{}' cannot {} '{}'",
+            member_name,
+            access,
+            path.display()
+        );
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn write_handoff_artifact(
+        &mut self,
+        author_role: &str,
+        relative_path: &Path,
+        content: &[u8],
+    ) -> Result<PathBuf> {
+        if relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            self.record_barrier_violation_attempt(
+                author_role,
+                &relative_path.display().to_string(),
+                "handoff writes must stay within the shared handoff directory",
+            );
+            bail!(
+                "invalid handoff artifact path '{}': must be relative and stay under handoff/",
+                relative_path.display()
+            );
+        }
+        let handoff_root = self.handoff_dir();
+        let artifact_path = handoff_root.join(relative_path);
+        let Some(parent) = artifact_path.parent() else {
+            bail!(
+                "handoff artifact path '{}' has no parent",
+                artifact_path.display()
+            );
+        };
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+        std::fs::write(&artifact_path, content)
+            .with_context(|| format!("failed to write {}", artifact_path.display()))?;
+
+        let content_hash = format!("{:x}", Sha256::digest(content));
+        self.record_barrier_artifact_created(
+            author_role,
+            &artifact_path.display().to_string(),
+            &content_hash,
+        );
+        Ok(artifact_path)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn read_handoff_artifact(
+        &mut self,
+        reader_role: &str,
+        relative_path: &Path,
+    ) -> Result<Vec<u8>> {
+        if relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            self.record_barrier_violation_attempt(
+                reader_role,
+                &relative_path.display().to_string(),
+                "handoff reads must stay within the shared handoff directory",
+            );
+            bail!(
+                "invalid handoff artifact path '{}': must be relative and stay under handoff/",
+                relative_path.display()
+            );
+        }
+        let artifact_path = self.handoff_dir().join(relative_path);
+        self.validate_member_barrier_path(reader_role, &artifact_path, "read")?;
+        let content = std::fs::read(&artifact_path)
+            .with_context(|| format!("failed to read {}", artifact_path.display()))?;
+        let content_hash = format!("{:x}", Sha256::digest(&content));
+        self.record_barrier_artifact_read(
+            reader_role,
+            &artifact_path.display().to_string(),
+            &content_hash,
+        );
+        Ok(content)
     }
 
     pub(super) fn manager_name(&self, engineer: &str) -> Option<String> {
