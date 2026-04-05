@@ -1,12 +1,15 @@
 //! Backend health, worktree staleness, uncommitted work warnings, and prompt loading.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tracing::{info, warn};
 
 use super::super::*;
+
+const SHARED_TARGET_DISK_THRESHOLD_PCT: u8 = 80;
+const SHARED_TARGET_CLEANUP_INTERVAL: Duration = Duration::from_secs(900);
 
 /// Check if a worktree has unresolved merge conflicts (UU, AA, DU, UD entries).
 fn worktree_has_merge_conflicts(worktree_path: &Path) -> bool {
@@ -35,6 +38,36 @@ fn worktree_has_merge_conflicts(worktree_path: &Path) -> bool {
 }
 
 impl TeamDaemon {
+    pub(in super::super) fn maybe_cleanup_shared_cargo_target(&mut self) -> Result<()> {
+        if self.last_shared_target_cleanup.elapsed() < SHARED_TARGET_CLEANUP_INTERVAL {
+            return Ok(());
+        }
+        self.last_shared_target_cleanup = Instant::now();
+
+        let shared_target =
+            crate::team::task_loop::shared_cargo_target_dir(&self.config.project_root);
+        std::fs::create_dir_all(&shared_target).ok();
+        let used_pct = filesystem_usage_percent(&shared_target)?;
+        if used_pct < SHARED_TARGET_DISK_THRESHOLD_PCT {
+            return Ok(());
+        }
+
+        let removed = prune_legacy_worktree_target_dirs(&self.config.project_root)?;
+        if !removed.is_empty() {
+            info!(
+                used_pct,
+                removed = removed.len(),
+                "pruned legacy per-worktree cargo targets under disk pressure"
+            );
+            self.record_orchestrator_action(format!(
+                "runtime: pruned {} legacy worktree target dirs at {}% disk usage",
+                removed.len(),
+                used_pct
+            ));
+        }
+        Ok(())
+    }
+
     /// Detect worktrees stuck on stale branches whose commits have already
     /// been cherry-picked onto main, and auto-reset them to the base branch.
     /// Also detects and auto-recovers worktrees stuck in merge conflict state.
@@ -345,6 +378,54 @@ impl TeamDaemon {
             }
         }
     }
+}
+
+fn filesystem_usage_percent(path: &Path) -> Result<u8> {
+    let output = std::process::Command::new("df")
+        .args(["-Pk", path.to_string_lossy().as_ref()])
+        .output()?;
+    if !output.status.success() {
+        return Ok(0);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(line) = stdout.lines().nth(1) else {
+        return Ok(0);
+    };
+    let pct_field = line.split_whitespace().nth(4).unwrap_or("0%");
+    Ok(pct_field.trim_end_matches('%').parse().unwrap_or(0))
+}
+
+fn prune_legacy_worktree_target_dirs(project_root: &Path) -> Result<Vec<PathBuf>> {
+    let worktrees_root = project_root.join(".batty").join("worktrees");
+    if !worktrees_root.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut removed = Vec::new();
+    for entry in std::fs::read_dir(&worktrees_root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let direct_target = path.join("target");
+        if direct_target.is_dir() {
+            std::fs::remove_dir_all(&direct_target)?;
+            removed.push(direct_target);
+        }
+
+        for nested in std::fs::read_dir(&path)? {
+            let nested = nested?;
+            let nested_target = nested.path().join("target");
+            if nested_target.is_dir() {
+                std::fs::remove_dir_all(&nested_target)?;
+                removed.push(nested_target);
+            }
+        }
+    }
+
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -885,6 +966,43 @@ mod tests {
             .workflow_policy
             .uncommitted_warn_threshold = threshold;
         daemon
+    }
+
+    #[test]
+    fn prune_legacy_worktree_target_dirs_removes_engineer_targets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree_target = tmp
+            .path()
+            .join(".batty")
+            .join("worktrees")
+            .join("eng-1")
+            .join("target");
+        std::fs::create_dir_all(&worktree_target).unwrap();
+        std::fs::write(worktree_target.join("stale"), "artifact").unwrap();
+
+        let removed = super::prune_legacy_worktree_target_dirs(tmp.path()).unwrap();
+
+        assert_eq!(removed, vec![worktree_target.clone()]);
+        assert!(!worktree_target.exists());
+    }
+
+    #[test]
+    fn prune_legacy_worktree_target_dirs_removes_nested_multi_repo_targets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested_target = tmp
+            .path()
+            .join(".batty")
+            .join("worktrees")
+            .join("eng-2")
+            .join("subrepo")
+            .join("target");
+        std::fs::create_dir_all(&nested_target).unwrap();
+        std::fs::write(nested_target.join("stale"), "artifact").unwrap();
+
+        let removed = super::prune_legacy_worktree_target_dirs(tmp.path()).unwrap();
+
+        assert_eq!(removed, vec![nested_target.clone()]);
+        assert!(!nested_target.exists());
     }
 
     #[test]
