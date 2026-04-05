@@ -177,6 +177,8 @@ pub struct TeamDaemon {
     pub(super) last_health_check: Instant,
     /// Rate-limiting: last time each engineer received an uncommitted-work warning.
     pub(super) last_uncommitted_warn: HashMap<String, Instant>,
+    /// Last time the daemon checked for stale per-worktree cargo targets to prune.
+    pub(super) last_shared_target_cleanup: Instant,
     /// Tracks consecutive "no commits ahead of main" rejections per engineer.
     /// Used to detect and auto-recover from branches that never diverged.
     pub(super) completion_rejection_counts: HashMap<String, u32>,
@@ -431,6 +433,7 @@ impl TeamDaemon {
             // Start far enough in the past to trigger an immediate check.
             last_health_check: Instant::now() - Duration::from_secs(3600),
             last_uncommitted_warn: HashMap::new(),
+            last_shared_target_cleanup: Instant::now() - Duration::from_secs(3600),
             completion_rejection_counts: HashMap::new(),
             narration_rejection_counts: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
