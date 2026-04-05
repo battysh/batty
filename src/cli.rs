@@ -214,6 +214,9 @@ pub enum Command {
         gaps: bool,
     },
 
+    /// Run clean-room equivalence verification from PARITY.md
+    Verify,
+
     /// Show pending dispatch queue entries
     Queue,
 
@@ -1303,6 +1306,12 @@ mod tests {
             }
             other => panic!("expected parity command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn verify_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "verify"]);
+        assert!(matches!(cli.command, Command::Verify));
     }
 
     #[test]

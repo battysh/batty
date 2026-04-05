@@ -1215,6 +1215,48 @@
       ],
       "title": "Narration Rejection Rate Per Hour (%)",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2
+          },
+          "max": 1,
+          "min": 0,
+          "unit": "percentunit"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 79
+      },
+      "id": 114,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE((SELECT MIN(timestamp) / 3600 FROM events WHERE event_type='parity_updated'), strftime('%s', 'now') / 3600)\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events WHERE event_type='parity_updated')\n), parity AS (\n  SELECT timestamp / 3600 AS hr, AVG(load) AS rate FROM events WHERE event_type='parity_updated' GROUP BY hr\n) SELECT h * 3600 AS time, COALESCE(parity.rate, 0.0) AS verification_pass_rate FROM hours LEFT JOIN parity ON hours.h = parity.hr ORDER BY time;",
+          "queryType": "table",
+          "rawQueryText": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE((SELECT MIN(timestamp) / 3600 FROM events WHERE event_type='parity_updated'), strftime('%s', 'now') / 3600)\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events WHERE event_type='parity_updated')\n), parity AS (\n  SELECT timestamp / 3600 AS hr, AVG(load) AS rate FROM events WHERE event_type='parity_updated' GROUP BY hr\n) SELECT h * 3600 AS time, COALESCE(parity.rate, 0.0) AS verification_pass_rate FROM hours LEFT JOIN parity ON hours.h = parity.hr ORDER BY time;",
+          "rawSql": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE((SELECT MIN(timestamp) / 3600 FROM events WHERE event_type='parity_updated'), strftime('%s', 'now') / 3600)\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events WHERE event_type='parity_updated')\n), parity AS (\n  SELECT timestamp / 3600 AS hr, AVG(load) AS rate FROM events WHERE event_type='parity_updated' GROUP BY hr\n) SELECT h * 3600 AS time, COALESCE(parity.rate, 0.0) AS verification_pass_rate FROM hours LEFT JOIN parity ON hours.h = parity.hr ORDER BY time;",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Verification Pass Rate Over Time",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",

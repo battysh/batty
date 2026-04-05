@@ -91,6 +91,17 @@ jobs:
       - name: Build
         run: cargo build
 
+      - name: Verify parity equivalence
+        run: cargo run -- verify
+
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-report-${{ matrix.os }}
+          path: .batty/reports/verification/latest.md
+          if-no-files-found: ignore
+
       - name: Test
         run: >-
           cargo test --

@@ -235,11 +235,13 @@ fn scaffold_cleanroom_assets(
     let implementation_dir = project_root.join("implementation");
     let planning_dir = project_root.join("planning");
     let specs_dir = project_root.join("specs");
+    let verification_scripts_dir = project_root.join("scripts").join("verification");
 
     create_dir_if_missing(&analysis_dir, created)?;
     create_dir_if_missing(&implementation_dir, created)?;
     create_dir_if_missing(&planning_dir, created)?;
     create_dir_if_missing(&specs_dir, created)?;
+    create_dir_if_missing(&verification_scripts_dir, created)?;
 
     write_scaffold_file(
         &project_root.join("PARITY.md"),
@@ -258,6 +260,32 @@ fn scaffold_cleanroom_assets(
         include_str!("templates/cleanroom_process.md"),
         force,
         created,
+    )?;
+    write_scaffold_file(
+        &project_root.join(".batty").join("verification.yml"),
+        include_str!("templates/cleanroom_verification.yml"),
+        force,
+        created,
+    )?;
+    write_scaffold_file(
+        &verification_scripts_dir.join("placeholder-baseline.sh"),
+        include_str!("templates/cleanroom_verification_baseline.sh"),
+        force,
+        created,
+    )?;
+    write_scaffold_file(
+        &verification_scripts_dir.join("placeholder-candidate.sh"),
+        include_str!("templates/cleanroom_verification_candidate.sh"),
+        force,
+        created,
+    )?;
+    mark_executable(
+        &verification_scripts_dir.join("placeholder-baseline.sh"),
+        force,
+    )?;
+    mark_executable(
+        &verification_scripts_dir.join("placeholder-candidate.sh"),
+        force,
     )?;
 
     Ok(())
@@ -286,6 +314,23 @@ fn write_scaffold_file(
         std::fs::write(path, content)
             .with_context(|| format!("failed to write {}", path.display()))?;
         created.push(path.to_path_buf());
+    }
+    Ok(())
+}
+
+fn mark_executable(path: &Path, force: bool) -> Result<()> {
+    if force || path.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut perms = std::fs::metadata(path)
+                .with_context(|| format!("failed to stat {}", path.display()))?
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms)
+                .with_context(|| format!("failed to chmod {}", path.display()))?;
+        }
     }
     Ok(())
 }
