@@ -21,7 +21,8 @@ use crate::team::task_loop::{
 };
 
 use super::git_ops::{
-    commits_ahead_of_main, files_changed_from_main, now_unix, run_git_with_context,
+    commits_ahead_of_main, diff_stat_from_main, files_changed_from_main, now_unix,
+    run_git_with_context,
 };
 use super::lock::{MergeLock, MergeOutcome};
 use super::operations::merge_engineer_branch;
@@ -180,6 +181,11 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     // --- Narration-only quality gate ---
     // Commits exist, but check if any files actually changed. If the agent produced
     // commits with only commentary (e.g. empty commits, metadata-only), reject.
+    let diff_stat = if daemon.is_multi_repo {
+        multi_repo_diff_stat_from_main(&worktree_dir, &daemon.sub_repo_names)?
+    } else {
+        diff_stat_from_main(&worktree_dir)?
+    };
     let files_changed = if daemon.is_multi_repo {
         multi_repo_files_changed_from_main(&worktree_dir, &daemon.sub_repo_names)?
     } else {
@@ -189,7 +195,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     if files_changed == 0 {
         let narration_count = daemon
             .narration_rejection_counts
-            .entry(engineer.to_string())
+            .entry(task_id)
             .or_insert(0);
         *narration_count += 1;
         let count = *narration_count;
@@ -200,32 +206,47 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
             engineer,
             task_id,
             narration_rejection_count = count,
-            "commits exist but no files changed — narration-only completion"
+            diff_stat = %diff_stat,
+            "commits exist but no file diff — narration-only completion"
         );
         daemon.record_narration_rejection(engineer, task_id, count);
 
-        if count >= MAX_NARRATION_REJECTIONS {
+        if count == MAX_NARRATION_REJECTIONS {
             // Escalate to manager
             if let Some(ref manager_name) = manager_name {
                 let msg = format!(
-                    "[daemon] Engineer {engineer} has submitted {count} narration-only completions for task #{task_id}. \
-                     Branch has commits but zero file changes. The agent may need a more directive prompt or task restart."
+                    "[daemon] Engineer {engineer} hit the narration-only quality gate {count} times on task #{task_id}. \
+                     Branch has {total_commits} commit(s) ahead of main but `git diff --stat main..HEAD` is empty.\n\
+                     Follow-up prompt sent: \"Your previous attempt only produced commentary. Execute the actual commands to make the code changes.\"\n\
+                     Diff stat: {}\n\
+                     The agent may need a more directive prompt or task restart.",
+                    if diff_stat.is_empty() {
+                        "(empty)".to_string()
+                    } else {
+                        diff_stat.clone()
+                    }
                 );
                 daemon.queue_message("daemon", manager_name, &msg)?;
             }
-            daemon.narration_rejection_counts.remove(engineer);
         }
 
         let msg = format!(
-            "Your previous attempt only produced commentary — your branch has {total_commits} commit(s) but zero file changes. \
-             Execute the actual commands to make the code changes, then commit them."
+            "Your previous attempt only produced commentary. Execute the actual commands to make the code changes.\n\
+             Batty checked `git diff --stat main..HEAD` and found no file changes.\n\
+             Commits ahead of main: {total_commits}\n\
+             Diff stat: {}",
+            if diff_stat.is_empty() {
+                "(empty)".to_string()
+            } else {
+                diff_stat.clone()
+            }
         );
         daemon.queue_message("batty", engineer, &msg)?;
         return Ok(());
     }
 
     // Clear narration rejection counter on real file changes
-    daemon.narration_rejection_counts.remove(engineer);
+    daemon.narration_rejection_counts.remove(&task_id);
 
     let task_branch = if daemon.is_multi_repo {
         multi_repo_task_branch(&worktree_dir, &daemon.sub_repo_names)?
@@ -784,6 +805,24 @@ fn multi_repo_files_changed_from_main(
     Ok(total)
 }
 
+fn multi_repo_diff_stat_from_main(
+    worktree_dir: &Path,
+    sub_repo_names: &[String],
+) -> Result<String> {
+    let mut stats = Vec::new();
+    for name in sub_repo_names {
+        let sub_wt = worktree_dir.join(name);
+        if !sub_wt.exists() {
+            continue;
+        }
+        let diff_stat = diff_stat_from_main(&sub_wt).unwrap_or_default();
+        if !diff_stat.is_empty() {
+            stats.push(format!("[{name}]\n{diff_stat}"));
+        }
+    }
+    Ok(stats.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1034,6 +1073,109 @@ mod tests {
         let manager_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
         assert!(manager_messages.is_empty());
+    }
+
+    #[test]
+    fn narration_only_completion_retries_then_escalates_after_two_rejections() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        write_task_file(&repo, 42, "narration-only-task");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+        git_ok(
+            &worktree_dir,
+            &["commit", "--allow-empty", "-m", "commentary only"],
+        );
+
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ];
+        let mut daemon = make_test_daemon(&repo, members);
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        let engineer_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
+        assert_eq!(engineer_messages.len(), 1);
+        assert!(engineer_messages[0]
+            .body
+            .contains("Your previous attempt only produced commentary. Execute the actual commands to make the code changes."));
+        assert!(
+            engineer_messages[0]
+                .body
+                .contains("git diff --stat main..HEAD")
+        );
+
+        let manager_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
+        assert!(manager_messages.is_empty());
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        let engineer_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
+        assert_eq!(engineer_messages.len(), 2);
+
+        let manager_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
+        assert_eq!(manager_messages.len(), 1);
+        assert!(
+            manager_messages[0]
+                .body
+                .contains("hit the narration-only quality gate 2 times")
+        );
+        assert!(
+            manager_messages[0]
+                .body
+                .contains("git diff --stat main..HEAD` is empty")
+        );
+
+        let events_path = repo.join(".batty").join("team_config").join("events.jsonl");
+        let events = read_events(&events_path).unwrap();
+        let narration_events: Vec<_> = events
+            .iter()
+            .filter(|event| event.event == "narration_rejection")
+            .collect();
+        assert_eq!(narration_events.len(), 2);
+        assert_eq!(narration_events[0].task.as_deref(), Some("42"));
+        assert_eq!(
+            narration_events[1].reason.as_deref(),
+            Some("rejection_count=2")
+        );
+    }
+
+    #[test]
+    fn narration_rejection_count_is_task_scoped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        write_task_file(&repo, 42, "first-task");
+        write_task_file(&repo, 43, "second-task");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+        git_ok(
+            &worktree_dir,
+            &["commit", "--allow-empty", "-m", "commentary only"],
+        );
+
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.set_active_task_for_test("eng-1", 42);
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+        assert_eq!(daemon.narration_rejection_counts.get(&42), Some(&1));
+
+        daemon.clear_active_task("eng-1");
+        assert!(!daemon.narration_rejection_counts.contains_key(&42));
+
+        daemon.set_active_task_for_test("eng-1", 43);
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+        assert_eq!(daemon.narration_rejection_counts.get(&43), Some(&1));
     }
 
     #[test]
