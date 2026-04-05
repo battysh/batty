@@ -287,6 +287,12 @@ fn scaffold_cleanroom_assets(
         &verification_scripts_dir.join("placeholder-candidate.sh"),
         force,
     )?;
+    write_scaffold_file(
+        &analysis_dir.join("README.md"),
+        include_str!("templates/cleanroom_analysis.md"),
+        force,
+        created,
+    )?;
 
     Ok(())
 }
@@ -1130,6 +1136,7 @@ mod tests {
         assert!(config_dir.join("batty_test_writer.md").exists());
         assert!(config_dir.join("batty_implementer.md").exists());
         assert!(tmp.path().join("analysis").is_dir());
+        assert!(tmp.path().join("analysis").join("README.md").exists());
         assert!(tmp.path().join("implementation").is_dir());
         assert!(tmp.path().join("PARITY.md").exists());
         assert!(tmp.path().join("SPEC.md").exists());
@@ -1282,6 +1289,7 @@ mod tests {
         std::fs::create_dir_all(project_root.join("planning")).unwrap();
         std::fs::write(config_dir.join("team.yaml"), "name: demo\n").unwrap();
         std::fs::write(config_dir.join("batty_decompiler.md"), "prompt\n").unwrap();
+        std::fs::write(project_root.join("analysis").join("README.md"), "# Analysis\n").unwrap();
         std::fs::write(project_root.join("PARITY.md"), "# Parity\n").unwrap();
         std::fs::write(project_root.join("SPEC.md"), "# Spec\n").unwrap();
         std::fs::write(
@@ -1294,7 +1302,7 @@ mod tests {
         let template_dir = templates_base_dir().unwrap().join("cleanroom-template");
         let export_root = template_dir.join(TEMPLATE_PROJECT_ROOT_DIR);
 
-        assert_eq!(copied, 5);
+        assert_eq!(copied, 6);
         assert_eq!(
             std::fs::read_to_string(template_dir.join("team.yaml")).unwrap(),
             "name: demo\n"
@@ -1302,6 +1310,10 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(template_dir.join("batty_decompiler.md")).unwrap(),
             "prompt\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(export_root.join("analysis").join("README.md")).unwrap(),
+            "# Analysis\n"
         );
         assert_eq!(
             std::fs::read_to_string(export_root.join("PARITY.md")).unwrap(),
@@ -1316,6 +1328,31 @@ mod tests {
                 .unwrap(),
             "# Process\n"
         );
+    }
+
+    #[test]
+    fn init_team_cleanroom_template_includes_multi_backend_guidance() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_team(tmp.path(), "cleanroom", None, None, false).unwrap();
+
+        let config_dir = team_config_dir(tmp.path());
+        let decompiler = std::fs::read_to_string(config_dir.join("batty_decompiler.md")).unwrap();
+        let spec_writer = std::fs::read_to_string(config_dir.join("batty_spec_writer.md")).unwrap();
+        let process =
+            std::fs::read_to_string(tmp.path().join("planning").join("cleanroom-process.md"))
+                .unwrap();
+        let analysis_readme =
+            std::fs::read_to_string(tmp.path().join("analysis").join("README.md")).unwrap();
+
+        assert!(decompiler.contains("SkoolKit"));
+        assert!(decompiler.contains("Ghidra"));
+        assert!(decompiler.contains("NES"));
+        assert!(decompiler.contains("Game Boy"));
+        assert!(decompiler.contains("DOS"));
+        assert!(decompiler.contains("analysis/README.md"));
+        assert!(spec_writer.contains("normalized analysis artifact"));
+        assert!(process.contains("## Backend Selection"));
+        assert!(analysis_readme.contains("## Normalized Analysis Artifact"));
     }
 
     #[test]
