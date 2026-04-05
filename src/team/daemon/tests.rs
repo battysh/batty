@@ -2672,6 +2672,89 @@ fn clean_room_handoff_write_and_read_emit_audit_events() {
 }
 
 #[test]
+fn clean_room_spec_sync_exports_specs_and_updates_parity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut daemon = clean_room_test_daemon(tmp.path());
+    let events_path = tmp
+        .path()
+        .join(".batty")
+        .join("team_config")
+        .join("events.jsonl");
+    daemon.event_sink = EventSink::new(&events_path).unwrap();
+
+    let spec_path = tmp.path().join("specs/player-movement/SPEC.md");
+    std::fs::create_dir_all(spec_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &spec_path,
+        r#"# Behavior: Player movement
+
+## Purpose
+
+Describe visible movement in response to directional input.
+
+## Inputs
+
+- Directional input.
+
+## Outputs
+
+- The player sprite moves on screen.
+
+## State Transitions
+
+- Movement starts when input is active and stops when input ends.
+
+## Edge Cases
+
+- Movement stops at solid obstacles.
+
+## Acceptance Criteria
+
+- Given a movement input, the player advances by one visible step.
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("PARITY.md"),
+        r#"---
+project: manic-miner
+target: analysis-artifacts
+source_platform: zx-spectrum
+target_language: rust
+last_verified: pending
+overall_parity: 0%
+---
+
+| Behavior | Spec | Test | Implementation | Verified | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Player movement | draft | -- | -- | -- | |
+"#,
+    )
+    .unwrap();
+
+    daemon.sync_cleanroom_specs().unwrap();
+
+    let exported = tmp
+        .path()
+        .join(".batty")
+        .join("handoff")
+        .join("specs/player-movement/SPEC.md");
+    assert!(exported.exists());
+
+    let parity = crate::team::parity::ParityReport::load(tmp.path()).unwrap();
+    assert_eq!(parity.rows.len(), 1);
+    assert_eq!(
+        parity.rows[0].spec,
+        crate::team::parity::ParityStatus::Complete
+    );
+    assert_eq!(parity.rows[0].notes, "spec: specs/player-movement/SPEC.md");
+
+    let events = std::fs::read_to_string(events_path).unwrap();
+    assert!(events.contains("barrier_artifact_created"));
+    assert!(events.contains("specs/player-movement/SPEC.md"));
+}
+
+#[test]
 fn clean_room_barrier_violation_attempt_is_logged() {
     let tmp = tempfile::tempdir().unwrap();
     let mut daemon = clean_room_test_daemon(tmp.path());
