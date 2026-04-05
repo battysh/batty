@@ -178,6 +178,7 @@ impl TeamDaemon {
             });
             self.run_recoverable_step("record_parity_snapshot", |daemon| {
                 if daemon.config.team_config.automation.clean_room_mode {
+                    daemon.sync_cleanroom_specs()?;
                     if let Ok(report) =
                         crate::team::parity::ParityReport::load(&daemon.config.project_root)
                     {
