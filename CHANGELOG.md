@@ -7,6 +7,15 @@ All notable changes to Batty are documented here.
 Agent health and dispatch reliability improvements, discovered during a
 24-hour marketing team run where one agent was silently dead for 22 hours.
 
+### Fixes (added post-release)
+
+- **Fix manual assignment race with auto-dispatch** — when a manager
+  manually assigns a task, `claimed_by` is now set on the board BEFORE
+  launching the assignment. Previously, the manual path only transitioned
+  the task to in-progress without setting `claimed_by`, leaving a race
+  window where auto-dispatch would grab the unclaimed task and assign it
+  to a different engineer.
+
 ### Fixes
 
 - **Fix `preserve_working` state desync after daemon restart** — when a
