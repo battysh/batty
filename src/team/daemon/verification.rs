@@ -292,9 +292,8 @@ mod tests {
     use crate::team::test_results::{TestFailure, TestResults};
 
     use super::{
-        ScopeValidationResult, changed_files_from_main, engineer_worktree_context,
-        find_claimed_task_for_worktree, parse_scope_fence, parse_test_output,
-        scope_validation_failure, validate_declared_scope,
+        ScopeValidationResult, engineer_worktree_context, find_claimed_task_for_worktree,
+        parse_scope_fence, parse_test_output, scope_validation_failure, validate_declared_scope,
     };
 
     #[test]

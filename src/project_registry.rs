@@ -6,9 +6,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const REGISTRY_KIND: &str = "batty.projectRegistry";
-pub const REGISTRY_SCHEMA_VERSION: u32 = 1;
+pub const REGISTRY_SCHEMA_VERSION: u32 = 2;
 const REGISTRY_FILENAME: &str = "project-registry.json";
 const REGISTRY_PATH_ENV: &str = "BATTY_PROJECT_REGISTRY_PATH";
+
+const ROUTING_STATE_KIND: &str = "batty.projectRoutingState";
+pub const ROUTING_STATE_SCHEMA_VERSION: u32 = 1;
+const ROUTING_STATE_FILENAME: &str = "project-routing-state.json";
+const ROUTING_STATE_PATH_ENV: &str = "BATTY_PROJECT_ROUTING_STATE_PATH";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +39,8 @@ impl Default for ProjectRegistry {
 pub struct RegisteredProject {
     pub project_id: String,
     pub name: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
     pub project_root: PathBuf,
     pub board_dir: PathBuf,
     pub team_name: String,
@@ -54,6 +61,8 @@ pub struct RegisteredProject {
 pub struct ProjectChannelBinding {
     pub channel: String,
     pub binding: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_binding: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -73,6 +82,7 @@ pub struct ProjectPolicyFlags {
 pub struct ProjectRegistration {
     pub project_id: String,
     pub name: String,
+    pub aliases: Vec<String>,
     pub project_root: PathBuf,
     pub board_dir: PathBuf,
     pub team_name: String,
@@ -83,6 +93,116 @@ pub struct ProjectRegistration {
     pub policy_flags: ProjectPolicyFlags,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRoutingState {
+    pub kind: String,
+    pub schema_version: u32,
+    #[serde(default)]
+    pub selections: Vec<ActiveProjectSelection>,
+}
+
+impl Default for ProjectRoutingState {
+    fn default() -> Self {
+        Self {
+            kind: ROUTING_STATE_KIND.to_string(),
+            schema_version: ROUTING_STATE_SCHEMA_VERSION,
+            selections: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveProjectSelection {
+    pub project_id: String,
+    pub scope: ActiveProjectScope,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ActiveProjectScope {
+    Global,
+    Channel { channel: String, binding: String },
+    Thread {
+        channel: String,
+        binding: String,
+        thread_binding: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRoutingRequest {
+    pub message: String,
+    pub channel: Option<String>,
+    pub binding: Option<String>,
+    pub thread_binding: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingConfidence {
+    High,
+    Medium,
+    Low,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRoutingCandidate {
+    pub project_id: String,
+    pub reason: String,
+    pub score: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRoutingDecision {
+    pub selected_project_id: Option<String>,
+    pub requires_confirmation: bool,
+    pub confidence: RoutingConfidence,
+    pub reason: String,
+    #[serde(default)]
+    pub candidates: Vec<ProjectRoutingCandidate>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectRegistryV1 {
+    kind: String,
+    schema_version: u32,
+    #[serde(default)]
+    projects: Vec<RegisteredProjectV1>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisteredProjectV1 {
+    project_id: String,
+    name: String,
+    project_root: PathBuf,
+    board_dir: PathBuf,
+    team_name: String,
+    session_name: String,
+    #[serde(default)]
+    channel_bindings: Vec<ProjectChannelBindingV1>,
+    owner: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    policy_flags: ProjectPolicyFlags,
+    created_at: u64,
+    updated_at: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectChannelBindingV1 {
+    channel: String,
+    binding: String,
+}
+
 pub fn registry_path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os(REGISTRY_PATH_ENV) {
         return Ok(PathBuf::from(path));
@@ -90,6 +210,15 @@ pub fn registry_path() -> Result<PathBuf> {
 
     let home = std::env::var("HOME").context("cannot determine home directory")?;
     Ok(PathBuf::from(home).join(".batty").join(REGISTRY_FILENAME))
+}
+
+pub fn routing_state_path() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os(ROUTING_STATE_PATH_ENV) {
+        return Ok(PathBuf::from(path));
+    }
+
+    let home = std::env::var("HOME").context("cannot determine home directory")?;
+    Ok(PathBuf::from(home).join(".batty").join(ROUTING_STATE_FILENAME))
 }
 
 pub fn load_registry() -> Result<ProjectRegistry> {
@@ -112,6 +241,23 @@ pub fn list_projects() -> Result<Vec<RegisteredProject>> {
 
 pub fn get_project(project_id: &str) -> Result<Option<RegisteredProject>> {
     get_project_at(&registry_path()?, project_id)
+}
+
+pub fn load_routing_state() -> Result<ProjectRoutingState> {
+    load_routing_state_at(&routing_state_path()?)
+}
+
+pub fn set_active_project(
+    project_id: &str,
+    scope: ActiveProjectScope,
+) -> Result<ActiveProjectSelection> {
+    set_active_project_at(&registry_path()?, &routing_state_path()?, project_id, scope)
+}
+
+pub fn resolve_project_for_message(
+    request: &ProjectRoutingRequest,
+) -> Result<ProjectRoutingDecision> {
+    resolve_project_for_message_at(&registry_path()?, &routing_state_path()?, request)
 }
 
 pub fn load_registry_at(path: &Path) -> Result<ProjectRegistry> {
@@ -144,19 +290,63 @@ pub fn load_registry_at(path: &Path) -> Result<ProjectRegistry> {
         bail!("registry {} is missing schemaVersion", path.display());
     };
 
-    match schema_version {
-        REGISTRY_SCHEMA_VERSION => {
-            let registry: ProjectRegistry = serde_json::from_value(raw)
-                .with_context(|| format!("failed to decode registry {}", path.display()))?;
-            validate_registry(&registry)?;
-            Ok(registry)
+    let registry = match schema_version {
+        1 => migrate_registry_v1(raw)?,
+        REGISTRY_SCHEMA_VERSION => serde_json::from_value(raw)
+            .with_context(|| format!("failed to decode registry {}", path.display()))?,
+        other => {
+            bail!(
+                "registry {} uses unsupported schemaVersion {}",
+                path.display(),
+                other
+            )
         }
-        other => bail!(
-            "registry {} uses unsupported schemaVersion {}",
-            path.display(),
-            other
-        ),
+    };
+    validate_registry(&registry)?;
+    Ok(registry)
+}
+
+pub fn load_routing_state_at(path: &Path) -> Result<ProjectRoutingState> {
+    if !path.exists() {
+        return Ok(ProjectRoutingState::default());
     }
+
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read routing state {}", path.display()))?;
+    let raw: Value = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse routing state {}", path.display()))?;
+
+    let Some(kind) = raw.get("kind").and_then(Value::as_str) else {
+        bail!("routing state {} is missing kind", path.display());
+    };
+    if kind != ROUTING_STATE_KIND {
+        bail!(
+            "routing state {} has unsupported kind '{}' (expected '{}')",
+            path.display(),
+            kind,
+            ROUTING_STATE_KIND
+        );
+    }
+
+    let Some(schema_version) = raw
+        .get("schemaVersion")
+        .and_then(Value::as_u64)
+        .map(|value| value as u32)
+    else {
+        bail!("routing state {} is missing schemaVersion", path.display());
+    };
+    if schema_version != ROUTING_STATE_SCHEMA_VERSION {
+        bail!(
+            "routing state {} uses unsupported schemaVersion {}",
+            path.display(),
+            schema_version
+        );
+    }
+
+    let state: ProjectRoutingState = serde_json::from_value(raw)
+        .with_context(|| format!("failed to decode routing state {}", path.display()))?;
+    validate_routing_state(&state)?;
+    Ok(state)
 }
 
 pub fn register_project_at(
@@ -198,20 +388,182 @@ pub fn get_project_at(path: &Path, project_id: &str) -> Result<Option<Registered
         .find(|project| project.project_id == project_id))
 }
 
+pub fn set_active_project_at(
+    registry_path: &Path,
+    state_path: &Path,
+    project_id: &str,
+    scope: ActiveProjectScope,
+) -> Result<ActiveProjectSelection> {
+    let registry = load_registry_at(registry_path)?;
+    if registry.projects.iter().all(|project| project.project_id != project_id) {
+        bail!("project '{}' is not registered", project_id);
+    }
+
+    let mut state = load_routing_state_at(state_path)?;
+    let selection = ActiveProjectSelection {
+        project_id: project_id.to_string(),
+        scope,
+        updated_at: crate::team::now_unix(),
+    };
+
+    state
+        .selections
+        .retain(|existing| !same_scope(&existing.scope, &selection.scope));
+    state.selections.push(selection.clone());
+    sort_selections(&mut state.selections);
+    save_routing_state(state_path, &state)?;
+    Ok(selection)
+}
+
+pub fn resolve_project_for_message_at(
+    registry_path: &Path,
+    state_path: &Path,
+    request: &ProjectRoutingRequest,
+) -> Result<ProjectRoutingDecision> {
+    let registry = load_registry_at(registry_path)?;
+    let routing_state = load_routing_state_at(state_path).unwrap_or_default();
+    let projects = registry
+        .projects
+        .iter()
+        .filter(|project| !project.policy_flags.archived)
+        .collect::<Vec<_>>();
+
+    if projects.is_empty() {
+        return Ok(ProjectRoutingDecision {
+            selected_project_id: None,
+            requires_confirmation: true,
+            confidence: RoutingConfidence::Low,
+            reason: "No active projects are registered.".to_string(),
+            candidates: Vec::new(),
+        });
+    }
+
+    let control_action = looks_like_control_action(&request.message);
+    if projects.len() == 1 {
+        let project = projects[0];
+        let requires_confirmation = control_action;
+        return Ok(ProjectRoutingDecision {
+            selected_project_id: Some(project.project_id.clone()),
+            requires_confirmation,
+            confidence: if requires_confirmation {
+                RoutingConfidence::Medium
+            } else {
+                RoutingConfidence::High
+            },
+            reason: if requires_confirmation {
+                format!(
+                    "Only one registered project exists ({}), but this looks like a control action and should be confirmed.",
+                    project.project_id
+                )
+            } else {
+                format!("Selected {} because it is the only registered project.", project.project_id)
+            },
+            candidates: vec![ProjectRoutingCandidate {
+                project_id: project.project_id.clone(),
+                reason: "only registered project".to_string(),
+                score: 100,
+            }],
+        });
+    }
+
+    let mut candidates = projects
+        .iter()
+        .filter_map(|project| score_project(project, &routing_state, request))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.project_id.cmp(&right.project_id))
+    });
+
+    let Some(top) = candidates.first().cloned() else {
+        return Ok(ProjectRoutingDecision {
+            selected_project_id: None,
+            requires_confirmation: true,
+            confidence: RoutingConfidence::Low,
+            reason: "Message did not identify a project with high confidence. Ask the user to choose a projectId.".to_string(),
+            candidates,
+        });
+    };
+
+    let ambiguous = candidates
+        .get(1)
+        .is_some_and(|second| second.score + 10 >= top.score);
+    let requires_confirmation = ambiguous || !auto_route_allowed(&top, control_action);
+
+    Ok(ProjectRoutingDecision {
+        selected_project_id: (!ambiguous).then_some(top.project_id.clone()),
+        requires_confirmation,
+        confidence: routing_confidence(top.score),
+        reason: routing_reason(&top, ambiguous, control_action),
+        candidates,
+    })
+}
+
 pub fn parse_channel_binding(spec: &str) -> Result<ProjectChannelBinding> {
     let Some((channel, binding)) = spec.split_once('=') else {
         bail!("invalid channel binding '{spec}'; expected <channel>=<binding>");
     };
 
-    let channel = channel.trim();
-    let binding = binding.trim();
-    if channel.is_empty() || binding.is_empty() {
-        bail!("invalid channel binding '{spec}'; channel and binding must be non-empty");
+    let channel = trim_required("channelBinding.channel", channel)?;
+    let binding = trim_required("channelBinding.binding", binding)?;
+    Ok(ProjectChannelBinding {
+        channel,
+        binding,
+        thread_binding: None,
+    })
+}
+
+pub fn parse_thread_binding(spec: &str) -> Result<ProjectChannelBinding> {
+    let Some((channel_spec, thread_binding)) = spec.split_once('#') else {
+        bail!("invalid thread binding '{spec}'; expected <channel>=<binding>#<thread-binding>");
+    };
+    let mut binding = parse_channel_binding(channel_spec)?;
+    binding.thread_binding = Some(trim_required("channelBinding.threadBinding", thread_binding)?);
+    Ok(binding)
+}
+
+fn migrate_registry_v1(raw: Value) -> Result<ProjectRegistry> {
+    let legacy: ProjectRegistryV1 =
+        serde_json::from_value(raw).context("failed to decode legacy schemaVersion 1 registry")?;
+    if legacy.kind != REGISTRY_KIND {
+        bail!("registry kind must be '{}'", REGISTRY_KIND);
+    }
+    if legacy.schema_version != 1 {
+        bail!("legacy registry schemaVersion must be 1");
     }
 
-    Ok(ProjectChannelBinding {
-        channel: channel.to_string(),
-        binding: binding.to_string(),
+    Ok(ProjectRegistry {
+        kind: REGISTRY_KIND.to_string(),
+        schema_version: REGISTRY_SCHEMA_VERSION,
+        projects: legacy
+            .projects
+            .into_iter()
+            .map(|project| RegisteredProject {
+                project_id: project.project_id,
+                name: project.name,
+                aliases: Vec::new(),
+                project_root: project.project_root,
+                board_dir: project.board_dir,
+                team_name: project.team_name,
+                session_name: project.session_name,
+                channel_bindings: project
+                    .channel_bindings
+                    .into_iter()
+                    .map(|binding| ProjectChannelBinding {
+                        channel: binding.channel,
+                        binding: binding.binding,
+                        thread_binding: None,
+                    })
+                    .collect(),
+                owner: project.owner,
+                tags: project.tags,
+                policy_flags: project.policy_flags,
+                created_at: project.created_at,
+                updated_at: project.updated_at,
+            })
+            .collect(),
     })
 }
 
@@ -229,6 +581,20 @@ fn save_registry(path: &Path, registry: &ProjectRegistry) -> Result<()> {
     Ok(())
 }
 
+fn save_routing_state(path: &Path, state: &ProjectRoutingState) -> Result<()> {
+    validate_routing_state(state)?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create routing state dir {}", parent.display()))?;
+    }
+
+    let content = serde_json::to_string_pretty(state)?;
+    std::fs::write(path, format!("{content}\n"))
+        .with_context(|| format!("failed to write routing state {}", path.display()))?;
+    Ok(())
+}
+
 fn validate_registry(registry: &ProjectRegistry) -> Result<()> {
     if registry.kind != REGISTRY_KIND {
         bail!("registry kind must be '{}'", REGISTRY_KIND);
@@ -241,6 +607,7 @@ fn validate_registry(registry: &ProjectRegistry) -> Result<()> {
     let mut project_roots = HashSet::new();
     let mut team_names = HashSet::new();
     let mut session_names = HashSet::new();
+    let mut aliases = HashSet::new();
 
     for project in &registry.projects {
         validate_project(project)?;
@@ -257,8 +624,34 @@ fn validate_registry(registry: &ProjectRegistry) -> Result<()> {
         if !session_names.insert(project.session_name.clone()) {
             bail!("duplicate sessionName '{}'", project.session_name);
         }
+        for alias in &project.aliases {
+            if !aliases.insert(alias.clone()) {
+                bail!("duplicate alias '{}'", alias);
+            }
+        }
     }
 
+    Ok(())
+}
+
+fn validate_routing_state(state: &ProjectRoutingState) -> Result<()> {
+    if state.kind != ROUTING_STATE_KIND {
+        bail!("routing state kind must be '{}'", ROUTING_STATE_KIND);
+    }
+    if state.schema_version != ROUTING_STATE_SCHEMA_VERSION {
+        bail!(
+            "routing state schemaVersion must be {}",
+            ROUTING_STATE_SCHEMA_VERSION
+        );
+    }
+
+    let mut scopes = HashSet::new();
+    for selection in &state.selections {
+        validate_project_id(&selection.project_id)?;
+        if !scopes.insert(selection.scope.clone()) {
+            bail!("duplicate active-project scope in routing state");
+        }
+    }
     Ok(())
 }
 
@@ -297,6 +690,18 @@ fn ensure_unique(registry: &ProjectRegistry, project: &RegisteredProject) -> Res
             project.session_name
         );
     }
+
+    let existing_aliases = registry
+        .projects
+        .iter()
+        .flat_map(|existing| existing.aliases.iter())
+        .cloned()
+        .collect::<HashSet<_>>();
+    for alias in &project.aliases {
+        if existing_aliases.contains(alias) {
+            bail!("alias '{}' is already registered", alias);
+        }
+    }
     Ok(())
 }
 
@@ -328,34 +733,48 @@ fn normalize_registration(registration: ProjectRegistration) -> Result<Registere
         );
     }
 
-    let mut tags = registration
-        .tags
-        .into_iter()
-        .map(|tag| tag.trim().to_string())
-        .filter(|tag| !tag.is_empty())
-        .collect::<Vec<_>>();
-    tags.sort();
-    tags.dedup();
+    let aliases = normalize_labels("alias", registration.aliases)?;
+    let tags = normalize_labels("tag", registration.tags)?;
 
-    let mut seen_channels = HashSet::new();
+    let mut seen_bindings = HashSet::new();
     let mut channel_bindings = Vec::with_capacity(registration.channel_bindings.len());
     for binding in registration.channel_bindings {
         let channel = trim_required("channelBinding.channel", &binding.channel)?;
         let binding_value = trim_required("channelBinding.binding", &binding.binding)?;
-        if !seen_channels.insert(channel.clone()) {
-            bail!("duplicate channel binding for channel '{}'", channel);
+        let thread_binding = binding
+            .thread_binding
+            .as_deref()
+            .map(|value| trim_required("channelBinding.threadBinding", value))
+            .transpose()?;
+        let binding_key = (
+            channel.clone(),
+            binding_value.clone(),
+            thread_binding.clone().unwrap_or_default(),
+        );
+        if !seen_bindings.insert(binding_key) {
+            bail!(
+                "duplicate channel/thread binding for channel '{}'",
+                channel
+            );
         }
         channel_bindings.push(ProjectChannelBinding {
             channel,
             binding: binding_value,
+            thread_binding,
         });
     }
-    channel_bindings.sort_by(|left, right| left.channel.cmp(&right.channel));
+    channel_bindings.sort_by(|left, right| {
+        left.channel
+            .cmp(&right.channel)
+            .then_with(|| left.binding.cmp(&right.binding))
+            .then_with(|| left.thread_binding.cmp(&right.thread_binding))
+    });
 
     let now = crate::team::now_unix();
     let project = RegisteredProject {
         project_id: registration.project_id,
         name,
+        aliases,
         project_root,
         board_dir,
         team_name,
@@ -396,6 +815,12 @@ fn validate_project(project: &RegisteredProject) -> Result<()> {
             project.project_root.display()
         );
     }
+    for alias in &project.aliases {
+        validate_label("alias", alias)?;
+    }
+    for tag in &project.tags {
+        validate_label("tag", tag)?;
+    }
     Ok(())
 }
 
@@ -415,12 +840,42 @@ fn validate_project_id(project_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_label(field_name: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{field_name} cannot be empty");
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_' | '.'))
+    {
+        bail!(
+            "{field_name} '{}' must use lowercase ASCII letters, digits, '.', '-', or '_'",
+            value
+        );
+    }
+    Ok(())
+}
+
 fn trim_required(field_name: &str, value: &str) -> Result<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         bail!("{field_name} cannot be empty");
     }
     Ok(trimmed.to_string())
+}
+
+fn normalize_labels(field_name: &str, values: Vec<String>) -> Result<Vec<String>> {
+    let mut labels = values
+        .into_iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    labels.sort();
+    labels.dedup();
+    for label in &labels {
+        validate_label(field_name, label)?;
+    }
+    Ok(labels)
 }
 
 fn normalize_path(path: &Path) -> Result<PathBuf> {
@@ -441,6 +896,272 @@ fn normalize_path(path: &Path) -> Result<PathBuf> {
     }
 }
 
+fn sort_selections(selections: &mut [ActiveProjectSelection]) {
+    selections.sort_by(|left, right| {
+        scope_rank(&left.scope)
+            .cmp(&scope_rank(&right.scope))
+            .then_with(|| left.project_id.cmp(&right.project_id))
+    });
+}
+
+fn scope_rank(scope: &ActiveProjectScope) -> (&'static str, &str, &str, &str) {
+    match scope {
+        ActiveProjectScope::Global => ("global", "", "", ""),
+        ActiveProjectScope::Channel { channel, binding } => ("channel", channel, binding, ""),
+        ActiveProjectScope::Thread {
+            channel,
+            binding,
+            thread_binding,
+        } => ("thread", channel, binding, thread_binding),
+    }
+}
+
+fn same_scope(left: &ActiveProjectScope, right: &ActiveProjectScope) -> bool {
+    match (left, right) {
+        (ActiveProjectScope::Global, ActiveProjectScope::Global) => true,
+        (
+            ActiveProjectScope::Channel {
+                channel: left_channel,
+                binding: left_binding,
+            },
+            ActiveProjectScope::Channel {
+                channel: right_channel,
+                binding: right_binding,
+            },
+        ) => left_channel == right_channel && left_binding == right_binding,
+        (
+            ActiveProjectScope::Thread {
+                channel: left_channel,
+                binding: left_binding,
+                thread_binding: left_thread,
+            },
+            ActiveProjectScope::Thread {
+                channel: right_channel,
+                binding: right_binding,
+                thread_binding: right_thread,
+            },
+        ) => {
+            left_channel == right_channel
+                && left_binding == right_binding
+                && left_thread == right_thread
+        }
+        _ => false,
+    }
+}
+
+fn score_project(
+    project: &RegisteredProject,
+    routing_state: &ProjectRoutingState,
+    request: &ProjectRoutingRequest,
+) -> Option<ProjectRoutingCandidate> {
+    let message = request.message.to_ascii_lowercase();
+    let tokens = normalized_tokens(&message);
+    let mut score = 0u32;
+    let mut reasons = Vec::new();
+
+    if tokens.iter().any(|token| token == &project.project_id) {
+        score = score.max(100);
+        reasons.push("explicit projectId mention".to_string());
+    }
+
+    if project
+        .aliases
+        .iter()
+        .any(|alias| tokens.iter().any(|token| token == alias))
+    {
+        score = score.max(98);
+        reasons.push("explicit alias mention".to_string());
+    }
+
+    if phrase_match(&message, &project.name.to_ascii_lowercase()) {
+        score = score.max(95);
+        reasons.push("project name mention".to_string());
+    }
+
+    let mentioned_tags = project
+        .tags
+        .iter()
+        .filter(|tag| tokens.iter().any(|token| token == *tag))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !mentioned_tags.is_empty() {
+        score = score.max(70);
+        reasons.push(format!("tag match ({})", mentioned_tags.join(", ")));
+    }
+
+    if let Some(reason) = thread_binding_match(project, request) {
+        score = score.max(100);
+        reasons.push(reason);
+    } else if let Some(reason) = channel_binding_match(project, request) {
+        score = score.max(90);
+        reasons.push(reason);
+    }
+
+    if let Some(reason) = active_selection_match(project, routing_state, request) {
+        score = score.max(reason.0);
+        reasons.push(reason.1);
+    }
+
+    if score == 0 {
+        None
+    } else {
+        Some(ProjectRoutingCandidate {
+            project_id: project.project_id.clone(),
+            reason: reasons.join("; "),
+            score,
+        })
+    }
+}
+
+fn thread_binding_match(
+    project: &RegisteredProject,
+    request: &ProjectRoutingRequest,
+) -> Option<String> {
+    let channel = request.channel.as_deref()?;
+    let binding = request.binding.as_deref()?;
+    let thread_binding = request.thread_binding.as_deref()?;
+    project.channel_bindings.iter().find_map(|candidate| {
+        (candidate.channel == channel
+            && candidate.binding == binding
+            && candidate.thread_binding.as_deref() == Some(thread_binding))
+        .then(|| "thread binding match".to_string())
+    })
+}
+
+fn channel_binding_match(
+    project: &RegisteredProject,
+    request: &ProjectRoutingRequest,
+) -> Option<String> {
+    let channel = request.channel.as_deref()?;
+    let binding = request.binding.as_deref()?;
+    project.channel_bindings.iter().find_map(|candidate| {
+        (candidate.channel == channel
+            && candidate.binding == binding
+            && candidate.thread_binding.is_none())
+        .then(|| "channel binding match".to_string())
+    })
+}
+
+fn active_selection_match(
+    project: &RegisteredProject,
+    routing_state: &ProjectRoutingState,
+    request: &ProjectRoutingRequest,
+) -> Option<(u32, String)> {
+    routing_state
+        .selections
+        .iter()
+        .find(|selection| selection.project_id == project.project_id)
+        .and_then(|selection| match &selection.scope {
+            ActiveProjectScope::Thread {
+                channel,
+                binding,
+                thread_binding,
+            } => (request.channel.as_deref() == Some(channel.as_str())
+                && request.binding.as_deref() == Some(binding.as_str())
+                && request.thread_binding.as_deref() == Some(thread_binding.as_str()))
+            .then(|| (96, "active project selected for this thread".to_string())),
+            ActiveProjectScope::Channel { channel, binding } => {
+                (request.channel.as_deref() == Some(channel.as_str())
+                    && request.binding.as_deref() == Some(binding.as_str()))
+                .then(|| (80, "active project selected for this channel".to_string()))
+            }
+            ActiveProjectScope::Global => {
+                Some((65, "global active project selection".to_string()))
+            }
+        })
+}
+
+fn normalized_tokens(value: &str) -> Vec<String> {
+    let mut current = String::new();
+    let mut tokens = Vec::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            current.push(ch);
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn phrase_match(message: &str, phrase: &str) -> bool {
+    if phrase.is_empty() {
+        return false;
+    }
+    message.contains(phrase)
+}
+
+fn looks_like_control_action(message: &str) -> bool {
+    let tokens = normalized_tokens(&message.to_ascii_lowercase());
+    tokens.iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "stop"
+                | "restart"
+                | "delete"
+                | "archive"
+                | "merge"
+                | "ship"
+                | "deploy"
+                | "kill"
+                | "pause"
+                | "resume"
+                | "assign"
+                | "unregister"
+                | "register"
+                | "instruct"
+        )
+    })
+}
+
+fn auto_route_allowed(candidate: &ProjectRoutingCandidate, control_action: bool) -> bool {
+    if candidate.score >= 98 {
+        return true;
+    }
+    if candidate.reason.contains("thread binding match") {
+        return true;
+    }
+    if control_action {
+        return candidate.reason.contains("explicit projectId mention")
+            || candidate.reason.contains("explicit alias mention")
+            || candidate.reason.contains("thread binding match");
+    }
+    candidate.score >= 80
+}
+
+fn routing_confidence(score: u32) -> RoutingConfidence {
+    if score >= 95 {
+        RoutingConfidence::High
+    } else if score >= 75 {
+        RoutingConfidence::Medium
+    } else {
+        RoutingConfidence::Low
+    }
+}
+
+fn routing_reason(
+    top: &ProjectRoutingCandidate,
+    ambiguous: bool,
+    control_action: bool,
+) -> String {
+    if ambiguous {
+        return format!(
+            "Routing is ambiguous across multiple projects. Top match was {} because {}.",
+            top.project_id, top.reason
+        );
+    }
+    if control_action && !auto_route_allowed(top, true) {
+        return format!(
+            "Matched {} because {}, but this looks like a control action and requires confirmation.",
+            top.project_id, top.reason
+        );
+    }
+    format!("Selected {} because {}.", top.project_id, top.reason)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,6 +1170,7 @@ mod tests {
         ProjectRegistration {
             project_id: "alpha".to_string(),
             name: "Alpha".to_string(),
+            aliases: vec!["batty".to_string()],
             project_root: project_root.to_path_buf(),
             board_dir: project_root
                 .join(".batty")
@@ -460,10 +1182,12 @@ mod tests {
                 ProjectChannelBinding {
                     channel: "telegram".to_string(),
                     binding: "chat:123".to_string(),
+                    thread_binding: None,
                 },
                 ProjectChannelBinding {
                     channel: "slack".to_string(),
                     binding: "channel:C123".to_string(),
+                    thread_binding: Some("thread:abc".to_string()),
                 },
             ],
             owner: Some("ops".to_string()),
@@ -477,6 +1201,32 @@ mod tests {
         }
     }
 
+    fn write_beta(registry_path: &Path, root: &Path) {
+        let beta_root = root.join("beta");
+        std::fs::create_dir_all(beta_root.join(".batty/team_config/board")).unwrap();
+        register_project_at(
+            registry_path,
+            ProjectRegistration {
+                project_id: "beta".to_string(),
+                name: "Beta".to_string(),
+                aliases: vec!["other".to_string()],
+                project_root: beta_root.clone(),
+                board_dir: beta_root.join(".batty/team_config/board"),
+                team_name: "beta".to_string(),
+                session_name: "batty-beta".to_string(),
+                channel_bindings: vec![ProjectChannelBinding {
+                    channel: "telegram".to_string(),
+                    binding: "chat:999".to_string(),
+                    thread_binding: None,
+                }],
+                owner: None,
+                tags: vec!["backend".to_string()],
+                policy_flags: ProjectPolicyFlags::default(),
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn register_and_get_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
@@ -487,6 +1237,8 @@ mod tests {
         let created =
             register_project_at(&registry_path, sample_registration(&project_root)).unwrap();
         assert_eq!(created.project_id, "alpha");
+        assert_eq!(created.aliases, vec!["batty"]);
+        assert_eq!(created.channel_bindings.len(), 2);
 
         let fetched = get_project_at(&registry_path, "alpha").unwrap().unwrap();
         assert_eq!(fetched, created);
@@ -497,62 +1249,215 @@ mod tests {
     }
 
     #[test]
-    fn register_rejects_duplicate_session_name() {
-        let tmp = tempfile::tempdir().unwrap();
-        let registry_path = tmp.path().join("project-registry.json");
-        let first_root = tmp.path().join("alpha");
-        let second_root = tmp.path().join("beta");
-        std::fs::create_dir_all(first_root.join(".batty/team_config/board")).unwrap();
-        std::fs::create_dir_all(second_root.join(".batty/team_config/board")).unwrap();
-
-        register_project_at(&registry_path, sample_registration(&first_root)).unwrap();
-
-        let mut second = sample_registration(&second_root);
-        second.project_id = "beta".to_string();
-        second.name = "Beta".to_string();
-        second.team_name = "beta".to_string();
-
-        let error = register_project_at(&registry_path, second).unwrap_err();
-        assert!(error.to_string().contains("sessionName 'batty-alpha'"));
-    }
-
-    #[test]
-    fn unregister_returns_removed_project() {
-        let tmp = tempfile::tempdir().unwrap();
-        let registry_path = tmp.path().join("project-registry.json");
-        let project_root = tmp.path().join("alpha");
-        std::fs::create_dir_all(project_root.join(".batty/team_config/board")).unwrap();
-
-        register_project_at(&registry_path, sample_registration(&project_root)).unwrap();
-        let removed = unregister_project_at(&registry_path, "alpha")
-            .unwrap()
-            .unwrap();
-        assert_eq!(removed.project_id, "alpha");
-        assert!(get_project_at(&registry_path, "alpha").unwrap().is_none());
-    }
-
-    #[test]
-    fn parse_channel_binding_requires_equals() {
-        let error = parse_channel_binding("telegram").unwrap_err();
-        assert!(error.to_string().contains("expected <channel>=<binding>"));
-    }
-
-    #[test]
-    fn load_rejects_unsupported_schema_version() {
+    fn load_migrates_schema_version_one() {
         let tmp = tempfile::tempdir().unwrap();
         let registry_path = tmp.path().join("project-registry.json");
         std::fs::write(
             &registry_path,
             r#"{
   "kind": "batty.projectRegistry",
-  "schemaVersion": 99,
-  "projects": []
+  "schemaVersion": 1,
+  "projects": [
+    {
+      "projectId": "alpha",
+      "name": "Alpha",
+      "projectRoot": "/tmp/alpha",
+      "boardDir": "/tmp/alpha/.batty/team_config/board",
+      "teamName": "alpha",
+      "sessionName": "batty-alpha",
+      "channelBindings": [{ "channel": "telegram", "binding": "chat:123" }],
+      "owner": null,
+      "tags": ["core"],
+      "policyFlags": {
+        "allowOpenclawSupervision": true,
+        "allowCrossProjectRouting": false,
+        "allowSharedServiceRouting": false,
+        "archived": false
+      },
+      "createdAt": 1,
+      "updatedAt": 1
+    }
+  ]
 }
 "#,
         )
         .unwrap();
 
-        let error = load_registry_at(&registry_path).unwrap_err();
-        assert!(error.to_string().contains("unsupported schemaVersion 99"));
+        let registry = load_registry_at(&registry_path).unwrap();
+        assert_eq!(registry.schema_version, 2);
+        assert!(registry.projects[0].aliases.is_empty());
+        assert_eq!(registry.projects[0].channel_bindings[0].thread_binding, None);
+    }
+
+    #[test]
+    fn parse_thread_binding_requires_hash_separator() {
+        let error = parse_thread_binding("slack=channel:C123").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("expected <channel>=<binding>#<thread-binding>"));
+    }
+
+    #[test]
+    fn set_active_project_upserts_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry_path = tmp.path().join("project-registry.json");
+        let state_path = tmp.path().join("project-routing-state.json");
+        let project_root = tmp.path().join("alpha");
+        std::fs::create_dir_all(project_root.join(".batty/team_config/board")).unwrap();
+        register_project_at(&registry_path, sample_registration(&project_root)).unwrap();
+
+        set_active_project_at(
+            &registry_path,
+            &state_path,
+            "alpha",
+            ActiveProjectScope::Global,
+        )
+        .unwrap();
+        set_active_project_at(
+            &registry_path,
+            &state_path,
+            "alpha",
+            ActiveProjectScope::Channel {
+                channel: "telegram".to_string(),
+                binding: "chat:123".to_string(),
+            },
+        )
+        .unwrap();
+
+        let state = load_routing_state_at(&state_path).unwrap();
+        assert_eq!(state.selections.len(), 2);
+    }
+
+    #[test]
+    fn resolve_prefers_explicit_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry_path = tmp.path().join("project-registry.json");
+        let state_path = tmp.path().join("project-routing-state.json");
+        let project_root = tmp.path().join("alpha");
+        std::fs::create_dir_all(project_root.join(".batty/team_config/board")).unwrap();
+        register_project_at(&registry_path, sample_registration(&project_root)).unwrap();
+        write_beta(&registry_path, tmp.path());
+
+        let decision = resolve_project_for_message_at(
+            &registry_path,
+            &state_path,
+            &ProjectRoutingRequest {
+                message: "check batty".to_string(),
+                channel: None,
+                binding: None,
+                thread_binding: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(decision.selected_project_id.as_deref(), Some("alpha"));
+        assert!(!decision.requires_confirmation);
+        assert_eq!(decision.confidence, RoutingConfidence::High);
+    }
+
+    #[test]
+    fn resolve_uses_thread_binding_as_high_confidence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry_path = tmp.path().join("project-registry.json");
+        let state_path = tmp.path().join("project-routing-state.json");
+        let project_root = tmp.path().join("alpha");
+        std::fs::create_dir_all(project_root.join(".batty/team_config/board")).unwrap();
+        register_project_at(&registry_path, sample_registration(&project_root)).unwrap();
+        write_beta(&registry_path, tmp.path());
+
+        let decision = resolve_project_for_message_at(
+            &registry_path,
+            &state_path,
+            &ProjectRoutingRequest {
+                message: "check status".to_string(),
+                channel: Some("slack".to_string()),
+                binding: Some("channel:C123".to_string()),
+                thread_binding: Some("thread:abc".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(decision.selected_project_id.as_deref(), Some("alpha"));
+        assert!(!decision.requires_confirmation);
+        assert!(decision.reason.contains("thread binding"));
+    }
+
+    #[test]
+    fn resolve_requires_confirmation_for_control_action_from_global_active_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry_path = tmp.path().join("project-registry.json");
+        let state_path = tmp.path().join("project-routing-state.json");
+        let project_root = tmp.path().join("alpha");
+        std::fs::create_dir_all(project_root.join(".batty/team_config/board")).unwrap();
+        register_project_at(&registry_path, sample_registration(&project_root)).unwrap();
+        write_beta(&registry_path, tmp.path());
+        set_active_project_at(
+            &registry_path,
+            &state_path,
+            "alpha",
+            ActiveProjectScope::Global,
+        )
+        .unwrap();
+
+        let decision = resolve_project_for_message_at(
+            &registry_path,
+            &state_path,
+            &ProjectRoutingRequest {
+                message: "restart it".to_string(),
+                channel: None,
+                binding: None,
+                thread_binding: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(decision.selected_project_id.as_deref(), Some("alpha"));
+        assert!(decision.requires_confirmation);
+        assert_eq!(decision.confidence, RoutingConfidence::Low);
+    }
+
+    #[test]
+    fn resolve_requires_clarification_when_only_generic_tag_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry_path = tmp.path().join("project-registry.json");
+        let state_path = tmp.path().join("project-routing-state.json");
+        let alpha_root = tmp.path().join("alpha");
+        std::fs::create_dir_all(alpha_root.join(".batty/team_config/board")).unwrap();
+        register_project_at(&registry_path, sample_registration(&alpha_root)).unwrap();
+        let gamma_root = tmp.path().join("gamma");
+        std::fs::create_dir_all(gamma_root.join(".batty/team_config/board")).unwrap();
+        register_project_at(
+            &registry_path,
+            ProjectRegistration {
+                project_id: "gamma".to_string(),
+                name: "Gamma".to_string(),
+                aliases: vec!["gamma".to_string()],
+                project_root: gamma_root.clone(),
+                board_dir: gamma_root.join(".batty/team_config/board"),
+                team_name: "gamma".to_string(),
+                session_name: "batty-gamma".to_string(),
+                channel_bindings: Vec::new(),
+                owner: None,
+                tags: vec!["core".to_string()],
+                policy_flags: ProjectPolicyFlags::default(),
+            },
+        )
+        .unwrap();
+
+        let decision = resolve_project_for_message_at(
+            &registry_path,
+            &state_path,
+            &ProjectRoutingRequest {
+                message: "check the core project".to_string(),
+                channel: None,
+                binding: None,
+                thread_binding: None,
+            },
+        )
+        .unwrap();
+
+        assert!(decision.selected_project_id.is_none());
+        assert!(decision.requires_confirmation);
+        assert!(decision.reason.contains("ambiguous") || decision.reason.contains("high confidence"));
     }
 }

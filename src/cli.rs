@@ -469,6 +469,9 @@ pub enum ProjectCommand {
         /// Operator-facing project name
         #[arg(long)]
         name: String,
+        /// Alternate operator-facing aliases used for routing
+        #[arg(long = "alias")]
+        aliases: Vec<String>,
         /// Repository root for the supervised project
         #[arg(long = "project-root")]
         project_root: PathBuf,
@@ -490,6 +493,9 @@ pub enum ProjectCommand {
         /// Channel binding in the form <channel>=<binding>
         #[arg(long = "channel-binding")]
         channel_bindings: Vec<String>,
+        /// Thread binding in the form <channel>=<binding>#<thread-binding>
+        #[arg(long = "thread-binding")]
+        thread_bindings: Vec<String>,
         /// Allow OpenClaw supervision actions for this project
         #[arg(long, default_value_t = false)]
         allow_openclaw_supervision: bool,
@@ -524,6 +530,40 @@ pub enum ProjectCommand {
     Get {
         /// Stable unique project identifier
         project_id: String,
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Set the active project used for implicit routing
+    SetActive {
+        /// Stable unique project identifier
+        project_id: String,
+        /// Optional channel provider name for channel-scoped activation
+        #[arg(long)]
+        channel: Option<String>,
+        /// Optional channel binding identifier for channel-scoped activation
+        #[arg(long)]
+        binding: Option<String>,
+        /// Optional thread binding identifier for thread-scoped activation
+        #[arg(long = "thread-binding")]
+        thread_binding: Option<String>,
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Resolve which project a message should route to
+    Resolve {
+        /// Message text to resolve
+        message: String,
+        /// Optional channel provider name
+        #[arg(long)]
+        channel: Option<String>,
+        /// Optional channel binding identifier
+        #[arg(long)]
+        binding: Option<String>,
+        /// Optional thread binding identifier
+        #[arg(long = "thread-binding")]
+        thread_binding: Option<String>,
         /// Emit machine-readable JSON output
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -1637,6 +1677,7 @@ mod tests {
                     ProjectCommand::Register {
                         project_id,
                         name,
+                        aliases,
                         project_root,
                         board_dir,
                         team_name,
@@ -1644,6 +1685,7 @@ mod tests {
                         owner,
                         tags,
                         channel_bindings,
+                        thread_bindings,
                         allow_openclaw_supervision,
                         allow_cross_project_routing,
                         allow_shared_service_routing,
@@ -1661,8 +1703,10 @@ mod tests {
                 assert_eq!(team_name, "batty");
                 assert_eq!(session_name, "batty-batty");
                 assert_eq!(owner.as_deref(), Some("platform"));
+                assert!(aliases.is_empty());
                 assert_eq!(tags, vec!["openclaw"]);
                 assert_eq!(channel_bindings, vec!["telegram=chat:123"]);
+                assert!(thread_bindings.is_empty());
                 assert!(allow_openclaw_supervision);
                 assert!(!allow_cross_project_routing);
                 assert!(!allow_shared_service_routing);
@@ -1684,6 +1728,75 @@ mod tests {
                 assert!(json);
             }
             other => panic!("expected project get command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_set_active_subcommand_parses_thread_scope() {
+        let cli = Cli::parse_from([
+            "batty",
+            "project",
+            "set-active",
+            "batty-core",
+            "--channel",
+            "slack",
+            "--binding",
+            "channel:C123",
+            "--thread-binding",
+            "thread:abc",
+        ]);
+        match cli.command {
+            Command::Project {
+                command:
+                    ProjectCommand::SetActive {
+                        project_id,
+                        channel,
+                        binding,
+                        thread_binding,
+                        json,
+                    },
+            } => {
+                assert_eq!(project_id, "batty-core");
+                assert_eq!(channel.as_deref(), Some("slack"));
+                assert_eq!(binding.as_deref(), Some("channel:C123"));
+                assert_eq!(thread_binding.as_deref(), Some("thread:abc"));
+                assert!(!json);
+            }
+            other => panic!("expected project set-active command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_resolve_subcommand_parses() {
+        let cli = Cli::parse_from([
+            "batty",
+            "project",
+            "resolve",
+            "check batty",
+            "--channel",
+            "telegram",
+            "--binding",
+            "chat:123",
+            "--json",
+        ]);
+        match cli.command {
+            Command::Project {
+                command:
+                    ProjectCommand::Resolve {
+                        message,
+                        channel,
+                        binding,
+                        thread_binding,
+                        json,
+                    },
+            } => {
+                assert_eq!(message, "check batty");
+                assert_eq!(channel.as_deref(), Some("telegram"));
+                assert_eq!(binding.as_deref(), Some("chat:123"));
+                assert!(thread_binding.is_none());
+                assert!(json);
+            }
+            other => panic!("expected project resolve command, got {other:?}"),
         }
     }
 
