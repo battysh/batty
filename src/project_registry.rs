@@ -1,9 +1,11 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::tmux;
 
 const REGISTRY_KIND: &str = "batty.projectRegistry";
 pub const REGISTRY_SCHEMA_VERSION: u32 = 2;
@@ -93,6 +95,75 @@ pub struct ProjectRegistration {
     pub policy_flags: ProjectPolicyFlags,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectLifecycleState {
+    Running,
+    Stopped,
+    Degraded,
+    Recovering,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectLifecycleAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectHealthSummary {
+    pub paused: bool,
+    pub watchdog_state: String,
+    pub unhealthy_members: Vec<String>,
+    pub member_count: usize,
+    pub active_member_count: usize,
+    pub pending_inbox_count: usize,
+    pub triage_backlog_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPipelineMetrics {
+    pub active_task_count: usize,
+    pub review_queue_count: usize,
+    pub runnable_count: u32,
+    pub blocked_count: u32,
+    pub stale_in_progress_count: u32,
+    pub stale_review_count: u32,
+    pub auto_merge_rate: Option<f64>,
+    pub rework_rate: Option<f64>,
+    pub avg_review_latency_secs: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectStatusDto {
+    pub project_id: String,
+    pub name: String,
+    pub team_name: String,
+    pub session_name: String,
+    pub project_root: PathBuf,
+    pub lifecycle: ProjectLifecycleState,
+    pub running: bool,
+    pub health: ProjectHealthSummary,
+    pub pipeline: ProjectPipelineMetrics,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLifecycleActionResult {
+    pub project_id: String,
+    pub action: ProjectLifecycleAction,
+    pub changed: bool,
+    pub lifecycle: ProjectLifecycleState,
+    pub running: bool,
+    pub audit_message: String,
+    pub status: ProjectStatusDto,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectRoutingState {
@@ -124,7 +195,10 @@ pub struct ActiveProjectSelection {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ActiveProjectScope {
     Global,
-    Channel { channel: String, binding: String },
+    Channel {
+        channel: String,
+        binding: String,
+    },
     Thread {
         channel: String,
         binding: String,
@@ -218,7 +292,9 @@ pub fn routing_state_path() -> Result<PathBuf> {
     }
 
     let home = std::env::var("HOME").context("cannot determine home directory")?;
-    Ok(PathBuf::from(home).join(".batty").join(ROUTING_STATE_FILENAME))
+    Ok(PathBuf::from(home)
+        .join(".batty")
+        .join(ROUTING_STATE_FILENAME))
 }
 
 pub fn load_registry() -> Result<ProjectRegistry> {
@@ -241,6 +317,110 @@ pub fn list_projects() -> Result<Vec<RegisteredProject>> {
 
 pub fn get_project(project_id: &str) -> Result<Option<RegisteredProject>> {
     get_project_at(&registry_path()?, project_id)
+}
+
+pub fn get_project_status(project_id: &str) -> Result<ProjectStatusDto> {
+    let Some(project) = get_project(project_id)? else {
+        bail!("project '{}' is not registered", project_id);
+    };
+    project_status(&project)
+}
+
+pub fn start_project(project_id: &str) -> Result<ProjectLifecycleActionResult> {
+    let Some(project) = get_project(project_id)? else {
+        bail!("project '{}' is not registered", project_id);
+    };
+    let status = project_status(&project)?;
+    if status.running {
+        return Ok(ProjectLifecycleActionResult {
+            project_id: project.project_id.clone(),
+            action: ProjectLifecycleAction::Start,
+            changed: false,
+            lifecycle: status.lifecycle,
+            running: status.running,
+            audit_message: format!("project '{}' is already running", project.project_id),
+            status,
+        });
+    }
+
+    crate::team::start_team(&project.project_root, false)?;
+    let status = project_status(&project)?;
+    Ok(ProjectLifecycleActionResult {
+        project_id: project.project_id.clone(),
+        action: ProjectLifecycleAction::Start,
+        changed: true,
+        lifecycle: status.lifecycle,
+        running: status.running,
+        audit_message: format!(
+            "started project '{}' in session {}",
+            project.project_id, project.session_name
+        ),
+        status,
+    })
+}
+
+pub fn stop_project(project_id: &str) -> Result<ProjectLifecycleActionResult> {
+    let Some(project) = get_project(project_id)? else {
+        bail!("project '{}' is not registered", project_id);
+    };
+    let status = project_status(&project)?;
+    if !status.running {
+        return Ok(ProjectLifecycleActionResult {
+            project_id: project.project_id.clone(),
+            action: ProjectLifecycleAction::Stop,
+            changed: false,
+            lifecycle: status.lifecycle,
+            running: status.running,
+            audit_message: format!("project '{}' is already stopped", project.project_id),
+            status,
+        });
+    }
+
+    crate::team::stop_team(&project.project_root)?;
+    let status = project_status(&project)?;
+    Ok(ProjectLifecycleActionResult {
+        project_id: project.project_id.clone(),
+        action: ProjectLifecycleAction::Stop,
+        changed: true,
+        lifecycle: status.lifecycle,
+        running: status.running,
+        audit_message: format!(
+            "stopped project '{}' and recorded shutdown summary",
+            project.project_id
+        ),
+        status,
+    })
+}
+
+pub fn restart_project(project_id: &str) -> Result<ProjectLifecycleActionResult> {
+    let Some(project) = get_project(project_id)? else {
+        bail!("project '{}' is not registered", project_id);
+    };
+    let before = project_status(&project)?;
+    if before.running {
+        crate::team::stop_team(&project.project_root)?;
+    }
+    crate::team::start_team(&project.project_root, false)?;
+    let status = project_status(&project)?;
+    Ok(ProjectLifecycleActionResult {
+        project_id: project.project_id.clone(),
+        action: ProjectLifecycleAction::Restart,
+        changed: true,
+        lifecycle: status.lifecycle,
+        running: status.running,
+        audit_message: if before.running {
+            format!(
+                "restarted project '{}' in session {}",
+                project.project_id, project.session_name
+            )
+        } else {
+            format!(
+                "started stopped project '{}' via restart in session {}",
+                project.project_id, project.session_name
+            )
+        },
+        status,
+    })
 }
 
 pub fn load_routing_state() -> Result<ProjectRoutingState> {
@@ -395,7 +575,11 @@ pub fn set_active_project_at(
     scope: ActiveProjectScope,
 ) -> Result<ActiveProjectSelection> {
     let registry = load_registry_at(registry_path)?;
-    if registry.projects.iter().all(|project| project.project_id != project_id) {
+    if registry
+        .projects
+        .iter()
+        .all(|project| project.project_id != project_id)
+    {
         bail!("project '{}' is not registered", project_id);
     }
 
@@ -456,7 +640,10 @@ pub fn resolve_project_for_message_at(
                     project.project_id
                 )
             } else {
-                format!("Selected {} because it is the only registered project.", project.project_id)
+                format!(
+                    "Selected {} because it is the only registered project.",
+                    project.project_id
+                )
             },
             candidates: vec![ProjectRoutingCandidate {
                 project_id: project.project_id.clone(),
@@ -520,7 +707,10 @@ pub fn parse_thread_binding(spec: &str) -> Result<ProjectChannelBinding> {
         bail!("invalid thread binding '{spec}'; expected <channel>=<binding>#<thread-binding>");
     };
     let mut binding = parse_channel_binding(channel_spec)?;
-    binding.thread_binding = Some(trim_required("channelBinding.threadBinding", thread_binding)?);
+    binding.thread_binding = Some(trim_required(
+        "channelBinding.threadBinding",
+        thread_binding,
+    )?);
     Ok(binding)
 }
 
@@ -752,10 +942,7 @@ fn normalize_registration(registration: ProjectRegistration) -> Result<Registere
             thread_binding.clone().unwrap_or_default(),
         );
         if !seen_bindings.insert(binding_key) {
-            bail!(
-                "duplicate channel/thread binding for channel '{}'",
-                channel
-            );
+            bail!("duplicate channel/thread binding for channel '{}'", channel);
         }
         channel_bindings.push(ProjectChannelBinding {
             channel,
@@ -789,6 +976,123 @@ fn normalize_registration(registration: ProjectRegistration) -> Result<Registere
 
     validate_project(&project)?;
     Ok(project)
+}
+
+fn project_status(project: &RegisteredProject) -> Result<ProjectStatusDto> {
+    let report = load_project_status_report(project)?;
+    let lifecycle = resolve_lifecycle_state(&report);
+    let workflow_metrics = report.workflow_metrics.unwrap_or_default();
+
+    Ok(ProjectStatusDto {
+        project_id: project.project_id.clone(),
+        name: project.name.clone(),
+        team_name: project.team_name.clone(),
+        session_name: project.session_name.clone(),
+        project_root: project.project_root.clone(),
+        lifecycle,
+        running: report.running,
+        health: ProjectHealthSummary {
+            paused: report.paused,
+            watchdog_state: report.watchdog.state,
+            unhealthy_members: report.health.unhealthy_members,
+            member_count: report.health.member_count,
+            active_member_count: report.health.active_member_count,
+            pending_inbox_count: report.health.pending_inbox_count,
+            triage_backlog_count: report.health.triage_backlog_count,
+        },
+        pipeline: ProjectPipelineMetrics {
+            active_task_count: report.active_tasks.len(),
+            review_queue_count: report.review_queue.len(),
+            runnable_count: workflow_metrics.runnable_count,
+            blocked_count: workflow_metrics.blocked_count,
+            stale_in_progress_count: workflow_metrics.stale_in_progress_count,
+            stale_review_count: workflow_metrics.stale_review_count,
+            auto_merge_rate: workflow_metrics.auto_merge_rate,
+            rework_rate: workflow_metrics.rework_rate,
+            avg_review_latency_secs: workflow_metrics.avg_review_latency_secs,
+        },
+    })
+}
+
+fn resolve_lifecycle_state(
+    report: &crate::team::status::TeamStatusJsonReport,
+) -> ProjectLifecycleState {
+    if !report.running {
+        ProjectLifecycleState::Stopped
+    } else if report.watchdog.state == "restarting" {
+        ProjectLifecycleState::Recovering
+    } else if report.paused
+        || report.watchdog.state == "circuit-open"
+        || !report.health.unhealthy_members.is_empty()
+    {
+        ProjectLifecycleState::Degraded
+    } else {
+        ProjectLifecycleState::Running
+    }
+}
+
+fn load_project_status_report(
+    project: &RegisteredProject,
+) -> Result<crate::team::status::TeamStatusJsonReport> {
+    let config_path = crate::team::team_config_path(&project.project_root);
+    if !config_path.exists() {
+        bail!(
+            "no team config found for project '{}' at {}",
+            project.project_id,
+            config_path.display()
+        );
+    }
+
+    let team_config = crate::team::config::TeamConfig::load(&config_path)?;
+    let members = crate::team::hierarchy::resolve_hierarchy(&team_config)?;
+    let session_running = tmux::session_exists(&project.session_name);
+    let runtime_statuses = if session_running {
+        crate::team::status::list_runtime_member_statuses(&project.session_name).unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
+    let pending_inbox_counts =
+        crate::team::status::pending_inbox_counts(&project.project_root, &members);
+    let triage_backlog_counts =
+        crate::team::status::triage_backlog_counts(&project.project_root, &members);
+    let owned_task_buckets =
+        crate::team::status::owned_task_buckets(&project.project_root, &members);
+    let worktree_staleness =
+        crate::team::status::worktree_staleness_by_member(&project.project_root, &members);
+    let agent_health = crate::team::status::agent_health_by_member(&project.project_root, &members);
+    let paused = crate::team::pause_marker_path(&project.project_root).exists();
+    let rows = crate::team::status::build_team_status_rows(
+        &members,
+        session_running,
+        &runtime_statuses,
+        &pending_inbox_counts,
+        &triage_backlog_counts,
+        &owned_task_buckets,
+        &worktree_staleness,
+        &agent_health,
+    );
+    let workflow_metrics =
+        crate::team::status::workflow_metrics_section(&project.project_root, &members)
+            .map(|(_, metrics)| metrics);
+    let watchdog =
+        crate::team::status::load_watchdog_status(&project.project_root, session_running);
+    let (active_tasks, review_queue) =
+        crate::team::status::board_status_task_queues(&project.project_root)?;
+
+    Ok(crate::team::status::build_team_status_json_report(
+        crate::team::status::TeamStatusJsonReportInput {
+            team: team_config.name,
+            session: project.session_name.clone(),
+            session_running,
+            paused,
+            watchdog,
+            workflow_metrics,
+            active_tasks,
+            review_queue,
+            engineer_profiles: None,
+            members: rows,
+        },
+    ))
 }
 
 fn validate_project(project: &RegisteredProject) -> Result<()> {
@@ -1060,14 +1364,11 @@ fn active_selection_match(
                 && request.binding.as_deref() == Some(binding.as_str())
                 && request.thread_binding.as_deref() == Some(thread_binding.as_str()))
             .then(|| (96, "active project selected for this thread".to_string())),
-            ActiveProjectScope::Channel { channel, binding } => {
-                (request.channel.as_deref() == Some(channel.as_str())
-                    && request.binding.as_deref() == Some(binding.as_str()))
-                .then(|| (80, "active project selected for this channel".to_string()))
-            }
-            ActiveProjectScope::Global => {
-                Some((65, "global active project selection".to_string()))
-            }
+            ActiveProjectScope::Channel { channel, binding } => (request.channel.as_deref()
+                == Some(channel.as_str())
+                && request.binding.as_deref() == Some(binding.as_str()))
+            .then(|| (80, "active project selected for this channel".to_string())),
+            ActiveProjectScope::Global => Some((65, "global active project selection".to_string())),
         })
 }
 
@@ -1142,11 +1443,7 @@ fn routing_confidence(score: u32) -> RoutingConfidence {
     }
 }
 
-fn routing_reason(
-    top: &ProjectRoutingCandidate,
-    ambiguous: bool,
-    control_action: bool,
-) -> String {
+fn routing_reason(top: &ProjectRoutingCandidate, ambiguous: bool, control_action: bool) -> String {
     if ambiguous {
         return format!(
             "Routing is ambiguous across multiple projects. Top match was {} because {}.",
@@ -1286,7 +1583,10 @@ mod tests {
         let registry = load_registry_at(&registry_path).unwrap();
         assert_eq!(registry.schema_version, 2);
         assert!(registry.projects[0].aliases.is_empty());
-        assert_eq!(registry.projects[0].channel_bindings[0].thread_binding, None);
+        assert_eq!(
+            registry.projects[0].channel_bindings[0].thread_binding,
+            None
+        );
     }
 
     #[test]
@@ -1458,6 +1758,64 @@ mod tests {
 
         assert!(decision.selected_project_id.is_none());
         assert!(decision.requires_confirmation);
-        assert!(decision.reason.contains("ambiguous") || decision.reason.contains("high confidence"));
+        assert!(
+            decision.reason.contains("ambiguous") || decision.reason.contains("high confidence")
+        );
+    }
+
+    #[test]
+    fn resolve_lifecycle_state_maps_stopped_recovering_and_degraded() {
+        let base = crate::team::status::TeamStatusJsonReport {
+            team: "batty".to_string(),
+            session: "batty-batty".to_string(),
+            running: true,
+            paused: false,
+            watchdog: crate::team::status::WatchdogStatus {
+                state: "running".to_string(),
+                restart_count: 0,
+                current_backoff_secs: None,
+                last_exit_reason: None,
+            },
+            health: crate::team::status::TeamStatusHealth {
+                session_running: true,
+                paused: false,
+                member_count: 3,
+                active_member_count: 1,
+                pending_inbox_count: 0,
+                triage_backlog_count: 0,
+                unhealthy_members: Vec::new(),
+            },
+            workflow_metrics: None,
+            active_tasks: Vec::new(),
+            review_queue: Vec::new(),
+            engineer_profiles: None,
+            members: Vec::new(),
+        };
+
+        let mut stopped = base.clone();
+        stopped.running = false;
+        assert_eq!(
+            resolve_lifecycle_state(&stopped),
+            ProjectLifecycleState::Stopped
+        );
+
+        let mut recovering = base.clone();
+        recovering.watchdog.state = "restarting".to_string();
+        assert_eq!(
+            resolve_lifecycle_state(&recovering),
+            ProjectLifecycleState::Recovering
+        );
+
+        let mut degraded = base.clone();
+        degraded.health.unhealthy_members.push("eng-1".to_string());
+        assert_eq!(
+            resolve_lifecycle_state(&degraded),
+            ProjectLifecycleState::Degraded
+        );
+
+        assert_eq!(
+            resolve_lifecycle_state(&base),
+            ProjectLifecycleState::Running
+        );
     }
 }

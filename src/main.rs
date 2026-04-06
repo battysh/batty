@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use batty_cli::{
     agent,
     cli::{
@@ -501,6 +501,71 @@ fn main() -> Result<()> {
                     );
                 }
             }
+            ProjectCommand::Start { project_id, json } => {
+                let result = project_registry::start_project(&project_id)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("{}", result.audit_message);
+                    println!(
+                        "Lifecycle: {:?} | Running: {}",
+                        result.lifecycle, result.running
+                    );
+                }
+            }
+            ProjectCommand::Stop { project_id, json } => {
+                let result = project_registry::stop_project(&project_id)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("{}", result.audit_message);
+                    println!(
+                        "Lifecycle: {:?} | Running: {}",
+                        result.lifecycle, result.running
+                    );
+                }
+            }
+            ProjectCommand::Restart { project_id, json } => {
+                let result = project_registry::restart_project(&project_id)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("{}", result.audit_message);
+                    println!(
+                        "Lifecycle: {:?} | Running: {}",
+                        result.lifecycle, result.running
+                    );
+                }
+            }
+            ProjectCommand::Status { project_id, json } => {
+                let status = project_registry::get_project_status(&project_id)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&status)?);
+                } else {
+                    println!("Project: {}", status.project_id);
+                    println!("Name: {}", status.name);
+                    println!("Lifecycle: {:?}", status.lifecycle);
+                    println!("Running: {}", status.running);
+                    println!("Team: {}", status.team_name);
+                    println!("Session: {}", status.session_name);
+                    println!(
+                        "Health: paused={} watchdog={} unhealthy={} triage_backlog={}",
+                        status.health.paused,
+                        status.health.watchdog_state,
+                        status.health.unhealthy_members.len(),
+                        status.health.triage_backlog_count
+                    );
+                    println!(
+                        "Pipeline: active={} review={} runnable={} blocked={} stale_in_progress={} stale_review={}",
+                        status.pipeline.active_task_count,
+                        status.pipeline.review_queue_count,
+                        status.pipeline.runnable_count,
+                        status.pipeline.blocked_count,
+                        status.pipeline.stale_in_progress_count,
+                        status.pipeline.stale_review_count
+                    );
+                }
+            }
             ProjectCommand::SetActive {
                 project_id,
                 channel,
@@ -538,13 +603,14 @@ fn main() -> Result<()> {
                 thread_binding,
                 json,
             } => {
-                let decision =
-                    project_registry::resolve_project_for_message(&project_registry::ProjectRoutingRequest {
+                let decision = project_registry::resolve_project_for_message(
+                    &project_registry::ProjectRoutingRequest {
                         message,
                         channel,
                         binding,
                         thread_binding,
-                    })?;
+                    },
+                )?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&decision)?);
                 } else {
