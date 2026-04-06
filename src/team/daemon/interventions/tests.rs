@@ -8,6 +8,7 @@ use super::review::{
 use super::utilization::architect_utilization_intervention_signature;
 use super::*;
 use crate::team::config::WorkflowMode;
+use crate::team::test_support::write_board_task_file;
 use crate::team::daemon::interventions::dispatch::manager_dispatch_intervention_key;
 use crate::team::daemon::interventions::utilization::architect_utilization_intervention_key;
 use crate::team::harness::{TestHarness, architect_member, engineer_member, manager_member};
@@ -1650,6 +1651,16 @@ fn maybe_fire_nudges_delivers_when_idle_past_interval() {
         "eng-1".to_string(),
         Instant::now() - daemon.automation_idle_grace_duration() - Duration::from_secs(1),
     );
+    // Engineer needs an in-progress task for the nudge to fire
+    write_board_task_file(
+        &daemon.config.project_root,
+        1,
+        "active-task",
+        "in-progress",
+        Some("eng-1"),
+        &[],
+        None,
+    );
 
     daemon.maybe_fire_nudges().unwrap();
 
@@ -1800,6 +1811,79 @@ fn maybe_fire_nudges_paused_marker_suppresses() {
     daemon.maybe_fire_nudges().unwrap();
 
     assert!(harness.pending_inbox_messages("eng-1").unwrap().is_empty());
+}
+
+#[test]
+fn maybe_fire_nudges_skips_engineer_with_no_actionable_task() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.nudges.insert(
+        "eng-1".to_string(),
+        NudgeSchedule {
+            text: "nudge".to_string(),
+            interval: Duration::from_secs(1),
+            idle_since: Some(Instant::now() - Duration::from_secs(120)),
+            fired_this_idle: false,
+            paused: false,
+        },
+    );
+    daemon.idle_started_at.insert(
+        "eng-1".to_string(),
+        Instant::now() - daemon.automation_idle_grace_duration() - Duration::from_secs(1),
+    );
+    // Engineer's only task is "done" — no actionable work
+    write_board_task_file(
+        &daemon.config.project_root,
+        42,
+        "completed-task",
+        "done",
+        Some("eng-1"),
+        &[],
+        None,
+    );
+
+    daemon.maybe_fire_nudges().unwrap();
+
+    // No nudge should be delivered
+    assert!(harness.pending_inbox_messages("eng-1").unwrap().is_empty());
+    // But fired_this_idle should be set so we don't re-check every cycle
+    assert!(daemon.nudges.get("eng-1").unwrap().fired_this_idle);
+}
+
+#[test]
+fn maybe_fire_nudges_fires_for_engineer_with_in_progress_task() {
+    let harness = nudge_harness();
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.nudges.insert(
+        "eng-1".to_string(),
+        NudgeSchedule {
+            text: "Get moving!".to_string(),
+            interval: Duration::from_secs(1),
+            idle_since: Some(Instant::now() - Duration::from_secs(120)),
+            fired_this_idle: false,
+            paused: false,
+        },
+    );
+    daemon.idle_started_at.insert(
+        "eng-1".to_string(),
+        Instant::now() - daemon.automation_idle_grace_duration() - Duration::from_secs(1),
+    );
+    // Engineer has an in-progress task — nudge should fire
+    write_board_task_file(
+        &daemon.config.project_root,
+        43,
+        "active-task",
+        "in-progress",
+        Some("eng-1"),
+        &[],
+        None,
+    );
+
+    daemon.maybe_fire_nudges().unwrap();
+
+    let pending = harness.pending_inbox_messages("eng-1").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].body.contains("Get moving!"));
 }
 
 // ─── mod.rs helper function tests ─────────────────────────────────────────────
