@@ -2,12 +2,13 @@
 //! without actually invoking tools or commands.
 
 use std::collections::{HashMap, VecDeque};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tracing::warn;
 
 use super::super::*;
+use super::format_checkpoint_section;
 use crate::shim::classifier::AgentType;
 use crate::team::events::TeamEvent;
 
@@ -145,9 +146,17 @@ impl NarrationTracker {
     }
 
     pub(super) fn note_breaker_nudge(&mut self, member: &str) {
-        let sample_len_at_nudge = self.samples.get(member).map(|samples| samples.len()).unwrap_or(0);
-        self.breaker_states
-            .insert(member.to_string(), BreakerState { sample_len_at_nudge });
+        let sample_len_at_nudge = self
+            .samples
+            .get(member)
+            .map(|samples| samples.len())
+            .unwrap_or(0);
+        self.breaker_states.insert(
+            member.to_string(),
+            BreakerState {
+                sample_len_at_nudge,
+            },
+        );
     }
 
     pub(super) fn clear_breaker(&mut self, member: &str) {
@@ -163,7 +172,9 @@ impl NarrationTracker {
         };
         self.is_meta_conversation(member)
             && samples.len()
-                >= state.sample_len_at_nudge.saturating_add(META_CONVERSATION_GRACE_CYCLES)
+                >= state
+                    .sample_len_at_nudge
+                    .saturating_add(META_CONVERSATION_GRACE_CYCLES)
     }
 }
 
@@ -314,7 +325,7 @@ impl TeamDaemon {
                 self.intervention_cooldowns
                     .insert(restart_key, Instant::now());
                 self.narration_tracker.clear_member(&member_name);
-                self.clear_narration_cooldowns(&member_name);
+                self.clear_narration_nudge_cooldown(&member_name);
             }
         }
 
@@ -325,15 +336,61 @@ impl TeamDaemon {
         let Some(task) = self.active_task(member_name)? else {
             return Ok(());
         };
+        let Some(member) = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+            .cloned()
+        else {
+            return Ok(());
+        };
         let Some(pane_id) = self.config.pane_map.get(member_name).cloned() else {
             return Ok(());
         };
+        let work_dir = self.member_work_dir(&member);
 
         warn!(member = %member_name, task_id = task.id, "restarting agent after sustained narration loop");
+        self.preserve_worktree_before_restart(member_name, &work_dir, "narration loop");
+        if self
+            .config
+            .team_config
+            .workflow_policy
+            .context_handoff_enabled
+        {
+            let recent_output = self.capture_context_handoff_output(&pane_id);
+            if let Err(error) =
+                crate::shim::runtime::preserve_handoff(&work_dir, recent_output.as_deref())
+            {
+                warn!(
+                    member = %member_name,
+                    task_id = task.id,
+                    error = %error,
+                    "failed to preserve narration restart handoff"
+                );
+            }
+        }
+
+        let checkpoint = super::super::super::checkpoint::gather_checkpoint(
+            &self.config.project_root,
+            member_name,
+            &task,
+        );
+        if let Err(error) = super::super::super::checkpoint::write_checkpoint(
+            &self.config.project_root,
+            &checkpoint,
+        ) {
+            warn!(
+                member = %member_name,
+                error = %error,
+                "failed to write narration restart checkpoint"
+            );
+        }
+
         crate::tmux::respawn_pane(&pane_id, "bash")?;
         std::thread::sleep(Duration::from_millis(200));
 
-        let assignment = Self::restart_assignment_message(&task);
+        let assignment = self.restart_assignment_with_handoff(&task, &work_dir);
         let launch = self.launch_task_assignment(member_name, &assignment, Some(task.id), false)?;
         let mut restart_notice = format!(
             "Restarted after a narration loop. Continue task #{} from the current worktree state and execute commands instead of narrating.",
@@ -343,6 +400,11 @@ impl TeamDaemon {
             restart_notice.push_str(&format!("\nBranch: {branch}"));
         }
         restart_notice.push_str(&format!("\nWorktree: {}", launch.work_dir.display()));
+        if let Some(cp_content) =
+            super::super::super::checkpoint::read_checkpoint(&self.config.project_root, member_name)
+        {
+            restart_notice.push_str(&format_checkpoint_section(&cp_content));
+        }
         if let Err(error) = self.queue_message("daemon", member_name, &restart_notice) {
             warn!(member = %member_name, error = %error, "failed to inject narration restart notice");
         }
@@ -378,9 +440,13 @@ impl TeamDaemon {
         format!("narration-restart::{member_name}")
     }
 
-    fn clear_narration_cooldowns(&mut self, member_name: &str) {
+    fn clear_narration_nudge_cooldown(&mut self, member_name: &str) {
         self.intervention_cooldowns
             .remove(&Self::narration_nudge_cooldown_key(member_name));
+    }
+
+    fn clear_narration_cooldowns(&mut self, member_name: &str) {
+        self.clear_narration_nudge_cooldown(member_name);
         self.intervention_cooldowns
             .remove(&Self::narration_restart_cooldown_key(member_name));
     }
@@ -398,9 +464,7 @@ impl TeamDaemon {
             .unwrap_or_else(|| "Continue the current assignment.".to_string());
         self.prepend_member_nudge(
             member,
-            &format!(
-                "STOP NARRATING. Execute the next concrete step now.\n{task_context}"
-            ),
+            &format!("STOP NARRATING. Execute the next concrete step now.\n{task_context}"),
         )
     }
 }
@@ -543,7 +607,12 @@ mod tests {
             );
         }
         tracker.note_breaker_nudge("eng-1");
-        tracker.record_sample("eng-1", 4, "$ sed -n '1,40p' src/team/daemon.rs", AgentType::Codex);
+        tracker.record_sample(
+            "eng-1",
+            4,
+            "$ sed -n '1,40p' src/team/daemon.rs",
+            AgentType::Codex,
+        );
         assert!(!tracker.has_active_breaker("eng-1"));
         assert!(!tracker.has_samples("eng-1"));
     }
@@ -554,7 +623,6 @@ mod tests {
         for _ in 0..6 {
             tracker.record_sample("eng-1", 4, "narrating", AgentType::Claude);
         }
-        backdate_member_samples(&mut tracker, "eng-1", 40, 8);
         assert!(!tracker.is_narrating("eng-1"));
     }
 

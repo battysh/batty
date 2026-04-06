@@ -135,7 +135,7 @@ const ALERT_RULES: &[AlertRuleDefinition] = &[
         threshold: 2.0,
         sql: "SELECT COUNT(*) AS value \
               FROM events \
-              WHERE event_type = 'narration_detected' \
+              WHERE event_type IN ('narration_detected', 'meta_conversation_escalated') \
                 AND timestamp BETWEEN $__from / 1000 AND $__to / 1000;",
         description: "Narration detection tripped more than twice in the last 15 minutes.",
     },
@@ -729,6 +729,7 @@ mod tests {
         }
         assert!(yaml.contains("pipeline_starvation_detected"));
         assert!(yaml.contains("narration_detected"));
+        assert!(yaml.contains("meta_conversation_escalated"));
     }
 
     #[test]

@@ -290,6 +290,30 @@ impl TeamEvent {
         }
     }
 
+    pub fn meta_conversation_nudged(role: &str, task: Option<u32>) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: task.map(|id| id.to_string()),
+            ..Self::base("meta_conversation_nudged")
+        }
+    }
+
+    pub fn meta_conversation_escalated(role: &str, task: Option<u32>) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: task.map(|id| id.to_string()),
+            ..Self::base("meta_conversation_escalated")
+        }
+    }
+
+    pub fn meta_conversation_recovered(role: &str, task: Option<u32>) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: task.map(|id| id.to_string()),
+            ..Self::base("meta_conversation_recovered")
+        }
+    }
+
     pub fn narration_rejection(role: &str, task_id: u32, rejection_count: u32) -> Self {
         Self {
             role: Some(role.into()),
@@ -1629,6 +1653,24 @@ mod tests {
         assert_eq!(event.role.as_deref(), Some("eng-1-1"));
         assert_eq!(event.task.as_deref(), Some("42"));
         assert_eq!(event.reason.as_deref(), Some("rejection_count=2"));
+    }
+
+    #[test]
+    fn meta_conversation_events_have_correct_fields() {
+        let nudged = TeamEvent::meta_conversation_nudged("eng-1-4", Some(415));
+        assert_eq!(nudged.event, "meta_conversation_nudged");
+        assert_eq!(nudged.role.as_deref(), Some("eng-1-4"));
+        assert_eq!(nudged.task.as_deref(), Some("415"));
+
+        let escalated = TeamEvent::meta_conversation_escalated("eng-1-4", Some(415));
+        assert_eq!(escalated.event, "meta_conversation_escalated");
+        assert_eq!(escalated.role.as_deref(), Some("eng-1-4"));
+        assert_eq!(escalated.task.as_deref(), Some("415"));
+
+        let recovered = TeamEvent::meta_conversation_recovered("eng-1-4", Some(415));
+        assert_eq!(recovered.event, "meta_conversation_recovered");
+        assert_eq!(recovered.role.as_deref(), Some("eng-1-4"));
+        assert_eq!(recovered.task.as_deref(), Some("415"));
     }
 
     #[test]
