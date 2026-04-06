@@ -38,10 +38,8 @@ pub const REQUIRED_ROWS: &[&str] = &[
 pub const REQUIRED_ALERTS: &[&str] = &[
     "Zero Activity",
     "Crash Spike",
-    "Stall Detection",
-    "Pipeline Starvation",
-    "Review Queue Aging",
-    "Narration Loop",
+    "Dispatch Starvation",
+    "Merge Queue Depth",
 ];
 
 const ALERT_RULE_GROUP: &str = "batty-operational-anomalies";
@@ -88,21 +86,8 @@ const ALERT_RULES: &[AlertRuleDefinition] = &[
         description: "More than three agent crashes in the last 10 minutes.",
     },
     AlertRuleDefinition {
-        uid: "batty_stall_detection",
-        title: "Stall Detection",
-        severity: "warning",
-        window_secs: 20 * 60,
-        for_duration: "2m",
-        threshold: 0.5,
-        sql: "SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END AS value \
-              FROM events \
-              WHERE event_type = 'stall_detected' \
-                AND timestamp BETWEEN $__from / 1000 AND $__to / 1000;",
-        description: "A stall_detected event occurred in the last 20 minutes.",
-    },
-    AlertRuleDefinition {
-        uid: "batty_pipeline_starvation",
-        title: "Pipeline Starvation",
+        uid: "batty_dispatch_starvation",
+        title: "Dispatch Starvation",
         severity: "warning",
         window_secs: 10 * 60,
         for_duration: "2m",
@@ -111,33 +96,26 @@ const ALERT_RULES: &[AlertRuleDefinition] = &[
               FROM events \
               WHERE event_type = 'pipeline_starvation_detected' \
                 AND timestamp BETWEEN $__from / 1000 AND $__to / 1000;",
-        description: "Idle engineers outnumber runnable todo tasks and the pipeline is running dry.",
+        description: "Idle engineers outnumber runnable work and dispatch is starving the lane.",
     },
     AlertRuleDefinition {
-        uid: "batty_review_queue_aging",
-        title: "Review Queue Aging",
+        uid: "batty_merge_queue_depth",
+        title: "Merge Queue Depth",
         severity: "warning",
-        window_secs: 30 * 60,
+        window_secs: 60 * 60,
         for_duration: "2m",
-        threshold: 0.5,
-        sql: "SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END AS value \
-              FROM events \
-              WHERE event_type IN ('review_nudge_sent', 'review_escalated') \
-                AND timestamp BETWEEN $__from / 1000 AND $__to / 1000;",
-        description: "Review backlog has aged long enough to trigger a nudge or escalation.",
-    },
-    AlertRuleDefinition {
-        uid: "batty_narration_loop",
-        title: "Narration Loop",
-        severity: "warning",
-        window_secs: 15 * 60,
-        for_duration: "90s",
-        threshold: 2.0,
+        threshold: 3.0,
         sql: "SELECT COUNT(*) AS value \
-              FROM events \
-              WHERE event_type IN ('narration_detected', 'meta_conversation_escalated') \
-                AND timestamp BETWEEN $__from / 1000 AND $__to / 1000;",
-        description: "Narration detection tripped more than twice in the last 15 minutes.",
+              FROM task_metrics tm \
+              WHERE tm.completed_at IS NOT NULL \
+                AND NOT EXISTS ( \
+                    SELECT 1 \
+                    FROM events e \
+                    WHERE e.task_id = tm.task_id \
+                      AND e.event_type IN ('task_auto_merged', 'task_manual_merged', 'task_reworked') \
+                      AND e.timestamp >= tm.completed_at \
+                );",
+        description: "More than three completed tasks are still waiting for merge or rework.",
     },
 ];
 
@@ -161,6 +139,14 @@ fn alert_webhook_url(port: u16) -> String {
 
 fn alerts_log_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("alerts.log")
+}
+
+fn orchestrator_alert_log_path(project_root: &Path) -> PathBuf {
+    crate::team::orchestrator_log_path(project_root)
+}
+
+fn orchestrator_alert_ansi_log_path(project_root: &Path) -> PathBuf {
+    crate::team::orchestrator_ansi_log_path(project_root)
 }
 
 fn project_alerting_dir(project_root: &Path) -> PathBuf {
@@ -578,7 +564,19 @@ fn handle_alert_webhook(mut stream: TcpStream, project_root: &Path) -> Result<()
         .map(|(_, body)| body)
         .unwrap_or_default();
     let line = format_alert_notification(body);
-    let mut file = OpenOptions::new()
+    append_alert_logs(project_root, &line)?;
+    if let Err(error) = maybe_send_telegram_alert(&line) {
+        eprintln!("grafana alert telegram delivery failed: {error}");
+    }
+    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")?;
+    Ok(())
+}
+
+fn append_alert_logs(project_root: &Path, line: &str) -> Result<()> {
+    if let Some(parent) = alerts_log_path(project_root).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut alerts = OpenOptions::new()
         .create(true)
         .append(true)
         .open(alerts_log_path(project_root))
@@ -588,9 +586,33 @@ fn handle_alert_webhook(mut stream: TcpStream, project_root: &Path) -> Result<()
                 alerts_log_path(project_root).display()
             )
         })?;
-    writeln!(file, "{line}")?;
-    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")?;
+    writeln!(alerts, "{line}")?;
+
+    let orchestrator_line = format!("alert: {line}");
+    let plain_path = orchestrator_alert_log_path(project_root);
+    let ansi_path = orchestrator_alert_ansi_log_path(project_root);
+    let mut plain = crate::team::open_log_for_append(&plain_path)?;
+    writeln!(plain, "{orchestrator_line}")?;
+    let mut ansi = crate::team::open_log_for_append(&ansi_path)?;
+    writeln!(ansi, "{orchestrator_line}")?;
     Ok(())
+}
+
+fn maybe_send_telegram_alert(message: &str) -> Result<()> {
+    let bot_token = match std::env::var("BATTY_TELEGRAM_BOT_TOKEN") {
+        Ok(token) => token,
+        Err(_) => return Ok(()),
+    };
+    let chat_id = match std::env::var("BATTY_GRAFANA_ALERT_CHAT_ID")
+        .or_else(|_| std::env::var("BATTY_TELEGRAM_ALERT_CHAT_ID"))
+    {
+        Ok(chat_id) => chat_id,
+        Err(_) => return Ok(()),
+    };
+
+    let bot = crate::team::telegram::TelegramBot::new(bot_token, Vec::new());
+    bot.send_message(&chat_id, message)
+        .context("failed to send Grafana alert to Telegram")
 }
 
 fn format_alert_notification(body: &str) -> String {
@@ -728,8 +750,9 @@ mod tests {
             assert!(yaml.contains(expected), "missing {expected} from YAML");
         }
         assert!(yaml.contains("pipeline_starvation_detected"));
-        assert!(yaml.contains("narration_detected"));
-        assert!(yaml.contains("meta_conversation_escalated"));
+        assert!(yaml.contains("task_auto_merged"));
+        assert!(yaml.contains("task_manual_merged"));
+        assert!(yaml.contains("task_reworked"));
     }
 
     #[test]
@@ -769,6 +792,24 @@ mod tests {
                 .join(".batty/grafana/alerting/policies.yaml")
                 .exists()
         );
+    }
+
+    #[test]
+    fn append_alert_logs_writes_alert_and_orchestrator_logs() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        append_alert_logs(tmp.path(), "[1] status=firing alerts=Crash Spike").unwrap();
+
+        let alerts = std::fs::read_to_string(tmp.path().join(".batty/alerts.log")).unwrap();
+        assert!(alerts.contains("Crash Spike"));
+
+        let orchestrator =
+            std::fs::read_to_string(tmp.path().join(".batty/orchestrator.log")).unwrap();
+        assert!(orchestrator.contains("alert: [1] status=firing alerts=Crash Spike"));
+
+        let orchestrator_ansi =
+            std::fs::read_to_string(tmp.path().join(".batty/orchestrator.ansi.log")).unwrap();
+        assert!(orchestrator_ansi.contains("alert: [1] status=firing alerts=Crash Spike"));
     }
 
     #[test]
@@ -823,7 +864,7 @@ mod tests {
 
     #[test]
     fn dashboard_alert_count_matches_expected() {
-        assert_eq!(REQUIRED_ALERTS.len(), 6);
+        assert_eq!(REQUIRED_ALERTS.len(), 4);
     }
 
     #[test]
