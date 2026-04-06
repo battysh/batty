@@ -497,16 +497,16 @@ impl TeamEvent {
         }
     }
 
-    pub fn planning_cycle_triggered(role: &str, idle_engineers: u32, board_summary: &str) -> Self {
+    pub fn tact_cycle_triggered(role: &str, idle_engineers: u32, board_summary: &str) -> Self {
         Self {
             role: Some(role.into()),
             working_members: Some(idle_engineers),
             reason: Some(board_summary.into()),
-            ..Self::base("planning_cycle_triggered")
+            ..Self::base("tact_cycle_triggered")
         }
     }
 
-    pub fn planning_cycle_completed(
+    pub fn tact_tasks_created(
         role: &str,
         tasks_created: u32,
         latency_secs: u64,
@@ -519,7 +519,7 @@ impl TeamEvent {
             uptime_secs: Some(latency_secs),
             reason: Some(if success { "success" } else { "failure" }.into()),
             error: error.map(str::to_string),
-            ..Self::base("planning_cycle_completed")
+            ..Self::base("tact_tasks_created")
         }
     }
 
@@ -1062,12 +1062,12 @@ mod tests {
                 TeamEvent::context_pressure_warning("eng-1", Some(42), 88, 100, 400_000),
             ),
             (
-                "planning_cycle_triggered",
-                TeamEvent::planning_cycle_triggered("architect", 3, "todo=0, backlog=1"),
+                "tact_cycle_triggered",
+                TeamEvent::tact_cycle_triggered("architect", 3, "todo=0, backlog=1"),
             ),
             (
-                "planning_cycle_completed",
-                TeamEvent::planning_cycle_completed("architect", 2, 14, true, None),
+                "tact_tasks_created",
+                TeamEvent::tact_tasks_created("architect", 2, 14, true, None),
             ),
             (
                 "board_task_archived",
@@ -1295,16 +1295,12 @@ mod tests {
     }
 
     #[test]
-    fn planning_cycle_completed_includes_latency_status_and_created_count() {
-        let event =
-            TeamEvent::planning_cycle_completed("architect", 4, 19, false, Some("parse failed"));
+    fn tact_tasks_created_includes_latency_status_and_created_count() {
+        let event = TeamEvent::tact_tasks_created("architect", 4, 19, false, Some("parse failed"));
         let json = serde_json::to_string(&event).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(
-            parsed["event"].as_str().unwrap(),
-            "planning_cycle_completed"
-        );
+        assert_eq!(parsed["event"].as_str().unwrap(), "tact_tasks_created");
         assert_eq!(parsed["role"].as_str().unwrap(), "architect");
         assert_eq!(parsed["restart_count"].as_u64().unwrap(), 4);
         assert_eq!(parsed["uptime_secs"].as_u64().unwrap(), 19);
