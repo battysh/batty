@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::task::load_tasks_from_dir;
 
 use super::board::{WorkflowMetadata, read_workflow_metadata, write_workflow_metadata};
+use super::daemon::verification;
 use super::team_config_dir;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -82,6 +83,28 @@ pub fn apply_completion_to_metadata(packet: &CompletionPacket, metadata: &mut Wo
     metadata.outcome = Some(packet.outcome.clone());
 }
 
+fn scope_review_blockers(
+    project_root: &Path,
+    task_text: &str,
+    packet: &CompletionPacket,
+) -> Result<Vec<String>> {
+    let worktree_dir = resolve_worktree_path(project_root, packet)?;
+    if !worktree_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let changed_files = verification::changed_files_from_main(&worktree_dir)?;
+    let scope = verification::validate_declared_scope(task_text, &changed_files);
+    if scope.declared_scope.is_empty() || scope.out_of_scope_files.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    Ok(vec![format!(
+        "scope fence violation: changed files outside declared scope: {}",
+        scope.out_of_scope_files.join(", ")
+    )])
+}
+
 pub(crate) fn ingest_completion_message(project_root: &Path, message: &str) -> Result<Option<u32>> {
     if !message.contains("Completion Packet") {
         return Ok(None);
@@ -90,9 +113,12 @@ pub(crate) fn ingest_completion_message(project_root: &Path, message: &str) -> R
     let packet = parse_completion(message)?;
     let validation = validate_completion(&packet);
     let task_path = find_task_path(project_root, packet.task_id)?;
+    let task_text = std::fs::read_to_string(&task_path)
+        .with_context(|| format!("failed to read {}", task_path.display()))?;
     let mut metadata = read_workflow_metadata(&task_path)?;
     apply_completion_to_metadata(&packet, &mut metadata);
     let mut review_blockers = validation.missing_fields;
+    review_blockers.extend(scope_review_blockers(project_root, &task_text, &packet)?);
     if packet.outcome.trim() == "ready_for_review" && review_blockers.is_empty() {
         if let Ok(worktree_path) = resolve_worktree_path(project_root, &packet)
             && worktree_path.exists()
@@ -275,6 +301,67 @@ outcome: ready_for_review
         assert_eq!(metadata.tests_passed, Some(true));
         assert_eq!(metadata.artifacts, packet.artifacts);
         assert_eq!(metadata.outcome.as_deref(), Some("ready_for_review"));
+    }
+
+    #[test]
+    fn ingest_completion_message_adds_scope_fence_review_blocker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = team_config_dir(tmp.path()).join("board").join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let task_path = tasks_dir.join("027-task.md");
+        std::fs::write(
+            &task_path,
+            "---\nid: 27\ntitle: Completion packets\nstatus: review\npriority: medium\nclaimed_by: eng-1-4\nclass: standard\n---\n\nTask body.\nSCOPE FENCE: src/team/completion.rs, src/team/review.rs\n",
+        )
+        .unwrap();
+
+        let worktree = tmp.path().join(".batty").join("worktrees").join("eng-1-4");
+        std::fs::create_dir_all(worktree.join("src/team")).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&worktree)
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init"]).status.success());
+        assert!(
+            git(&["config", "user.email", "test@example.com"])
+                .status
+                .success()
+        );
+        assert!(git(&["config", "user.name", "Test"]).status.success());
+        std::fs::write(worktree.join("src/team/completion.rs"), "base\n").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(git(&["commit", "-m", "base"]).status.success());
+        assert!(git(&["branch", "-M", "main"]).status.success());
+        assert!(git(&["checkout", "-b", "eng-1-4"]).status.success());
+
+        std::fs::write(worktree.join("src/team/review.rs"), "in scope\n").unwrap();
+        std::fs::write(worktree.join("src/team/daemon.rs"), "out of scope\n").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(git(&["commit", "-m", "change"]).status.success());
+
+        let updated = ingest_completion_message(
+            tmp.path(),
+            r#"Done.
+
+## Completion Packet
+
+```json
+{"task_id":27,"branch":"eng-1-4/task-27","worktree_path":".batty/worktrees/eng-1-4","commit":"abc1234","changed_paths":["src/team/review.rs","src/team/daemon.rs"],"tests_run":true,"tests_passed":true,"artifacts":[],"outcome":"ready_for_review"}
+```"#,
+        )
+        .unwrap();
+
+        assert_eq!(updated, Some(27));
+        let metadata = read_workflow_metadata(&task_path).unwrap();
+        assert!(
+            metadata
+                .review_blockers
+                .iter()
+                .any(|blocker| blocker.contains("src/team/daemon.rs"))
+        );
     }
 
     #[test]
