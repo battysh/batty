@@ -5,12 +5,12 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use super::daemon_mgmt::{
-    force_kill_daemon, request_graceful_daemon_shutdown, resume_marker_path,
-    DAEMON_SHUTDOWN_GRACE_PERIOD,
+    DAEMON_SHUTDOWN_GRACE_PERIOD, force_kill_daemon, request_graceful_daemon_shutdown,
+    resume_marker_path,
 };
 use super::{
     config, estimation, events, hierarchy, now_unix, status, team_config_path, team_events_path,
@@ -527,13 +527,13 @@ pub fn validate_team(project_root: &Path, verbose: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::team::TRIAGE_RESULT_FRESHNESS_SECONDS;
     use crate::team::config::RoleType;
     use crate::team::hierarchy;
     use crate::team::inbox;
     use crate::team::status;
     use crate::team::team_config_dir;
     use crate::team::team_config_path;
-    use crate::team::TRIAGE_RESULT_FRESHNESS_SECONDS;
     use serial_test::serial;
 
     #[test]

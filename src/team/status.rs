@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -11,14 +11,14 @@ use crate::task;
 
 use super::config::{self, RoleType};
 use super::daemon::NudgeSchedule;
-use super::daemon_mgmt::{watchdog_state_path, PersistedWatchdogState};
+use super::daemon_mgmt::{PersistedWatchdogState, watchdog_state_path};
 use super::events;
 use super::hierarchy::MemberInstance;
 use super::inbox;
 use super::standup::MemberState;
 use super::{
-    daemon_state_path, now_unix, pause_marker_path, team_config_dir, team_config_path,
-    team_events_path, TRIAGE_RESULT_FRESHNESS_SECONDS,
+    TRIAGE_RESULT_FRESHNESS_SECONDS, daemon_state_path, now_unix, pause_marker_path,
+    team_config_dir, team_config_path, team_events_path,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2206,10 +2206,12 @@ mod tests {
             active_tasks[0].worktree_path.as_deref(),
             Some(".batty/worktrees/eng-1")
         );
-        assert!(active_tasks[0]
-            .branch
-            .as_deref()
-            .is_some_and(|branch| branch.contains("eng-1")));
+        assert!(
+            active_tasks[0]
+                .branch
+                .as_deref()
+                .is_some_and(|branch| branch.contains("eng-1"))
+        );
         assert!(active_tasks[0].commit.as_deref().is_some());
     }
 

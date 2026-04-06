@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -302,15 +302,15 @@ fn install_watchdog_signal_handlers() -> Result<()> {
     unsafe {
         libc::signal(
             libc::SIGTERM,
-            handle_watchdog_shutdown_signal as libc::sighandler_t,
+            handle_watchdog_shutdown_signal as *const () as libc::sighandler_t,
         );
         libc::signal(
             libc::SIGINT,
-            handle_watchdog_shutdown_signal as libc::sighandler_t,
+            handle_watchdog_shutdown_signal as *const () as libc::sighandler_t,
         );
         libc::signal(
             libc::SIGHUP,
-            handle_watchdog_shutdown_signal as libc::sighandler_t,
+            handle_watchdog_shutdown_signal as *const () as libc::sighandler_t,
         );
     }
     WATCHDOG_SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
