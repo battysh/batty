@@ -27,6 +27,7 @@ pub mod comms;
 pub mod completion;
 pub mod config;
 pub mod config_diff;
+pub mod context_management;
 pub mod cost;
 pub mod daemon;
 mod daemon_mgmt;
