@@ -206,6 +206,20 @@ impl TeamConfig {
                 );
             }
 
+            for (instance_name, override_cfg) in &role.instance_overrides {
+                if let Some(agent_name) = override_cfg.agent.as_deref()
+                    && agent::adapter_from_name(agent_name).is_none()
+                {
+                    bail!(
+                        "role '{}' instance override '{}' uses unknown agent '{}'; valid agents: {}",
+                        role.name,
+                        instance_name,
+                        agent_name,
+                        valid_agents
+                    );
+                }
+            }
+
             let effective_agent = role.agent.as_deref().or(self.agent.as_deref());
             if (role.auth_mode.is_some() || !role.auth_env.is_empty())
                 && !matches!(effective_agent, Some("claude" | "claude-code"))

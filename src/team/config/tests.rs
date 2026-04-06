@@ -364,6 +364,27 @@ roles:
 }
 
 #[test]
+fn validate_rejects_unknown_instance_override_agent() {
+    let yaml = r#"
+name: test-team
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instance_overrides:
+      eng-1-1:
+        agent: mystery
+"#;
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("instance override 'eng-1-1'"));
+    assert!(error.contains("unknown agent 'mystery'"));
+}
+
+#[test]
 fn parse_event_log_max_bytes_override() {
     let yaml = r#"
 name: test
@@ -1417,6 +1438,33 @@ roles:
     assert_eq!(role.provider_overlay.as_deref(), Some("codex"));
 
     let override_cfg = role.instance_overrides.get("engineer").unwrap();
+    assert_eq!(override_cfg.agent, None);
     assert_eq!(override_cfg.model_class.as_deref(), Some("frontier"));
     assert_eq!(override_cfg.posture.as_deref(), Some("fast_lane"));
+}
+
+#[test]
+fn parses_instance_override_agent_and_model() {
+    let yaml = r#"
+name: mixed-team
+agent: claude
+roles:
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    model: gpt-5.4
+    instances: 2
+    instance_overrides:
+      engineer-2:
+        agent: kiro
+        model: claude-opus-4.6-1m
+"#;
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    let role = config.role_def("engineer").unwrap();
+    let override_cfg = role.instance_overrides.get("engineer-2").unwrap();
+
+    assert_eq!(role.agent.as_deref(), Some("codex"));
+    assert_eq!(role.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(override_cfg.agent.as_deref(), Some("kiro"));
+    assert_eq!(override_cfg.model.as_deref(), Some("claude-opus-4.6-1m"));
 }
