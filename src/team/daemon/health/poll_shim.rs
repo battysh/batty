@@ -12,6 +12,7 @@ use super::super::launcher::{
     new_member_session_id, strip_nudge_section, write_launch_script,
 };
 use super::super::*;
+use super::CONTEXT_RESTART_COOLDOWN;
 use crate::shim::protocol::{Event, ShimState};
 use crate::team::watcher::{SessionTrackerConfig, discover_claude_session_file};
 use crate::team::{append_shim_event_log, shim_log_path};
@@ -790,9 +791,8 @@ impl TeamDaemon {
     }
 
     /// Detect agents stuck in "Working" state longer than the configured
-    /// timeout and force-transition them to Idle. This prevents the cascading
-    /// deadlock where a stuck shim state classifier permanently blocks message
-    /// delivery and pipeline starvation detection.
+    /// timeout. Claude shims get a cold respawn; other backends are
+    /// force-transitioned to Idle to unblock queueing and scheduling.
     pub(in crate::team) fn check_working_state_timeouts(&mut self) -> Result<()> {
         let timeout_secs = self.config.team_config.shim_working_state_timeout_secs;
         if timeout_secs == 0 {
@@ -815,6 +815,57 @@ impl TeamDaemon {
                 .get(&name)
                 .map(|h| h.secs_since_state_change())
                 .unwrap_or(0);
+            let agent_type = self
+                .shim_handles
+                .get(&name)
+                .map(|h| h.agent_type.clone())
+                .unwrap_or_default();
+
+            if is_claude_agent_type(&agent_type) {
+                let cooldown_key = format!("stale-claude-respawn::{name}");
+                let on_cooldown = self
+                    .intervention_cooldowns
+                    .get(&cooldown_key)
+                    .is_some_and(|last| last.elapsed() < CONTEXT_RESTART_COOLDOWN);
+                if on_cooldown {
+                    continue;
+                }
+
+                warn!(
+                    member = name.as_str(),
+                    secs_in_working = secs,
+                    timeout_secs,
+                    "auto-restarting stale Claude shim"
+                );
+                let _ = append_shim_event_log(
+                    &self.config.project_root,
+                    &name,
+                    &format!(
+                        "<- stale claude respawn (stuck working for {}s, timeout={}s)",
+                        secs, timeout_secs
+                    ),
+                );
+                self.record_orchestrator_action(format!(
+                    "health: cold-respawn stale Claude agent {} after {}s stuck in Working (timeout={}s)",
+                    name, secs, timeout_secs
+                ));
+
+                match self.handle_shim_cold_respawn(&name, "stale_claude_agent") {
+                    Ok(()) => {
+                        self.intervention_cooldowns
+                            .insert(cooldown_key, std::time::Instant::now());
+                        continue;
+                    }
+                    Err(error) => {
+                        warn!(
+                            member = name.as_str(),
+                            error = %error,
+                            "stale Claude respawn failed; falling back to force-idle"
+                        );
+                    }
+                }
+            }
+
             warn!(
                 member = name.as_str(),
                 secs_in_working = secs,
@@ -860,6 +911,10 @@ fn is_missing_codex_saved_session(detail: &str) -> bool {
     detail.contains("no saved session found with id") || detail.contains("no saved session found")
 }
 
+fn is_claude_agent_type(agent_type: &str) -> bool {
+    matches!(agent_type, "claude" | "claude-code")
+}
+
 fn shim_agent_cmd_uses_resume(agent_cmd: &str) -> bool {
     if agent_cmd.contains("codex resume ") {
         return true;
@@ -892,7 +947,7 @@ mod tests {
     use super::*;
     use crate::team::test_support::{
         EnvVarGuard, PATH_LOCK, TestDaemonBuilder, engineer_member, init_git_repo, manager_member,
-        write_owned_task_file_with_context,
+        setup_fake_backend, write_owned_task_file_with_context,
     };
     use std::collections::HashMap;
 
@@ -1205,7 +1260,12 @@ mod tests {
         // Set timeout to 0 seconds effectively — but we need > 0 to not skip.
         // Instead, set it to 1 second and backdate the state change.
         daemon.config.team_config.shim_working_state_timeout_secs = 1;
-        insert_mock_handle(&mut daemon, "eng-1");
+        insert_mock_codex_handle(
+            &mut daemon,
+            "eng-1",
+            "codex exec",
+            std::path::PathBuf::from("/tmp/test"),
+        );
         daemon
             .shim_handles
             .get_mut("eng-1")
@@ -1234,6 +1294,62 @@ mod tests {
     }
 
     #[test]
+    fn check_working_state_timeouts_restarts_stale_claude_agents() {
+        let _path_lock = PATH_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let (fake_bin, fake_log) = setup_fake_backend(&tmp, "batty", "fake-batty.log");
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let combined_path = if original_path.is_empty() {
+            fake_bin.display().to_string()
+        } else {
+            format!("{}:{original_path}", fake_bin.display())
+        };
+        let _path_guard = EnvVarGuard::set("PATH", &combined_path);
+        let _batty_guard = EnvVarGuard::set(
+            "BATTY_BINARY_PATH",
+            fake_bin.join("batty").to_string_lossy().as_ref(),
+        );
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), false),
+            ])
+            .build();
+        daemon.config.team_config.shim_working_state_timeout_secs = 1;
+        insert_mock_handle(&mut daemon, "eng-1");
+        daemon
+            .shim_handles
+            .get_mut("eng-1")
+            .unwrap()
+            .apply_state_change(ShimState::Working);
+        daemon
+            .shim_handles
+            .get_mut("eng-1")
+            .unwrap()
+            .state_changed_at = std::time::Instant::now() - std::time::Duration::from_secs(10);
+        daemon.states.insert("eng-1".into(), MemberState::Working);
+
+        daemon.check_working_state_timeouts().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let log = std::fs::read_to_string(&fake_log)
+            .unwrap_or_else(|_| panic!("fake batty log was not written at {}", fake_log.display()));
+
+        assert!(
+            log.contains("shim") && log.contains("--id") && log.contains("eng-1"),
+            "stale Claude timeout should cold-respawn via batty shim"
+        );
+        assert_eq!(daemon.states.get("eng-1"), Some(&MemberState::Working));
+        assert_eq!(daemon.shim_handles["eng-1"].state, ShimState::Starting);
+        assert!(
+            daemon
+                .intervention_cooldowns
+                .contains_key("stale-claude-respawn::eng-1")
+        );
+    }
+
+    #[test]
     fn check_working_state_timeouts_skips_idle_agents() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
@@ -1258,7 +1374,12 @@ mod tests {
             .members(vec![engineer_member("eng-1", None, false)])
             .build();
         daemon.config.team_config.shim_working_state_timeout_secs = 1;
-        insert_mock_handle(&mut daemon, "eng-1");
+        insert_mock_codex_handle(
+            &mut daemon,
+            "eng-1",
+            "codex exec",
+            std::path::PathBuf::from("/tmp/test"),
+        );
         daemon
             .shim_handles
             .get_mut("eng-1")
@@ -1420,7 +1541,11 @@ mod tests {
                 .contains(&format!("Worktree: {}", worktree_path.display()))
         );
         assert!(identity.prompt.contains("Carry-Forward Summary"));
-        assert!(identity.prompt.contains("edited src/team/daemon/health/poll_shim.rs"));
+        assert!(
+            identity
+                .prompt
+                .contains("edited src/team/daemon/health/poll_shim.rs")
+        );
         assert!(
             !handoff_path.exists(),
             "cold respawn should consume the handoff file into the prompt"
