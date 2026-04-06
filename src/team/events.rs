@@ -397,14 +397,16 @@ impl TeamEvent {
     pub fn context_pressure_warning(
         role: &str,
         task: Option<u32>,
+        pressure_score: u64,
+        threshold: u64,
         output_bytes: u64,
-        threshold_bytes: u64,
     ) -> Self {
         Self {
             role: Some(role.into()),
             task: task.map(|id| id.to_string()),
+            load: Some(pressure_score as f64),
             output_bytes: Some(output_bytes),
-            reason: Some(format!("threshold_bytes={threshold_bytes}")),
+            reason: Some(format!("threshold={threshold}")),
             ..Self::base("context_pressure_warning")
         }
     }
@@ -863,7 +865,7 @@ mod tests {
             ("pane_respawned", TeamEvent::pane_respawned("eng-1")),
             (
                 "context_pressure_warning",
-                TeamEvent::context_pressure_warning("eng-1", Some(42), 400_000, 512_000),
+                TeamEvent::context_pressure_warning("eng-1", Some(42), 88, 100, 400_000),
             ),
             (
                 "planning_cycle_triggered",
@@ -1083,7 +1085,7 @@ mod tests {
 
     #[test]
     fn context_pressure_warning_includes_threshold_and_output_bytes() {
-        let event = TeamEvent::context_pressure_warning("eng-1-2", Some(67), 420_000, 512_000);
+        let event = TeamEvent::context_pressure_warning("eng-1-2", Some(67), 91, 100, 420_000);
         let json = serde_json::to_string(&event).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
@@ -1093,8 +1095,9 @@ mod tests {
         );
         assert_eq!(parsed["role"].as_str().unwrap(), "eng-1-2");
         assert_eq!(parsed["task"].as_str().unwrap(), "67");
+        assert_eq!(parsed["load"].as_f64().unwrap(), 91.0);
         assert_eq!(parsed["output_bytes"].as_u64().unwrap(), 420_000);
-        assert_eq!(parsed["reason"].as_str().unwrap(), "threshold_bytes=512000");
+        assert_eq!(parsed["reason"].as_str().unwrap(), "threshold=100");
     }
 
     #[test]

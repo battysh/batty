@@ -57,6 +57,9 @@ pub struct SessionWatcher {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CodexQualitySignals {
     pub last_response_chars: Option<usize>,
+    pub assistant_message_count: u32,
+    pub tool_call_count: u32,
+    pub unique_tool_names: Vec<String>,
     pub shortening_streak: u32,
     pub repeated_output_streak: u32,
     pub shrinking_responses: bool,
@@ -692,6 +695,9 @@ mod tests {
             offset: 0,
             quality: CodexQualitySignals {
                 last_response_chars: Some(12),
+                assistant_message_count: 4,
+                tool_call_count: 2,
+                unique_tool_names: vec!["exec_command".to_string(), "apply_patch".to_string()],
                 shortening_streak: 2,
                 repeated_output_streak: 3,
                 shrinking_responses: true,
@@ -705,6 +711,9 @@ mod tests {
             watcher.codex_quality_signals(),
             Some(CodexQualitySignals {
                 last_response_chars: Some(12),
+                assistant_message_count: 4,
+                tool_call_count: 2,
+                unique_tool_names: vec!["exec_command".to_string(), "apply_patch".to_string()],
                 shortening_streak: 2,
                 repeated_output_streak: 3,
                 shrinking_responses: true,
@@ -725,6 +734,9 @@ mod tests {
             offset: 42,
             quality: CodexQualitySignals {
                 last_response_chars: Some(12),
+                assistant_message_count: 3,
+                tool_call_count: 1,
+                unique_tool_names: vec!["exec_command".to_string()],
                 shortening_streak: 1,
                 repeated_output_streak: 2,
                 shrinking_responses: true,

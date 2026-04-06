@@ -253,6 +253,8 @@ pub struct WorkflowPolicy {
     pub planning_cycle_cooldown_secs: u64,
     #[serde(default = "default_narration_detection_threshold")]
     pub narration_detection_threshold: usize,
+    #[serde(default = "default_context_pressure_threshold")]
+    pub context_pressure_threshold: u64,
     #[serde(default = "default_context_pressure_threshold_bytes")]
     pub context_pressure_threshold_bytes: u64,
     #[serde(default = "default_context_pressure_restart_delay_secs")]
@@ -336,6 +338,7 @@ impl Default for WorkflowPolicy {
             health_check_interval_secs: default_health_check_interval_secs(),
             planning_cycle_cooldown_secs: default_planning_cycle_cooldown_secs(),
             narration_detection_threshold: default_narration_detection_threshold(),
+            context_pressure_threshold: default_context_pressure_threshold(),
             context_pressure_threshold_bytes: default_context_pressure_threshold_bytes(),
             context_pressure_restart_delay_secs: default_context_pressure_restart_delay_secs(),
             graceful_shutdown_timeout_secs: default_graceful_shutdown_timeout_secs(),
@@ -392,6 +395,10 @@ fn default_claim_ttl_warning_secs() -> u64 {
 
 fn default_planning_cycle_cooldown_secs() -> u64 {
     300
+}
+
+fn default_context_pressure_threshold() -> u64 {
+    100
 }
 
 fn default_context_pressure_threshold_bytes() -> u64 {
