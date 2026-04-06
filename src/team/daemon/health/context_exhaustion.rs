@@ -90,7 +90,11 @@ impl TeamDaemon {
         Ok(())
     }
 
-    fn restart_member_with_task_context(&mut self, member_name: &str, reason: &str) -> Result<()> {
+    pub(crate) fn restart_member_with_task_context(
+        &mut self,
+        member_name: &str,
+        reason: &str,
+    ) -> Result<()> {
         let Some(task) = self.active_task(member_name)? else {
             warn!(
                 member = %member_name,
@@ -113,36 +117,7 @@ impl TeamDaemon {
         };
 
         let work_dir = self.member_work_dir(&member);
-        if self
-            .config
-            .team_config
-            .workflow_policy
-            .context_handoff_enabled
-        {
-            let recent_output = self.capture_context_handoff_output(&pane_id);
-            if let Err(error) =
-                crate::shim::runtime::preserve_handoff(&work_dir, &task, recent_output.as_deref())
-            {
-                warn!(
-                    member = %member_name,
-                    task_id = task.id,
-                    error = %error,
-                    "failed to preserve restart handoff"
-                );
-            }
-        }
-
-        let checkpoint = super::super::super::checkpoint::gather_checkpoint(
-            &self.config.project_root,
-            member_name,
-            &task,
-        );
-        if let Err(error) = super::super::super::checkpoint::write_checkpoint(
-            &self.config.project_root,
-            &checkpoint,
-        ) {
-            warn!(member = %member_name, error = %error, "failed to write progress checkpoint");
-        }
+        self.preserve_restart_context(member_name, &task, Some(&pane_id), &work_dir, reason);
 
         tmux::respawn_pane(&pane_id, "bash")?;
         std::thread::sleep(std::time::Duration::from_millis(200));

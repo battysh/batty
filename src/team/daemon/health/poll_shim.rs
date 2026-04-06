@@ -498,8 +498,8 @@ impl TeamDaemon {
         if let Some(task) = self.active_task(member_name)? {
             let team_config_dir = self.config.project_root.join(".batty").join("team_config");
             let role_context = strip_nudge_section(&self.load_prompt(&member, &team_config_dir));
-            let prompt = Self::restart_assignment_message(&task);
             let work_dir = self.member_work_dir(&member);
+            let prompt = self.restart_assignment_with_handoff(&task, &work_dir);
             let role = self
                 .config
                 .team_config
@@ -583,6 +583,25 @@ impl TeamDaemon {
         member_name: &str,
         reason: &str,
     ) -> Result<()> {
+        if let Some(task) = self.active_task(member_name)?
+            && let Some(member) = self
+                .config
+                .members
+                .iter()
+                .find(|member| member.name == member_name)
+                .cloned()
+        {
+            let pane_id = self.config.pane_map.get(member_name).cloned();
+            let work_dir = self.member_work_dir(&member);
+            self.preserve_restart_context(
+                member_name,
+                &task,
+                pane_id.as_deref(),
+                &work_dir,
+                reason,
+            );
+        }
+
         let Some(plan) = self.cold_respawn_plan(member_name)? else {
             return Ok(());
         };
@@ -646,27 +665,32 @@ impl TeamDaemon {
 
     /// Respawn a shim after a crash when auto_respawn_on_crash is enabled.
     fn handle_shim_crash_respawn(&mut self, member_name: &str) -> Result<()> {
-        let (agent_type, agent_cmd, work_dir) = {
-            let Some(handle) = self.shim_handles.get(member_name) else {
-                return Ok(());
-            };
-            (
-                handle.agent_type.clone(),
-                handle.agent_cmd.clone(),
-                handle.work_dir.clone(),
-            )
+        let Some(plan) = self.cold_respawn_plan(member_name)? else {
+            return Ok(());
         };
 
-        self.preserve_worktree_before_restart(member_name, &work_dir, "shim crash respawn");
+        self.preserve_worktree_before_restart(member_name, &plan.work_dir, "shim crash respawn");
+        if let Some(task) = self.active_task(member_name)?
+            && let Some(pane_id) = self.config.pane_map.get(member_name).cloned()
+        {
+            self.preserve_restart_context(
+                member_name,
+                &task,
+                Some(&pane_id),
+                &plan.work_dir,
+                "shim_crash",
+            );
+        }
 
         info!(member = member_name, "auto-respawning shim after crash");
 
-        let sdk_mode = agent_supports_sdk_mode(&agent_type) && self.config.team_config.use_sdk_mode;
+        let sdk_mode =
+            agent_supports_sdk_mode(&plan.agent_type) && self.config.team_config.use_sdk_mode;
         let new_handle = super::super::shim_spawn::spawn_shim(
             member_name,
-            &agent_type,
-            &agent_cmd,
-            &work_dir,
+            &plan.agent_type,
+            &plan.agent_cmd,
+            &plan.work_dir,
             None,
             self.config
                 .team_config
@@ -678,6 +702,12 @@ impl TeamDaemon {
                 .auto_commit_on_restart,
             sdk_mode,
         )?;
+        if let Some(identity) = plan.identity.clone() {
+            if let Some(watcher) = self.watchers.get_mut(member_name) {
+                watcher.set_session_id(identity.session_id.clone());
+            }
+            self.persist_member_launch_identity(member_name, identity)?;
+        }
         self.shim_handles
             .insert(member_name.to_string(), new_handle);
         self.emit_event(TeamEvent::pane_respawned(member_name));
@@ -1308,6 +1338,7 @@ mod tests {
         let _home_guard = EnvVarGuard::set("HOME", home.to_string_lossy().as_ref());
 
         let worktree_path = repo.join(".batty").join("worktrees").join("eng-1");
+        std::fs::create_dir_all(&worktree_path).unwrap();
         let branch_name = "eng-1/42";
         write_owned_task_file_with_context(
             &repo,
@@ -1360,6 +1391,13 @@ mod tests {
             "No saved session found with ID stale-session"
         ));
 
+        let handoff_path = worktree_path.join(crate::shim::runtime::HANDOFF_FILE_NAME);
+        std::fs::write(
+            &handoff_path,
+            "# Carry-Forward Summary\n## Recent Activity\nedited src/team/daemon/health/poll_shim.rs\n",
+        )
+        .unwrap();
+
         let plan = daemon
             .cold_respawn_plan("eng-1")
             .unwrap()
@@ -1379,6 +1417,12 @@ mod tests {
             identity
                 .prompt
                 .contains(&format!("Worktree: {}", worktree_path.display()))
+        );
+        assert!(identity.prompt.contains("Carry-Forward Summary"));
+        assert!(identity.prompt.contains("edited src/team/daemon/health/poll_shim.rs"));
+        assert!(
+            !handoff_path.exists(),
+            "cold respawn should consume the handoff file into the prompt"
         );
     }
 }
