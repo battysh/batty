@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 
 use super::events::TeamEvent;
+use super::test_results::{TestFailure, TestResults};
 
 /// Database file name under `.batty/`.
 const DB_FILENAME: &str = "telemetry.db";
@@ -82,6 +83,17 @@ fn init_schema(conn: &Connection) -> Result<()> {
             total_merges    INTEGER NOT NULL DEFAULT 0,
             total_events    INTEGER NOT NULL DEFAULT 0
         );
+
+        CREATE TABLE IF NOT EXISTS test_case_metrics (
+            framework       TEXT NOT NULL,
+            test_name       TEXT NOT NULL,
+            failures        INTEGER NOT NULL DEFAULT 0,
+            flaky_passes    INTEGER NOT NULL DEFAULT 0,
+            last_task_id    TEXT,
+            last_engineer   TEXT,
+            last_seen_at    INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (framework, test_name)
+        );
         ",
     )
     .context("failed to initialize telemetry schema")?;
@@ -94,6 +106,59 @@ fn init_schema(conn: &Connection) -> Result<()> {
         [],
     );
     Ok(())
+}
+
+pub fn record_test_results(
+    conn: &Connection,
+    task_id: u32,
+    engineer: &str,
+    results: &TestResults,
+    flaky_failures: &[TestFailure],
+) -> Result<()> {
+    let task_id = task_id.to_string();
+    let now = chrono::Utc::now().timestamp();
+
+    for failure in flaky_failures {
+        conn.execute(
+            "INSERT INTO test_case_metrics (framework, test_name, flaky_passes, last_task_id, last_engineer, last_seen_at)
+             VALUES (?1, ?2, 1, ?3, ?4, ?5)
+             ON CONFLICT(framework, test_name) DO UPDATE SET
+               flaky_passes = flaky_passes + 1,
+               last_task_id = excluded.last_task_id,
+               last_engineer = excluded.last_engineer,
+               last_seen_at = excluded.last_seen_at",
+            params![results.framework, failure.test_name, task_id, engineer, now],
+        )?;
+    }
+
+    for failure in &results.failures {
+        conn.execute(
+            "INSERT INTO test_case_metrics (framework, test_name, failures, last_task_id, last_engineer, last_seen_at)
+             VALUES (?1, ?2, 1, ?3, ?4, ?5)
+             ON CONFLICT(framework, test_name) DO UPDATE SET
+               failures = failures + 1,
+               last_task_id = excluded.last_task_id,
+               last_engineer = excluded.last_engineer,
+               last_seen_at = excluded.last_seen_at",
+            params![results.framework, failure.test_name, task_id, engineer, now],
+        )?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn query_test_case_metric(
+    conn: &Connection,
+    framework: &str,
+    test_name: &str,
+) -> Result<(u32, u32)> {
+    conn.query_row(
+        "SELECT failures, flaky_passes FROM test_case_metrics WHERE framework = ?1 AND test_name = ?2",
+        params![framework, test_name],
+        |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?)),
+    )
+    .context("failed to query test case metric")
 }
 
 // ---------------------------------------------------------------------------
@@ -834,6 +899,53 @@ mod tests {
         // avg = (100 + 300) / 2 = 200
         let avg = row.avg_review_latency_secs.unwrap();
         assert!((avg - 200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn record_test_results_tracks_failures_and_flakes() {
+        let conn = open_in_memory().unwrap();
+        let failed_results = TestResults {
+            framework: "cargo".to_string(),
+            total: Some(2),
+            passed: 1,
+            failed: 1,
+            ignored: 0,
+            failures: vec![super::super::test_results::TestFailure {
+                test_name: "tests::fails".to_string(),
+                message: Some("assertion failed".to_string()),
+                location: Some("src/lib.rs:9".to_string()),
+            }],
+            summary: None,
+        };
+        record_test_results(&conn, 42, "eng-1", &failed_results, &[]).unwrap();
+
+        let (failures, flaky_passes) =
+            query_test_case_metric(&conn, "cargo", "tests::fails").unwrap();
+        assert_eq!(failures, 1);
+        assert_eq!(flaky_passes, 0);
+
+        let passed_results = TestResults {
+            framework: "cargo".to_string(),
+            total: Some(2),
+            passed: 2,
+            failed: 0,
+            ignored: 0,
+            failures: vec![],
+            summary: None,
+        };
+        record_test_results(
+            &conn,
+            42,
+            "eng-1",
+            &passed_results,
+            &failed_results.failures,
+        )
+        .unwrap();
+
+        let (failures, flaky_passes) =
+            query_test_case_metric(&conn, "cargo", "tests::fails").unwrap();
+        assert_eq!(failures, 1);
+        assert_eq!(flaky_passes, 1);
     }
 
     // --- Fix #1: tasks_completed incremented on task_completed ---
