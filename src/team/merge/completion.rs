@@ -18,7 +18,7 @@ use crate::team::daemon::TeamDaemon;
 use crate::team::daemon::verification::run_automatic_verification;
 use crate::team::task_loop::{
     checkout_worktree_branch_from_main, current_worktree_branch, engineer_base_branch_name,
-    read_task_title, run_tests_in_worktree,
+    read_task_title,
 };
 use crate::team::telemetry_db;
 use crate::team::test_results::TestResults;
@@ -59,9 +59,20 @@ fn record_verification_evidence(
     detail: impl Into<String>,
 ) {
     let detail = detail.into();
-    let kind_name = format!("{kind:?}").to_ascii_lowercase();
+    let kind_name = kind_name(&kind);
     state.record_evidence(kind, detail.clone());
     daemon.record_verification_evidence_collected(engineer, task_id, &kind_name, &detail);
+}
+
+fn kind_name(kind: &EvidenceKind) -> String {
+    let mut name = String::new();
+    for (index, ch) in format!("{kind:?}").chars().enumerate() {
+        if ch.is_ascii_uppercase() && index > 0 {
+            name.push('_');
+        }
+        name.push(ch.to_ascii_lowercase());
+    }
+    name
 }
 
 fn verification_fix_message(
@@ -95,6 +106,42 @@ fn verification_fix_message(
     body.push_str(output.trim());
     body.push_str("\n```\nFix these failures, then report completion again.");
     body
+}
+
+fn structured_failure_details(results: &TestResults) -> Vec<String> {
+    results
+        .failures
+        .iter()
+        .map(|failure| {
+            let mut detail = failure.test_name.clone();
+            if let Some(message) = failure
+                .message
+                .as_deref()
+                .filter(|message| !message.is_empty())
+            {
+                detail.push_str(" (");
+                detail.push_str(message);
+                if let Some(location) = failure
+                    .location
+                    .as_deref()
+                    .filter(|location| !location.is_empty())
+                {
+                    detail.push_str(" at ");
+                    detail.push_str(location);
+                }
+                detail.push(')');
+            } else if let Some(location) = failure
+                .location
+                .as_deref()
+                .filter(|location| !location.is_empty())
+            {
+                detail.push_str(" (at ");
+                detail.push_str(location);
+                detail.push(')');
+            }
+            detail
+        })
+        .collect()
 }
 
 fn move_task_to_review(
@@ -306,7 +353,55 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     };
 
     if !has_required_evidence || !verification_run.passed {
-        let next_phase = if verification_state.reached_max_iterations() {
+        let verification_results = crate::team::test_results::parse(
+            test_command.as_deref().unwrap_or("cargo test"),
+            &verification_run.output,
+            verification_run.passed,
+        );
+        if !verification_run.passed {
+            persist_test_results(&board_dir, task_id, &verification_results)?;
+            if let Some(conn) = &daemon.telemetry_db {
+                telemetry_db::record_test_results(
+                    conn,
+                    task_id,
+                    engineer,
+                    &verification_results,
+                    &[],
+                )?;
+            }
+        }
+        let is_zero_commit = !has_required_evidence && total_commits == 0;
+        let is_narration_only = !has_required_evidence && code_files_changed == 0;
+        let narration_count = if is_narration_only {
+            let count = {
+                let entry = daemon
+                    .narration_rejection_counts
+                    .entry(task_id)
+                    .or_insert(0);
+                *entry += 1;
+                *entry
+            };
+            daemon.record_narration_rejection(engineer, task_id, count);
+            count
+        } else {
+            0
+        };
+        let retry_attempt = if !verification_run.passed {
+            Some(daemon.increment_retry(engineer))
+        } else {
+            None
+        };
+        let should_escalate = if is_narration_only {
+            narration_count >= 2
+        } else if is_zero_commit {
+            false
+        } else if !verification_run.passed {
+            verification_state.reached_max_iterations()
+                || retry_attempt.is_some_and(|attempt| attempt > 2)
+        } else {
+            verification_state.reached_max_iterations()
+        };
+        let next_phase = if should_escalate {
             VerificationPhase::Failed
         } else {
             VerificationPhase::Fixing
@@ -319,64 +414,109 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
             next_phase,
         );
 
-        if files_changed == 0 || code_files_changed == 0 {
-            let narration_count = daemon
-                .narration_rejection_counts
-                .entry(task_id)
-                .or_insert(0);
-            *narration_count += 1;
-            let narration_count = *narration_count;
-            daemon.record_narration_rejection(engineer, task_id, narration_count);
-        }
-
         let headline = if !has_required_evidence {
-            format!(
-                "Verification could not accept this completion: no sufficient task evidence was found. Commits ahead of main: {total_commits}. Files changed: {files_changed}. Code files changed: {code_files_changed}. Diff stat: {}",
-                if diff_stat.is_empty() {
-                    "(empty)".to_string()
+            if total_commits == 0 {
+                format!(
+                    "Verification rejected this completion because there are no commits ahead of main. Run `git add -A`, create a real commit, and inspect `git diff --stat main..HEAD` before reporting completion again. Commits ahead of main: {total_commits}. Files changed: {files_changed}. Code files changed: {code_files_changed}. Diff stat: {}",
+                    if diff_stat.is_empty() {
+                        "(empty)".to_string()
+                    } else {
+                        diff_stat.clone()
+                    }
+                )
+            } else if code_files_changed == 0 {
+                let narration_prefix = if files_changed == 0 {
+                    "Your previous attempt only produced commentary. Execute the actual commands to make the code changes."
                 } else {
-                    diff_stat.clone()
-                }
-            )
+                    "Verification found no code changes in this completion."
+                };
+                format!(
+                    "{narration_prefix} Inspect `git diff --stat main..HEAD` and make an actual code change before reporting completion again. Commits ahead of main: {total_commits}. Files changed: {files_changed}. Code files changed: {code_files_changed}. Diff stat: {}",
+                    if diff_stat.is_empty() {
+                        "(empty)".to_string()
+                    } else {
+                        diff_stat.clone()
+                    }
+                )
+            } else {
+                format!(
+                    "Verification could not accept this completion: no sufficient task evidence was found. Commits ahead of main: {total_commits}. Files changed: {files_changed}. Code files changed: {code_files_changed}. Diff stat: {}",
+                    if diff_stat.is_empty() {
+                        "(empty)".to_string()
+                    } else {
+                        diff_stat.clone()
+                    }
+                )
+            }
         } else {
-            "Verification failed because the test command did not pass.".to_string()
+            format!(
+                "Verification failed because the test command did not pass. Summary: {}.",
+                verification_results.failure_summary()
+            )
         };
         let engineer_message = verification_fix_message(
             &verification_state,
             &headline,
-            &verification_run.failures,
+            &structured_failure_details(&verification_results),
             &verification_run.file_paths,
             &verification_run.output,
         );
         daemon.queue_message("batty", engineer, &engineer_message)?;
 
-        if verification_state.phase == VerificationPhase::Failed
-            && let Some(ref manager_name) = manager_name
-        {
+        if should_escalate && let Some(ref manager_name) = manager_name {
             daemon.record_verification_max_iterations_reached(
                 engineer,
                 task_id,
                 verification_state.iteration,
                 manager_name,
             );
-            let manager_message = format!(
-                "[daemon] Engineer {engineer} hit verification max iterations on task #{task_id}.\nLatest phase: failed\nAttempts: {}/{}\nDiff stat: {}\nRecent failures:\n{}\nLatest output:\n```\\n{}\\n```",
-                verification_state.iteration,
-                verification_state.max_iterations,
-                if diff_stat.is_empty() {
-                    "(empty)".to_string()
-                } else {
-                    diff_stat.clone()
-                },
-                verification_run
-                    .failures
-                    .iter()
-                    .take(8)
-                    .map(|failure| format!("- {failure}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                verification_run.output.trim()
-            );
+            let manager_message = if !has_required_evidence && code_files_changed == 0 {
+                format!(
+                    "[daemon] Engineer {engineer} hit the narration-only quality gate {} times on task #{task_id}.\nReason: completion diff is narration-only.\nAttempts: {}/{}\nDiff stat: {}\nLatest output:\n```\\n{}\\n```",
+                    narration_count,
+                    verification_state.iteration,
+                    verification_state.max_iterations,
+                    if diff_stat.is_empty() {
+                        "(empty)".to_string()
+                    } else {
+                        diff_stat.clone()
+                    },
+                    verification_run.output.trim()
+                )
+            } else if has_required_evidence {
+                format!(
+                    "[daemon] Engineer {engineer} hit verification max iterations on task #{task_id}.\nLatest phase: failed\nAttempts: {}/{}\nSummary: {}\nRecent failures:\n{}\nLatest output:\n```\\n{}\\n```",
+                    verification_state.iteration,
+                    verification_state.max_iterations,
+                    verification_results.failure_summary(),
+                    structured_failure_details(&verification_results)
+                        .iter()
+                        .take(8)
+                        .map(|failure| format!("- {failure}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    verification_run.output.trim()
+                )
+            } else {
+                format!(
+                    "[daemon] Engineer {engineer} hit verification max iterations on task #{task_id}.\nLatest phase: failed\nAttempts: {}/{}\nDiff stat: {}\nRecent failures:\n{}\nLatest output:\n```\\n{}\\n```",
+                    verification_state.iteration,
+                    verification_state.max_iterations,
+                    if diff_stat.is_empty() {
+                        "(empty)".to_string()
+                    } else {
+                        diff_stat.clone()
+                    },
+                    verification_run
+                        .failures
+                        .iter()
+                        .take(8)
+                        .map(|failure| format!("- {failure}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    verification_run.output.trim()
+                )
+            };
             daemon.queue_message("daemon", manager_name, &manager_message)?;
         }
 
@@ -401,18 +541,16 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     } else {
         current_worktree_branch(&worktree_dir)?
     };
-    let test_started = Instant::now();
     let previous_results = load_previous_test_results(&board_dir, task_id)?;
-    let test_run = run_tests_in_worktree(
-        &worktree_dir,
-        daemon
-            .config
-            .team_config
-            .workflow_policy
-            .test_command
-            .as_deref(),
-    )?;
-    let test_duration_ms = test_started.elapsed().as_millis() as u64;
+    let test_run = crate::team::test_results::TestRunOutput {
+        passed: verification_run.passed,
+        output: verification_run.output.clone(),
+        results: crate::team::test_results::parse(
+            test_command.as_deref().unwrap_or("cargo test"),
+            &verification_run.output,
+            verification_run.passed,
+        ),
+    };
     let flaky_failures = if test_run.passed {
         detect_flaky_failures(previous_results.as_ref(), &test_run.results)
     } else {
@@ -429,7 +567,6 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         )?;
     }
     let tests_passed = test_run.passed;
-    let output_truncated = test_run.output.clone();
     if tests_passed {
         let task_title = read_task_title(&board_dir, task_id);
 
