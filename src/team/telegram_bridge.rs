@@ -1,6 +1,8 @@
 //! Telegram bridge orchestration for the daemon poll loop.
 
-use anyhow::Result;
+use std::collections::BTreeMap;
+
+use anyhow::{Result, anyhow, bail};
 use tracing::{debug, info, warn};
 
 use super::*;
@@ -25,11 +27,16 @@ impl TeamDaemon {
     }
 
     fn poll_telegram(&mut self) -> Result<()> {
-        let Some(bot) = &mut self.telegram_bot else {
+        if self.telegram_bot.is_none() {
             return Ok(());
-        };
+        }
 
-        let messages = match bot.poll_updates() {
+        let messages = match self
+            .telegram_bot
+            .as_mut()
+            .expect("checked telegram bot presence")
+            .poll_updates()
+        {
             Ok(msgs) => msgs,
             Err(error) => {
                 debug!(error = %error, "telegram poll failed");
@@ -58,6 +65,15 @@ impl TeamDaemon {
                 "telegram inbound"
             );
 
+            if let Some(reply) = self.handle_telegram_command(&msg) {
+                if let Some(bot) = self.telegram_bot.as_ref() {
+                    if let Err(error) = bot.send_message(&msg.chat_id.to_string(), &reply) {
+                        warn!(chat_id = msg.chat_id, error = %error, "failed to send telegram reply");
+                    }
+                }
+                continue;
+            }
+
             for target in &targets {
                 let inbox_msg = inbox::InboxMessage::new_send("human", target, &msg.text);
                 if let Err(error) = inbox::deliver_to_inbox(&root, &inbox_msg) {
@@ -73,6 +89,110 @@ impl TeamDaemon {
         }
 
         Ok(())
+    }
+
+    fn handle_telegram_command(
+        &mut self,
+        msg: &super::super::telegram::InboundMessage,
+    ) -> Option<String> {
+        let command = match parse_telegram_command(&msg.text) {
+            Ok(Some(command)) => command,
+            Ok(None) => return None,
+            Err(error) => return Some(error.to_string()),
+        };
+
+        Some(match self.execute_telegram_command(command) {
+            Ok(reply) => reply,
+            Err(error) => format!("Command failed: {error}"),
+        })
+    }
+
+    fn execute_telegram_command(&mut self, command: TelegramCommand) -> Result<String> {
+        match command {
+            TelegramCommand::Status => Ok(self.render_telegram_status_summary()),
+            TelegramCommand::Board => render_telegram_board_summary(&self.config.project_root),
+            TelegramCommand::Assign { engineer, task } => {
+                let id = crate::team::messaging::assign_task(
+                    &self.config.project_root,
+                    &engineer,
+                    &task,
+                )?;
+                Ok(format!("Assigned {engineer}: {task}\nInbox id: {id}"))
+            }
+            TelegramCommand::Merge { task_id } => {
+                let engineer = engineer_for_merge_task(&self.config.project_root, task_id)?;
+                crate::team::messaging::merge_worktree(&self.config.project_root, &engineer)?;
+                Ok(format!("Merged Task #{task_id} from {engineer}."))
+            }
+            TelegramCommand::Send { role, message } => {
+                crate::team::messaging::send_message_as(
+                    &self.config.project_root,
+                    Some("human"),
+                    &role,
+                    &message,
+                )?;
+                Ok(format!("Sent to {role}: {}", preview_text(&message, 120)))
+            }
+        }
+    }
+
+    fn render_telegram_status_summary(&self) -> String {
+        let session = format!("batty-{}", self.config.team_config.name);
+        let running = crate::tmux::session_exists(&session);
+        let paused = crate::team::pause_marker_path(&self.config.project_root).exists();
+        let pending_inbox_counts = crate::team::status::pending_inbox_counts(
+            &self.config.project_root,
+            &self.config.members,
+        );
+        let triage_backlog_counts = crate::team::status::triage_backlog_counts(
+            &self.config.project_root,
+            &self.config.members,
+        );
+        let pending_inbox_total: usize = pending_inbox_counts.values().sum();
+        let triage_total: usize = triage_backlog_counts.values().sum();
+
+        let mut state_counts = BTreeMap::new();
+        for member in &self.config.members {
+            if member.role_type == RoleType::User {
+                continue;
+            }
+            let label = match self
+                .states
+                .get(&member.name)
+                .copied()
+                .unwrap_or(MemberState::Idle)
+            {
+                MemberState::Idle => "idle",
+                MemberState::Working => "working",
+            };
+            *state_counts.entry(label).or_insert(0usize) += 1;
+        }
+
+        let states = if state_counts.is_empty() {
+            "none".to_string()
+        } else {
+            state_counts
+                .into_iter()
+                .map(|(state, count)| format!("{state}={count}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        let (active_tasks, review_tasks) =
+            crate::team::status::board_status_task_queues(&self.config.project_root)
+                .unwrap_or_else(|_| (Vec::new(), Vec::new()));
+
+        format!(
+            "Team: {}\nSession: {}{}\nMembers: {}\nInbox: {}\nTriage: {}\nBoard: active={}, review={}",
+            self.config.team_config.name,
+            if running { "running" } else { "stopped" },
+            if paused { " (paused)" } else { "" },
+            states,
+            pending_inbox_total,
+            triage_total,
+            active_tasks.len(),
+            review_tasks.len(),
+        )
     }
 
     fn deliver_user_inbox(&mut self) -> Result<()> {
@@ -147,6 +267,171 @@ impl TeamDaemon {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TelegramCommand {
+    Status,
+    Board,
+    Assign { engineer: String, task: String },
+    Merge { task_id: u32 },
+    Send { role: String, message: String },
+}
+
+fn parse_telegram_command(text: &str) -> Result<Option<TelegramCommand>> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('/') {
+        return Ok(None);
+    }
+
+    let (name, rest) = trimmed
+        .split_once(char::is_whitespace)
+        .map(|(name, rest)| (name, rest.trim()))
+        .unwrap_or((trimmed, ""));
+
+    match name {
+        "/status" => {
+            if rest.is_empty() {
+                Ok(Some(TelegramCommand::Status))
+            } else {
+                Err(anyhow!("Usage: /status"))
+            }
+        }
+        "/board" => {
+            if rest.is_empty() {
+                Ok(Some(TelegramCommand::Board))
+            } else {
+                Err(anyhow!("Usage: /board"))
+            }
+        }
+        "/assign" => {
+            let mut parts = rest.splitn(2, char::is_whitespace).filter(|part| !part.is_empty());
+            let engineer = parts
+                .next()
+                .ok_or_else(|| anyhow!("Usage: /assign <engineer> <task>"))?;
+            let task = parts.next().unwrap_or("").trim();
+            if task.is_empty() {
+                bail!("Usage: /assign <engineer> <task>");
+            }
+            Ok(Some(TelegramCommand::Assign {
+                engineer: engineer.to_string(),
+                task: task.to_string(),
+            }))
+        }
+        "/merge" => {
+            if rest.is_empty() {
+                bail!("Usage: /merge <task>");
+            }
+            let task_id = rest
+                .trim_start_matches('#')
+                .parse::<u32>()
+                .map_err(|_| anyhow!("Usage: /merge <task>"))?;
+            Ok(Some(TelegramCommand::Merge { task_id }))
+        }
+        "/send" => {
+            let mut parts = rest.splitn(2, char::is_whitespace).filter(|part| !part.is_empty());
+            let role = parts
+                .next()
+                .ok_or_else(|| anyhow!("Usage: /send <role> <message>"))?;
+            let message = parts.next().unwrap_or("").trim();
+            if message.is_empty() {
+                bail!("Usage: /send <role> <message>");
+            }
+            Ok(Some(TelegramCommand::Send {
+                role: role.to_string(),
+                message: message.to_string(),
+            }))
+        }
+        _ => Err(anyhow!(
+            "Unknown command. Supported: /status, /board, /assign, /merge, /send"
+        )),
+    }
+}
+
+fn render_telegram_board_summary(project_root: &std::path::Path) -> Result<String> {
+    let tasks_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    if !tasks_dir.is_dir() {
+        return Ok("Board: no tasks found.".to_string());
+    }
+
+    let tasks = crate::task::load_tasks_from_dir(&tasks_dir)?;
+    let mut counts = BTreeMap::<String, usize>::new();
+    for task in &tasks {
+        *counts.entry(task.status.clone()).or_insert(0) += 1;
+    }
+
+    let counts_summary = if counts.is_empty() {
+        "empty".to_string()
+    } else {
+        counts
+            .into_iter()
+            .map(|(status, count)| format!("{status}={count}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let (active_tasks, review_tasks) = crate::team::status::board_status_task_queues(project_root)?;
+    let active_summary = summarize_status_entries(&active_tasks);
+    let review_summary = summarize_status_entries(&review_tasks);
+
+    Ok(format!(
+        "Board: {counts_summary}\nActive: {active_summary}\nReview: {review_summary}"
+    ))
+}
+
+fn summarize_status_entries(entries: &[crate::team::status::StatusTaskEntry]) -> String {
+    if entries.is_empty() {
+        return "none".to_string();
+    }
+
+    entries
+        .iter()
+        .take(3)
+        .map(|entry| match entry.claimed_by.as_deref() {
+            Some(owner) => format!("#{} {} ({owner})", entry.id, preview_text(&entry.title, 32)),
+            None => format!("#{} {}", entry.id, preview_text(&entry.title, 32)),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn engineer_for_merge_task(project_root: &std::path::Path, task_id: u32) -> Result<String> {
+    let tasks_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    if !tasks_dir.is_dir() {
+        bail!("Board not found.");
+    }
+
+    let task = crate::task::load_tasks_from_dir(&tasks_dir)?
+        .into_iter()
+        .find(|task| task.id == task_id)
+        .ok_or_else(|| anyhow!("Task #{task_id} not found."))?;
+
+    let engineer = task
+        .claimed_by
+        .ok_or_else(|| anyhow!("Task #{task_id} is not assigned."))?;
+    if !engineer.starts_with("eng-") {
+        bail!("Task #{task_id} is assigned to {engineer}, not an engineer.");
+    }
+
+    Ok(engineer)
+}
+
+fn preview_text(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let preview: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
@@ -189,6 +474,16 @@ mod tests {
         if let Some(schedule) = daemon.nudges.get_mut(member_name) {
             schedule.idle_since = Some(Instant::now() - schedule.interval.max(grace));
         }
+    }
+
+    fn write_board_task(project_root: &std::path::Path, file_name: &str, body: &str) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(tasks_dir.join(file_name), body).unwrap();
     }
 
     #[test]
@@ -1272,5 +1567,283 @@ mod tests {
         };
         let daemon = TeamDaemon::new(config).unwrap();
         assert_eq!(daemon.automation_sender_for("mgr"), "boss");
+    }
+
+    #[test]
+    fn parse_telegram_commands_supports_phone_friendly_forms() {
+        assert_eq!(
+            parse_telegram_command("/status").unwrap(),
+            Some(TelegramCommand::Status)
+        );
+        assert_eq!(
+            parse_telegram_command("/board").unwrap(),
+            Some(TelegramCommand::Board)
+        );
+        assert_eq!(
+            parse_telegram_command("/assign eng-1 Fix flaky test").unwrap(),
+            Some(TelegramCommand::Assign {
+                engineer: "eng-1".to_string(),
+                task: "Fix flaky test".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_telegram_command("/merge #41").unwrap(),
+            Some(TelegramCommand::Merge { task_id: 41 })
+        );
+        assert_eq!(
+            parse_telegram_command("/send architect Need review on task 41").unwrap(),
+            Some(TelegramCommand::Send {
+                role: "architect".to_string(),
+                message: "Need review on task 41".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_telegram_command_rejects_invalid_usage() {
+        assert_eq!(parse_telegram_command("hello").unwrap(), None);
+        assert!(parse_telegram_command("/assign eng-1").is_err());
+        assert!(parse_telegram_command("/merge nope").is_err());
+        assert!(parse_telegram_command("/send architect").is_err());
+        assert!(parse_telegram_command("/unknown").is_err());
+    }
+
+    #[test]
+    fn telegram_assign_command_delivers_assignment_to_inbox() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roles = vec![
+            RoleDef {
+                name: "human".to_string(),
+                role_type: RoleType::User,
+                agent: None,
+                auth_mode: None,
+                auth_env: vec![],
+                instances: 1,
+                prompt: None,
+                talks_to: vec!["eng".to_string()],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                barrier_group: None,
+                use_worktrees: false,
+            },
+            RoleDef {
+                name: "eng".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("codex".to_string()),
+                auth_mode: None,
+                auth_env: vec![],
+                instances: 1,
+                prompt: None,
+                talks_to: Vec::new(),
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                barrier_group: None,
+                use_worktrees: false,
+            },
+        ];
+        let mut daemon = TeamDaemon::new(daemon_config_with_roles(tmp.path(), roles)).unwrap();
+
+        let reply = daemon
+            .execute_telegram_command(TelegramCommand::Assign {
+                engineer: "eng".to_string(),
+                task: "Fix flaky test".to_string(),
+            })
+            .unwrap();
+
+        assert!(reply.contains("Assigned eng"));
+        let pending = inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "eng").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].body.contains("Fix flaky test"));
+    }
+
+    #[test]
+    fn telegram_send_command_delivers_message_to_inbox() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roles = vec![
+            RoleDef {
+                name: "human".to_string(),
+                role_type: RoleType::User,
+                agent: None,
+                auth_mode: None,
+                auth_env: vec![],
+                instances: 1,
+                prompt: None,
+                talks_to: vec!["architect".to_string()],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                barrier_group: None,
+                use_worktrees: false,
+            },
+            RoleDef {
+                name: "architect".to_string(),
+                role_type: RoleType::Architect,
+                agent: Some("claude".to_string()),
+                auth_mode: None,
+                auth_env: vec![],
+                instances: 1,
+                prompt: None,
+                talks_to: Vec::new(),
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                barrier_group: None,
+                use_worktrees: false,
+            },
+        ];
+        let mut daemon = TeamDaemon::new(daemon_config_with_roles(tmp.path(), roles)).unwrap();
+
+        let reply = daemon
+            .execute_telegram_command(TelegramCommand::Send {
+                role: "architect".to_string(),
+                message: "Need a quick review".to_string(),
+            })
+            .unwrap();
+
+        assert!(reply.contains("Sent to architect"));
+        let pending =
+            inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "architect").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].body, "Need a quick review");
+    }
+
+    #[test]
+    fn render_telegram_board_summary_reports_counts_and_queues() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_board_task(
+            tmp.path(),
+            "task-11.md",
+            "---\nid: 11\ntitle: Active task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\n---\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "task-12.md",
+            "---\nid: 12\ntitle: Review task\nstatus: review\npriority: medium\nclaimed_by: eng-2\nclass: standard\n---\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "task-13.md",
+            "---\nid: 13\ntitle: Todo task\nstatus: todo\npriority: low\nclass: standard\n---\n",
+        );
+
+        let summary = render_telegram_board_summary(tmp.path()).unwrap();
+        assert!(summary.contains("in-progress=1"));
+        assert!(summary.contains("review=1"));
+        assert!(summary.contains("todo=1"));
+        assert!(summary.contains("#11 Active task (eng-1)"));
+        assert!(summary.contains("#12 Review task (eng-2)"));
+    }
+
+    #[test]
+    fn engineer_for_merge_task_reads_claimed_engineer() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_board_task(
+            tmp.path(),
+            "task-41.md",
+            "---\nid: 41\ntitle: Merge me\nstatus: review\npriority: high\nclaimed_by: eng-1\nclass: standard\n---\n",
+        );
+
+        assert_eq!(engineer_for_merge_task(tmp.path(), 41).unwrap(), "eng-1");
+    }
+
+    #[test]
+    fn status_summary_reports_member_and_board_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roles = vec![
+            RoleDef {
+                name: "human".to_string(),
+                role_type: RoleType::User,
+                agent: None,
+                auth_mode: None,
+                auth_env: vec![],
+                instances: 1,
+                prompt: None,
+                talks_to: vec!["architect".to_string(), "eng".to_string()],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                barrier_group: None,
+                use_worktrees: false,
+            },
+            RoleDef {
+                name: "architect".to_string(),
+                role_type: RoleType::Architect,
+                agent: Some("claude".to_string()),
+                auth_mode: None,
+                auth_env: vec![],
+                instances: 1,
+                prompt: None,
+                talks_to: Vec::new(),
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                barrier_group: None,
+                use_worktrees: false,
+            },
+            RoleDef {
+                name: "eng".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("codex".to_string()),
+                auth_mode: None,
+                auth_env: vec![],
+                instances: 1,
+                prompt: None,
+                talks_to: Vec::new(),
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                barrier_group: None,
+                use_worktrees: false,
+            },
+        ];
+        let mut daemon = TeamDaemon::new(daemon_config_with_roles(tmp.path(), roles)).unwrap();
+        daemon
+            .states
+            .insert("architect".to_string(), MemberState::Working);
+        daemon.states.insert("eng".to_string(), MemberState::Idle);
+        let root = inbox::inboxes_root(tmp.path());
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("human", "architect", "Need input"),
+        )
+        .unwrap();
+        write_board_task(
+            tmp.path(),
+            "task-50.md",
+            "---\nid: 50\ntitle: In progress\nstatus: in-progress\npriority: high\nclaimed_by: eng\nclass: standard\n---\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "task-51.md",
+            "---\nid: 51\ntitle: In review\nstatus: review\npriority: medium\nclaimed_by: eng\nclass: standard\n---\n",
+        );
+
+        let summary = daemon.render_telegram_status_summary();
+        assert!(summary.contains("Members: idle=1, working=1"));
+        assert!(summary.contains("Inbox: 1"));
+        assert!(summary.contains("Board: active=1, review=1"));
     }
 }
