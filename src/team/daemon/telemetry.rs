@@ -93,6 +93,16 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::agent_handoff(role, &task, reason, success));
     }
 
+    pub(super) fn record_handoff_injected(
+        &mut self,
+        role: &str,
+        task: impl Into<String>,
+        reason: &str,
+    ) {
+        let task = task.into();
+        self.emit_event(TeamEvent::handoff_injected(role, &task, reason));
+    }
+
     pub(super) fn record_context_exhausted(
         &mut self,
         role: &str,
