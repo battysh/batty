@@ -5,8 +5,8 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::team::config::{
-    AutomationConfig, BoardConfig, OrchestratorPosition, RoleType, StandupConfig, TeamConfig,
-    WorkflowMode, WorkflowPolicy,
+    AutomationConfig, BoardConfig, OrchestratorPosition, RoleDef, RoleType, StandupConfig,
+    TeamConfig, WorkflowMode, WorkflowPolicy,
 };
 use crate::team::daemon::{DaemonConfig, NudgeSchedule, TeamDaemon};
 use crate::team::failure_patterns::FailureTracker;
@@ -359,7 +359,31 @@ impl<'a> TestDaemonBuilder<'a> {
                 pending_queue_max_age_secs: 600,
                 event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 retro_min_duration_secs: 60,
-                roles: Vec::new(),
+                roles: {
+                    let mut seen = std::collections::HashSet::new();
+                    self.members
+                        .iter()
+                        .filter(|m| seen.insert(m.role_name.clone()))
+                        .map(|m| RoleDef {
+                            name: m.role_name.clone(),
+                            role_type: m.role_type,
+                            agent: m.agent.clone(),
+                            auth_mode: None,
+                            auth_env: Vec::new(),
+                            instances: 1,
+                            prompt: None,
+                            talks_to: Vec::new(),
+                            channel: None,
+                            channel_config: None,
+                            nudge_interval_secs: None,
+                            receives_standup: None,
+                            standup_interval_secs: None,
+                            owns: Vec::new(),
+                            barrier_group: None,
+                            use_worktrees: m.use_worktrees,
+                        })
+                        .collect()
+                },
             },
             session: self.session,
             members: self.members,
