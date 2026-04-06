@@ -455,6 +455,14 @@ impl TeamEvent {
         }
     }
 
+    pub fn meta_conversation_detected(role: &str, task: Option<u32>) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: task.map(|id| id.to_string()),
+            ..Self::base("meta_conversation_detected")
+        }
+    }
+
     pub fn meta_conversation_escalated(role: &str, task: Option<u32>) -> Self {
         Self {
             role: Some(role.into()),
