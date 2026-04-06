@@ -183,6 +183,7 @@ pub struct TeamDaemon {
     pub(super) failed_deliveries: Vec<FailedDelivery>,
     pub(super) review_first_seen: HashMap<u32, u64>,
     pub(super) review_nudge_sent: HashSet<u32>,
+    pub(super) poll_cycle_count: u64,
     pub(super) poll_interval: Duration,
     pub(super) is_git_repo: bool,
     /// True when the project root is not a git repo but contains git sub-repos.
@@ -445,6 +446,7 @@ impl TeamDaemon {
             failed_deliveries: Vec::new(),
             review_first_seen: HashMap::new(),
             review_nudge_sent: HashSet::new(),
+            poll_cycle_count: 0,
             poll_interval: Duration::from_secs(5),
             is_git_repo,
             is_multi_repo,

@@ -310,7 +310,7 @@ impl TeamDaemon {
         Ok(())
     }
 
-    fn claim_ttl_secs_for_priority(&self, priority: &str) -> u64 {
+    pub(super) fn claim_ttl_secs_for_priority(&self, priority: &str) -> u64 {
         let policy = &self.config.team_config.workflow_policy.claim_ttl;
         if priority.eq_ignore_ascii_case("critical") {
             policy.critical_secs

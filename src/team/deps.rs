@@ -92,6 +92,14 @@ pub fn render_deps(board_dir: &Path, format: DepsFormat) -> Result<String> {
     }
 }
 
+pub(crate) fn detect_cycle_for_tasks(tasks: &[Task]) -> Option<Vec<u32>> {
+    let nodes: BTreeMap<u32, TaskNode> = tasks
+        .iter()
+        .map(|task| (task.id, TaskNode::from_task(task)))
+        .collect();
+    detect_cycle(&nodes)
+}
+
 /// Detect cycles using DFS. Returns the cycle path if found.
 fn detect_cycle(nodes: &BTreeMap<u32, TaskNode>) -> Option<Vec<u32>> {
     let mut visited = HashSet::new();

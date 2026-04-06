@@ -17,6 +17,7 @@ use super::*;
 use anyhow::{Context, Result};
 
 mod checks;
+mod auto_doctor;
 pub mod context;
 mod context_exhaustion;
 pub mod narration;

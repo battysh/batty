@@ -404,6 +404,21 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::board_task_archived(&task_id.to_string(), role));
     }
 
+    pub(super) fn record_auto_doctor_action(
+        &mut self,
+        action_type: &str,
+        task_id: Option<u32>,
+        engineer: Option<&str>,
+        details: &str,
+    ) {
+        self.emit_event(TeamEvent::auto_doctor_action(
+            action_type,
+            task_id,
+            engineer,
+            details,
+        ));
+    }
+
     pub(super) fn record_standup_generated(&mut self, recipient: &str) {
         self.emit_event(TeamEvent::standup_generated(recipient));
     }
@@ -786,6 +801,7 @@ mod tests {
             failed_deliveries: Vec::new(),
             review_first_seen: HashMap::new(),
             review_nudge_sent: HashSet::new(),
+            poll_cycle_count: 0,
             poll_interval: Duration::from_secs(5),
             is_git_repo: false,
             is_multi_repo: false,
@@ -1211,6 +1227,7 @@ mod tests {
             failed_deliveries: Vec::new(),
             review_first_seen: HashMap::new(),
             review_nudge_sent: HashSet::new(),
+            poll_cycle_count: 0,
             poll_interval: Duration::from_secs(5),
             is_git_repo: false,
             is_multi_repo: false,
