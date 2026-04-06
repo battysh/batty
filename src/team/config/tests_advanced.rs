@@ -108,6 +108,55 @@ roles:
 }
 
 #[test]
+fn claude_auth_mode_defaults_to_oauth_when_absent() {
+    let config: TeamConfig = serde_yaml::from_str(minimal_yaml()).unwrap();
+    let architect = config.role_def("architect").unwrap();
+    let auth = config.resolve_claude_auth(architect);
+    assert_eq!(auth.mode, ClaudeAuthMode::Oauth);
+    assert!(auth.env.is_empty());
+}
+
+#[test]
+fn validate_rejects_auth_env_without_custom_mode() {
+    let yaml = r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+    auth_env: [ANTHROPIC_API_KEY]
+"#;
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("auth_env"));
+    assert!(err.contains("custom"));
+}
+
+#[test]
+fn validate_accepts_claude_custom_auth_env() {
+    let yaml = r#"
+name: test
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+    auth_mode: custom
+    auth_env: [ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL]
+"#;
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    config.validate().unwrap();
+    let auth = config.resolve_claude_auth(&config.roles[0]);
+    assert_eq!(auth.mode, ClaudeAuthMode::Custom);
+    assert_eq!(
+        auth.env,
+        vec![
+            "ANTHROPIC_API_KEY".to_string(),
+            "ANTHROPIC_BASE_URL".to_string()
+        ]
+    );
+}
+
+#[test]
 fn validate_team_level_agent_rejects_unknown() {
     let yaml = r#"
 name: test
