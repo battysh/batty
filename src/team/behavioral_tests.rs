@@ -335,7 +335,10 @@ mod tests {
     #[test]
     fn auto_merge_disabled_policy_always_manual() {
         let summary = make_diff(1, 5, 2, &["team"]);
-        let policy = AutoMergePolicy::default(); // enabled: false
+        let policy = AutoMergePolicy {
+            enabled: false,
+            ..AutoMergePolicy::default()
+        };
         let decision = should_auto_merge(&summary, &policy, true);
         match decision {
             AutoMergeDecision::ManualReview { reasons, .. } => {

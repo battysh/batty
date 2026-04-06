@@ -351,8 +351,8 @@ batty start
 
 ## Auto-Merge Policy
 
-Batty can auto-merge small, low-risk engineer branches without waiting for manual
-review. Enable it in `team.yaml`:
+Batty auto-merges small, low-risk engineer branches by default, without waiting
+for manual review. Tune it in `team.yaml`:
 
 ```yaml
 workflow_policy:
