@@ -629,6 +629,7 @@ pub fn run_kiro_acp(args: ShimArgs, channel: Channel) -> Result<()> {
                 body,
                 message_id,
             } => {
+                let delivery_id = message_id.clone();
                 let mut st = state_cmd.lock().unwrap();
                 match st.state {
                     ShimState::Idle => {
@@ -648,6 +649,12 @@ pub fn run_kiro_acp(args: ShimArgs, channel: Channel) -> Result<()> {
                         let ndjson = prompt_req.to_ndjson();
 
                         if !write_stdin(&stdin_writer, &ndjson) {
+                            if let Some(id) = delivery_id {
+                                cmd_channel.send(&Event::DeliveryFailed {
+                                    id,
+                                    reason: "stdin write failed (closed)".into(),
+                                })?;
+                            }
                             cmd_channel.send(&Event::Error {
                                 command: "SendMessage".into(),
                                 reason: "stdin write failed (closed)".into(),
@@ -655,6 +662,9 @@ pub fn run_kiro_acp(args: ShimArgs, channel: Channel) -> Result<()> {
                             continue;
                         }
 
+                        if let Some(id) = delivery_id {
+                            cmd_channel.send(&Event::MessageDelivered { id })?;
+                        }
                         cmd_channel.send(&Event::StateChanged {
                             from: ShimState::Idle,
                             to: ShimState::Working,

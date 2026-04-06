@@ -48,6 +48,9 @@ pub enum Event {
         to: ShimState,
         summary: String,
     },
+    MessageDelivered {
+        id: String,
+    },
     Completion {
         #[serde(skip_serializing_if = "Option::is_none")]
         message_id: Option<String>,
@@ -79,6 +82,10 @@ pub enum Event {
     Warning {
         message: String,
         idle_secs: Option<u64>,
+    },
+    DeliveryFailed {
+        id: String,
+        reason: String,
     },
     Error {
         command: String,
@@ -339,6 +346,22 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_event_message_delivered() {
+        let (a, b) = socketpair().unwrap();
+        let mut sender = Channel::new(a);
+        let mut receiver = Channel::new(b);
+
+        let evt = Event::MessageDelivered { id: "msg-1".into() };
+        sender.send(&evt).unwrap();
+        let received: Event = receiver.recv::<Event>().unwrap().unwrap();
+
+        match received {
+            Event::MessageDelivered { id } => assert_eq!(id, "msg-1"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
     fn roundtrip_event_state_changed() {
         let (a, b) = socketpair().unwrap();
         let mut sender = Channel::new(a);
@@ -381,6 +404,28 @@ mod tests {
         sender.send(&Event::Pong).unwrap();
         let received: Event = receiver.recv::<Event>().unwrap().unwrap();
         assert!(matches!(received, Event::Pong));
+    }
+
+    #[test]
+    fn roundtrip_event_delivery_failed() {
+        let (a, b) = socketpair().unwrap();
+        let mut sender = Channel::new(a);
+        let mut receiver = Channel::new(b);
+
+        let evt = Event::DeliveryFailed {
+            id: "msg-1".into(),
+            reason: "stdin write failed".into(),
+        };
+        sender.send(&evt).unwrap();
+        let received: Event = receiver.recv::<Event>().unwrap().unwrap();
+
+        match received {
+            Event::DeliveryFailed { id, reason } => {
+                assert_eq!(id, "msg-1");
+                assert_eq!(reason, "stdin write failed");
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]

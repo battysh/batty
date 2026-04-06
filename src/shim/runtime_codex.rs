@@ -149,6 +149,7 @@ pub fn run_codex_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                 body,
                 message_id,
             } => {
+                let delivery_id = message_id.clone();
                 let mut st = state_cmd.lock().unwrap();
                 match st.state {
                     ShimState::Idle => {
@@ -166,6 +167,9 @@ pub fn run_codex_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                             to: ShimState::Working,
                             summary: String::new(),
                         })?;
+                        if let Some(id) = delivery_id {
+                            cmd_channel.send(&Event::MessageDelivered { id })?;
+                        }
 
                         // Spawn codex exec subprocess for this message
                         let text = format_injected_message(&from, &body);
