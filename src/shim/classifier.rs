@@ -410,10 +410,7 @@ fn classify_claude(content: &str) -> Classification {
     let idle_confidence = bottom
         .iter()
         .filter_map(|line| {
-            best_phrase_confidence(
-                line,
-                &["bypass permissions", "shift+tab", "ctrl+g to edit"],
-            )
+            best_phrase_confidence(line, &["bypass permissions", "shift+tab", "ctrl+g to edit"])
         })
         .max_by(f32::total_cmp);
 
@@ -486,10 +483,9 @@ fn classify_codex(content: &str) -> Classification {
     // Check for Codex working/loading indicators before idle check.
     // "esc to interrupt" means Codex is actively working or loading.
     for line in &recent_nonempty {
-        if let Some(confidence) = best_phrase_confidence(
-            line,
-            &["esc to interrupt", "starting mcp", "executing"],
-        ) {
+        if let Some(confidence) =
+            best_phrase_confidence(line, &["esc to interrupt", "starting mcp", "executing"])
+        {
             return if confidence >= MIN_CLASSIFIER_CONFIDENCE {
                 Classification {
                     verdict: ScreenVerdict::AgentWorking,
@@ -685,7 +681,9 @@ fn claude_working_confidence(line: &str) -> Option<f32> {
         || lower.contains("ctrl+b to run")
         || lower.contains("ctrl+b to r")
         || (lower.contains("esc t")
-            && (lower.contains("bypass") || lower.contains("shift+tab") || lower.contains("ctrl+g")))
+            && (lower.contains("bypass")
+                || lower.contains("shift+tab")
+                || lower.contains("ctrl+g")))
     {
         return Some(0.84);
     }
@@ -736,7 +734,8 @@ fn token_prefix_score(line_tokens: &[&str], phrase_tokens: &[&str]) -> f32 {
 }
 
 fn normalize_match_text(value: &str) -> String {
-    value.to_ascii_lowercase()
+    value
+        .to_ascii_lowercase()
         .replace('\u{2026}', "...")
         .replace("…", "...")
         .split_whitespace()
@@ -872,7 +871,10 @@ mod tests {
         assert!(result.confidence < MIN_CLASSIFIER_CONFIDENCE);
 
         let parser = make_screen("output\n  shift");
-        assert_eq!(classify(AgentType::Claude, parser.screen()), ScreenVerdict::Unknown);
+        assert_eq!(
+            classify(AgentType::Claude, parser.screen()),
+            ScreenVerdict::Unknown
+        );
     }
 
     #[test]

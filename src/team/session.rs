@@ -368,7 +368,8 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool, health: bool) 
     } else {
         None
     };
-    let optional_subsystems = health.then(|| status::load_optional_subsystem_statuses(project_root));
+    let optional_subsystems =
+        health.then(|| status::load_optional_subsystem_statuses(project_root));
 
     if json {
         let report = status::build_team_status_json_report(status::TeamStatusJsonReportInput {
@@ -445,9 +446,9 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool, health: bool) 
             .iter()
             .chain(review_queue.iter())
             .filter_map(|task| {
-                task.test_summary.as_ref().map(|summary| {
-                    format!("#{} {}: {}", task.id, task.title, summary)
-                })
+                task.test_summary
+                    .as_ref()
+                    .map(|summary| format!("#{} {}: {}", task.id, task.title, summary))
             })
             .collect::<Vec<_>>();
         if !failed_test_tasks.is_empty() {

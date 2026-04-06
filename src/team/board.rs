@@ -188,7 +188,9 @@ pub(crate) fn compute_task_aging_at(
     report
         .stale_in_progress
         .sort_by_key(|entry| (entry.task_id, entry.age_secs));
-    report.aged_todo.sort_by_key(|entry| (entry.task_id, entry.age_secs));
+    report
+        .aged_todo
+        .sort_by_key(|entry| (entry.task_id, entry.age_secs));
     report
         .stale_review
         .sort_by_key(|entry| (entry.task_id, entry.age_secs));
@@ -262,8 +264,14 @@ pub(crate) fn read_task_lifecycle_timestamps(task_path: &Path) -> Result<TaskLif
         serde_yaml::from_str(frontmatter).context("failed to parse task frontmatter")?;
 
     Ok(TaskLifecycleTimestamps {
-        created: parsed.created.as_deref().and_then(parse_frontmatter_timestamp),
-        started: parsed.started.as_deref().and_then(parse_frontmatter_timestamp),
+        created: parsed
+            .created
+            .as_deref()
+            .and_then(parse_frontmatter_timestamp),
+        started: parsed
+            .started
+            .as_deref()
+            .and_then(parse_frontmatter_timestamp),
         completed: parsed
             .completed
             .as_deref()
@@ -1528,8 +1536,8 @@ mod tests {
             Some("2026-04-06T11:00:00Z"),
         );
 
-        let report = compute_task_aging_at(&board_dir, tmp.path(), AgingThresholds::default(), now)
-            .unwrap();
+        let report =
+            compute_task_aging_at(&board_dir, tmp.path(), AgingThresholds::default(), now).unwrap();
 
         assert_eq!(report.stale_in_progress.len(), 1);
         assert_eq!(report.stale_in_progress[0].task_id, 1);
@@ -1577,8 +1585,8 @@ mod tests {
             Some("2026-04-06T11:00:01Z"),
         );
 
-        let report = compute_task_aging_at(&board_dir, tmp.path(), AgingThresholds::default(), now)
-            .unwrap();
+        let report =
+            compute_task_aging_at(&board_dir, tmp.path(), AgingThresholds::default(), now).unwrap();
 
         assert!(report.stale_in_progress.is_empty());
         assert!(report.aged_todo.is_empty());

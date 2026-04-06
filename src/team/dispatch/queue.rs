@@ -58,7 +58,11 @@ struct ChangedPathsFrontmatter {
 }
 
 fn board_tasks_dir(project_root: &Path) -> std::path::PathBuf {
-    project_root.join(".batty").join("team_config").join("board").join("tasks")
+    project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks")
 }
 
 fn extract_frontmatter(content: &str) -> Option<&str> {
@@ -213,7 +217,13 @@ impl TeamDaemon {
         blocking_task_ids.dedup();
         let overlap_details = conflicts
             .iter()
-            .map(|conflict| format!("#{} [{}]", conflict.task_id, conflict.conflicting_files.join(", ")))
+            .map(|conflict| {
+                format!(
+                    "#{} [{}]",
+                    conflict.task_id,
+                    conflict.conflicting_files.join(", ")
+                )
+            })
             .collect::<Vec<_>>();
         let updated_dependencies =
             append_task_dependencies(board_dir, candidate.id, &blocking_task_ids)?;
@@ -314,7 +324,8 @@ impl TeamDaemon {
             let mut least_conflicted: Option<(crate::task::Task, Vec<OverlapConflict>)> = None;
 
             for task in available_tasks {
-                let conflicts = find_overlapping_tasks(&task, &in_progress_tasks, self.project_root());
+                let conflicts =
+                    find_overlapping_tasks(&task, &in_progress_tasks, self.project_root());
                 if conflicts.is_empty() {
                     selected_task = Some(task);
                     break;
@@ -1227,7 +1238,12 @@ mod tests {
     #[test]
     fn test_predicted_files_from_tags() {
         let tmp = tempfile::tempdir().unwrap();
-        let tasks_dir = tmp.path().join(".batty").join("team_config").join("board").join("tasks");
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
         std::fs::create_dir_all(&tasks_dir).unwrap();
         std::fs::write(
             tasks_dir.join("001-prior-shim.md"),
@@ -1247,7 +1263,14 @@ mod tests {
     #[test]
     fn test_predicted_files_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        write_task_with_body(tmp.path(), 32, "no-hints", "todo", None, "No file hints here.");
+        write_task_with_body(
+            tmp.path(),
+            32,
+            "no-hints",
+            "todo",
+            None,
+            "No file hints here.",
+        );
         let task = crate::task::Task::from_file(
             &tmp.path()
                 .join(".batty")
@@ -1264,7 +1287,14 @@ mod tests {
     #[test]
     fn test_find_overlapping_no_conflict() {
         let tmp = tempfile::tempdir().unwrap();
-        write_task_with_body(tmp.path(), 40, "candidate", "todo", None, "Edit src/team/daemon.rs.");
+        write_task_with_body(
+            tmp.path(),
+            40,
+            "candidate",
+            "todo",
+            None,
+            "Edit src/team/daemon.rs.",
+        );
         write_task_with_body(
             tmp.path(),
             41,
@@ -1273,7 +1303,12 @@ mod tests {
             Some("eng-2"),
             "Edit src/team/status.rs.",
         );
-        let tasks_dir = tmp.path().join(".batty").join("team_config").join("board").join("tasks");
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
         let candidate = crate::task::Task::from_file(&tasks_dir.join("040-candidate.md")).unwrap();
         let active = crate::task::Task::from_file(&tasks_dir.join("041-active.md")).unwrap();
 
@@ -1283,7 +1318,14 @@ mod tests {
     #[test]
     fn test_find_overlapping_with_conflict() {
         let tmp = tempfile::tempdir().unwrap();
-        write_task_with_body(tmp.path(), 42, "candidate", "todo", None, "Edit src/team/daemon.rs.");
+        write_task_with_body(
+            tmp.path(),
+            42,
+            "candidate",
+            "todo",
+            None,
+            "Edit src/team/daemon.rs.",
+        );
         write_task_with_body(
             tmp.path(),
             43,
@@ -1292,7 +1334,12 @@ mod tests {
             Some("eng-2"),
             "Edit src/team/daemon.rs too.",
         );
-        let tasks_dir = tmp.path().join(".batty").join("team_config").join("board").join("tasks");
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
         let candidate = crate::task::Task::from_file(&tasks_dir.join("042-candidate.md")).unwrap();
         let active = crate::task::Task::from_file(&tasks_dir.join("043-active.md")).unwrap();
 
@@ -1304,7 +1351,14 @@ mod tests {
     #[test]
     fn test_find_overlapping_multiple_conflicts() {
         let tmp = tempfile::tempdir().unwrap();
-        write_task_with_body(tmp.path(), 44, "candidate", "todo", None, "Edit src/team/daemon.rs.");
+        write_task_with_body(
+            tmp.path(),
+            44,
+            "candidate",
+            "todo",
+            None,
+            "Edit src/team/daemon.rs.",
+        );
         write_task_with_body(
             tmp.path(),
             45,
@@ -1321,7 +1375,12 @@ mod tests {
             Some("eng-3"),
             "Also touch src/team/daemon.rs.",
         );
-        let tasks_dir = tmp.path().join(".batty").join("team_config").join("board").join("tasks");
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
         let candidate = crate::task::Task::from_file(&tasks_dir.join("044-candidate.md")).unwrap();
         let active_a = crate::task::Task::from_file(&tasks_dir.join("045-active-a.md")).unwrap();
         let active_b = crate::task::Task::from_file(&tasks_dir.join("046-active-b.md")).unwrap();

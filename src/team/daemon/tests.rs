@@ -2575,7 +2575,13 @@ fn prepare_member_launch_injects_handoff_for_active_task() {
         .join("board")
         .join("tasks");
     std::fs::create_dir_all(&task_dir).unwrap();
-    crate::team::test_support::write_owned_task_file(tmp.path(), 42, "resume-task", "in-progress", "eng-1");
+    crate::team::test_support::write_owned_task_file(
+        tmp.path(),
+        42,
+        "resume-task",
+        "in-progress",
+        "eng-1",
+    );
 
     let mut daemon = TeamDaemon::new(DaemonConfig {
         project_root: tmp.path().to_path_buf(),
@@ -2668,10 +2674,25 @@ fn prepare_member_launch_injects_handoff_for_active_task() {
         )
         .unwrap();
 
-    assert!(plan.identity.prompt.contains("You are continuing work on Task #42."));
-    assert!(plan.identity.prompt.contains("already fixed parser edge cases"));
-    assert!(plan.identity.prompt.contains("Resume from where you left off"));
-    assert!(!handoff_path.exists(), "launch should consume the handoff file");
+    assert!(
+        plan.identity
+            .prompt
+            .contains("You are continuing work on Task #42.")
+    );
+    assert!(
+        plan.identity
+            .prompt
+            .contains("already fixed parser edge cases")
+    );
+    assert!(
+        plan.identity
+            .prompt
+            .contains("Resume from where you left off")
+    );
+    assert!(
+        !handoff_path.exists(),
+        "launch should consume the handoff file"
+    );
 }
 
 #[test]
@@ -3602,9 +3623,11 @@ fn aging_task_stale_alerts_manager_and_emits_event() {
     let manager_messages =
         crate::team::inbox::all_messages(&crate::team::inbox::inboxes_root(tmp.path()), "manager")
             .unwrap();
-    assert!(manager_messages
-        .iter()
-        .any(|(msg, _)| msg.body.contains("Task #70 has been in progress")));
+    assert!(
+        manager_messages
+            .iter()
+            .any(|(msg, _)| msg.body.contains("Task #70 has been in progress"))
+    );
 }
 
 #[test]
@@ -3637,9 +3660,11 @@ fn aging_review_stale_alerts_review_owner() {
     let manager_messages =
         crate::team::inbox::all_messages(&crate::team::inbox::inboxes_root(tmp.path()), "manager")
             .unwrap();
-    assert!(manager_messages
-        .iter()
-        .any(|(msg, _)| msg.body.contains("Review urgency: task #71")));
+    assert!(
+        manager_messages
+            .iter()
+            .any(|(msg, _)| msg.body.contains("Review urgency: task #71"))
+    );
 }
 
 #[test]

@@ -116,12 +116,7 @@ impl TeamDaemon {
             let handoff_success =
                 crate::shim::runtime::preserve_handoff(work_dir, task, recent_output.as_deref());
             match handoff_success {
-                Ok(()) => self.record_agent_handoff(
-                    member_name,
-                    task.id.to_string(),
-                    reason,
-                    true,
-                ),
+                Ok(()) => self.record_agent_handoff(member_name, task.id.to_string(), reason, true),
                 Err(error) => {
                     warn!(
                         member = %member_name,
@@ -130,12 +125,7 @@ impl TeamDaemon {
                         error = %error,
                         "failed to preserve restart handoff"
                     );
-                    self.record_agent_handoff(
-                        member_name,
-                        task.id.to_string(),
-                        reason,
-                        false,
-                    );
+                    self.record_agent_handoff(member_name, task.id.to_string(), reason, false);
                 }
             }
         }
