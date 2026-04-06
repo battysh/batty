@@ -27,6 +27,7 @@ exclude = [
 [[bin]]
 name = "batty"
 path = "src/main.rs"
+test = false
 
 [lib]
 doctest = false
