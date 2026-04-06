@@ -515,8 +515,7 @@ fn load_board_context(
     let metrics = metrics::compute_metrics(board_dir, members).ok()?;
     let thresholds = project_root_from_board_dir(Some(board_dir))
         .and_then(|project_root| {
-            crate::team::config::TeamConfig::load(&crate::team::team_config_path(project_root))
-                .ok()
+            crate::team::config::TeamConfig::load(&crate::team::team_config_path(project_root)).ok()
         })
         .map(|config| crate::team::board::AgingThresholds {
             stale_in_progress_hours: config.workflow_policy.stale_in_progress_hours,

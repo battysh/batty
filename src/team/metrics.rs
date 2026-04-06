@@ -113,7 +113,9 @@ pub fn average_cycle_time_by_priority(
         let Some(cycle_time_minutes) = record.cycle_time_minutes else {
             continue;
         };
-        let entry = buckets.entry(normalized_priority(&record.priority)).or_default();
+        let entry = buckets
+            .entry(normalized_priority(&record.priority))
+            .or_default();
         entry.0 += cycle_time_minutes;
         entry.1 += 1;
     }

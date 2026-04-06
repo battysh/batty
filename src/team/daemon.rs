@@ -100,13 +100,13 @@ pub(crate) mod verification;
 
 #[cfg(test)]
 use self::dispatch::normalized_assignment_dir;
+pub(crate) use self::error_handling::{optional_subsystem_for_step, optional_subsystem_names};
 use self::helpers::{extract_nudge_section, role_prompt_path};
 use self::hot_reload::consume_hot_reload_marker;
 #[cfg(test)]
 use self::hot_reload::{
     BinaryFingerprint, hot_reload_daemon_args, hot_reload_marker_path, write_hot_reload_marker,
 };
-pub(crate) use self::error_handling::{optional_subsystem_for_step, optional_subsystem_names};
 pub(crate) use self::interventions::NudgeSchedule;
 use self::interventions::OwnedTaskInterventionState;
 use self::launcher::{
@@ -361,10 +361,8 @@ impl TeamDaemon {
             .team_config
             .workflow_policy
             .narration_detection_enabled;
-        let narration_threshold_polls = config
-            .team_config
-            .workflow_policy
-            .narration_threshold_polls;
+        let narration_threshold_polls =
+            config.team_config.workflow_policy.narration_threshold_polls;
 
         let states = HashMap::new();
 
