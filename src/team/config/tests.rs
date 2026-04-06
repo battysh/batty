@@ -210,6 +210,8 @@ roles:
     assert_eq!(config.automation.intervention_idle_grace_secs, 60);
     assert_eq!(config.workflow_policy.narration_threshold, 0.8);
     assert_eq!(config.workflow_policy.narration_nudge_max, 2);
+    assert!(config.workflow_policy.narration_detection_enabled);
+    assert_eq!(config.workflow_policy.narration_threshold_polls, 5);
     assert_eq!(config.workflow_policy.context_pressure_threshold, 100);
     assert_eq!(
         config.workflow_policy.context_pressure_threshold_bytes,

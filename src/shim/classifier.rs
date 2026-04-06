@@ -256,6 +256,23 @@ pub fn classify_narration_line(line: &str, agent_type: AgentType) -> NarrationLi
     NarrationLineKind::Other
 }
 
+/// Detect whether the current screen content looks like narration instead of
+/// concrete execution. This is intentionally screen-level so daemon health
+/// checks can count consecutive narration polls.
+pub fn detect_narration_pattern(content: &str, agent_type: AgentType) -> bool {
+    let mut explanation_lines = 0usize;
+
+    for line in content.lines() {
+        match classify_narration_line(line, agent_type) {
+            NarrationLineKind::ToolOrCommand => return false,
+            NarrationLineKind::Explanation => explanation_lines += 1,
+            NarrationLineKind::Other => {}
+        }
+    }
+
+    explanation_lines > 0
+}
+
 fn has_command_or_tool_signal(line: &str, agent_type: AgentType) -> bool {
     let common_markers = [
         "*** Begin Patch",
@@ -952,6 +969,18 @@ mod tests {
             classify_narration_line("src/team/daemon/health/narration.rs", AgentType::Codex),
             NarrationLineKind::Other
         );
+    }
+
+    #[test]
+    fn detect_narration_pattern_matches_planning_without_tools() {
+        let content = "I will inspect the daemon.\nLet me review the health loop.\nMy plan is to patch narration handling.";
+        assert!(detect_narration_pattern(content, AgentType::Codex));
+    }
+
+    #[test]
+    fn detect_narration_pattern_rejects_tool_execution() {
+        let content = "I will inspect the daemon.\n$ rg -n narration src/team\nExit code: 0";
+        assert!(!detect_narration_pattern(content, AgentType::Codex));
     }
 
     // -- Kiro --

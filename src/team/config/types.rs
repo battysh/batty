@@ -255,6 +255,10 @@ pub struct WorkflowPolicy {
     pub narration_threshold: f64,
     #[serde(default = "default_narration_nudge_max")]
     pub narration_nudge_max: u32,
+    #[serde(default = "default_narration_detection_enabled")]
+    pub narration_detection_enabled: bool,
+    #[serde(default = "default_narration_threshold_polls")]
+    pub narration_threshold_polls: u32,
     #[serde(default = "default_context_pressure_threshold")]
     pub context_pressure_threshold: u64,
     #[serde(default = "default_context_pressure_threshold_bytes")]
@@ -347,6 +351,8 @@ impl Default for WorkflowPolicy {
             planning_cycle_cooldown_secs: default_planning_cycle_cooldown_secs(),
             narration_threshold: default_narration_threshold(),
             narration_nudge_max: default_narration_nudge_max(),
+            narration_detection_enabled: default_narration_detection_enabled(),
+            narration_threshold_polls: default_narration_threshold_polls(),
             context_pressure_threshold: default_context_pressure_threshold(),
             context_pressure_threshold_bytes: default_context_pressure_threshold_bytes(),
             context_pressure_restart_delay_secs: default_context_pressure_restart_delay_secs(),
@@ -560,6 +566,12 @@ fn default_narration_threshold() -> f64 {
 }
 fn default_narration_nudge_max() -> u32 {
     2
+}
+fn default_narration_detection_enabled() -> bool {
+    true
+}
+fn default_narration_threshold_polls() -> u32 {
+    5
 }
 fn default_confidence_threshold() -> f64 {
     0.8
