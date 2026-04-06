@@ -201,11 +201,6 @@ fn spawn_detached_process(
         .context("failed to clone log file handle")?;
 
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
-    let root_str = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf())
-        .to_string_lossy()
-        .to_string();
 
     let mut cmd = Command::new(exe);
     cmd.args(args)
