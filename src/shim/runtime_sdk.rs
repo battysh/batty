@@ -32,6 +32,10 @@ const GROUP_TERM_GRACE_SECS: u64 = 2;
 const WORKING_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const STALLED_MID_TURN_MARKER: &str = "stalled mid-turn";
 const MESSAGE_PREVIEW_LIMIT: usize = 160;
+const SDK_COMMAND_POLL_MS: u64 = 1000;
+const SDK_KEEPALIVE_IDLE_SECS: u64 = 300;
+const SDK_KEEPALIVE_MESSAGE: &str =
+    "Continue monitoring. If you have no pending work, reply with 'idle'.";
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -128,6 +132,8 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
     let mut evt_channel = cmd_channel
         .try_clone()
         .context("failed to clone channel for stdout reader")?;
+
+    cmd_channel.set_read_timeout(Some(Duration::from_millis(SDK_COMMAND_POLL_MS)))?;
 
     // Emit Ready immediately — Claude -p mode accepts input on stdin right away.
     cmd_channel.send(&Event::Ready)?;
@@ -452,6 +458,7 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
 
     // -- Command loop (main thread) --
     let state_cmd = Arc::clone(&state);
+    let mut last_keepalive = Instant::now();
     loop {
         let cmd = match cmd_channel.recv::<ShimCommand>() {
             Ok(Some(c)) => c,
@@ -462,6 +469,19 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                 );
                 terminate_child(&mut child);
                 break;
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io_error| {
+                        matches!(
+                            io_error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        )
+                    }) =>
+            {
+                maybe_send_keepalive(&state_cmd, &stdin_writer, &mut last_keepalive);
+                continue;
             }
             Err(e) => {
                 eprintln!("[shim-sdk {}] channel error: {e}", args.id);
@@ -476,6 +496,7 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                 body,
                 message_id,
             } => {
+                last_keepalive = Instant::now();
                 let mut st = state_cmd.lock().unwrap();
                 match st.state {
                     ShimState::Idle => {
@@ -594,6 +615,7 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
             }
 
             ShimCommand::Ping => {
+                last_keepalive = Instant::now();
                 cmd_channel.send(&Event::Pong)?;
             }
 
@@ -634,6 +656,41 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
 
     stdout_handle.join().ok();
     Ok(())
+}
+
+fn maybe_send_keepalive<W: IoWrite>(
+    state: &Arc<Mutex<SdkState>>,
+    stdin_writer: &Arc<Mutex<W>>,
+    last_keepalive: &mut Instant,
+) {
+    if last_keepalive.elapsed() < Duration::from_secs(SDK_KEEPALIVE_IDLE_SECS) {
+        return;
+    }
+
+    let session_id = {
+        let mut st = state.lock().unwrap();
+        if st.state != ShimState::Idle || st.session_id.is_empty() || st.pending_message_id.is_some() {
+            return;
+        }
+        st.state = ShimState::Working;
+        st.state_changed_at = Instant::now();
+        st.accumulated_response.clear();
+        st.session_id.clone()
+    };
+
+    let user_msg = SdkUserMessage::new(&session_id, SDK_KEEPALIVE_MESSAGE);
+    let ndjson = user_msg.to_ndjson();
+    if let Ok(mut writer) = stdin_writer.lock() {
+        if writeln!(writer, "{ndjson}").is_ok() {
+            let _ = writer.flush();
+            *last_keepalive = Instant::now();
+            return;
+        }
+    }
+
+    let mut st = state.lock().unwrap();
+    st.state = ShimState::Idle;
+    st.state_changed_at = Instant::now();
 }
 
 // ---------------------------------------------------------------------------
@@ -962,5 +1019,82 @@ mod tests {
             st.last_sent_message_preview.as_deref(),
             Some("second message")
         );
+    }
+
+    #[test]
+    fn keepalive_is_skipped_before_interval() {
+        let state = Arc::new(Mutex::new(SdkState {
+            state: ShimState::Idle,
+            state_changed_at: Instant::now(),
+            started_at: Instant::now(),
+            session_id: "sess-1".into(),
+            accumulated_response: String::new(),
+            pending_message_id: None,
+            last_sent_message_from: None,
+            last_sent_message_preview: None,
+            message_queue: VecDeque::new(),
+            cumulative_output_bytes: 0,
+        }));
+        let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut last_keepalive = Instant::now();
+
+        maybe_send_keepalive(&state, &writer, &mut last_keepalive);
+
+        assert!(writer.lock().unwrap().is_empty());
+        assert_eq!(state.lock().unwrap().state, ShimState::Idle);
+    }
+
+    #[test]
+    fn keepalive_sends_message_after_interval() {
+        let state = Arc::new(Mutex::new(SdkState {
+            state: ShimState::Idle,
+            state_changed_at: Instant::now(),
+            started_at: Instant::now(),
+            session_id: "sess-1".into(),
+            accumulated_response: "stale output".into(),
+            pending_message_id: None,
+            last_sent_message_from: None,
+            last_sent_message_preview: None,
+            message_queue: VecDeque::new(),
+            cumulative_output_bytes: 0,
+        }));
+        let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut last_keepalive =
+            Instant::now() - Duration::from_secs(SDK_KEEPALIVE_IDLE_SECS + 1);
+
+        maybe_send_keepalive(&state, &writer, &mut last_keepalive);
+
+        let output = String::from_utf8(writer.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("\"type\":\"user\""));
+        assert!(output.contains("\"session_id\":\"sess-1\""));
+        assert!(output.contains(SDK_KEEPALIVE_MESSAGE));
+
+        let st = state.lock().unwrap();
+        assert_eq!(st.state, ShimState::Working);
+        assert!(st.accumulated_response.is_empty());
+    }
+
+    #[test]
+    fn keepalive_is_skipped_without_session() {
+        let state = Arc::new(Mutex::new(SdkState {
+            state: ShimState::Idle,
+            state_changed_at: Instant::now(),
+            started_at: Instant::now(),
+            session_id: String::new(),
+            accumulated_response: String::new(),
+            pending_message_id: None,
+            last_sent_message_from: None,
+            last_sent_message_preview: None,
+            message_queue: VecDeque::new(),
+            cumulative_output_bytes: 0,
+        }));
+        let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut last_keepalive =
+            Instant::now() - Duration::from_secs(SDK_KEEPALIVE_IDLE_SECS + 1);
+
+        maybe_send_keepalive(&state, &writer, &mut last_keepalive);
+
+        assert!(writer.lock().unwrap().is_empty());
+        assert_eq!(state.lock().unwrap().state, ShimState::Idle);
     }
 }

@@ -38,7 +38,32 @@ fn shim_log_preview(body: &str) -> String {
     preview
 }
 
+fn format_batched_message(messages: &[inbox::InboxMessage]) -> String {
+    messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            format!(
+                "--- Message {}/{} from {} ---\n{}",
+                index + 1,
+                messages.len(),
+                message.from,
+                message.body
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 impl TeamDaemon {
+    fn uses_management_batching(&self, member_name: &str) -> bool {
+        self.config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+            .is_some_and(|member| matches!(member.role_type, RoleType::Architect | RoleType::Manager))
+    }
+
     pub(in crate::team) fn member_ready_for_delivery(&self, member_name: &str) -> bool {
         if let Some(handle) = self.shim_handles.get(member_name) {
             if handle.is_terminal() {
@@ -380,6 +405,20 @@ impl TeamDaemon {
                 continue;
             }
 
+            if self.uses_management_batching(name) {
+                let batched_messages: Vec<inbox::InboxMessage> = messages
+                    .iter()
+                    .filter(|msg| matches!(msg.msg_type, inbox::MessageType::Send))
+                    .cloned()
+                    .collect();
+                if batched_messages.len() > 1
+                    && self.deliver_batched_management_messages(&root, name, &batched_messages)?
+                {
+                    self.mark_member_working(name);
+                    continue;
+                }
+            }
+
             let Some(_pane_id) = self.config.pane_map.get(name).cloned() else {
                 continue;
             };
@@ -553,6 +592,62 @@ impl TeamDaemon {
         }
 
         Ok(())
+    }
+
+    fn deliver_batched_management_messages(
+        &mut self,
+        root: &std::path::Path,
+        member_name: &str,
+        messages: &[inbox::InboxMessage],
+    ) -> Result<bool> {
+        let Some(handle) = self.shim_handles.get_mut(member_name) else {
+            return Ok(false);
+        };
+
+        let first_sender = messages
+            .first()
+            .map(|message| message.from.as_str())
+            .unwrap_or("daemon");
+        let batched_body = format_batched_message(messages);
+        info!(
+            to = %member_name,
+            count = messages.len(),
+            "delivering batched inbox messages via shim"
+        );
+        if let Err(error) = handle.send_message(first_sender, &batched_body) {
+            warn!(
+                to = %member_name,
+                count = messages.len(),
+                error = %error,
+                "failed to deliver batched inbox messages"
+            );
+            return Ok(false);
+        }
+
+        handle.apply_state_change(crate::shim::protocol::ShimState::Working);
+        let _ = append_shim_event_log(
+            &self.config.project_root,
+            member_name,
+            &format!(
+                "-> batched {} messages: {}",
+                messages.len(),
+                shim_log_preview(&batched_body)
+            ),
+        );
+        for message in messages {
+            if let Err(error) = inbox::mark_delivered(root, member_name, &message.id) {
+                warn!(
+                    member = %member_name,
+                    id = %message.id,
+                    error = %error,
+                    "failed to mark batched message delivered"
+                );
+            } else {
+                self.record_message_routed(&message.from, member_name);
+            }
+        }
+
+        Ok(true)
     }
 
     fn resolve_role_name(&self, member_name: &str) -> String {
@@ -1400,6 +1495,59 @@ mod tests {
 
         let pending = inbox::pending_messages(&root, "eng-1").unwrap();
         let _ = pending;
+    }
+
+    #[test]
+    fn deliver_inbox_batches_management_messages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let root = inbox::inboxes_root(tmp.path());
+        daemon
+            .config
+            .pane_map
+            .insert("manager".to_string(), "%123".to_string());
+
+        let first = inbox::InboxMessage::new_send("eng-1", "manager", "first update");
+        let second = inbox::InboxMessage::new_send("architect", "manager", "second update");
+        inbox::deliver_to_inbox(&root, &first).unwrap();
+        inbox::deliver_to_inbox(&root, &second).unwrap();
+
+        let (parent_sock, child_sock) = crate::shim::protocol::socketpair().unwrap();
+        let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+        let mut child_channel = crate::shim::protocol::Channel::new(child_sock);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "manager".to_string(),
+            parent_channel,
+            12345,
+            "claude".to_string(),
+            "claude".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("manager".to_string(), handle);
+        daemon
+            .states
+            .insert("manager".to_string(), crate::team::standup::MemberState::Idle);
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        child_channel
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+        match cmd {
+            crate::shim::protocol::Command::SendMessage { body, .. } => {
+                assert!(body.contains("--- Message 1/2 from "));
+                assert!(body.contains("--- Message 2/2 from "));
+                assert!(body.contains("from eng-1 ---"));
+                assert!(body.contains("first update"));
+                assert!(body.contains("from architect ---"));
+                assert!(body.contains("second update"));
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+
+        assert!(inbox::pending_messages(&root, "manager").unwrap().is_empty());
     }
 
     #[test]
