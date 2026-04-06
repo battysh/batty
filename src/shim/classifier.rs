@@ -88,11 +88,27 @@ pub fn detect_meta_conversation(content: &str, agent_type: AgentType) -> bool {
         return false;
     }
 
-    let tool_markers = match agent_type {
-        AgentType::Claude => ["read(", "edit(", "bash(", "write(", "grep(", "glob(", "multiedit(", "⎿"],
-        AgentType::Codex => ["apply_patch", "*** begin patch", "$ ", "\n$ ", "exit code:", "target/"],
-        AgentType::Kiro => ["applying", "$ ", "\n$ ", "running…", "running..."],
-        AgentType::Generic => ["$ ", "\n$ ", "exit code:"],
+    let tool_markers: &[&str] = match agent_type {
+        AgentType::Claude => &[
+            "read(",
+            "edit(",
+            "bash(",
+            "write(",
+            "grep(",
+            "glob(",
+            "multiedit(",
+            "⎿",
+        ],
+        AgentType::Codex => &[
+            "apply_patch",
+            "*** begin patch",
+            "$ ",
+            "\n$ ",
+            "exit code:",
+            "target/",
+        ],
+        AgentType::Kiro => &["applying", "$ ", "\n$ ", "running…", "running..."],
+        AgentType::Generic => &["$ ", "\n$ ", "exit code:"],
     };
     if tool_markers.iter().any(|marker| trimmed.contains(marker)) {
         return false;
@@ -138,7 +154,9 @@ pub fn detect_meta_conversation(content: &str, agent_type: AgentType) -> bool {
             let line = line.trim();
             !line.is_empty()
                 && (meta_patterns.iter().any(|pattern| line.contains(pattern))
-                    || question_patterns.iter().any(|pattern| line.contains(pattern))
+                    || question_patterns
+                        .iter()
+                        .any(|pattern| line.contains(pattern))
                     || line.ends_with('?'))
         })
         .count();
