@@ -70,7 +70,14 @@ pub(crate) fn run_tests_in_worktree(
         .current_dir(worktree_dir);
     command.env("CARGO_HOME", &cargo_home);
     if let Some(project_root) = engineer_worktree_project_root(worktree_dir) {
-        command.env("CARGO_TARGET_DIR", shared_cargo_target_dir(&project_root));
+        let wt_name = worktree_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "default".to_string());
+        command.env(
+            "CARGO_TARGET_DIR",
+            shared_cargo_target_dir(&project_root).join(&wt_name),
+        );
     }
     let output = command.output().with_context(|| {
         format!(
@@ -500,7 +507,14 @@ fn ensure_shared_cargo_target_config(project_root: &Path, worktree_dir: &Path) -
     std::fs::create_dir_all(&cargo_dir)
         .with_context(|| format!("failed to create {}", cargo_dir.display()))?;
     let config_path = cargo_dir.join("config.toml");
-    let target_dir = shared_cargo_target_dir(project_root);
+    // Each worktree gets its own target subdirectory so parallel builds
+    // don't contend on the same Cargo lock. The shared parent is kept for
+    // disk-pressure cleanup scans.
+    let worktree_name = worktree_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "default".to_string());
+    let target_dir = shared_cargo_target_dir(project_root).join(&worktree_name);
     std::fs::create_dir_all(&target_dir)
         .with_context(|| format!("failed to create {}", target_dir.display()))?;
 
