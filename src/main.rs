@@ -1063,6 +1063,13 @@ fn main() -> Result<()> {
             print!("{}", team::doctor::run(&root, fix, yes)?);
         }
 
+        Command::Worktree { health } => {
+            if !health {
+                bail!("worktree command requires --health");
+            }
+            print!("{}", team::worktree_health::run(&root)?);
+        }
+
         Command::Grafana { command } => {
             let config_path = team::team_config_path(&root);
             let port = if config_path.exists() {

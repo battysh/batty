@@ -75,6 +75,7 @@ pub mod validation;
 pub mod verification;
 pub mod watcher;
 pub mod workflow;
+pub mod worktree_health;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

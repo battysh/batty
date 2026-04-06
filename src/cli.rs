@@ -239,6 +239,13 @@ pub enum Command {
         yes: bool,
     },
 
+    /// Inspect engineer worktree health
+    Worktree {
+        /// Show the current worktree health report
+        #[arg(long, default_value_t = false)]
+        health: bool,
+    },
+
     /// Show consolidated telemetry dashboard (tasks, cycle time, rates, agents)
     Metrics,
 
@@ -1311,6 +1318,12 @@ mod tests {
                 yes: true
             }
         ));
+    }
+
+    #[test]
+    fn worktree_health_command_parses() {
+        let cli = Cli::parse_from(["batty", "worktree", "--health"]);
+        assert!(matches!(cli.command, Command::Worktree { health: true }));
     }
 
     #[test]
