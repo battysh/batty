@@ -229,6 +229,9 @@ pub enum Command {
         command: ScaleCommand,
     },
 
+    /// Trigger an explicit topology reload for the running daemon
+    Reload,
+
     /// Dump diagnostic state from Batty state files
     Doctor {
         /// Remove orphan branches and worktrees after confirmation
@@ -755,6 +758,15 @@ mod tests {
                 command: Some(BoardCommand::Deps { format }),
             } => assert_eq!(format, DepsFormatArg::Tree),
             other => panic!("expected board deps command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reload_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "reload"]);
+        match cli.command {
+            Command::Reload => {}
+            other => panic!("expected reload command, got {other:?}"),
         }
     }
 
