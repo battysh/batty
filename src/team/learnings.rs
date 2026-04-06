@@ -31,7 +31,6 @@ struct RelatedTaskContext {
     task: Task,
     score: usize,
     changed_paths: Vec<String>,
-    learning: Option<LearningEntry>,
     metrics: TaskMetricsSummary,
     git_summary: Option<String>,
 }
@@ -219,10 +218,6 @@ fn related_completed_tasks(
         return Ok(Vec::new());
     }
     let mut metrics_by_task = load_task_metrics(project_root)?;
-    let learnings_by_task: HashMap<u32, LearningEntry> = load_task_learnings(project_root)?
-        .into_iter()
-        .map(|entry| (entry.task_id, entry))
-        .collect();
 
     let mut scored = Vec::new();
     for candidate in crate::task::load_tasks_from_dir(&tasks_dir)? {
@@ -242,7 +237,6 @@ fn related_completed_tasks(
             .as_deref()
             .and_then(|commit| git_commit_summary(project_root, commit));
         scored.push(RelatedTaskContext {
-            learning: learnings_by_task.get(&candidate.id).cloned(),
             metrics,
             git_summary,
             changed_paths,
@@ -630,8 +624,13 @@ mod tests {
         let mut escalation = TeamEvent::task_escalated("eng-2", "10", Some("needed rework"));
         escalation.task = Some("10".to_string());
         telemetry_db::insert_event(&conn, &escalation).unwrap();
+        let mut escalation_repeat =
+            TeamEvent::task_escalated("eng-2", "10", Some("second rework"));
+        escalation_repeat.task = Some("10".to_string());
+        telemetry_db::insert_event(&conn, &escalation_repeat).unwrap();
         let mut event_sink = EventSink::new(&crate::team::team_events_path(tmp.path())).unwrap();
-        event_sink.push(&escalation).unwrap();
+        event_sink.emit(escalation.clone()).unwrap();
+        event_sink.emit(escalation_repeat).unwrap();
 
         write_task_file(
             tmp.path(),

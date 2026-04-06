@@ -3,12 +3,14 @@ use crate::shim::protocol::{Command, ShimState, socketpair};
 use crate::team::config::{AllocationPolicy, AllocationStrategy, BoardConfig, WorkflowPolicy};
 use crate::team::daemon::agent_handle::AgentHandle;
 use crate::team::events;
+use crate::team::events::{QualityMetricsInfo, TeamEvent};
 use crate::team::inbox;
 use crate::team::standup::MemberState;
 use crate::team::task_loop::{
     current_worktree_branch, engineer_base_branch_name, setup_engineer_worktree,
 };
 use crate::team::team_events_path;
+use crate::team::telemetry_db;
 use crate::team::test_support::{
     TestDaemonBuilder, engineer_member, git_ok, git_stdout, init_git_repo, manager_member,
     write_open_task_file, write_owned_task_file,
@@ -24,6 +26,36 @@ fn write_task_file(project_root: &std::path::Path, file_name: &str, content: &st
         .join("tasks");
     std::fs::create_dir_all(&tasks_dir).unwrap();
     std::fs::write(tasks_dir.join(file_name), content).unwrap();
+}
+
+fn seed_dispatch_telemetry(project_root: &std::path::Path, engineer: &str, completion_rate: f64) {
+    std::fs::create_dir_all(project_root.join(".batty")).unwrap();
+    let conn = telemetry_db::open(project_root).unwrap();
+    for task_id in 1..=5 {
+        telemetry_db::insert_event(&conn, &TeamEvent::task_assigned(engineer, &task_id.to_string()))
+            .unwrap();
+        if completion_rate >= 1.0 || task_id as f64 <= completion_rate * 5.0 {
+            telemetry_db::insert_event(
+                &conn,
+                &TeamEvent::task_completed(engineer, Some(&task_id.to_string())),
+            )
+            .unwrap();
+        }
+        telemetry_db::insert_event(
+            &conn,
+            &TeamEvent::quality_metrics_recorded(&QualityMetricsInfo {
+                backend: "codex",
+                role: engineer,
+                task: &task_id.to_string(),
+                narration_ratio: 0.1,
+                commit_frequency: 1.0,
+                first_pass_test_rate: 1.0,
+                retry_rate: 0.0,
+                time_to_completion_secs: 120,
+            }),
+        )
+        .unwrap();
+    }
 }
 
 #[test]
@@ -1279,6 +1311,8 @@ fn manual_cooldown_only_affects_assigned_engineer() {
 #[test]
 fn scored_dispatch_prefers_engineer_with_matching_tag_history() {
     let tmp = tempfile::tempdir().unwrap();
+    seed_dispatch_telemetry(tmp.path(), "eng-1", 0.2);
+    seed_dispatch_telemetry(tmp.path(), "eng-2", 0.2);
     write_task_file(
         tmp.path(),
         "001-history.md",
@@ -1334,6 +1368,8 @@ fn scored_dispatch_prefers_engineer_with_matching_tag_history() {
 #[test]
 fn scored_dispatch_prefers_engineer_with_matching_changed_paths() {
     let tmp = tempfile::tempdir().unwrap();
+    seed_dispatch_telemetry(tmp.path(), "eng-1", 0.2);
+    seed_dispatch_telemetry(tmp.path(), "eng-2", 0.2);
     write_task_file(
         tmp.path(),
         "001-history.md",
