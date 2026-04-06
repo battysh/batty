@@ -12,6 +12,8 @@ use crate::team::watcher::CodexQualitySignals;
 const WARNING_PERCENT: u64 = 70;
 const NUDGE_PERCENT: u64 = 90;
 const RESTART_AFTER_OVER_THRESHOLD_POLLS: u32 = 2;
+const CLAUDE_PROACTIVE_CONTEXT_BYTES: u64 = 200_000;
+const CLAUDE_PROACTIVE_RESTART_PCT: u64 = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextPressureAction {
@@ -187,6 +189,22 @@ impl TeamDaemon {
         }
 
         let is_working = self.states.get(member_name) == Some(&MemberState::Working);
+        if is_working && self.should_proactively_restart_claude_for_context(member_name) {
+            let estimated_context_bytes = self.estimated_context_bytes(member_name);
+            warn!(
+                member = %member_name,
+                estimated_context_bytes,
+                threshold_bytes = CLAUDE_PROACTIVE_CONTEXT_BYTES,
+                "Claude agent exceeded proactive context threshold"
+            );
+            self.record_orchestrator_action(format!(
+                "health: proactive Claude restart for {} at {} estimated context bytes",
+                member_name, estimated_context_bytes
+            ));
+            self.handle_context_pressure_restart(member_name)?;
+            self.context_pressure_tracker.clear_member(member_name);
+            return Ok(());
+        }
         let threshold = self
             .config
             .team_config
@@ -345,6 +363,30 @@ impl TeamDaemon {
             .as_secs();
         Some(now.saturating_sub(commit_ts))
     }
+
+    pub(super) fn estimated_context_bytes(&self, member_name: &str) -> u64 {
+        self.shim_handles
+            .get(member_name)
+            .map(|handle| handle.output_bytes.saturating_add(handle.input_bytes))
+            .unwrap_or_default()
+    }
+
+    fn should_proactively_restart_claude_for_context(&self, member_name: &str) -> bool {
+        let Some(member) = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+        else {
+            return false;
+        };
+        let agent_name = member.agent.as_deref().unwrap_or("claude");
+        if agent_name != "claude" {
+            return false;
+        }
+        self.estimated_context_bytes(member_name)
+            >= CLAUDE_PROACTIVE_CONTEXT_BYTES.saturating_mul(CLAUDE_PROACTIVE_RESTART_PCT) / 100
+    }
 }
 
 #[cfg(test)]
@@ -498,5 +540,28 @@ mod tests {
             ZERO_OUTPUT_THRESHOLD_SECS, 600,
             "zero-output detection should trigger after 10 minutes"
         );
+    }
+
+    #[test]
+    fn estimated_context_bytes_sums_input_and_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = crate::team::test_support::TestDaemonBuilder::new(tmp.path())
+            .members(vec![crate::team::test_support::architect_member("architect")])
+            .build();
+        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "architect".into(),
+            crate::shim::protocol::Channel::new(parent),
+            123,
+            "claude".into(),
+            "claude".into(),
+            tmp.path().to_path_buf(),
+        );
+        handle.output_bytes = 120_000;
+        handle.input_bytes = 50_000;
+        daemon.shim_handles.insert("architect".into(), handle);
+
+        assert_eq!(daemon.estimated_context_bytes("architect"), 170_000);
+        assert!(daemon.should_proactively_restart_claude_for_context("architect"));
     }
 }

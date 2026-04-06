@@ -36,6 +36,8 @@ pub(in crate::team) struct AgentHandle {
     pub last_rows: u16,
     /// Latest session output byte count reported by the shim.
     pub output_bytes: u64,
+    /// Approximate total input bytes sent to the agent session.
+    pub input_bytes: u64,
     /// When the shim last reported activity.
     pub last_activity_at: Option<Instant>,
 }
@@ -63,6 +65,7 @@ impl AgentHandle {
             last_cols: 0,
             last_rows: 0,
             output_bytes: 0,
+            input_bytes: 0,
             last_activity_at: None,
         }
     }
@@ -92,6 +95,10 @@ impl AgentHandle {
 
     /// Send a message to the shim.
     pub fn send_message(&mut self, from: &str, body: &str) -> anyhow::Result<()> {
+        self.input_bytes = self
+            .input_bytes
+            .saturating_add(from.len() as u64 + body.len() as u64);
+        self.record_activity();
         self.channel.send(&Command::SendMessage {
             from: from.to_string(),
             body: body.to_string(),
@@ -350,6 +357,20 @@ mod tests {
         assert_eq!(handle.output_bytes, 128);
         assert!(handle.last_activity_at.is_some());
         assert_eq!(handle.secs_since_last_activity(), Some(0));
+    }
+
+    #[test]
+    fn send_message_tracks_input_bytes() {
+        let (mut handle, mut child) = make_test_handle();
+        handle.send_message("manager", "do the thing").unwrap();
+
+        assert_eq!(
+            handle.input_bytes,
+            "manager".len() as u64 + "do the thing".len() as u64
+        );
+
+        let cmd: Command = child.recv().unwrap().unwrap();
+        assert!(matches!(cmd, Command::SendMessage { .. }));
     }
 
     #[test]
