@@ -1289,7 +1289,11 @@ mod tests {
         std::fs::create_dir_all(project_root.join("planning")).unwrap();
         std::fs::write(config_dir.join("team.yaml"), "name: demo\n").unwrap();
         std::fs::write(config_dir.join("batty_decompiler.md"), "prompt\n").unwrap();
-        std::fs::write(project_root.join("analysis").join("README.md"), "# Analysis\n").unwrap();
+        std::fs::write(
+            project_root.join("analysis").join("README.md"),
+            "# Analysis\n",
+        )
+        .unwrap();
         std::fs::write(project_root.join("PARITY.md"), "# Parity\n").unwrap();
         std::fs::write(project_root.join("SPEC.md"), "# Spec\n").unwrap();
         std::fs::write(

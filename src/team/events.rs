@@ -1367,9 +1367,11 @@ mod tests {
         let events = read_events(&path).unwrap();
         assert_eq!(events.len(), 4);
         for idx in 0..4 {
-            assert!(events
-                .iter()
-                .any(|event| event.role.as_deref() == Some(&format!("eng-{idx}"))));
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event.role.as_deref() == Some(&format!("eng-{idx}")))
+            );
         }
     }
 

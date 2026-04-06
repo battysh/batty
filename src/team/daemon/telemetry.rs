@@ -474,14 +474,14 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::team::LOG_ROTATION_BYTES;
     use crate::team::config::{
         AutomationConfig, BoardConfig, OrchestratorPosition, RoleDef, StandupConfig, TeamConfig,
         WorkflowMode, WorkflowPolicy,
     };
-    use crate::team::events::{read_events, EventSink};
+    use crate::team::events::{EventSink, read_events};
     use crate::team::failure_patterns::FailureTracker;
-    use crate::team::test_helpers::{daemon_config_with_roles, RecordingChannel};
-    use crate::team::LOG_ROTATION_BYTES;
+    use crate::team::test_helpers::{RecordingChannel, daemon_config_with_roles};
     use regex::Regex;
     use serial_test::serial;
 
@@ -813,11 +813,12 @@ mod tests {
 
         assert!(malformed_path.is_dir());
         assert!(malformed_ansi_path.is_dir());
-        assert!(!tmp
-            .path()
-            .join(".batty")
-            .join("orchestrator.log.1")
-            .exists());
+        assert!(
+            !tmp.path()
+                .join(".batty")
+                .join("orchestrator.log.1")
+                .exists()
+        );
     }
 
     #[test]
