@@ -120,7 +120,8 @@ pub fn load_engineer_profiles(
 ) -> Result<HashMap<String, EngineerProfile>> {
     let persisted = load_persisted_task_profiles(project_root)?;
     let telemetry = load_engineer_telemetry_stats(project_root)?;
-    let mut profiles = build_engineer_profiles_with_history(engineers, tasks, &persisted, &telemetry)?;
+    let mut profiles =
+        build_engineer_profiles_with_history(engineers, tasks, &persisted, &telemetry)?;
     if let Ok(conn) = crate::team::telemetry_db::open(project_root)
         && let Ok(rows) = crate::team::telemetry_db::query_engineer_performance_profiles(&conn)
     {
@@ -394,7 +395,9 @@ pub fn explain_routing_for_task(
             .all(|breakdown| breakdown.telemetry_completed_tasks >= 5);
     if telemetry_ready || !has_any_telemetry {
         breakdowns.sort_by(|left, right| compare_breakdowns(left, right));
-        let chosen_engineer = breakdowns.first().map(|breakdown| breakdown.engineer.clone());
+        let chosen_engineer = breakdowns
+            .first()
+            .map(|breakdown| breakdown.engineer.clone());
         return RoutingDecisionExplanation {
             chosen_engineer,
             fallback_to_round_robin: false,
@@ -404,7 +407,9 @@ pub fn explain_routing_for_task(
     }
 
     breakdowns.sort_by(|left, right| left.engineer.cmp(&right.engineer));
-    let chosen_engineer = breakdowns.first().map(|breakdown| breakdown.engineer.clone());
+    let chosen_engineer = breakdowns
+        .first()
+        .map(|breakdown| breakdown.engineer.clone());
     RoutingDecisionExplanation {
         chosen_engineer,
         fallback_to_round_robin: true,
@@ -417,7 +422,10 @@ pub fn explain_routing_for_task(
 }
 
 pub fn print_dispatch_explanation(project_root: &Path, task_id: Option<u32>) -> Result<()> {
-    let board_dir = project_root.join(".batty").join("team_config").join("board");
+    let board_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board");
     let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
     let task = select_dispatch_task(&tasks, task_id)
         .with_context(|| format!("no dispatchable task found for {:?}", task_id))?;
@@ -582,8 +590,8 @@ fn load_idle_engineers(
     }
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    let state: PersistedDaemonStateView =
-        serde_json::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))?;
+    let state: PersistedDaemonStateView = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(members
         .iter()
         .filter(|member| member.role_type == RoleType::Engineer)
@@ -1138,7 +1146,8 @@ mod tests {
             ),
         ]);
 
-        let explanation = explain_routing_for_task(&engineers, &profiles, &task(&[], ""), &policy());
+        let explanation =
+            explain_routing_for_task(&engineers, &profiles, &task(&[], ""), &policy());
         assert!(explanation.fallback_to_round_robin);
         assert_eq!(explanation.chosen_engineer.as_deref(), Some("eng-1"));
     }
@@ -1147,10 +1156,7 @@ mod tests {
     fn explain_routing_keeps_scored_mode_when_no_telemetry_exists() {
         let engineers = vec!["eng-1".to_string(), "eng-2".to_string()];
         let profiles = HashMap::from([
-            (
-                "eng-1".to_string(),
-                EngineerProfile::default(),
-            ),
+            ("eng-1".to_string(), EngineerProfile::default()),
             (
                 "eng-2".to_string(),
                 EngineerProfile {

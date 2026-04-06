@@ -172,7 +172,11 @@ fn summarize_progress_from_event_log(worktree: &Path, task: &crate::task::Task) 
         }
 
         let mut line = event.event.clone();
-        if let Some(reason) = event.reason.as_deref().filter(|reason| !reason.trim().is_empty()) {
+        if let Some(reason) = event
+            .reason
+            .as_deref()
+            .filter(|reason| !reason.trim().is_empty())
+        {
             line.push_str(": ");
             line.push_str(reason.trim());
         } else if let Some(details) = event
@@ -182,7 +186,10 @@ fn summarize_progress_from_event_log(worktree: &Path, task: &crate::task::Task) 
         {
             line.push_str(": ");
             line.push_str(details.trim());
-        } else if let Some(error) = event.error.as_deref().filter(|error| !error.trim().is_empty())
+        } else if let Some(error) = event
+            .error
+            .as_deref()
+            .filter(|error| !error.trim().is_empty())
         {
             line.push_str(": ");
             line.push_str(error.trim());
@@ -2015,8 +2022,10 @@ mod tests {
 
         let task_id = "42";
         let event_lines = [
-            serde_json::to_string(&crate::team::events::TeamEvent::task_assigned("eng-1", task_id))
-                .unwrap(),
+            serde_json::to_string(&crate::team::events::TeamEvent::task_assigned(
+                "eng-1", task_id,
+            ))
+            .unwrap(),
             serde_json::to_string(&crate::team::events::TeamEvent::agent_restarted(
                 "eng-1",
                 task_id,

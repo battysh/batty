@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -1593,9 +1593,11 @@ mod tests {
     #[test]
     fn parse_thread_binding_requires_hash_separator() {
         let error = parse_thread_binding("slack=channel:C123").unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("expected <channel>=<binding>#<thread-binding>"));
+        assert!(
+            error
+                .to_string()
+                .contains("expected <channel>=<binding>#<thread-binding>")
+        );
     }
 
     #[test]
