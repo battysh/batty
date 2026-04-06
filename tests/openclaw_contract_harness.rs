@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use batty_cli::team::events::TeamEvent;
 use batty_cli::team::inbox::{self, InboxMessage};
 use batty_cli::team::openclaw;
+use serial_test::serial;
 use tempfile::TempDir;
 
 struct FakeTmux {
@@ -150,6 +151,7 @@ fn event_fixture_matches_contract_schema() {
 }
 
 #[test]
+#[serial]
 fn openclaw_status_contract_supports_running_fixture_snapshot() {
     let project = copy_fixture_project("running");
     let fake_tmux = install_fake_tmux("running");
@@ -181,10 +183,14 @@ fn openclaw_status_contract_supports_running_fixture_snapshot() {
 }
 
 #[test]
+#[serial]
 fn openclaw_status_contract_supports_stopped_fixture_snapshot() {
     let project = copy_fixture_project("stopped");
+    let fake_tmux = install_fake_tmux("stopped");
 
-    let status = openclaw::openclaw_status_summary(project.path()).unwrap();
+    let status = with_fake_tmux(Some(&fake_tmux), || {
+        openclaw::openclaw_status_summary(project.path()).unwrap()
+    });
 
     assert_eq!(status.project, "fixture-stopped");
     assert!(!status.running);
@@ -201,6 +207,7 @@ fn openclaw_status_contract_supports_stopped_fixture_snapshot() {
 }
 
 #[test]
+#[serial]
 fn openclaw_status_survives_internal_reason_wording_changes() {
     let project = copy_fixture_project("degraded");
     let fake_tmux = install_fake_tmux("degraded");
@@ -239,6 +246,7 @@ fn openclaw_status_survives_internal_reason_wording_changes() {
 }
 
 #[test]
+#[serial]
 fn openclaw_follow_up_harness_dispatches_reminders_and_escalations() {
     let project = copy_fixture_project("degraded");
     let fake_tmux = install_fake_tmux("degraded");
@@ -286,6 +294,7 @@ fn openclaw_follow_up_harness_dispatches_reminders_and_escalations() {
 }
 
 #[test]
+#[serial]
 fn openclaw_follow_up_harness_persists_last_sent_at_for_contract_stability() {
     let project = copy_fixture_project("degraded");
     let fake_tmux = install_fake_tmux("degraded");
