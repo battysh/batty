@@ -92,9 +92,33 @@ pub(crate) fn ingest_completion_message(project_root: &Path, message: &str) -> R
     let task_path = find_task_path(project_root, packet.task_id)?;
     let mut metadata = read_workflow_metadata(&task_path)?;
     apply_completion_to_metadata(&packet, &mut metadata);
-    metadata.review_blockers = validation.missing_fields;
+    let mut review_blockers = validation.missing_fields;
+    if packet.outcome.trim() == "ready_for_review" && review_blockers.is_empty() {
+        if let Ok(worktree_path) = resolve_worktree_path(project_root, &packet)
+            && worktree_path.exists()
+        {
+            review_blockers.extend(crate::team::task_loop::validate_review_ready_worktree(
+                &worktree_path,
+            )?);
+        }
+    }
+    metadata.review_blockers = review_blockers;
     write_workflow_metadata(&task_path, &metadata)?;
     Ok(Some(packet.task_id))
+}
+
+fn resolve_worktree_path(project_root: &Path, packet: &CompletionPacket) -> Result<PathBuf> {
+    let raw_path = packet
+        .worktree_path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .context("worktree_path missing for commit validation")?;
+    let path = PathBuf::from(raw_path);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(project_root.join(path))
+    }
 }
 
 fn extract_packet_text(text: &str) -> Option<&str> {
