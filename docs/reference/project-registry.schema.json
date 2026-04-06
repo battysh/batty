@@ -10,7 +10,7 @@
       "const": "batty.projectRegistry"
     },
     "schemaVersion": {
-      "const": 1
+      "const": 2
     },
     "projects": {
       "type": "array",
@@ -26,6 +26,7 @@
       "required": [
         "projectId",
         "name",
+        "aliases",
         "projectRoot",
         "boardDir",
         "teamName",
@@ -44,6 +45,13 @@
         "name": {
           "type": "string",
           "minLength": 1
+        },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9._-]+$"
+          }
         },
         "projectRoot": {
           "type": "string",
@@ -73,7 +81,8 @@
         "tags": {
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^[a-z0-9._-]+$"
           }
         },
         "policyFlags": {
@@ -101,6 +110,9 @@
         "binding": {
           "type": "string",
           "minLength": 1
+        },
+        "threadBinding": {
+          "type": ["string", "null"]
         }
       }
     },
