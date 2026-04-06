@@ -75,6 +75,13 @@ pub enum Command {
         detail: bool,
     },
 
+    /// OpenClaw supervisor integration helpers for Batty
+    #[command(name = "openclaw")]
+    OpenClaw {
+        #[command(subcommand)]
+        command: OpenClawCommand,
+    },
+
     /// Send a message to an agent role (human → agent injection)
     Send {
         /// Explicit sender override (hidden; used by pane bridge and automation)
@@ -744,6 +751,45 @@ pub enum NudgeIntervention {
     OwnedTask,
 }
 
+#[derive(Subcommand, Debug)]
+pub enum OpenClawCommand {
+    /// Write an OpenClaw project registration/config skeleton for Batty
+    Register {
+        /// Overwrite an existing config file
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+    /// Show an operator-friendly Batty summary for OpenClaw supervision
+    Status {
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Send a high-level instruction into an allowed Batty role
+    Instruct {
+        /// Target role, typically architect or manager
+        role: String,
+        /// High-level instruction text
+        message: String,
+    },
+    /// Run configured OpenClaw follow-up/reminder workflows
+    #[command(name = "follow-up")]
+    FollowUp {
+        #[command(subcommand)]
+        command: OpenClawFollowUpCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum OpenClawFollowUpCommand {
+    /// Evaluate configured cron follow-ups and dispatch any due reminders
+    Run {
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
 impl NudgeIntervention {
     /// Return the marker file suffix for this intervention.
     #[allow(dead_code)]
@@ -1159,6 +1205,44 @@ mod tests {
                 assert!(detail);
             }
             other => panic!("expected status command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn openclaw_register_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "openclaw", "register", "--force"]);
+        match cli.command {
+            Command::OpenClaw { command } => match command {
+                OpenClawCommand::Register { force } => assert!(force),
+                other => panic!("expected openclaw register command, got {other:?}"),
+            },
+            other => panic!("expected openclaw command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn openclaw_status_subcommand_parses_json_flag() {
+        let cli = Cli::parse_from(["batty", "openclaw", "status", "--json"]);
+        match cli.command {
+            Command::OpenClaw { command } => match command {
+                OpenClawCommand::Status { json } => assert!(json),
+                other => panic!("expected openclaw status command, got {other:?}"),
+            },
+            other => panic!("expected openclaw command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn openclaw_follow_up_run_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "openclaw", "follow-up", "run"]);
+        match cli.command {
+            Command::OpenClaw { command } => match command {
+                OpenClawCommand::FollowUp { command } => match command {
+                    OpenClawFollowUpCommand::Run { json } => assert!(!json),
+                },
+                other => panic!("expected openclaw follow-up command, got {other:?}"),
+            },
+            other => panic!("expected openclaw command, got {other:?}"),
         }
     }
 
