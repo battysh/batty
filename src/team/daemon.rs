@@ -220,6 +220,7 @@ pub struct TeamDaemon {
 }
 
 impl TeamDaemon {
+    #[cfg_attr(test, allow(dead_code))]
     pub(super) fn preserve_member_worktree(&self, member_name: &str, commit_message: &str) -> bool {
         let policy = &self.config.team_config.workflow_policy;
         if !policy.auto_commit_on_restart {
