@@ -1,6 +1,21 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::events::TeamEvent;
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct QualityMetrics {
+    pub narration_ratio: f64,
+    pub commit_frequency: f64,
+    pub first_pass_test_rate: f64,
+    pub retry_rate: f64,
+    pub time_to_completion_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentMetric {
+    pub backend: String,
+    pub quality: QualityMetrics,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompletionQualityMetrics {
@@ -52,8 +67,12 @@ FROM hours \
 LEFT JOIN events e \
   ON e.event_type='quality_metrics_recorded' \
  AND e.timestamp / 3600 = hours.h \
-GROUP BY time, backend \
+  GROUP BY time, backend \
 ORDER BY time, backend;";
+
+pub fn calculate_narration_ratio(output: &str) -> f64 {
+    narration_ratio(output)
+}
 
 pub fn narration_ratio(output: &str) -> f64 {
     let mut explanation_lines = 0_u32;
@@ -118,7 +137,44 @@ pub fn build_completion_quality_metrics(
     }
 }
 
-pub fn aggregate_by_backend(
+pub fn aggregate_by_backend(metrics: &[AgentMetric]) -> HashMap<String, QualityMetrics> {
+    let mut grouped: HashMap<String, Vec<&AgentMetric>> = HashMap::new();
+    for metric in metrics {
+        grouped.entry(metric.backend.clone()).or_default().push(metric);
+    }
+
+    grouped
+        .into_iter()
+        .map(|(backend, samples)| {
+            let count = samples.len() as f64;
+            let avg = |f: fn(&AgentMetric) -> f64| -> f64 {
+                if samples.is_empty() {
+                    return 0.0;
+                }
+                samples.iter().map(|sample| f(sample)).sum::<f64>() / count
+            };
+            let avg_u64 = |f: fn(&AgentMetric) -> u64| -> u64 {
+                if samples.is_empty() {
+                    return 0;
+                }
+                (samples.iter().map(|sample| f(sample) as f64).sum::<f64>() / count).round() as u64
+            };
+
+            (
+                backend,
+                QualityMetrics {
+                    narration_ratio: avg(|sample| sample.quality.narration_ratio),
+                    commit_frequency: avg(|sample| sample.quality.commit_frequency),
+                    first_pass_test_rate: avg(|sample| sample.quality.first_pass_test_rate),
+                    retry_rate: avg(|sample| sample.quality.retry_rate),
+                    time_to_completion_secs: avg_u64(|sample| sample.quality.time_to_completion_secs),
+                },
+            )
+        })
+        .collect()
+}
+
+pub fn aggregate_completion_metrics_by_backend(
     metrics: &[CompletionQualityMetrics],
 ) -> BTreeMap<String, BackendQualityStats> {
     let mut grouped: BTreeMap<String, Vec<&CompletionQualityMetrics>> = BTreeMap::new();
@@ -203,32 +259,52 @@ mod tests {
     #[test]
     fn narration_ratio_is_zero_for_all_code_lines() {
         let output = "```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n$ cargo test";
-        assert_eq!(narration_ratio(output), 0.0);
+        assert_eq!(calculate_narration_ratio(output), 0.0);
     }
 
     #[test]
     fn narration_ratio_is_one_for_all_text_lines() {
         let output =
             "I inspected the failure.\nNext I will patch the parser.\nThen I will rerun tests.";
-        assert_eq!(narration_ratio(output), 1.0);
+        assert_eq!(calculate_narration_ratio(output), 1.0);
     }
 
     #[test]
     fn narration_ratio_handles_mixed_text_and_code() {
         let output = "I found the issue.\nfn main() {}\nI patched the bug.\n$ cargo test";
-        assert_eq!(narration_ratio(output), 0.5);
+        assert_eq!(calculate_narration_ratio(output), 0.5);
     }
 
     #[test]
     fn first_pass_rate_aggregation_handles_multiple_completions() {
         let stats = aggregate_by_backend(&[
-            build_completion_quality_metrics("codex", "eng-1", 1, "", 2, 0, Some(100), 400),
-            build_completion_quality_metrics("codex", "eng-1", 2, "", 1, 2, Some(200), 800),
-            build_completion_quality_metrics("codex", "eng-1", 3, "", 3, 0, Some(300), 900),
+            AgentMetric {
+                backend: "codex".into(),
+                quality: QualityMetrics {
+                    first_pass_test_rate: 1.0,
+                    retry_rate: 0.0,
+                    ..QualityMetrics::default()
+                },
+            },
+            AgentMetric {
+                backend: "codex".into(),
+                quality: QualityMetrics {
+                    first_pass_test_rate: 0.0,
+                    retry_rate: 2.0,
+                    ..QualityMetrics::default()
+                },
+            },
+            AgentMetric {
+                backend: "codex".into(),
+                quality: QualityMetrics {
+                    first_pass_test_rate: 1.0,
+                    retry_rate: 0.0,
+                    ..QualityMetrics::default()
+                },
+            },
         ]);
 
         let codex = stats.get("codex").unwrap();
-        assert_eq!(codex.samples, 3);
         assert!((codex.first_pass_test_rate - (2.0 / 3.0)).abs() < 0.0001);
         assert!((codex.retry_rate - (2.0 / 3.0)).abs() < 0.0001);
     }
@@ -236,49 +312,48 @@ mod tests {
     #[test]
     fn backend_grouping_produces_correct_per_backend_stats() {
         let stats = aggregate_by_backend(&[
-            build_completion_quality_metrics(
-                "claude",
-                "eng-a",
-                1,
-                "I explained\n$ cargo test",
-                1,
-                0,
-                Some(0),
-                3600,
-            ),
-            build_completion_quality_metrics(
-                "codex",
-                "eng-b",
-                2,
-                "fn main() {}",
-                2,
-                1,
-                Some(0),
-                1800,
-            ),
-            build_completion_quality_metrics(
-                "codex",
-                "eng-c",
-                3,
-                "I explained\nfn main() {}",
-                3,
-                0,
-                Some(0),
-                3600,
-            ),
+            AgentMetric {
+                backend: "claude".into(),
+                quality: QualityMetrics {
+                    narration_ratio: 0.5,
+                    commit_frequency: 1.0,
+                    first_pass_test_rate: 1.0,
+                    retry_rate: 0.0,
+                    time_to_completion_secs: 3600,
+                },
+            },
+            AgentMetric {
+                backend: "codex".into(),
+                quality: QualityMetrics {
+                    narration_ratio: 0.0,
+                    commit_frequency: 4.0,
+                    first_pass_test_rate: 0.0,
+                    retry_rate: 1.0,
+                    time_to_completion_secs: 1800,
+                },
+            },
+            AgentMetric {
+                backend: "codex".into(),
+                quality: QualityMetrics {
+                    narration_ratio: 0.5,
+                    commit_frequency: 3.0,
+                    first_pass_test_rate: 1.0,
+                    retry_rate: 0.0,
+                    time_to_completion_secs: 3600,
+                },
+            },
         ]);
 
-        assert_eq!(stats.get("claude").unwrap().samples, 1);
-        assert_eq!(stats.get("codex").unwrap().samples, 2);
         assert!((stats.get("claude").unwrap().first_pass_test_rate - 1.0).abs() < 0.0001);
         assert!((stats.get("codex").unwrap().first_pass_test_rate - 0.5).abs() < 0.0001);
+        assert_eq!(stats.get("codex").unwrap().time_to_completion_secs, 2700);
     }
 
     #[test]
     fn empty_data_is_handled_gracefully() {
         assert!(aggregate_by_backend(&[]).is_empty());
         assert_eq!(assignment_started_at(&[], "eng-1", 42), None);
-        assert_eq!(narration_ratio(""), 0.0);
+        assert_eq!(calculate_narration_ratio(""), 0.0);
         assert_eq!(commit_frequency(3, 0), 0.0);
     }
 }
