@@ -5,12 +5,12 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use tracing::{info, warn};
 
 use super::daemon_mgmt::{
-    DAEMON_SHUTDOWN_GRACE_PERIOD, force_kill_daemon, request_graceful_daemon_shutdown,
-    resume_marker_path,
+    force_kill_daemon, request_graceful_daemon_shutdown, resume_marker_path,
+    DAEMON_SHUTDOWN_GRACE_PERIOD,
 };
 use super::{
     config, estimation, events, hierarchy, now_unix, status, team_config_path, team_events_path,
@@ -347,6 +347,7 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
     }
 
     let workflow_metrics = status::workflow_metrics_section(project_root, &members);
+    let watchdog = status::load_watchdog_status(project_root, session_running);
     let (active_tasks, review_queue) = match status::board_status_task_queues(project_root) {
         Ok(queues) => queues,
         Err(error) => {
@@ -361,6 +362,7 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
             session: session.clone(),
             session_running,
             paused,
+            watchdog,
             workflow_metrics: workflow_metrics
                 .as_ref()
                 .map(|(_, metrics)| metrics.clone()),
@@ -380,6 +382,7 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
                 "stopped"
             }
         );
+        println!("Watchdog: {}", status::format_watchdog_summary(&watchdog));
         println!();
         println!(
             "{:<20} {:<12} {:<10} {:<12} {:>5} {:>6} {:<14} {:<14} {:<16} {:<18} {:<24} {:<20}",
@@ -524,13 +527,13 @@ pub fn validate_team(project_root: &Path, verbose: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::team::TRIAGE_RESULT_FRESHNESS_SECONDS;
     use crate::team::config::RoleType;
     use crate::team::hierarchy;
     use crate::team::inbox;
     use crate::team::status;
     use crate::team::team_config_dir;
     use crate::team::team_config_path;
+    use crate::team::TRIAGE_RESULT_FRESHNESS_SECONDS;
     use serial_test::serial;
 
     #[test]
