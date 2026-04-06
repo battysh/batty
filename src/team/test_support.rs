@@ -255,6 +255,42 @@ pub(crate) fn engineer_member(
     }
 }
 
+pub(crate) fn inferred_role_defs(members: &[MemberInstance]) -> Vec<RoleDef> {
+    let mut roles = Vec::new();
+    let mut seen = HashSet::new();
+    for member in members {
+        if !seen.insert(member.role_name.clone()) {
+            continue;
+        }
+        let instances = members
+            .iter()
+            .filter(|candidate| candidate.role_name == member.role_name)
+            .count() as u32;
+        let use_worktrees = members
+            .iter()
+            .any(|candidate| candidate.role_name == member.role_name && candidate.use_worktrees);
+        roles.push(RoleDef {
+            name: member.role_name.clone(),
+            role_type: member.role_type,
+            agent: member.agent.clone(),
+            auth_mode: None,
+            auth_env: vec![],
+            instances,
+            prompt: None,
+            talks_to: vec![],
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: None,
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            barrier_group: None,
+            use_worktrees,
+        });
+    }
+    roles
+}
+
 pub(crate) struct TestDaemonBuilder<'a> {
     project_root: &'a Path,
     session: String,
@@ -332,7 +368,6 @@ impl<'a> TestDaemonBuilder<'a> {
     }
 
     pub(crate) fn build(self) -> TeamDaemon {
-        let roles = test_role_defs(&self.members);
         let config = DaemonConfig {
             project_root: self.project_root.to_path_buf(),
             team_config: TeamConfig {
@@ -360,7 +395,7 @@ impl<'a> TestDaemonBuilder<'a> {
                 pending_queue_max_age_secs: 600,
                 event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 retro_min_duration_secs: 60,
-                roles,
+                roles: inferred_role_defs(&self.members),
             },
             session: self.session,
             members: self.members,

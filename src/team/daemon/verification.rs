@@ -47,8 +47,9 @@ fn parse_test_output(output: &str) -> (Vec<String>, Vec<String>) {
             let cleaned = token.trim_matches(|ch: char| {
                 matches!(ch, '"' | '\'' | ',' | ':' | ';' | '(' | ')' | '[' | ']')
             });
-            if looks_like_path(cleaned) {
-                file_paths.insert(cleaned.to_string());
+            let normalized = normalize_path_token(cleaned);
+            if looks_like_path(normalized) {
+                file_paths.insert(normalized.to_string());
             }
         }
     }
@@ -58,6 +59,18 @@ fn parse_test_output(output: &str) -> (Vec<String>, Vec<String>) {
     }
 
     (failures, file_paths.into_iter().collect())
+}
+
+fn normalize_path_token(token: &str) -> &str {
+    let mut candidate = token;
+    while let Some((head, tail)) = candidate.rsplit_once(':') {
+        if tail.chars().all(|ch| ch.is_ascii_digit()) {
+            candidate = head;
+        } else {
+            break;
+        }
+    }
+    candidate
 }
 
 fn looks_like_path(token: &str) -> bool {
