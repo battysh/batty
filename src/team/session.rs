@@ -290,7 +290,7 @@ pub fn attach_team(project_root: &Path) -> Result<()> {
 }
 
 /// Show team status.
-pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
+pub fn team_status(project_root: &Path, json: bool, detail: bool) -> Result<()> {
     let config_path = team_config_path(project_root);
     if !config_path.exists() {
         bail!("no team config found at {}", config_path.display());
@@ -358,6 +358,15 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
         }
     };
 
+    let engineer_profiles = if detail {
+        crate::team::telemetry_db::open(project_root)
+            .ok()
+            .and_then(|conn| crate::team::telemetry_db::query_engineer_performance_profiles(&conn).ok())
+            .filter(|rows| !rows.is_empty())
+    } else {
+        None
+    };
+
     if json {
         let report = status::build_team_status_json_report(status::TeamStatusJsonReportInput {
             team: team_config.name.clone(),
@@ -370,6 +379,7 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
                 .map(|(_, metrics)| metrics.clone()),
             active_tasks,
             review_queue,
+            engineer_profiles,
             members: rows,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -426,6 +436,15 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
         if let Some((formatted, _)) = workflow_metrics {
             println!();
             println!("{formatted}");
+        }
+        if detail {
+            if let Some(profiles) = engineer_profiles {
+                println!();
+                println!("{}", status::format_engineer_profiles(&profiles));
+            } else {
+                println!();
+                println!("Engineer Profiles\nNo engineer performance telemetry recorded yet.");
+            }
         }
     }
 

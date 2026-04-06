@@ -142,6 +142,8 @@ pub(crate) struct TeamStatusJsonReport {
     pub(crate) workflow_metrics: Option<WorkflowMetrics>,
     pub(crate) active_tasks: Vec<StatusTaskEntry>,
     pub(crate) review_queue: Vec<StatusTaskEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) engineer_profiles: Option<Vec<crate::team::telemetry_db::EngineerPerformanceProfileRow>>,
     pub(crate) members: Vec<TeamStatusRow>,
 }
 
@@ -963,6 +965,7 @@ pub(crate) struct TeamStatusJsonReportInput {
     pub(crate) workflow_metrics: Option<WorkflowMetrics>,
     pub(crate) active_tasks: Vec<StatusTaskEntry>,
     pub(crate) review_queue: Vec<StatusTaskEntry>,
+    pub(crate) engineer_profiles: Option<Vec<crate::team::telemetry_db::EngineerPerformanceProfileRow>>,
     pub(crate) members: Vec<TeamStatusRow>,
 }
 
@@ -978,6 +981,7 @@ pub(crate) fn build_team_status_json_report(
         workflow_metrics,
         active_tasks,
         review_queue,
+        engineer_profiles,
         members,
     } = input;
     let health = build_team_status_health(&members, session_running, paused);
@@ -991,8 +995,61 @@ pub(crate) fn build_team_status_json_report(
         workflow_metrics,
         active_tasks,
         review_queue,
+        engineer_profiles,
         members,
     }
+}
+
+pub(crate) fn format_engineer_profiles(
+    profiles: &[crate::team::telemetry_db::EngineerPerformanceProfileRow],
+) -> String {
+    let mut lines = vec![
+        "Engineer Profiles".to_string(),
+        format!(
+            "{:<16} {:>5} {:>10} {:>10} {:>10} {:>10}",
+            "ROLE", "TASKS", "AVG_TIME", "LOC/HR", "FIRST_PASS", "CTX_FREQ"
+        ),
+    ];
+
+    for profile in profiles {
+        lines.push(format!(
+            "{:<16} {:>5} {:>10} {:>10} {:>10} {:>10}",
+            profile.role,
+            profile.completed_tasks,
+            format_age_compact(profile.avg_task_completion_secs),
+            format_rate_1(profile.lines_per_hour),
+            format_pct_0(profile.first_pass_test_rate),
+            format_pct_0(profile.context_exhaustion_frequency),
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn format_age_compact(secs: Option<f64>) -> String {
+    let Some(secs) = secs else {
+        return "-".to_string();
+    };
+    let secs = secs.round() as u64;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3_600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h", secs / 3_600)
+    }
+}
+
+fn format_rate_1(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.1}"))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_pct_0(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{:.0}%", value * 100.0))
+        .unwrap_or_else(|| "-".to_string())
 }
 
 pub fn compute_metrics(board_dir: &Path, members: &[MemberInstance]) -> Result<WorkflowMetrics> {
@@ -2095,6 +2152,16 @@ mod tests {
             }),
             active_tasks: Vec::new(),
             review_queue: Vec::new(),
+            engineer_profiles: Some(vec![
+                crate::team::telemetry_db::EngineerPerformanceProfileRow {
+                    role: "eng-1".to_string(),
+                    completed_tasks: 2,
+                    avg_task_completion_secs: Some(1800.0),
+                    lines_per_hour: Some(120.0),
+                    first_pass_test_rate: Some(0.5),
+                    context_exhaustion_frequency: Some(0.0),
+                },
+            ]),
             members: vec![TeamStatusRow {
                 name: "eng-1".to_string(),
                 role: "engineer".to_string(),
@@ -2122,6 +2189,7 @@ mod tests {
         assert_eq!(json["health"]["member_count"], 1);
         assert_eq!(json["workflow_metrics"]["runnable_count"], 1);
         assert!(json["members"].is_array());
+        assert_eq!(json["engineer_profiles"][0]["role"], "eng-1");
     }
 
     #[test]
@@ -2318,6 +2386,7 @@ mod tests {
                 commit: None,
                 next_action: Some("review now".to_string()),
             }],
+            engineer_profiles: None,
             members: vec![
                 TeamStatusRow {
                     name: "eng-1".to_string(),
@@ -2375,6 +2444,27 @@ mod tests {
         assert_eq!(report.health.triage_backlog_count, 2);
         assert_eq!(report.health.unhealthy_members, vec!["eng-1".to_string()]);
         assert_eq!(report.workflow_metrics.unwrap().runnable_count, 2);
+    }
+
+    #[test]
+    fn format_engineer_profiles_renders_compact_table() {
+        let rendered = format_engineer_profiles(&[
+            crate::team::telemetry_db::EngineerPerformanceProfileRow {
+                role: "eng-1".to_string(),
+                completed_tasks: 3,
+                avg_task_completion_secs: Some(5400.0),
+                lines_per_hour: Some(42.5),
+                first_pass_test_rate: Some(2.0 / 3.0),
+                context_exhaustion_frequency: Some(1.0 / 3.0),
+            },
+        ]);
+
+        assert!(rendered.contains("Engineer Profiles"));
+        assert!(rendered.contains("eng-1"));
+        assert!(rendered.contains("1h"));
+        assert!(rendered.contains("42.5"));
+        assert!(rendered.contains("67%"));
+        assert!(rendered.contains("33%"));
     }
 
     #[test]

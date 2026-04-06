@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::config::AllocationPolicy;
 use super::team_config_dir;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct EngineerProfile {
     pub name: String,
     pub completed_task_ids: Vec<u32>,
@@ -18,6 +18,15 @@ pub struct EngineerProfile {
     pub active_task_count: u32,
     pub total_completions: u32,
     pub recent_merge_conflicts: u32,
+    pub performance: Option<EngineerPerformanceProfile>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EngineerPerformanceProfile {
+    pub avg_task_completion_secs: Option<f64>,
+    pub lines_per_hour: Option<f64>,
+    pub first_pass_test_rate: Option<f64>,
+    pub context_exhaustion_frequency: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -69,7 +78,22 @@ pub fn load_engineer_profiles(
     tasks: &[Task],
 ) -> Result<HashMap<String, EngineerProfile>> {
     let persisted = load_persisted_task_profiles(project_root)?;
-    build_engineer_profiles_with_history(engineers, tasks, &persisted)
+    let mut profiles = build_engineer_profiles_with_history(engineers, tasks, &persisted)?;
+    if let Ok(conn) = crate::team::telemetry_db::open(project_root)
+        && let Ok(rows) = crate::team::telemetry_db::query_engineer_performance_profiles(&conn)
+    {
+        for row in rows {
+            if let Some(profile) = profiles.get_mut(&row.role) {
+                profile.performance = Some(EngineerPerformanceProfile {
+                    avg_task_completion_secs: row.avg_task_completion_secs,
+                    lines_per_hour: row.lines_per_hour,
+                    first_pass_test_rate: row.first_pass_test_rate,
+                    context_exhaustion_frequency: row.context_exhaustion_frequency,
+                });
+            }
+        }
+    }
+    Ok(profiles)
 }
 
 pub fn persist_completed_task_profile(project_root: &Path, task: &Task) -> Result<()> {
@@ -206,6 +230,47 @@ pub fn score_engineer_for_task(
     score -= (engineer.recent_merge_conflicts as i32) * policy.conflict_penalty;
     if engineer.total_completions > 3 {
         score += policy.experience_bonus;
+    }
+    score += performance_score(engineer.performance.as_ref());
+
+    score
+}
+
+fn performance_score(performance: Option<&EngineerPerformanceProfile>) -> i32 {
+    let Some(performance) = performance else {
+        return 0;
+    };
+
+    let mut score = 0;
+
+    if let Some(first_pass_rate) = performance.first_pass_test_rate {
+        if first_pass_rate >= 0.75 {
+            score += 1;
+        } else if first_pass_rate < 0.5 {
+            score -= 1;
+        }
+    }
+
+    if let Some(context_freq) = performance.context_exhaustion_frequency {
+        if context_freq >= 0.5 {
+            score -= 2;
+        } else if context_freq > 0.0 {
+            score -= 1;
+        }
+    }
+
+    if let Some(avg_task_completion_secs) = performance.avg_task_completion_secs {
+        if avg_task_completion_secs > 0.0 && avg_task_completion_secs <= 3_600.0 {
+            score += 1;
+        } else if avg_task_completion_secs >= 14_400.0 {
+            score -= 1;
+        }
+    }
+
+    if let Some(lines_per_hour) = performance.lines_per_hour
+        && lines_per_hour >= 200.0
+    {
+        score += 1;
     }
 
     score
@@ -456,6 +521,33 @@ mod tests {
         ]);
         let ranked = rank_engineers_for_task(&engineers, &profiles, &task(&[], ""), &policy());
         assert_eq!(ranked, vec!["eng-1".to_string(), "eng-2".to_string()]);
+    }
+
+    #[test]
+    fn score_prefers_more_reliable_performance_profile() {
+        let reliable = EngineerProfile {
+            performance: Some(EngineerPerformanceProfile {
+                avg_task_completion_secs: Some(1800.0),
+                lines_per_hour: Some(250.0),
+                first_pass_test_rate: Some(1.0),
+                context_exhaustion_frequency: Some(0.0),
+            }),
+            ..EngineerProfile::default()
+        };
+        let unstable = EngineerProfile {
+            performance: Some(EngineerPerformanceProfile {
+                avg_task_completion_secs: Some(18_000.0),
+                lines_per_hour: Some(10.0),
+                first_pass_test_rate: Some(0.0),
+                context_exhaustion_frequency: Some(1.0),
+            }),
+            ..EngineerProfile::default()
+        };
+
+        assert!(
+            score_engineer_for_task(&reliable, &task(&[], ""), &policy())
+                > score_engineer_for_task(&unstable, &task(&[], ""), &policy())
+        );
     }
 
     #[test]

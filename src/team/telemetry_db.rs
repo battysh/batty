@@ -8,6 +8,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
+use serde::Serialize;
 
 use super::events::TeamEvent;
 use super::test_results::{TestFailure, TestResults};
@@ -505,6 +506,140 @@ pub struct ReviewMetricsRow {
     pub avg_review_latency_secs: Option<f64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EngineerPerformanceProfileRow {
+    pub role: String,
+    pub completed_tasks: i64,
+    pub avg_task_completion_secs: Option<f64>,
+    pub lines_per_hour: Option<f64>,
+    pub first_pass_test_rate: Option<f64>,
+    pub context_exhaustion_frequency: Option<f64>,
+}
+
+pub fn query_engineer_performance_profiles(
+    conn: &Connection,
+) -> Result<Vec<EngineerPerformanceProfileRow>> {
+    let mut completion_stmt = conn.prepare(
+        "SELECT role, task_id,
+                json_extract(payload, '$.time_to_completion_secs') AS time_to_completion_secs,
+                json_extract(payload, '$.first_pass_test_rate') AS first_pass_test_rate
+         FROM events
+         WHERE event_type = 'quality_metrics_recorded'
+           AND role IS NOT NULL
+           AND task_id IS NOT NULL
+         ORDER BY role, task_id",
+    )?;
+
+    #[derive(Default)]
+    struct Accumulator {
+        completed_tasks: i64,
+        total_completion_secs: f64,
+        completion_secs_samples: i64,
+        first_pass_sum: f64,
+        first_pass_samples: i64,
+        context_exhausted_tasks: i64,
+        loc_lines: i64,
+        loc_hours: f64,
+    }
+
+    let mut by_role = std::collections::BTreeMap::<String, Accumulator>::new();
+    let mut task_durations = std::collections::HashMap::<String, (String, f64)>::new();
+
+    let completion_rows = completion_stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<f64>>(2)?,
+            row.get::<_, Option<f64>>(3)?,
+        ))
+    })?;
+
+    for row in completion_rows {
+        let (role, task_id, completion_secs, first_pass_rate) = row?;
+        let entry = by_role.entry(role.clone()).or_default();
+        entry.completed_tasks += 1;
+        if let Some(completion_secs) = completion_secs {
+            entry.total_completion_secs += completion_secs;
+            entry.completion_secs_samples += 1;
+            task_durations.insert(task_id.clone(), (role.clone(), completion_secs));
+        }
+        if let Some(first_pass_rate) = first_pass_rate {
+            entry.first_pass_sum += first_pass_rate;
+            entry.first_pass_samples += 1;
+        }
+    }
+
+    let mut ctx_stmt = conn.prepare(
+        "SELECT task_id, context_restart_count
+         FROM task_metrics
+         WHERE context_restart_count > 0",
+    )?;
+    let ctx_rows = ctx_stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    for row in ctx_rows {
+        let (task_id, _) = row?;
+        if let Some((role, _)) = task_durations.get(&task_id) {
+            by_role.entry(role.clone()).or_default().context_exhausted_tasks += 1;
+        }
+    }
+
+    let mut merge_stmt = conn.prepare(
+        "SELECT role, task_id, json_extract(payload, '$.reason') AS reason
+         FROM events
+         WHERE event_type = 'task_auto_merged'
+           AND role IS NOT NULL
+           AND task_id IS NOT NULL",
+    )?;
+    let merge_rows = merge_stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    for row in merge_rows {
+        let (role, task_id, reason) = row?;
+        let Some(lines_changed) = reason
+            .as_deref()
+            .and_then(parse_lines_changed_from_merge_reason)
+        else {
+            continue;
+        };
+        let Some((task_role, completion_secs)) = task_durations.get(&task_id) else {
+            continue;
+        };
+        if task_role != &role {
+            continue;
+        }
+        let entry = by_role.entry(role).or_default();
+        entry.loc_lines += lines_changed as i64;
+        entry.loc_hours += completion_secs / 3600.0;
+    }
+
+    Ok(by_role
+        .into_iter()
+        .map(|(role, acc)| EngineerPerformanceProfileRow {
+            role,
+            completed_tasks: acc.completed_tasks,
+            avg_task_completion_secs: (acc.completion_secs_samples > 0)
+                .then(|| acc.total_completion_secs / acc.completion_secs_samples as f64),
+            lines_per_hour: (acc.loc_hours > 0.0).then(|| acc.loc_lines as f64 / acc.loc_hours),
+            first_pass_test_rate: (acc.first_pass_samples > 0)
+                .then(|| acc.first_pass_sum / acc.first_pass_samples as f64),
+            context_exhaustion_frequency: (acc.completed_tasks > 0)
+                .then(|| acc.context_exhausted_tasks as f64 / acc.completed_tasks as f64),
+        })
+        .collect())
+}
+
+fn parse_lines_changed_from_merge_reason(reason: &str) -> Option<u64> {
+    reason
+        .split_whitespace()
+        .find_map(|token| token.strip_prefix("lines="))
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
 /// Query aggregated review pipeline metrics from the events table.
 pub fn query_review_metrics(conn: &Connection) -> Result<ReviewMetricsRow> {
     let count_event = |event_type: &str| -> Result<i64> {
@@ -710,6 +845,57 @@ mod tests {
         let tasks = query_task_metrics(&conn).unwrap();
         assert_eq!(tasks[0].context_restart_count, 2);
         assert_eq!(tasks[0].carry_forward_effective, Some(false));
+    }
+
+    #[test]
+    fn engineer_performance_profiles_aggregate_completion_quality_and_context() {
+        let conn = open_in_memory().unwrap();
+
+        insert_event(
+            &conn,
+            &TeamEvent::quality_metrics_recorded(&crate::team::events::QualityMetricsInfo {
+                backend: "codex",
+                role: "eng-1",
+                task: "41",
+                narration_ratio: 0.1,
+                commit_frequency: 1.0,
+                first_pass_test_rate: 1.0,
+                retry_rate: 0.0,
+                time_to_completion_secs: 3_600,
+            }),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::quality_metrics_recorded(&crate::team::events::QualityMetricsInfo {
+                backend: "codex",
+                role: "eng-1",
+                task: "42",
+                narration_ratio: 0.2,
+                commit_frequency: 2.0,
+                first_pass_test_rate: 0.0,
+                retry_rate: 1.0,
+                time_to_completion_secs: 1_800,
+            }),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::agent_restarted("eng-1", "42", "context_exhausted", 1),
+        )
+        .unwrap();
+        insert_event(&conn, &TeamEvent::task_auto_merged("eng-1", "41", 0.9, 2, 90)).unwrap();
+        insert_event(&conn, &TeamEvent::task_auto_merged("eng-1", "42", 0.9, 2, 30)).unwrap();
+
+        let rows = query_engineer_performance_profiles(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.role, "eng-1");
+        assert_eq!(row.completed_tasks, 2);
+        assert_eq!(row.avg_task_completion_secs, Some(2_700.0));
+        assert_eq!(row.first_pass_test_rate, Some(0.5));
+        assert_eq!(row.context_exhaustion_frequency, Some(0.5));
+        assert_eq!(row.lines_per_hour, Some(80.0));
     }
 
     #[test]
