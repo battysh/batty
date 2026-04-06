@@ -73,6 +73,9 @@ pub enum Command {
         /// Include detailed telemetry-backed engineer profiles
         #[arg(long, default_value_t = false)]
         detail: bool,
+        /// Show optional subsystem health and error-budget state
+        #[arg(long, default_value_t = false)]
+        health: bool,
     },
 
     /// OpenClaw supervisor integration helpers for Batty
@@ -1325,9 +1328,14 @@ mod tests {
     fn status_subcommand_defaults() {
         let cli = Cli::parse_from(["batty", "status"]);
         match cli.command {
-            Command::Status { json, detail } => {
+            Command::Status {
+                json,
+                detail,
+                health,
+            } => {
                 assert!(!json);
                 assert!(!detail);
+                assert!(!health);
             }
             other => panic!("expected status command, got {other:?}"),
         }
@@ -1337,9 +1345,14 @@ mod tests {
     fn status_subcommand_json_flag() {
         let cli = Cli::parse_from(["batty", "status", "--json"]);
         match cli.command {
-            Command::Status { json, detail } => {
+            Command::Status {
+                json,
+                detail,
+                health,
+            } => {
                 assert!(json);
                 assert!(!detail);
+                assert!(!health);
             }
             other => panic!("expected status command, got {other:?}"),
         }
@@ -1349,9 +1362,31 @@ mod tests {
     fn status_subcommand_detail_flag() {
         let cli = Cli::parse_from(["batty", "status", "--detail"]);
         match cli.command {
-            Command::Status { json, detail } => {
+            Command::Status {
+                json,
+                detail,
+                health,
+            } => {
                 assert!(!json);
                 assert!(detail);
+                assert!(!health);
+            }
+            other => panic!("expected status command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_subcommand_health_flag() {
+        let cli = Cli::parse_from(["batty", "status", "--health"]);
+        match cli.command {
+            Command::Status {
+                json,
+                detail,
+                health,
+            } => {
+                assert!(!json);
+                assert!(!detail);
+                assert!(health);
             }
             other => panic!("expected status command, got {other:?}"),
         }

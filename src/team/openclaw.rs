@@ -849,6 +849,7 @@ fn load_status_report(project_root: &Path) -> Result<status::TeamStatusJsonRepor
             workflow_metrics,
             active_tasks,
             review_queue,
+            optional_subsystems: None,
             engineer_profiles: None,
             members: rows,
         },
@@ -958,6 +959,7 @@ mod tests {
                 next_action: None,
                 test_summary: None,
             }],
+            optional_subsystems: None,
             engineer_profiles: None,
             members: Vec::new(),
         }

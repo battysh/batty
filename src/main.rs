@@ -357,8 +357,12 @@ fn main() -> Result<()> {
             team::attach_team(&root)?;
         }
 
-        Command::Status { json, detail } => {
-            team::team_status(&root, json, detail)?;
+        Command::Status {
+            json,
+            detail,
+            health,
+        } => {
+            team::team_status(&root, json, detail, health)?;
         }
 
         Command::OpenClaw { command } => match command {

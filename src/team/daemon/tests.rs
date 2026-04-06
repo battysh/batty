@@ -343,6 +343,8 @@ fn daemon_state_round_trip_preserves_runtime_fields() {
             },
         )]),
         pipeline_starvation_fired: true,
+        optional_subsystem_backoff: HashMap::new(),
+        optional_subsystem_disabled_remaining_secs: HashMap::new(),
     };
 
     save_daemon_state(tmp.path(), &state).unwrap();
@@ -4011,6 +4013,8 @@ fn save_daemon_state_returns_error_on_readonly_dir() {
             last_standup_elapsed_secs: HashMap::new(),
             nudge_state: HashMap::new(),
             pipeline_starvation_fired: false,
+            optional_subsystem_backoff: HashMap::new(),
+            optional_subsystem_disabled_remaining_secs: HashMap::new(),
         };
 
         let result = save_daemon_state(tmp.path(), &state);

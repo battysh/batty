@@ -33,6 +33,10 @@ pub(super) struct PersistedDaemonState {
     pub last_standup_elapsed_secs: HashMap<String, u64>,
     pub nudge_state: HashMap<String, PersistedNudgeState>,
     pub pipeline_starvation_fired: bool,
+    #[serde(default)]
+    pub optional_subsystem_backoff: HashMap<String, u32>,
+    #[serde(default)]
+    pub optional_subsystem_disabled_remaining_secs: HashMap<String, u64>,
 }
 
 impl TeamDaemon {
@@ -67,9 +71,16 @@ impl TeamDaemon {
             schedule.paused = persisted.paused;
         }
         self.pipeline_starvation_fired = state.pipeline_starvation_fired;
+        self.restore_optional_subsystem_budget_state(
+            &state.optional_subsystem_backoff,
+            &state.optional_subsystem_disabled_remaining_secs,
+        );
     }
 
     pub(super) fn persist_runtime_state(&self, clean_shutdown: bool) -> Result<()> {
+        let optional_subsystem_backoff = self.snapshot_optional_subsystem_backoff();
+        let optional_subsystem_disabled_remaining_secs =
+            self.snapshot_optional_subsystem_disabled_remaining_secs();
         let state = PersistedDaemonState {
             clean_shutdown,
             saved_at: now_unix(),
@@ -94,6 +105,8 @@ impl TeamDaemon {
                 })
                 .collect(),
             pipeline_starvation_fired: self.pipeline_starvation_fired,
+            optional_subsystem_backoff,
+            optional_subsystem_disabled_remaining_secs,
         };
         save_daemon_state(&self.config.project_root, &state)
     }
