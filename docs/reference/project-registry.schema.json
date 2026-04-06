@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://batty.sh/schemas/project-registry.schema.json",
+  "title": "Batty Project Registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "schemaVersion", "projects"],
+  "properties": {
+    "kind": {
+      "const": "batty.projectRegistry"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "projects": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/project"
+      }
+    }
+  },
+  "$defs": {
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "projectId",
+        "name",
+        "projectRoot",
+        "boardDir",
+        "teamName",
+        "sessionName",
+        "channelBindings",
+        "tags",
+        "policyFlags",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "projectId": {
+          "type": "string",
+          "pattern": "^[a-z0-9._-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "projectRoot": {
+          "type": "string",
+          "minLength": 1
+        },
+        "boardDir": {
+          "type": "string",
+          "minLength": 1
+        },
+        "teamName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sessionName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "channelBindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/channelBinding"
+          }
+        },
+        "owner": {
+          "type": ["string", "null"]
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "policyFlags": {
+          "$ref": "#/$defs/policyFlags"
+        },
+        "createdAt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "updatedAt": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "channelBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel", "binding"],
+      "properties": {
+        "channel": {
+          "type": "string",
+          "minLength": 1
+        },
+        "binding": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "policyFlags": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowOpenclawSupervision",
+        "allowCrossProjectRouting",
+        "allowSharedServiceRouting",
+        "archived"
+      ],
+      "properties": {
+        "allowOpenclawSupervision": {
+          "type": "boolean"
+        },
+        "allowCrossProjectRouting": {
+          "type": "boolean"
+        },
+        "allowSharedServiceRouting": {
+          "type": "boolean"
+        },
+        "archived": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

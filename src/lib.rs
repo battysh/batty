@@ -7,6 +7,7 @@ pub mod console_pane;
 pub mod events;
 pub mod log;
 pub mod paths;
+pub mod project_registry;
 pub mod prompt;
 pub mod shim;
 pub mod task;
