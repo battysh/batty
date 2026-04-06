@@ -263,8 +263,12 @@ pub struct WorkflowPolicy {
     pub auto_commit_on_restart: bool,
     #[serde(default = "default_uncommitted_warn_threshold")]
     pub uncommitted_warn_threshold: usize,
+    /// Legacy global test command. Verification now prefers
+    /// `workflow_policy.verification.test_command` and falls back here.
     #[serde(default)]
     pub test_command: Option<String>,
+    #[serde(default)]
+    pub verification: VerificationPolicy,
     #[serde(default)]
     pub auto_merge: AutoMergePolicy,
     /// When true, context exhaustion restarts capture a work summary and
@@ -314,6 +318,7 @@ impl Default for WorkflowPolicy {
             auto_commit_on_restart: default_auto_commit_on_restart(),
             uncommitted_warn_threshold: default_uncommitted_warn_threshold(),
             test_command: None,
+            verification: VerificationPolicy::default(),
             auto_merge: AutoMergePolicy::default(),
             context_handoff_enabled: default_context_handoff_enabled(),
             handoff_screen_history: default_handoff_screen_history(),
@@ -321,8 +326,43 @@ impl Default for WorkflowPolicy {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct VerificationPolicy {
+    #[serde(default = "default_verification_max_iterations")]
+    pub max_iterations: u32,
+    #[serde(default = "default_verification_auto_run_tests")]
+    pub auto_run_tests: bool,
+    #[serde(default = "default_verification_require_evidence")]
+    pub require_evidence: bool,
+    #[serde(default)]
+    pub test_command: Option<String>,
+}
+
+impl Default for VerificationPolicy {
+    fn default() -> Self {
+        Self {
+            max_iterations: default_verification_max_iterations(),
+            auto_run_tests: default_verification_auto_run_tests(),
+            require_evidence: default_verification_require_evidence(),
+            test_command: None,
+        }
+    }
+}
+
 fn default_graceful_shutdown_timeout_secs() -> u64 {
     5
+}
+
+fn default_verification_max_iterations() -> u32 {
+    5
+}
+
+fn default_verification_auto_run_tests() -> bool {
+    true
+}
+
+fn default_verification_require_evidence() -> bool {
+    true
 }
 
 fn default_auto_commit_on_restart() -> bool {

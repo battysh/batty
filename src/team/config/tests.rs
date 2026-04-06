@@ -1118,6 +1118,31 @@ roles:
 }
 
 #[test]
+fn parse_verification_policy_fields_from_yaml() {
+    let yaml = r#"
+name: test-team
+workflow_policy:
+  verification:
+    max_iterations: 7
+    auto_run_tests: false
+    require_evidence: false
+    test_command: ./scripts/verify.sh
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+"#;
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(config.workflow_policy.verification.max_iterations, 7);
+    assert!(!config.workflow_policy.verification.auto_run_tests);
+    assert!(!config.workflow_policy.verification.require_evidence);
+    assert_eq!(
+        config.workflow_policy.verification.test_command.as_deref(),
+        Some("./scripts/verify.sh")
+    );
+}
+
+#[test]
 fn parse_workflow_policy_restart_preservation_fields_from_yaml() {
     let yaml = r#"
 name: test-team
