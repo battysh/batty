@@ -361,6 +361,7 @@ fn main() -> Result<()> {
             team::team_status(&root, json, detail)?;
         }
 
+<<<<<<< HEAD
         Command::OpenClaw { command } => match command {
             OpenClawCommand::Register { force } => {
                 let path = team::openclaw::register_project(&root, force)?;
@@ -381,6 +382,8 @@ fn main() -> Result<()> {
         },
 
 
+=======
+>>>>>>> 850d1a4 (wip: checkpoint)
         Command::Project { command } => match command {
             ProjectCommand::Register {
                 project_id,
