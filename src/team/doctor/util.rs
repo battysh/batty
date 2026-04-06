@@ -8,8 +8,9 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
-use super::super::config::{RoleType, TeamConfig};
+use super::super::config::TeamConfig;
 use super::super::hierarchy::MemberInstance;
+use super::super::prompt_compose::{render_member_prompt, resolve_prompt_context};
 use super::{CheckLevel, CheckLine, DoctorDaemonState, LaunchIdentityRecord};
 
 pub(super) fn check_line(level: CheckLevel, message: impl Into<String>) -> CheckLine {
@@ -52,30 +53,11 @@ pub(super) fn prompt_yes_no(msg: &str, default_yes: bool) -> Result<bool> {
 }
 
 pub(super) fn current_prompt(member: &MemberInstance, config_dir: &Path) -> String {
-    let prompt_file = member.prompt.as_deref().unwrap_or(match member.role_type {
-        RoleType::Architect => "architect.md",
-        RoleType::Manager => "manager.md",
-        RoleType::Engineer => "engineer.md",
-        RoleType::User => "architect.md",
-    });
-
-    let path = config_dir.join(prompt_file);
-    let content = fs::read_to_string(&path).unwrap_or_else(|_| {
-        format!(
-            "You are {} (role: {:?}). Work on assigned tasks.",
-            member.name, member.role_type
-        )
-    });
-
-    strip_nudge_section(
-        &content
-            .replace("{{member_name}}", &member.name)
-            .replace("{{role_name}}", &member.role_name)
-            .replace(
-                "{{reports_to}}",
-                member.reports_to.as_deref().unwrap_or("none"),
-            ),
-    )
+    strip_nudge_section(&render_member_prompt(
+        member,
+        config_dir,
+        &resolve_prompt_context(member),
+    ))
 }
 
 pub(super) fn strip_nudge_section(prompt: &str) -> String {

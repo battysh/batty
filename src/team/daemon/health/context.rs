@@ -286,7 +286,9 @@ impl TeamDaemon {
         member_name: &str,
         output_bytes: u64,
     ) -> ContextPressureInputs {
-        let quality = self.current_codex_quality_signals(member_name).unwrap_or_default();
+        let quality = self
+            .current_codex_quality_signals(member_name)
+            .unwrap_or_default();
         ContextPressureInputs {
             output_bytes,
             narration_detected: self.narration_tracker.is_narrating(member_name),
@@ -400,7 +402,10 @@ mod tests {
         let (score, actions) =
             tracker.observe_at("eng-1", &pressure_inputs(), true, Instant::now());
         assert!(score >= 70);
-        assert_eq!(actions, vec![ContextPressureAction::Warn, ContextPressureAction::Nudge]);
+        assert_eq!(
+            actions,
+            vec![ContextPressureAction::Warn, ContextPressureAction::Nudge]
+        );
     }
 
     #[test]
@@ -420,7 +425,10 @@ mod tests {
         };
 
         let (score, actions) = tracker.observe_at("eng-1", &inputs, true, Instant::now());
-        assert!(score < 70, "brief planning should stay below the warning threshold");
+        assert!(
+            score < 70,
+            "brief planning should stay below the warning threshold"
+        );
         assert!(actions.is_empty());
     }
 

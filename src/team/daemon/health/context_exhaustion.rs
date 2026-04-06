@@ -83,16 +83,14 @@ impl TeamDaemon {
 
     pub(super) fn handle_context_pressure_restart(&mut self, member_name: &str) -> Result<()> {
         self.restart_member_with_task_context(member_name, "context pressure")?;
-        self.intervention_cooldowns
-            .insert(Self::context_restart_cooldown_key(member_name), Instant::now());
+        self.intervention_cooldowns.insert(
+            Self::context_restart_cooldown_key(member_name),
+            Instant::now(),
+        );
         Ok(())
     }
 
-    fn restart_member_with_task_context(
-        &mut self,
-        member_name: &str,
-        reason: &str,
-    ) -> Result<()> {
+    fn restart_member_with_task_context(&mut self, member_name: &str, reason: &str) -> Result<()> {
         let Some(task) = self.active_task(member_name)? else {
             warn!(
                 member = %member_name,

@@ -47,6 +47,8 @@ roles:
     agent: claude
     instances: 1
     prompt: batty_architect.md
+    posture: orchestrator
+    model_class: frontier
     talks_to: [human, manager]
     nudge_interval_secs: 1200
     owns: ["planning/**", "docs/**", "CLAUDE.md"]
@@ -56,6 +58,8 @@ roles:
     agent: claude
     instances: 1
     prompt: batty_manager.md
+    posture: orchestrator
+    model_class: frontier
     talks_to: [architect, engineer]
     nudge_interval_secs: 900
 
@@ -64,6 +68,8 @@ roles:
     agent: codex
     instances: 4
     prompt: batty_engineer.md
+    posture: deep_worker
+    model_class: standard
     talks_to: [manager]
     nudge_interval_secs: 900
     use_worktrees: true

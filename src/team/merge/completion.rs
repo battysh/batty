@@ -1525,8 +1525,16 @@ mod tests {
             inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
         assert_eq!(engineer_messages.len(), 1);
         assert!(engineer_messages[0].body.contains("Fix attempt 1/5"));
-        assert!(engineer_messages[0].body.contains("Verification failed because the test command did not pass."));
-        assert!(engineer_messages[0].body.contains("Latest verification output:"));
+        assert!(
+            engineer_messages[0]
+                .body
+                .contains("Verification failed because the test command did not pass.")
+        );
+        assert!(
+            engineer_messages[0]
+                .body
+                .contains("Latest verification output:")
+        );
 
         let events =
             read_events(&repo.join(".batty").join("team_config").join("events.jsonl")).unwrap();
@@ -1595,9 +1603,11 @@ mod tests {
         let manager_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
         assert_eq!(manager_messages.len(), 1);
-        assert!(manager_messages[0]
-            .body
-            .contains("hit verification max iterations on task #42"));
+        assert!(
+            manager_messages[0]
+                .body
+                .contains("hit verification max iterations on task #42")
+        );
         assert!(manager_messages[0].body.contains("Latest phase: failed"));
 
         let events =

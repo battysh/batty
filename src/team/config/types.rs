@@ -745,6 +745,8 @@ pub struct RoleDef {
     #[serde(default)]
     pub agent: Option<String>,
     #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
     pub auth_mode: Option<ClaudeAuthMode>,
     #[serde(default)]
     pub auth_env: Vec<String>,
@@ -752,6 +754,14 @@ pub struct RoleDef {
     pub instances: u32,
     #[serde(default)]
     pub prompt: Option<String>,
+    #[serde(default)]
+    pub posture: Option<String>,
+    #[serde(default)]
+    pub model_class: Option<String>,
+    #[serde(default)]
+    pub provider_overlay: Option<String>,
+    #[serde(default)]
+    pub instance_overrides: HashMap<String, RoleInstanceOverride>,
     #[serde(default)]
     pub talks_to: Vec<String>,
     #[serde(default)]
@@ -771,6 +781,22 @@ pub struct RoleDef {
     pub barrier_group: Option<String>,
     #[serde(default)]
     pub use_worktrees: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RoleInstanceOverride {
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub posture: Option<String>,
+    #[serde(default)]
+    pub model_class: Option<String>,
+    #[serde(default)]
+    pub provider_overlay: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]

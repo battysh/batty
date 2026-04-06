@@ -1389,3 +1389,34 @@ roles:
     let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
     assert!(config.use_shim);
 }
+
+#[test]
+fn parses_prompt_layering_fields_and_instance_overrides() {
+    let yaml = r#"
+name: layered-team
+roles:
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    model: gpt-5.4
+    prompt: batty_engineer.md
+    posture: deep_worker
+    model_class: standard
+    provider_overlay: codex
+    instance_overrides:
+      engineer:
+        model_class: frontier
+        posture: fast_lane
+"#;
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    let role = config.role_def("engineer").unwrap();
+
+    assert_eq!(role.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(role.posture.as_deref(), Some("deep_worker"));
+    assert_eq!(role.model_class.as_deref(), Some("standard"));
+    assert_eq!(role.provider_overlay.as_deref(), Some("codex"));
+
+    let override_cfg = role.instance_overrides.get("engineer").unwrap();
+    assert_eq!(override_cfg.model_class.as_deref(), Some("frontier"));
+    assert_eq!(override_cfg.posture.as_deref(), Some("fast_lane"));
+}
