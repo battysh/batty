@@ -77,6 +77,8 @@ mod hot_reload;
 mod interventions;
 #[path = "launcher.rs"]
 mod launcher;
+#[path = "daemon/merge_queue.rs"]
+mod merge_queue;
 #[path = "daemon/poll.rs"]
 mod poll;
 #[path = "daemon/reconcile.rs"]
@@ -105,6 +107,7 @@ use self::hot_reload::{
     BinaryFingerprint, hot_reload_daemon_args, hot_reload_marker_path, write_hot_reload_marker,
 };
 pub(crate) use self::interventions::NudgeSchedule;
+pub(crate) use self::merge_queue::MergeQueue;
 use self::interventions::OwnedTaskInterventionState;
 use self::launcher::{
     duplicate_claude_session_ids, load_launch_state, member_session_tracker_config,
@@ -219,6 +222,8 @@ pub struct TeamDaemon {
     pub(super) shim_handles: HashMap<String, agent_handle::AgentHandle>,
     /// When the last shim health check (Ping) was sent.
     pub(super) last_shim_health_check: Instant,
+    /// Serial daemon-owned merge queue for auto-merge execution.
+    pub(super) merge_queue: MergeQueue,
 }
 
 impl TeamDaemon {
@@ -467,6 +472,7 @@ impl TeamDaemon {
             pending_delivery_queue: HashMap::new(),
             shim_handles: HashMap::new(),
             last_shim_health_check: Instant::now(),
+            merge_queue: MergeQueue::default(),
         })
     }
 
