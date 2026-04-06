@@ -47,18 +47,27 @@ fn project_root() -> PathBuf {
 }
 
 fn setup_tracing(verbose: u8) {
-    let filter = match verbose {
+    // 1. Determine the default log level based on the verbose flag
+    let default_filter = match verbose {
         0 => "warn",
         1 => "info",
         2 => "debug",
         _ => "trace",
     };
 
+    
+    let env_filter = if let Ok(batty_log) = std::env::var("BATTY_LOG") {
+        
+        tracing_subscriber::EnvFilter::new(batty_log)
+    } else {
+        // Fall back to RUST_LOG, then fall back to the verbose flag default
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter))
+    };
+
+
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter)),
-        )
+        .with_env_filter(env_filter)
         .with_writer(std::io::stderr)
         .init();
 }
