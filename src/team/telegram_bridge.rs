@@ -120,13 +120,13 @@ impl TeamDaemon {
                 render_telegram_health_summary(&self.config.project_root, &self.config.members)
             }
             TelegramCommand::Assign { engineer, task } => {
-                execute_telegram_assign_command(&self.config.project_root, &engineer, &task)
+                self.execute_telegram_assign_command(&engineer, &task)
             }
             TelegramCommand::Merge { task_id } => {
-                execute_telegram_merge_command(&self.config.project_root, task_id)
+                self.execute_telegram_merge_command(task_id)
             }
             TelegramCommand::Kick { member } => {
-                execute_telegram_kick_command(&self.config.pane_map, &member)
+                self.execute_telegram_kick_command(&member)
             }
             TelegramCommand::Pause => {
                 crate::team::pause_team(&self.config.project_root)?;
@@ -237,6 +237,121 @@ impl TeamDaemon {
             active_tasks.len(),
             review_tasks.len(),
         )
+    }
+
+    fn execute_telegram_assign_command(&mut self, engineer: &str, task: &str) -> Result<String> {
+        let engineer_member = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == engineer)
+            .ok_or_else(|| anyhow!("Unknown engineer: {engineer}"))?;
+        if engineer_member.role_type != RoleType::Engineer {
+            bail!("{engineer} is not an engineer.");
+        }
+        if self.states.get(engineer) == Some(&MemberState::Working) {
+            bail!("{engineer} is not idle.");
+        }
+
+        if let Some(task_id) = parse_task_id_arg(task) {
+            let board_dir = self.board_dir();
+            let task_path = crate::team::task_cmd::find_task_path(&board_dir, task_id)?;
+            let task_record = crate::task::Task::from_file(&task_path)?;
+            if !matches!(task_record.status.as_str(), "backlog" | "todo") {
+                bail!(
+                    "Task #{task_id} is not assignable from status '{}'.",
+                    task_record.status
+                );
+            }
+            if task_record.blocked.is_some() || task_record.blocked_on.is_some() {
+                bail!("Task #{task_id} is blocked.");
+            }
+
+            crate::team::task_cmd::assign_task_owners(&board_dir, task_id, Some(engineer), None)?;
+            if task_record.status == "backlog" {
+                crate::team::task_cmd::transition_task(&board_dir, task_id, "todo")?;
+            }
+            crate::team::task_cmd::transition_task(&board_dir, task_id, "in-progress")?;
+
+            let inbox_id = crate::team::messaging::assign_task(
+                &self.config.project_root,
+                engineer,
+                &format!("Task #{task_id}: {}", task_record.title),
+            )?;
+            Ok(format!(
+                "Assigned {engineer} to #{task_id}: {}\nInbox id: {inbox_id}",
+                preview_text(&task_record.title, 120)
+            ))
+        } else {
+            let id = crate::team::messaging::assign_task(&self.config.project_root, engineer, task)?;
+            Ok(format!("Assigned {engineer}: {task}\nInbox id: {id}"))
+        }
+    }
+
+    fn execute_telegram_merge_command(&mut self, task_id: u32) -> Result<String> {
+        let board_dir = self.board_dir();
+        let task_path = crate::team::task_cmd::find_task_path(&board_dir, task_id)?;
+        let task = crate::task::Task::from_file(&task_path)?;
+        if task.status != "review" {
+            bail!("Task #{task_id} is not in review.");
+        }
+
+        let engineer = engineer_for_merge_task(&self.config.project_root, task_id)?;
+        let worktree_dir = self.worktree_dir(&engineer);
+        let verification_policy = &self.config.team_config.workflow_policy.verification;
+        let test_command = verification_policy
+            .test_command
+            .as_deref()
+            .or(self.config.team_config.workflow_policy.test_command.as_deref());
+        let test_run = crate::team::task_loop::run_tests_in_worktree(&worktree_dir, test_command)?;
+        if !test_run.passed {
+            bail!(
+                "Task #{task_id} verification failed before merge.\n{}",
+                preview_text(&test_run.results.failure_summary(), 240)
+            );
+        }
+
+        crate::team::messaging::merge_worktree(&self.config.project_root, &engineer)?;
+        crate::team::task_cmd::cmd_review_structured(&board_dir, task_id, "approve", None, "telegram")?;
+        let test_summary = test_run
+            .results
+            .summary
+            .clone()
+            .unwrap_or_else(|| format!("{} passed, {} failed", test_run.results.passed, test_run.results.failed));
+        Ok(format!(
+            "Merged Task #{task_id} from {engineer}. Tests: {test_summary}"
+        ))
+    }
+
+    fn execute_telegram_kick_command(&mut self, member: &str) -> Result<String> {
+        let mut saved = false;
+        if self.member_uses_worktrees(member) {
+            let worktree_dir = self.worktree_dir(member);
+            if worktree_dir.exists() {
+                saved = crate::team::task_loop::preserve_worktree_with_commit(
+                    &worktree_dir,
+                    "wip: auto-save before telegram kick [batty]",
+                    std::time::Duration::from_secs(
+                        self.config
+                            .team_config
+                            .workflow_policy
+                            .graceful_shutdown_timeout_secs,
+                    ),
+                )?;
+            }
+        }
+
+        let pane_id = self
+            .config
+            .pane_map
+            .get(member)
+            .ok_or_else(|| anyhow!("No pane registered for {member}."))?;
+        crate::tmux::respawn_pane(pane_id, "bash")?;
+        Ok(if saved {
+            format!("Restarted {member}. Worktree auto-saved.")
+        } else {
+            format!("Restarted {member}.")
+        })
     }
 
     fn deliver_user_inbox(&mut self) -> Result<()> {
@@ -597,63 +712,6 @@ fn count_lock_files(project_root: &std::path::Path) -> usize {
     count
 }
 
-fn execute_telegram_assign_command(
-    project_root: &std::path::Path,
-    engineer: &str,
-    task: &str,
-) -> Result<String> {
-    if let Some(task_id) = parse_task_id_arg(task) {
-        let board_dir = project_root.join(".batty").join("team_config").join("board");
-        let task_path = crate::team::task_cmd::find_task_path(&board_dir, task_id)?;
-        let task_record = crate::task::Task::from_file(&task_path)?;
-        crate::team::task_cmd::assign_task_owners(&board_dir, task_id, Some(engineer), None)?;
-        if task_record.status == "todo" {
-            crate::team::task_cmd::transition_task(&board_dir, task_id, "in-progress")?;
-        }
-        let inbox_id = crate::team::messaging::assign_task(
-            project_root,
-            engineer,
-            &format!("Task #{task_id}: {}", task_record.title),
-        )?;
-        Ok(format!(
-            "Assigned {engineer} to #{task_id}: {}\nInbox id: {inbox_id}",
-            preview_text(&task_record.title, 120)
-        ))
-    } else {
-        let id = crate::team::messaging::assign_task(project_root, engineer, task)?;
-        Ok(format!("Assigned {engineer}: {task}\nInbox id: {id}"))
-    }
-}
-
-fn execute_telegram_merge_command(project_root: &std::path::Path, task_id: u32) -> Result<String> {
-    let engineer = engineer_for_merge_task(project_root, task_id)?;
-    crate::team::messaging::merge_worktree(project_root, &engineer)?;
-    let board_dir = project_root.join(".batty").join("team_config").join("board");
-    let task_path = crate::team::task_cmd::find_task_path(&board_dir, task_id)?;
-    let task = crate::task::Task::from_file(&task_path)?;
-    if task.status == "review" {
-        crate::team::task_cmd::cmd_review_structured(
-            &board_dir,
-            task_id,
-            "approve",
-            None,
-            "telegram",
-        )?;
-    }
-    Ok(format!("Merged Task #{task_id} from {engineer}."))
-}
-
-fn execute_telegram_kick_command(
-    pane_map: &std::collections::HashMap<String, String>,
-    member: &str,
-) -> Result<String> {
-    let pane_id = pane_map
-        .get(member)
-        .ok_or_else(|| anyhow!("No pane registered for {member}."))?;
-    crate::tmux::respawn_pane(pane_id, "bash")?;
-    Ok(format!("Restarted {member}."))
-}
-
 fn write_telegram_goal(project_root: &std::path::Path, text: &str) -> Result<()> {
     let goal_path = project_root.join(".batty").join("goal.yaml");
     if let Some(parent) = goal_path.parent() {
@@ -748,6 +806,7 @@ fn preview_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
+    use std::process::Command;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -797,6 +856,16 @@ mod tests {
             .join("tasks");
         std::fs::create_dir_all(&tasks_dir).unwrap();
         std::fs::write(tasks_dir.join(file_name), body).unwrap();
+    }
+
+    fn git_ok(repo: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git").args(args).current_dir(repo).output().unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -2048,6 +2117,99 @@ mod tests {
     }
 
     #[test]
+    fn telegram_assign_command_rejects_busy_engineer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roles = vec![RoleDef {
+            name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            auth_mode: None,
+            auth_env: vec![],
+            instances: 1,
+            prompt: None,
+            talks_to: Vec::new(),
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: None,
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            barrier_group: None,
+            use_worktrees: false,
+        }];
+        let mut config = daemon_config_with_roles(tmp.path(), roles);
+        config.members = vec![MemberInstance {
+            name: "eng".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        }];
+        let mut daemon = TeamDaemon::new(config).unwrap();
+        daemon.states.insert("eng".to_string(), MemberState::Working);
+
+        let error = daemon
+            .execute_telegram_command(TelegramCommand::Assign {
+                engineer: "eng".to_string(),
+                task: "Fix flaky test".to_string(),
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("not idle"));
+    }
+
+    #[test]
+    fn telegram_assign_command_rejects_blocked_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roles = vec![RoleDef {
+            name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            auth_mode: None,
+            auth_env: vec![],
+            instances: 1,
+            prompt: None,
+            talks_to: Vec::new(),
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: None,
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            barrier_group: None,
+            use_worktrees: false,
+        }];
+        let mut config = daemon_config_with_roles(tmp.path(), roles);
+        config.members = vec![MemberInstance {
+            name: "eng".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+        }];
+        let mut daemon = TeamDaemon::new(config).unwrap();
+        daemon.states.insert("eng".to_string(), MemberState::Idle);
+        write_board_task(
+            tmp.path(),
+            "task-41.md",
+            "---\nid: 41\ntitle: Waiting task\nstatus: todo\npriority: high\nblocked_on: waiting for auth\nclass: standard\n---\n",
+        );
+
+        let error = daemon
+            .execute_telegram_command(TelegramCommand::Assign {
+                engineer: "eng".to_string(),
+                task: "41".to_string(),
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("blocked"));
+    }
+
+    #[test]
     fn telegram_send_command_delivers_message_to_inbox() {
         let tmp = tempfile::tempdir().unwrap();
         let roles = vec![
@@ -2165,6 +2327,23 @@ mod tests {
     }
 
     #[test]
+    fn telegram_merge_command_rejects_non_review_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_board_task(
+            tmp.path(),
+            "task-41.md",
+            "---\nid: 41\ntitle: Merge me\nstatus: todo\npriority: high\nclaimed_by: eng-1\nclass: standard\n---\n",
+        );
+        let mut daemon = TeamDaemon::new(daemon_config_with_roles(tmp.path(), Vec::new())).unwrap();
+
+        let error = daemon
+            .execute_telegram_command(TelegramCommand::Merge { task_id: 41 })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("not in review"));
+    }
+
+    #[test]
     fn pause_and_resume_commands_toggle_marker() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = TeamDaemon::new(daemon_config_with_roles(tmp.path(), Vec::new())).unwrap();
@@ -2184,6 +2363,72 @@ mod tests {
             "Automation resumed."
         );
         assert!(!crate::team::pause_marker_path(tmp.path()).exists());
+    }
+
+    #[test]
+    fn telegram_kick_command_autosaves_dirty_worktree_before_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        git_ok(tmp.path(), &["init"]);
+        git_ok(tmp.path(), &["config", "user.email", "test@example.com"]);
+        git_ok(tmp.path(), &["config", "user.name", "Test User"]);
+        std::fs::write(tmp.path().join("README.md"), "root\n").unwrap();
+        git_ok(tmp.path(), &["add", "README.md"]);
+        git_ok(tmp.path(), &["commit", "-m", "init"]);
+
+        let worktree_dir = tmp.path().join(".batty").join("worktrees").join("eng-1");
+        std::fs::create_dir_all(&worktree_dir).unwrap();
+        git_ok(&worktree_dir, &["init"]);
+        git_ok(&worktree_dir, &["config", "user.email", "test@example.com"]);
+        git_ok(&worktree_dir, &["config", "user.name", "Test User"]);
+        std::fs::write(worktree_dir.join("README.md"), "worktree\n").unwrap();
+        git_ok(&worktree_dir, &["add", "README.md"]);
+        git_ok(&worktree_dir, &["commit", "-m", "init"]);
+        std::fs::write(worktree_dir.join("README.md"), "dirty\n").unwrap();
+
+        let roles = vec![RoleDef {
+            name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            auth_mode: None,
+            auth_env: vec![],
+            instances: 1,
+            prompt: None,
+            talks_to: Vec::new(),
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: None,
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            barrier_group: None,
+            use_worktrees: true,
+        }];
+        let mut config = daemon_config_with_roles(tmp.path(), roles);
+        config.members = vec![MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: true,
+        }];
+        let mut daemon = TeamDaemon::new(config).unwrap();
+
+        let error = daemon
+            .execute_telegram_command(TelegramCommand::Kick {
+                member: "eng-1".to_string(),
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("No pane registered"));
+
+        let status = Command::new("git")
+            .args(["status", "--short"])
+            .current_dir(&worktree_dir)
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        assert!(String::from_utf8_lossy(&status.stdout).trim().is_empty());
     }
 
     #[test]
