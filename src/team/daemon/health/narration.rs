@@ -9,215 +9,210 @@ use tracing::warn;
 
 use super::super::*;
 use super::format_checkpoint_section;
-use crate::shim::classifier::AgentType;
+use crate::shim::classifier::{AgentType, NarrationLineKind};
 use crate::team::events::TeamEvent;
 
-const META_CONVERSATION_THRESHOLD: usize = 3;
-const META_CONVERSATION_GRACE_CYCLES: usize = 2;
+const DEFAULT_NARRATION_WINDOW_LINES: usize = 50;
+const DEFAULT_NARRATION_THRESHOLD: f64 = 0.8;
+const DEFAULT_NARRATION_NUDGE_MAX: u32 = 2;
+const NARRATION_CONSECUTIVE_CHECKS: usize = 3;
 
-#[derive(Debug, Clone)]
-pub(super) struct NarrationSample {
-    line_count: usize,
-    has_tool_markers: bool,
-    looks_meta_conversation: bool,
+#[derive(Debug, Clone, Default)]
+struct NarrationWindow {
+    lines: VecDeque<NarrationLineKind>,
+    explanation_lines: usize,
+    tool_lines: usize,
+}
+
+impl NarrationWindow {
+    fn push(&mut self, kind: NarrationLineKind, window_size: usize) {
+        if matches!(kind, NarrationLineKind::Other) {
+            return;
+        }
+
+        self.lines.push_back(kind);
+        match kind {
+            NarrationLineKind::Explanation => self.explanation_lines += 1,
+            NarrationLineKind::ToolOrCommand => self.tool_lines += 1,
+            NarrationLineKind::Other => {}
+        }
+
+        while self.lines.len() > window_size {
+            if let Some(evicted) = self.lines.pop_front() {
+                match evicted {
+                    NarrationLineKind::Explanation => {
+                        self.explanation_lines = self.explanation_lines.saturating_sub(1);
+                    }
+                    NarrationLineKind::ToolOrCommand => {
+                        self.tool_lines = self.tool_lines.saturating_sub(1);
+                    }
+                    NarrationLineKind::Other => {}
+                }
+            }
+        }
+    }
+
+    fn explanation_ratio(&self) -> f64 {
+        let classified = self.explanation_lines + self.tool_lines;
+        if classified == 0 {
+            return 0.0;
+        }
+        self.explanation_lines as f64 / classified as f64
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 struct BreakerState {
-    sample_len_at_nudge: usize,
+    consecutive_breaches: usize,
+    nudges_sent: u32,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct NarrationTracker {
-    samples: HashMap<String, VecDeque<NarrationSample>>,
+    windows: HashMap<String, NarrationWindow>,
+    last_content: HashMap<String, String>,
     breaker_states: HashMap<String, BreakerState>,
     window_size: usize,
-    threshold: usize,
+    threshold: f64,
+    nudge_max: u32,
 }
 
 impl Default for NarrationTracker {
     fn default() -> Self {
-        Self::new(12, 6)
+        Self::new(
+            DEFAULT_NARRATION_WINDOW_LINES,
+            DEFAULT_NARRATION_THRESHOLD,
+            DEFAULT_NARRATION_NUDGE_MAX,
+        )
     }
 }
 
 impl NarrationTracker {
-    pub(crate) fn new(window_size: usize, threshold: usize) -> Self {
+    pub(crate) fn new(window_size: usize, threshold: f64, nudge_max: u32) -> Self {
         Self {
-            samples: HashMap::new(),
+            windows: HashMap::new(),
+            last_content: HashMap::new(),
             breaker_states: HashMap::new(),
-            window_size: window_size.max(threshold.max(1)),
-            threshold: threshold.max(1),
+            window_size: window_size.max(1),
+            threshold: threshold.clamp(0.0, 1.0),
+            nudge_max,
         }
     }
 
     pub(super) fn clear_member(&mut self, member: &str) {
-        self.samples.remove(member);
+        self.windows.remove(member);
+        self.last_content.remove(member);
         self.breaker_states.remove(member);
     }
 
     pub(super) fn has_samples(&self, member: &str) -> bool {
-        self.samples
+        self.windows
             .get(member)
-            .is_some_and(|samples| !samples.is_empty())
+            .is_some_and(|window| !window.lines.is_empty())
     }
 
-    pub(super) fn record_sample(
-        &mut self,
-        member: &str,
-        line_count: usize,
-        content: &str,
-        agent_type: AgentType,
-    ) {
-        let has_tool_markers = has_tool_markers(content, agent_type);
-        if has_tool_markers {
-            self.clear_member(member);
+    pub(super) fn record_sample(&mut self, member: &str, content: &str, agent_type: AgentType) {
+        let window = self.windows.entry(member.to_string()).or_default();
+        let previous = self.last_content.get(member).cloned().unwrap_or_default();
+        let appended = appended_lines(&previous, content);
+
+        if appended.is_empty() && previous == content {
             return;
         }
-        let looks_meta_conversation =
-            crate::shim::classifier::detect_meta_conversation(content, agent_type);
 
-        let sample = NarrationSample {
-            line_count,
-            has_tool_markers,
-            looks_meta_conversation,
-        };
+        if content.lines().count() < previous.lines().count() || previous.len() > content.len() {
+            window.lines.clear();
+            window.explanation_lines = 0;
+            window.tool_lines = 0;
+        }
 
-        let samples = self.samples.entry(member.to_string()).or_default();
-        if samples
-            .back()
-            .is_some_and(|previous| sample.line_count <= previous.line_count)
-        {
-            samples.clear();
+        for line in appended {
+            let kind = crate::shim::classifier::classify_narration_line(line, agent_type);
+            window.push(kind, self.window_size);
         }
-        samples.push_back(sample);
-        while samples.len() > self.window_size {
-            samples.pop_front();
-        }
+
+        self.last_content
+            .insert(member.to_string(), content.to_string());
     }
 
     pub(super) fn is_narrating(&self, member: &str) -> bool {
-        let Some(samples) = self.samples.get(member) else {
+        let Some(window) = self.windows.get(member) else {
             return false;
         };
-        if samples.len() < self.threshold {
+        if window.lines.len() < self.window_size {
             return false;
         }
-
-        let start = samples.len() - self.threshold;
-        let window: Vec<&NarrationSample> = samples.iter().skip(start).collect();
-        if window.len() < self.threshold {
-            return false;
-        }
-
-        if window.iter().any(|sample| sample.has_tool_markers) {
-            return false;
-        }
-
-        if window
-            .windows(2)
-            .any(|pair| pair[1].line_count <= pair[0].line_count)
-        {
-            return false;
-        }
-
-        true
+        window.explanation_ratio() > self.threshold
     }
 
-    pub(super) fn is_meta_conversation(&self, member: &str) -> bool {
-        let Some(samples) = self.samples.get(member) else {
-            return false;
-        };
-        if samples.len() < META_CONVERSATION_THRESHOLD {
-            return false;
-        }
-
-        let start = samples.len() - META_CONVERSATION_THRESHOLD;
-        let window: Vec<&NarrationSample> = samples.iter().skip(start).collect();
-        window.len() == META_CONVERSATION_THRESHOLD
-            && window.iter().all(|sample| sample.looks_meta_conversation)
-            && window
-                .windows(2)
-                .all(|pair| pair[1].line_count > pair[0].line_count)
-    }
-
-    pub(super) fn has_active_breaker(&self, member: &str) -> bool {
-        self.breaker_states.contains_key(member)
-    }
-
-    pub(super) fn note_breaker_nudge(&mut self, member: &str) {
-        let sample_len_at_nudge = self
-            .samples
+    pub(super) fn narration_ratio(&self, member: &str) -> f64 {
+        self.windows
             .get(member)
-            .map(|samples| samples.len())
-            .unwrap_or(0);
-        self.breaker_states.insert(
-            member.to_string(),
-            BreakerState {
-                sample_len_at_nudge,
-            },
-        );
+            .map(NarrationWindow::explanation_ratio)
+            .unwrap_or(0.0)
     }
 
-    pub(super) fn clear_breaker(&mut self, member: &str) {
-        self.breaker_states.remove(member);
+    pub(super) fn note_breach(&mut self, member: &str, narrating: bool) -> BreakerState {
+        let state = self
+            .breaker_states
+            .entry(member.to_string())
+            .or_insert(BreakerState {
+                consecutive_breaches: 0,
+                nudges_sent: 0,
+            });
+        if narrating {
+            state.consecutive_breaches = state.consecutive_breaches.saturating_add(1);
+        } else {
+            state.consecutive_breaches = 0;
+            state.nudges_sent = 0;
+        }
+        *state
     }
 
-    pub(super) fn should_escalate_breaker(&self, member: &str) -> bool {
-        let Some(state) = self.breaker_states.get(member) else {
-            return false;
-        };
-        let Some(samples) = self.samples.get(member) else {
-            return false;
-        };
-        self.is_meta_conversation(member)
-            && samples.len()
-                >= state
-                    .sample_len_at_nudge
-                    .saturating_add(META_CONVERSATION_GRACE_CYCLES)
+    pub(super) fn should_nudge(&self, member: &str) -> bool {
+        self.breaker_states.get(member).is_some_and(|state| {
+            state.consecutive_breaches >= NARRATION_CONSECUTIVE_CHECKS
+                && state.nudges_sent < self.nudge_max
+        })
+    }
+
+    pub(super) fn note_nudge(&mut self, member: &str) {
+        if let Some(state) = self.breaker_states.get_mut(member) {
+            state.nudges_sent = state.nudges_sent.saturating_add(1);
+            state.consecutive_breaches = 0;
+        }
+    }
+
+    pub(super) fn should_restart(&self, member: &str) -> bool {
+        self.breaker_states.get(member).is_some_and(|state| {
+            state.consecutive_breaches >= NARRATION_CONSECUTIVE_CHECKS
+                && state.nudges_sent >= self.nudge_max
+        })
     }
 }
 
 pub(super) fn has_tool_markers(content: &str, agent_type: AgentType) -> bool {
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        return false;
+    content.lines().any(|line| {
+        matches!(
+            crate::shim::classifier::classify_narration_line(line, agent_type),
+            NarrationLineKind::ToolOrCommand
+        )
+    })
+}
+
+fn appended_lines<'a>(previous: &'a str, current: &'a str) -> Vec<&'a str> {
+    let current_lines: Vec<&str> = current.lines().collect();
+    if previous.is_empty() {
+        return current_lines;
     }
 
-    let common_markers = [
-        "*** Begin Patch",
-        "*** Update File:",
-        "*** Add File:",
-        "*** Delete File:",
-        "$ ",
-        "\n$ ",
-        "\n> ",
-        "Exit code:",
-    ];
-    if common_markers.iter().any(|marker| trimmed.contains(marker)) {
-        return true;
-    }
-
-    match agent_type {
-        AgentType::Claude => {
-            let claude_markers = [
-                "Read(",
-                "Edit(",
-                "Bash(",
-                "Write(",
-                "Grep(",
-                "Glob(",
-                "MultiEdit(",
-                "⎿",
-            ];
-            claude_markers.iter().any(|marker| trimmed.contains(marker))
-        }
-        AgentType::Codex => {
-            let codex_markers = ["$ ", "\n$ ", "apply_patch", "*** Begin Patch", "target/"];
-            codex_markers.iter().any(|marker| trimmed.contains(marker))
-        }
-        AgentType::Kiro | AgentType::Generic => trimmed.contains("$ ") || trimmed.contains("\n> "),
-    }
+    let previous_lines: Vec<&str> = previous.lines().collect();
+    let shared = previous_lines
+        .iter()
+        .zip(current_lines.iter())
+        .take_while(|(left, right)| left == right)
+        .count();
+    current_lines.into_iter().skip(shared).collect()
 }
 
 impl TeamDaemon {
@@ -232,7 +227,6 @@ impl TeamDaemon {
         for member_name in member_names {
             if self.states.get(&member_name) != Some(&MemberState::Working) {
                 self.narration_tracker.clear_member(&member_name);
-                self.clear_narration_cooldowns(&member_name);
                 continue;
             }
 
@@ -245,42 +239,29 @@ impl TeamDaemon {
             };
 
             let agent_type = self.member_agent_type(&member_name);
-            let line_count = capture.lines().count();
-            let had_active_breaker = self.narration_tracker.has_active_breaker(&member_name);
             self.narration_tracker
-                .record_sample(&member_name, line_count, &capture, agent_type);
+                .record_sample(&member_name, &capture, agent_type);
 
             if !self.narration_tracker.has_samples(&member_name) {
-                if had_active_breaker {
-                    self.emit_event(TeamEvent::meta_conversation_recovered(
-                        &member_name,
-                        self.active_task_id(&member_name),
-                    ));
-                }
-                self.clear_narration_cooldowns(&member_name);
                 continue;
             }
 
             let is_narrating = self.narration_tracker.is_narrating(&member_name);
-            let is_meta_conversation = self.narration_tracker.is_meta_conversation(&member_name);
-            if had_active_breaker && !is_meta_conversation {
-                self.emit_event(TeamEvent::meta_conversation_recovered(
-                    &member_name,
-                    self.active_task_id(&member_name),
-                ));
-                self.narration_tracker.clear_breaker(&member_name);
-                self.clear_narration_cooldowns(&member_name);
-            }
-
-            if !is_narrating && !is_meta_conversation {
+            let breaker_state = self
+                .narration_tracker
+                .note_breach(&member_name, is_narrating);
+            if !is_narrating {
                 continue;
             }
 
-            let nudge_key = Self::narration_nudge_cooldown_key(&member_name);
-            if is_meta_conversation && !self.intervention_cooldowns.contains_key(&nudge_key) {
-                let task_id = self.active_task_id(&member_name);
-                warn!(member = %member_name, task_id, "detected narration loop");
-                self.emit_event(TeamEvent::narration_detected(&member_name, task_id));
+            let task_id = self.active_task_id(&member_name);
+            let ratio = self.narration_tracker.narration_ratio(&member_name);
+            if breaker_state.consecutive_breaches == NARRATION_CONSECUTIVE_CHECKS {
+                warn!(member = %member_name, task_id, ratio, "detected narration loop");
+                self.emit_event(TeamEvent::narration_loop_detected(&member_name, task_id));
+            }
+
+            if self.narration_tracker.should_nudge(&member_name) {
                 if let Some(member) = self
                     .config
                     .members
@@ -290,20 +271,22 @@ impl TeamDaemon {
                 {
                     let message = self.meta_conversation_nudge_message(&member_name, &member);
                     if let Err(error) = self.queue_message("daemon", &member_name, &message) {
-                        warn!(member = %member_name, error = %error, "failed to queue narration nudge");
+                        warn!(
+                            member = %member_name,
+                            error = %error,
+                            "failed to queue narration nudge"
+                        );
                     }
                 }
                 self.emit_event(TeamEvent::meta_conversation_nudged(&member_name, task_id));
                 self.record_orchestrator_action(format!(
-                    "health: nudged {} to break meta-conversation loop",
-                    member_name
+                    "health: nudged {} after narration ratio {:.2}",
+                    member_name, ratio
                 ));
-                self.narration_tracker.note_breaker_nudge(&member_name);
-                self.intervention_cooldowns
-                    .insert(nudge_key, Instant::now());
+                self.narration_tracker.note_nudge(&member_name);
             }
 
-            if self.narration_tracker.should_escalate_breaker(&member_name) {
+            if self.narration_tracker.should_restart(&member_name) {
                 let restart_key = Self::narration_restart_cooldown_key(&member_name);
                 let on_cooldown = self
                     .intervention_cooldowns
@@ -320,12 +303,11 @@ impl TeamDaemon {
                 }
                 self.emit_event(TeamEvent::meta_conversation_escalated(
                     &member_name,
-                    self.active_task_id(&member_name),
+                    task_id,
                 ));
                 self.intervention_cooldowns
                     .insert(restart_key, Instant::now());
                 self.narration_tracker.clear_member(&member_name);
-                self.clear_narration_nudge_cooldown(&member_name);
             }
         }
 
@@ -405,23 +387,8 @@ impl TeamDaemon {
         }
     }
 
-    fn narration_nudge_cooldown_key(member_name: &str) -> String {
-        format!("narration-nudge::{member_name}")
-    }
-
     fn narration_restart_cooldown_key(member_name: &str) -> String {
         format!("narration-restart::{member_name}")
-    }
-
-    fn clear_narration_nudge_cooldown(&mut self, member_name: &str) {
-        self.intervention_cooldowns
-            .remove(&Self::narration_nudge_cooldown_key(member_name));
-    }
-
-    fn clear_narration_cooldowns(&mut self, member_name: &str) {
-        self.clear_narration_nudge_cooldown(member_name);
-        self.intervention_cooldowns
-            .remove(&Self::narration_restart_cooldown_key(member_name));
     }
 
     fn meta_conversation_nudge_message(
@@ -437,7 +404,7 @@ impl TeamDaemon {
             .unwrap_or_else(|| "Continue the current assignment.".to_string());
         self.prepend_member_nudge(
             member,
-            &format!("STOP NARRATING. Execute the next concrete step now.\n{task_context}"),
+            &format!("Stop explaining. Run the command now.\n{task_context}"),
         )
     }
 }
@@ -472,32 +439,45 @@ mod tests {
     #[test]
     fn record_and_detect_narration() {
         let mut tracker = NarrationTracker::default();
-        for line_count in 1..=6 {
-            tracker.record_sample(
-                "eng-1",
-                line_count,
-                "narrating without tools",
-                AgentType::Claude,
-            );
+        let content = (0..50)
+            .map(|idx| format!("I will explain step {idx}."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        tracker.record_sample("eng-1", &content, AgentType::Claude);
+        for _ in 0..3 {
+            tracker.note_breach("eng-1", tracker.is_narrating("eng-1"));
         }
         assert!(tracker.is_narrating("eng-1"));
+        assert!(tracker.should_nudge("eng-1"));
     }
 
     #[test]
     fn narration_clears_on_tool_use() {
         let mut tracker = NarrationTracker::default();
-        for line_count in 1..=5 {
-            tracker.record_sample("eng-1", line_count, "still narrating", AgentType::Claude);
-        }
-        tracker.record_sample("eng-1", 6, "⏺ Bash(cargo test)", AgentType::Claude);
+        let narrating = (0..50)
+            .map(|idx| format!("I will explain step {idx}."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        tracker.record_sample("eng-1", &narrating, AgentType::Claude);
+        assert!(tracker.is_narrating("eng-1"));
+
+        let with_tools = format!(
+            "{narrating}\n{}",
+            (0..20)
+                .map(|_| "⏺ Bash(cargo test)")
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        tracker.record_sample("eng-1", &with_tools, AgentType::Claude);
+        assert!(tracker.has_samples("eng-1"));
+        assert!(tracker.narration_ratio("eng-1") < 0.8);
         assert!(!tracker.is_narrating("eng-1"));
-        assert!(!tracker.has_samples("eng-1"));
     }
 
     #[test]
     fn narration_clears_on_idle() {
         let mut tracker = NarrationTracker::default();
-        tracker.record_sample("eng-1", 1, "narrating", AgentType::Claude);
+        tracker.record_sample("eng-1", "I will keep narrating.", AgentType::Claude);
         tracker.clear_member("eng-1");
         assert!(!tracker.has_samples("eng-1"));
         assert!(!tracker.is_narrating("eng-1"));
@@ -506,97 +486,66 @@ mod tests {
     #[test]
     fn narration_not_triggered_below_threshold() {
         let mut tracker = NarrationTracker::default();
-        for line_count in 1..=3 {
-            tracker.record_sample("eng-1", line_count, "narrating", AgentType::Claude);
-        }
+        let content = (0..40)
+            .map(|idx| format!("I will explain step {idx}."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        tracker.record_sample("eng-1", &content, AgentType::Claude);
         assert!(!tracker.is_narrating("eng-1"));
     }
 
     #[test]
-    fn meta_conversation_detected_within_three_cycles() {
+    fn restart_triggers_after_two_failed_nudges() {
         let mut tracker = NarrationTracker::default();
-        for line_count in 1..=3 {
-            tracker.record_sample(
-                "eng-1",
-                line_count,
-                "I should inspect the issue.\nNext step: I will check the daemon.\nShould I patch narration first?",
-                AgentType::Codex,
-            );
+        let content = (0..50)
+            .map(|idx| format!("I should inspect thing {idx}."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        tracker.record_sample("eng-1", &content, AgentType::Codex);
+
+        for _ in 0..3 {
+            tracker.note_breach("eng-1", tracker.is_narrating("eng-1"));
         }
-        assert!(tracker.is_meta_conversation("eng-1"));
+        assert!(tracker.should_nudge("eng-1"));
+        tracker.note_nudge("eng-1");
+
+        for _ in 0..3 {
+            tracker.note_breach("eng-1", true);
+        }
+        assert!(tracker.should_nudge("eng-1"));
+        tracker.note_nudge("eng-1");
+
+        for _ in 0..3 {
+            tracker.note_breach("eng-1", true);
+        }
+        assert!(tracker.should_restart("eng-1"));
     }
 
     #[test]
-    fn meta_conversation_false_positive_avoids_tool_output() {
+    fn narration_breaker_resets_after_progress() {
         let mut tracker = NarrationTracker::default();
-        for line_count in 1..=3 {
-            tracker.record_sample(
-                "eng-1",
-                line_count,
-                "$ rg -n narration src/team\nExit code: 0",
-                AgentType::Codex,
-            );
+        let narrating = (0..50)
+            .map(|idx| format!("I should inspect thing {idx}."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        tracker.record_sample("eng-1", &narrating, AgentType::Codex);
+        for _ in 0..3 {
+            tracker.note_breach("eng-1", true);
         }
-        assert!(!tracker.is_meta_conversation("eng-1"));
-    }
+        tracker.note_nudge("eng-1");
 
-    #[test]
-    fn breaker_escalates_after_two_more_cycles() {
-        let mut tracker = NarrationTracker::default();
-        for line_count in 1..=3 {
-            tracker.record_sample(
-                "eng-1",
-                line_count,
-                "I should inspect the issue.\nNext step: I will check the daemon.\nShould I patch narration first?",
-                AgentType::Codex,
-            );
-        }
-        tracker.note_breaker_nudge("eng-1");
-        tracker.record_sample(
-            "eng-1",
-            4,
-            "Maybe I should inspect more state first.\nI will think through the next step.",
-            AgentType::Codex,
+        let with_tools = format!(
+            "{narrating}\n{}",
+            (0..25)
+                .map(|_| "$ cargo test")
+                .collect::<Vec<_>>()
+                .join("\n")
         );
-        assert!(!tracker.should_escalate_breaker("eng-1"));
-        tracker.record_sample(
-            "eng-1",
-            5,
-            "Perhaps I should plan a bit more.\nNext step: I will keep reasoning.",
-            AgentType::Codex,
-        );
-        assert!(tracker.should_escalate_breaker("eng-1"));
-    }
-
-    #[test]
-    fn breaker_clears_after_tool_execution() {
-        let mut tracker = NarrationTracker::default();
-        for line_count in 1..=3 {
-            tracker.record_sample(
-                "eng-1",
-                line_count,
-                "I should inspect the issue.\nNext step: I will check the daemon.\nShould I patch narration first?",
-                AgentType::Codex,
-            );
-        }
-        tracker.note_breaker_nudge("eng-1");
-        tracker.record_sample(
-            "eng-1",
-            4,
-            "$ sed -n '1,40p' src/team/daemon.rs",
-            AgentType::Codex,
-        );
-        assert!(!tracker.has_active_breaker("eng-1"));
-        assert!(!tracker.has_samples("eng-1"));
-    }
-
-    #[test]
-    fn narration_requires_growing_output() {
-        let mut tracker = NarrationTracker::default();
-        for _ in 0..6 {
-            tracker.record_sample("eng-1", 4, "narrating", AgentType::Claude);
-        }
+        tracker.record_sample("eng-1", &with_tools, AgentType::Codex);
+        tracker.note_breach("eng-1", tracker.is_narrating("eng-1"));
         assert!(!tracker.is_narrating("eng-1"));
+        assert!(!tracker.should_nudge("eng-1"));
+        assert!(!tracker.should_restart("eng-1"));
     }
 
     #[test]

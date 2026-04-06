@@ -426,11 +426,11 @@ impl TeamEvent {
         }
     }
 
-    pub fn narration_detected(role: &str, task: Option<u32>) -> Self {
+    pub fn narration_loop_detected(role: &str, task: Option<u32>) -> Self {
         Self {
             role: Some(role.into()),
             task: task.map(|id| id.to_string()),
-            ..Self::base("narration_detected")
+            ..Self::base("narration_loop_detected")
         }
     }
 
@@ -1867,6 +1867,11 @@ mod tests {
 
     #[test]
     fn meta_conversation_events_have_correct_fields() {
+        let detected = TeamEvent::narration_loop_detected("eng-1-4", Some(415));
+        assert_eq!(detected.event, "narration_loop_detected");
+        assert_eq!(detected.role.as_deref(), Some("eng-1-4"));
+        assert_eq!(detected.task.as_deref(), Some("415"));
+
         let nudged = TeamEvent::meta_conversation_nudged("eng-1-4", Some(415));
         assert_eq!(nudged.event, "meta_conversation_nudged");
         assert_eq!(nudged.role.as_deref(), Some("eng-1-4"));

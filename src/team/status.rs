@@ -143,7 +143,8 @@ pub(crate) struct TeamStatusJsonReport {
     pub(crate) active_tasks: Vec<StatusTaskEntry>,
     pub(crate) review_queue: Vec<StatusTaskEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) engineer_profiles: Option<Vec<crate::team::telemetry_db::EngineerPerformanceProfileRow>>,
+    pub(crate) engineer_profiles:
+        Option<Vec<crate::team::telemetry_db::EngineerPerformanceProfileRow>>,
     pub(crate) members: Vec<TeamStatusRow>,
 }
 
@@ -965,7 +966,8 @@ pub(crate) struct TeamStatusJsonReportInput {
     pub(crate) workflow_metrics: Option<WorkflowMetrics>,
     pub(crate) active_tasks: Vec<StatusTaskEntry>,
     pub(crate) review_queue: Vec<StatusTaskEntry>,
-    pub(crate) engineer_profiles: Option<Vec<crate::team::telemetry_db::EngineerPerformanceProfileRow>>,
+    pub(crate) engineer_profiles:
+        Option<Vec<crate::team::telemetry_db::EngineerPerformanceProfileRow>>,
     pub(crate) members: Vec<TeamStatusRow>,
 }
 
@@ -2448,16 +2450,15 @@ mod tests {
 
     #[test]
     fn format_engineer_profiles_renders_compact_table() {
-        let rendered = format_engineer_profiles(&[
-            crate::team::telemetry_db::EngineerPerformanceProfileRow {
+        let rendered =
+            format_engineer_profiles(&[crate::team::telemetry_db::EngineerPerformanceProfileRow {
                 role: "eng-1".to_string(),
                 completed_tasks: 3,
                 avg_task_completion_secs: Some(5400.0),
                 lines_per_hour: Some(42.5),
                 first_pass_test_rate: Some(2.0 / 3.0),
                 context_exhaustion_frequency: Some(1.0 / 3.0),
-            },
-        ]);
+            }]);
 
         assert!(rendered.contains("Engineer Profiles"));
         assert!(rendered.contains("eng-1"));

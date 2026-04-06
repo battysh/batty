@@ -107,11 +107,11 @@ use self::hot_reload::{
     BinaryFingerprint, hot_reload_daemon_args, hot_reload_marker_path, write_hot_reload_marker,
 };
 pub(crate) use self::interventions::NudgeSchedule;
-pub(crate) use self::merge_queue::MergeQueue;
 use self::interventions::OwnedTaskInterventionState;
 use self::launcher::{
     duplicate_claude_session_ids, load_launch_state, member_session_tracker_config,
 };
+pub(crate) use self::merge_queue::MergeQueue;
 pub use self::state::load_dispatch_queue_snapshot;
 #[cfg(test)]
 use self::state::{
@@ -356,10 +356,8 @@ impl TeamDaemon {
 
         // Create Telegram bot for inbound polling (if configured)
         let telegram_bot = telegram_bridge::build_telegram_bot(&config.team_config);
-        let narration_detection_threshold = config
-            .team_config
-            .workflow_policy
-            .narration_detection_threshold;
+        let narration_threshold = config.team_config.workflow_policy.narration_threshold;
+        let narration_nudge_max = config.team_config.workflow_policy.narration_nudge_max;
 
         let states = HashMap::new();
 
@@ -458,8 +456,9 @@ impl TeamDaemon {
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
             narration_tracker: health::narration::NarrationTracker::new(
-                12,
-                narration_detection_threshold,
+                50,
+                narration_threshold,
+                narration_nudge_max,
             ),
             context_pressure_tracker: health::context::ContextPressureTracker::new(
                 context_pressure_threshold,

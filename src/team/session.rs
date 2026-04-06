@@ -361,7 +361,9 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool) -> Result<()> 
     let engineer_profiles = if detail {
         crate::team::telemetry_db::open(project_root)
             .ok()
-            .and_then(|conn| crate::team::telemetry_db::query_engineer_performance_profiles(&conn).ok())
+            .and_then(|conn| {
+                crate::team::telemetry_db::query_engineer_performance_profiles(&conn).ok()
+            })
             .filter(|rows| !rows.is_empty())
     } else {
         None

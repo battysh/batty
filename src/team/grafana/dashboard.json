@@ -1454,10 +1454,10 @@
             "type": "frser-sqlite-datasource",
             "uid": "batty-telemetry"
           },
-          "queryText": "SELECT timestamp AS time, COUNT(*) AS detections, role AS metric FROM events WHERE event_type='narration_detected' GROUP BY timestamp, role ORDER BY time;",
+          "queryText": "SELECT timestamp AS time, COUNT(*) AS detections, role AS metric FROM events WHERE event_type='narration_loop_detected' GROUP BY timestamp, role ORDER BY time;",
           "queryType": "table",
-          "rawQueryText": "SELECT timestamp AS time, COUNT(*) AS detections, role AS metric FROM events WHERE event_type='narration_detected' GROUP BY timestamp, role ORDER BY time;",
-          "rawSql": "SELECT timestamp AS time, COUNT(*) AS detections, role AS metric FROM events WHERE event_type='narration_detected' GROUP BY timestamp, role ORDER BY time;",
+          "rawQueryText": "SELECT timestamp AS time, COUNT(*) AS detections, role AS metric FROM events WHERE event_type='narration_loop_detected' GROUP BY timestamp, role ORDER BY time;",
+          "rawSql": "SELECT timestamp AS time, COUNT(*) AS detections, role AS metric FROM events WHERE event_type='narration_loop_detected' GROUP BY timestamp, role ORDER BY time;",
           "refId": "A",
           "timeColumns": [
             "time"
@@ -1530,10 +1530,10 @@
             "type": "frser-sqlite-datasource",
             "uid": "batty-telemetry"
           },
-          "queryText": "SELECT COALESCE(ROUND(AVG(n.timestamp - a.timestamp), 1), 0) AS value FROM events n LEFT JOIN events a ON a.role = n.role AND a.task_id = n.task_id AND a.event_type='task_assigned' AND a.timestamp <= n.timestamp WHERE n.event_type='narration_detected';",
+          "queryText": "SELECT COALESCE(ROUND(AVG(n.timestamp - a.timestamp), 1), 0) AS value FROM events n LEFT JOIN events a ON a.role = n.role AND a.task_id = n.task_id AND a.event_type='task_assigned' AND a.timestamp <= n.timestamp WHERE n.event_type='narration_loop_detected';",
           "queryType": "table",
-          "rawQueryText": "SELECT COALESCE(ROUND(AVG(n.timestamp - a.timestamp), 1), 0) AS value FROM events n LEFT JOIN events a ON a.role = n.role AND a.task_id = n.task_id AND a.event_type='task_assigned' AND a.timestamp <= n.timestamp WHERE n.event_type='narration_detected';",
-          "rawSql": "SELECT COALESCE(ROUND(AVG(n.timestamp - a.timestamp), 1), 0) AS value FROM events n LEFT JOIN events a ON a.role = n.role AND a.task_id = n.task_id AND a.event_type='task_assigned' AND a.timestamp <= n.timestamp WHERE n.event_type='narration_detected';",
+          "rawQueryText": "SELECT COALESCE(ROUND(AVG(n.timestamp - a.timestamp), 1), 0) AS value FROM events n LEFT JOIN events a ON a.role = n.role AND a.task_id = n.task_id AND a.event_type='task_assigned' AND a.timestamp <= n.timestamp WHERE n.event_type='narration_loop_detected';",
+          "rawSql": "SELECT COALESCE(ROUND(AVG(n.timestamp - a.timestamp), 1), 0) AS value FROM events n LEFT JOIN events a ON a.role = n.role AND a.task_id = n.task_id AND a.event_type='task_assigned' AND a.timestamp <= n.timestamp WHERE n.event_type='narration_loop_detected';",
           "refId": "A"
         }
       ],

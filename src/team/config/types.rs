@@ -251,8 +251,10 @@ pub struct WorkflowPolicy {
     pub health_check_interval_secs: u64,
     #[serde(default = "default_planning_cycle_cooldown_secs")]
     pub planning_cycle_cooldown_secs: u64,
-    #[serde(default = "default_narration_detection_threshold")]
-    pub narration_detection_threshold: usize,
+    #[serde(default = "default_narration_threshold")]
+    pub narration_threshold: f64,
+    #[serde(default = "default_narration_nudge_max")]
+    pub narration_nudge_max: u32,
     #[serde(default = "default_context_pressure_threshold")]
     pub context_pressure_threshold: u64,
     #[serde(default = "default_context_pressure_threshold_bytes")]
@@ -343,7 +345,8 @@ impl Default for WorkflowPolicy {
             max_stall_restarts: default_max_stall_restarts(),
             health_check_interval_secs: default_health_check_interval_secs(),
             planning_cycle_cooldown_secs: default_planning_cycle_cooldown_secs(),
-            narration_detection_threshold: default_narration_detection_threshold(),
+            narration_threshold: default_narration_threshold(),
+            narration_nudge_max: default_narration_nudge_max(),
             context_pressure_threshold: default_context_pressure_threshold(),
             context_pressure_threshold_bytes: default_context_pressure_threshold_bytes(),
             context_pressure_restart_delay_secs: default_context_pressure_restart_delay_secs(),
@@ -552,8 +555,11 @@ fn default_max_files_changed() -> usize {
 fn default_max_modules_touched() -> usize {
     2
 }
-fn default_narration_detection_threshold() -> usize {
-    6
+fn default_narration_threshold() -> f64 {
+    0.8
+}
+fn default_narration_nudge_max() -> u32 {
+    2
 }
 fn default_confidence_threshold() -> f64 {
     0.8

@@ -292,7 +292,7 @@ impl TeamDaemon {
         ContextPressureInputs {
             output_bytes,
             narration_detected: self.narration_tracker.is_narrating(member_name),
-            meta_conversation_detected: self.narration_tracker.is_meta_conversation(member_name),
+            meta_conversation_detected: self.narration_tracker.is_narrating(member_name),
             assistant_message_count: quality.assistant_message_count,
             tool_call_count: quality.tool_call_count,
             unique_tool_names: quality.unique_tool_names.len(),

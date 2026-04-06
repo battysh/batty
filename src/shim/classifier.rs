@@ -18,6 +18,14 @@ pub enum ScreenVerdict {
     Unknown,
 }
 
+/// How a single output line should be treated by narration enforcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NarrationLineKind {
+    Explanation,
+    ToolOrCommand,
+    Other,
+}
+
 /// Agent type selector for the shim classifier.
 ///
 /// This operates on vt100::Screen content, independent of the AgentType
@@ -162,6 +170,113 @@ pub fn detect_meta_conversation(content: &str, agent_type: AgentType) -> bool {
         .count();
 
     (meta_hits + question_hits) >= 2 || line_hits >= 2
+}
+
+/// Classify a single output line for narration-loop detection.
+pub fn classify_narration_line(line: &str, agent_type: AgentType) -> NarrationLineKind {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return NarrationLineKind::Other;
+    }
+
+    if has_command_or_tool_signal(trimmed, agent_type) {
+        return NarrationLineKind::ToolOrCommand;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let explanation_patterns = [
+        "i should",
+        "i will",
+        "i'll",
+        "let me",
+        "next step",
+        "need to",
+        "we need to",
+        "should i",
+        "maybe i should",
+        "perhaps i should",
+        "i can",
+        "plan:",
+        "thinking through",
+        "first, i'll",
+        "then i'll",
+        "instead of",
+        "i'm going to",
+        "before i",
+    ];
+    if explanation_patterns
+        .iter()
+        .any(|pattern| lower.contains(pattern))
+        || lower.ends_with('?')
+    {
+        return NarrationLineKind::Explanation;
+    }
+
+    NarrationLineKind::Other
+}
+
+fn has_command_or_tool_signal(line: &str, agent_type: AgentType) -> bool {
+    let common_markers = [
+        "*** Begin Patch",
+        "*** Update File:",
+        "*** Add File:",
+        "*** Delete File:",
+        "$ ",
+        "> ",
+        "Exit code:",
+        "apply_patch",
+    ];
+    if common_markers.iter().any(|marker| line.contains(marker)) {
+        return true;
+    }
+
+    let trimmed = line.trim_start();
+    let shell_prefixes = [
+        "git ",
+        "cargo ",
+        "rg ",
+        "sed ",
+        "ls ",
+        "cat ",
+        "grep ",
+        "find ",
+        "npm ",
+        "pnpm ",
+        "yarn ",
+        "pytest",
+        "go test",
+        "make ",
+        "batty ",
+        "kanban-md ",
+    ];
+    if shell_prefixes
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+    {
+        return true;
+    }
+
+    match agent_type {
+        AgentType::Claude => [
+            "Read(",
+            "Edit(",
+            "Bash(",
+            "Write(",
+            "Grep(",
+            "Glob(",
+            "MultiEdit(",
+            "⎿",
+        ]
+        .iter()
+        .any(|marker| line.contains(marker)),
+        AgentType::Codex => ["target/", "apply_patch"]
+            .iter()
+            .any(|marker| line.contains(marker)),
+        AgentType::Kiro => ["applying", "running…", "running..."]
+            .iter()
+            .any(|marker| line.to_ascii_lowercase().contains(marker)),
+        AgentType::Generic => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -575,6 +690,33 @@ mod tests {
     fn detect_meta_conversation_ignores_tool_execution_output() {
         let content = "I will inspect the daemon.\n$ rg -n narration src/team\nExit code: 0";
         assert!(!detect_meta_conversation(content, AgentType::Codex));
+    }
+
+    #[test]
+    fn classify_narration_line_marks_explanations() {
+        assert_eq!(
+            classify_narration_line(
+                "I will inspect the runtime before changing anything.",
+                AgentType::Codex
+            ),
+            NarrationLineKind::Explanation
+        );
+    }
+
+    #[test]
+    fn classify_narration_line_marks_tool_output() {
+        assert_eq!(
+            classify_narration_line("$ cargo test -p batty", AgentType::Codex),
+            NarrationLineKind::ToolOrCommand
+        );
+    }
+
+    #[test]
+    fn classify_narration_line_ignores_plain_output() {
+        assert_eq!(
+            classify_narration_line("src/team/daemon/health/narration.rs", AgentType::Codex),
+            NarrationLineKind::Other
+        );
     }
 
     // -- Kiro --

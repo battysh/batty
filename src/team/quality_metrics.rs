@@ -131,7 +131,9 @@ pub fn build_completion_quality_metrics(
     }
 }
 
-pub fn aggregate_by_backend(metrics: &[(String, QualityMetrics)]) -> HashMap<String, QualityMetrics> {
+pub fn aggregate_by_backend(
+    metrics: &[(String, QualityMetrics)],
+) -> HashMap<String, QualityMetrics> {
     let mut grouped: HashMap<String, Vec<&QualityMetrics>> = HashMap::new();
     for (backend, quality) in metrics {
         grouped.entry(backend.clone()).or_default().push(quality);
