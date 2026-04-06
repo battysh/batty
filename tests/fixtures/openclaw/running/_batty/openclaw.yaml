@@ -1,0 +1,23 @@
+version: 1
+project_name: fixture-running
+batty_root: .
+status:
+  recent_events: 4
+instruction:
+  sender: daemon
+  allowed_roles:
+    - architect
+    - manager
+follow_ups:
+  - name: review-queue-reminder
+    cron: "*/30 * * * *"
+    role: manager
+    message: Review queue still has pending work. Check `batty openclaw status` and move the lane forward.
+    summary: Review queue follow-up
+    when: review_queue_non_empty
+  - name: active-work-summary
+    cron: "*/30 * * * *"
+    role: architect
+    message: Active work remains in progress. Keep flow moving.
+    summary: Active task follow-up
+    when: active_tasks_non_empty
