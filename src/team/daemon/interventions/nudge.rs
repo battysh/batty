@@ -2,7 +2,7 @@
 //! who have been idle past their configured timeout.
 
 use anyhow::Result;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::super::*;
 
@@ -15,6 +15,14 @@ impl TeamDaemon {
             return Ok(());
         }
         let inbox_root = inbox::inboxes_root(&self.config.project_root);
+
+        // Load board tasks once so we can check whether engineers actually
+        // have in-progress work before nudging them.
+        let board_tasks = {
+            let tasks_dir = self.board_dir().join("tasks");
+            crate::task::load_tasks_from_dir(&tasks_dir).unwrap_or_default()
+        };
+
         let member_names: Vec<String> = self.nudges.keys().cloned().collect();
 
         for name in member_names {
@@ -32,6 +40,30 @@ impl TeamDaemon {
             };
 
             if fire {
+                // Skip nudge for engineers with no actionable (in-progress/todo) task.
+                // Nudging them to "re-open your task" when they have nothing to work
+                // on just wastes their context and floods the message queue.
+                let is_engineer = self
+                    .config
+                    .members
+                    .iter()
+                    .any(|m| m.name == name && m.role_type == RoleType::Engineer);
+                if is_engineer {
+                    let has_actionable_task = board_tasks.iter().any(|task| {
+                        task.claimed_by.as_deref() == Some(name.as_str())
+                            && matches!(task.status.as_str(), "in-progress" | "todo")
+                    });
+                    if !has_actionable_task {
+                        debug!(
+                            member = %name,
+                            "skipping nudge — engineer has no in-progress or todo task"
+                        );
+                        if let Some(schedule) = self.nudges.get_mut(&name) {
+                            schedule.fired_this_idle = true;
+                        }
+                        continue;
+                    }
+                }
                 let prompt_text = self.nudges[&name].text.clone();
                 let text = format!(
                     "{prompt_text}\n\nIdle nudge: you have been idle past your configured timeout. Move the current lane forward now or report the exact blocker."
