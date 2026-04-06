@@ -363,7 +363,6 @@ impl TeamDaemon {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::task::Task;
     use crate::team::config::RoleType;
     use crate::team::config_diff::{MemberChange, TopologyDiff};
     use crate::team::hierarchy::MemberInstance;
@@ -515,14 +514,16 @@ mod tests {
 
         daemon.requeue_removed_member_tasks("eng-1").unwrap();
 
-        let task = Task::from_file(
+        let task = crate::task::load_tasks_from_dir(
             &tmp.path()
                 .join(".batty")
                 .join("team_config")
                 .join("board")
-                .join("tasks")
-                .join("42-active-task.md"),
+                .join("tasks"),
         )
+        .unwrap()
+        .into_iter()
+        .find(|task| task.id == 42)
         .unwrap();
         assert_eq!(task.status, "todo");
         assert_eq!(task.claimed_by, None);
@@ -547,14 +548,16 @@ mod tests {
 
         daemon.requeue_removed_member_tasks("eng-1").unwrap();
 
-        let task = Task::from_file(
+        let task = crate::task::load_tasks_from_dir(
             &tmp.path()
                 .join(".batty")
                 .join("team_config")
                 .join("board")
-                .join("tasks")
-                .join("43-queued-task.md"),
+                .join("tasks"),
         )
+        .unwrap()
+        .into_iter()
+        .find(|task| task.id == 43)
         .unwrap();
         assert_eq!(task.status, "todo");
         assert_eq!(task.claimed_by, None);
