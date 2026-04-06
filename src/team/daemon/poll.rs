@@ -137,6 +137,9 @@ impl TeamDaemon {
             self.run_loop_step("reconcile_active_tasks", |daemon| {
                 daemon.reconcile_active_tasks()
             });
+            self.run_loop_step("maybe_manage_task_claim_ttls", |daemon| {
+                daemon.maybe_manage_task_claim_ttls()
+            });
             self.run_loop_step("maybe_auto_dispatch", |daemon| daemon.maybe_auto_dispatch());
             self.run_recoverable_step("maybe_recycle_cron_tasks", |daemon| {
                 daemon.maybe_recycle_cron_tasks()

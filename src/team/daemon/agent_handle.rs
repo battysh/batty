@@ -34,6 +34,8 @@ pub(in crate::team) struct AgentHandle {
     pub last_cols: u16,
     /// Last known pane height (for resize sync).
     pub last_rows: u16,
+    /// Latest session output byte count reported by the shim.
+    pub output_bytes: u64,
 }
 
 impl AgentHandle {
@@ -58,6 +60,7 @@ impl AgentHandle {
             work_dir,
             last_cols: 0,
             last_rows: 0,
+            output_bytes: 0,
         }
     }
 
@@ -110,6 +113,10 @@ impl AgentHandle {
     /// Record that a Pong was received.
     pub fn record_pong(&mut self) {
         self.last_pong_at = Some(Instant::now());
+    }
+
+    pub fn record_output_bytes(&mut self, output_bytes: u64) {
+        self.output_bytes = output_bytes;
     }
 
     /// Seconds since last Pong, or None if no Pong received yet.

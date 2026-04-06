@@ -218,6 +218,51 @@ impl TeamEvent {
         }
     }
 
+    pub fn task_claim_created(role: &str, task: &str, ttl_secs: u64, expires_at: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            reason: Some(format!("ttl_secs={ttl_secs} expires_at={expires_at}")),
+            ..Self::base("task_claim_created")
+        }
+    }
+
+    pub fn task_claim_progress(role: &str, task: &str, progress_type: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            reason: Some(progress_type.into()),
+            ..Self::base("task_claim_progress")
+        }
+    }
+
+    pub fn task_claim_warning(role: &str, task: &str, expires_in_secs: u64) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            reason: Some(format!("expires_in_secs={expires_in_secs}")),
+            ..Self::base("task_claim_warning")
+        }
+    }
+
+    pub fn task_claim_expired(role: &str, task: &str, reclaimed: bool) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            reason: Some(format!("reclaimed={reclaimed}")),
+            ..Self::base("task_claim_expired")
+        }
+    }
+
+    pub fn task_claim_extended(role: &str, task: &str, new_expires_at: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            reason: Some(format!("new_expires_at={new_expires_at}")),
+            ..Self::base("task_claim_extended")
+        }
+    }
+
     pub fn board_task_archived(task: &str, role: Option<&str>) -> Self {
         Self {
             role: role.map(str::to_string),
