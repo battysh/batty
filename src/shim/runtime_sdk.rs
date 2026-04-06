@@ -28,6 +28,7 @@ use super::sdk_types::{self, SdkControlResponse, SdkOutput, SdkUserMessage};
 
 const PROCESS_EXIT_POLL_MS: u64 = 100;
 const GROUP_TERM_GRACE_SECS: u64 = 2;
+const WORKING_READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -43,6 +44,10 @@ struct SdkState {
     accumulated_response: String,
     /// Message ID of the currently pending (in-flight) message.
     pending_message_id: Option<String>,
+    /// Role that sent the current in-flight message.
+    last_sent_message_from: Option<String>,
+    /// Preview of the last in-flight message body.
+    last_sent_message_preview: Option<String>,
     /// Messages queued while the agent is in Working state.
     message_queue: VecDeque<QueuedMessage>,
     /// Total bytes of response text received.
@@ -87,6 +92,8 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
         session_id: String::new(),
         accumulated_response: String::new(),
         pending_message_id: None,
+        last_sent_message_from: None,
+        last_sent_message_preview: None,
         message_queue: VecDeque::new(),
         cumulative_output_bytes: 0,
     }));
@@ -645,6 +652,8 @@ mod tests {
             session_id: String::new(),
             accumulated_response: String::new(),
             pending_message_id: None,
+            last_sent_message_from: None,
+            last_sent_message_preview: None,
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 0,
         };
