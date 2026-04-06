@@ -748,12 +748,13 @@ fn main() -> Result<()> {
                         println!("No task metrics recorded yet.");
                     } else {
                         println!(
-                            "{:<8} {:<20} {:<20} {:>7} {:>11} {:>10} {:>10}",
+                            "{:<8} {:<20} {:<20} {:>7} {:>11} {:>9} {:>10} {:>10}",
                             "TASK",
                             "STARTED",
                             "COMPLETED",
                             "RETRIES",
                             "ESCALATIONS",
+                            "CTX_RST",
                             "MERGE_SECS",
                             "CONFIDENCE"
                         );
@@ -775,12 +776,13 @@ fn main() -> Result<()> {
                                 .map(|c| format!("{:.2}", c))
                                 .unwrap_or_else(|| "-".to_string());
                             println!(
-                                "{:<8} {:<20} {:<20} {:>7} {:>11} {:>10} {:>10}",
+                                "{:<8} {:<20} {:<20} {:>7} {:>11} {:>9} {:>10} {:>10}",
                                 row.task_id,
                                 started,
                                 completed,
                                 row.retries,
                                 row.escalations,
+                                row.context_restart_count,
                                 merge,
                                 confidence
                             );

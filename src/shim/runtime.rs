@@ -60,8 +60,12 @@ const AUTO_COMMIT_TIMEOUT_SECS: u64 = 5;
 /// Capture a work summary (git diff + recent commits) and write it to
 /// a handoff file in the given worktree. Called before an agent restart
 /// so the new session can pick up where the old one left off.
-pub(crate) fn preserve_handoff(worktree: &Path, recent_output: Option<&str>) -> Result<()> {
-    let diff_stat = git_capture(worktree, &["diff", "--stat"]).unwrap_or_default();
+pub(crate) fn preserve_handoff(
+    worktree: &Path,
+    task: &crate::task::Task,
+    recent_output: Option<&str>,
+) -> Result<()> {
+    let changed_files = summarize_changed_files(worktree);
     let recent_commits = git_capture(worktree, &["log", "--oneline", "-5"]).unwrap_or_default();
     let tests_run = recent_output
         .map(extract_test_commands)
@@ -72,11 +76,15 @@ pub(crate) fn preserve_handoff(worktree: &Path, recent_output: Option<&str>) -> 
         .unwrap_or_default();
 
     let handoff = format!(
-        "# Handoff\n## Modified Files\n{}\n\n## Tests Run\n{}\n\n## Recent Activity\n{}\n\n## Recent Commits\n{}\n",
-        empty_section_fallback(&diff_stat),
+        "# Carry-Forward Summary\n## Task Spec\nTask #{}: {}\n\n{}\n\n## Work Completed So Far\n### Changed Files\n{}\n\n### Tests Run\n{}\n\n### Recent Activity\n{}\n\n### Recent Commits\n{}\n\n## What Remains\n{}\n",
+        task.id,
+        task.title,
+        empty_section_fallback(&task.description),
+        empty_section_fallback(&changed_files),
         empty_section_fallback(&tests_run),
         empty_section_fallback(&recent_activity),
-        empty_section_fallback(&recent_commits)
+        empty_section_fallback(&recent_commits),
+        handoff_remaining_work(task)
     );
     fs::write(worktree.join(HANDOFF_FILE_NAME), handoff)
         .with_context(|| format!("failed to write handoff file in {}", worktree.display()))?;
@@ -125,6 +133,33 @@ fn summarize_recent_activity(output: &str) -> String {
         .collect();
     let start = lines.len().saturating_sub(40);
     lines[start..].join("\n")
+}
+
+fn summarize_changed_files(worktree: &Path) -> String {
+    let mut files = Vec::new();
+    for args in [
+        &["diff", "--name-only"] as &[&str],
+        &["diff", "--cached", "--name-only"],
+        &["ls-files", "--others", "--exclude-standard"],
+    ] {
+        let Ok(output) = git_capture(worktree, args) else {
+            continue;
+        };
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !files.iter().any(|existing| existing == trimmed) {
+                files.push(trimmed.to_string());
+            }
+        }
+    }
+    files.join("\n")
+}
+
+fn handoff_remaining_work(task: &crate::task::Task) -> &str {
+    task.next_action
+        .as_deref()
+        .filter(|next| !next.trim().is_empty())
+        .unwrap_or("Continue from the current worktree state, verify acceptance criteria, and finish the task without redoing completed work.")
 }
 
 fn extract_test_commands(output: &str) -> Vec<String> {
@@ -1910,18 +1945,47 @@ mod tests {
 running cargo test --lib\n\
 test result: ok\n\
 editing src/lib.rs\n";
-        preserve_handoff(repo.path(), Some(recent_output)).unwrap();
+        let task = crate::task::Task {
+            id: 42,
+            title: "resume widget".to_string(),
+            status: "in-progress".to_string(),
+            priority: "high".to_string(),
+            claimed_by: Some("eng-1".to_string()),
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: Some("Run the Rust tests and finish the restart handoff.".to_string()),
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description: "Continue widget implementation.".to_string(),
+            batty_config: None,
+            source_path: repo.path().join("task-42.md"),
+        };
+        preserve_handoff(repo.path(), &task, Some(recent_output)).unwrap();
 
         let handoff = std::fs::read_to_string(repo.path().join(HANDOFF_FILE_NAME)).unwrap();
-        assert!(handoff.contains("# Handoff"));
-        assert!(handoff.contains("## Modified Files"));
+        assert!(handoff.contains("# Carry-Forward Summary"));
+        assert!(handoff.contains("## Task Spec"));
+        assert!(handoff.contains("Task #42: resume widget"));
+        assert!(handoff.contains("## Work Completed So Far"));
+        assert!(handoff.contains("### Changed Files"));
         assert!(handoff.contains("tracked.txt"));
-        assert!(handoff.contains("## Tests Run"));
+        assert!(handoff.contains("### Tests Run"));
         assert!(handoff.contains("cargo test --lib"));
-        assert!(handoff.contains("## Recent Activity"));
+        assert!(handoff.contains("### Recent Activity"));
         assert!(handoff.contains("editing src/lib.rs"));
-        assert!(handoff.contains("## Recent Commits"));
+        assert!(handoff.contains("### Recent Commits"));
         assert!(handoff.contains("initial commit"));
+        assert!(handoff.contains("## What Remains"));
+        assert!(handoff.contains("Run the Rust tests and finish the restart handoff."));
     }
 
     #[test]
@@ -1929,13 +1993,38 @@ editing src/lib.rs\n";
         let repo = tempfile::tempdir().unwrap();
         init_test_git_repo(repo.path());
 
-        preserve_handoff(repo.path(), None).unwrap();
+        let task = crate::task::Task {
+            id: 7,
+            title: "empty repo".to_string(),
+            status: "in-progress".to_string(),
+            priority: "low".to_string(),
+            claimed_by: Some("eng-1".to_string()),
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description: "No changes yet.".to_string(),
+            batty_config: None,
+            source_path: repo.path().join("task-7.md"),
+        };
+        preserve_handoff(repo.path(), &task, None).unwrap();
 
         let handoff = std::fs::read_to_string(repo.path().join(HANDOFF_FILE_NAME)).unwrap();
-        assert!(handoff.contains("## Modified Files\n(none)"));
-        assert!(handoff.contains("## Tests Run\n(none)"));
-        assert!(handoff.contains("## Recent Activity\n(none)"));
-        assert!(handoff.contains("## Recent Commits\n(none)"));
+        assert!(handoff.contains("### Changed Files\n(none)"));
+        assert!(handoff.contains("### Tests Run\n(none)"));
+        assert!(handoff.contains("### Recent Activity\n(none)"));
+        assert!(handoff.contains("### Recent Commits\n(none)"));
+        assert!(handoff.contains("## What Remains"));
     }
 
     #[test]

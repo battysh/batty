@@ -79,7 +79,7 @@ impl TeamDaemon {
         {
             let recent_output = self.capture_context_handoff_output(&pane_id);
             if let Err(error) =
-                crate::shim::runtime::preserve_handoff(&work_dir, recent_output.as_deref())
+                crate::shim::runtime::preserve_handoff(&work_dir, &task, recent_output.as_deref())
             {
                 warn!(
                     member = %member_name,
