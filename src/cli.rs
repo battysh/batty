@@ -70,6 +70,9 @@ pub enum Command {
         /// Emit machine-readable JSON output
         #[arg(long, default_value_t = false)]
         json: bool,
+        /// Include detailed telemetry-backed engineer profiles
+        #[arg(long, default_value_t = false)]
+        detail: bool,
     },
 
     /// Send a message to an agent role (human → agent injection)
@@ -1117,7 +1120,10 @@ mod tests {
     fn status_subcommand_defaults() {
         let cli = Cli::parse_from(["batty", "status"]);
         match cli.command {
-            Command::Status { json } => assert!(!json),
+            Command::Status { json, detail } => {
+                assert!(!json);
+                assert!(!detail);
+            }
             other => panic!("expected status command, got {other:?}"),
         }
     }
@@ -1126,7 +1132,22 @@ mod tests {
     fn status_subcommand_json_flag() {
         let cli = Cli::parse_from(["batty", "status", "--json"]);
         match cli.command {
-            Command::Status { json } => assert!(json),
+            Command::Status { json, detail } => {
+                assert!(json);
+                assert!(!detail);
+            }
+            other => panic!("expected status command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_subcommand_detail_flag() {
+        let cli = Cli::parse_from(["batty", "status", "--detail"]);
+        match cli.command {
+            Command::Status { json, detail } => {
+                assert!(!json);
+                assert!(detail);
+            }
             other => panic!("expected status command, got {other:?}"),
         }
     }
