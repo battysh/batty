@@ -1115,6 +1115,14 @@ mod tests {
                 .join("review_policy.md")
                 .exists()
         );
+        let manager_prompt =
+            std::fs::read_to_string(team_config_dir(tmp.path()).join("batty_manager.md")).unwrap();
+        let engineer_prompt =
+            std::fs::read_to_string(team_config_dir(tmp.path()).join("batty_engineer.md")).unwrap();
+        assert!(manager_prompt.contains("## Anti-Narration Rules"));
+        assert!(manager_prompt.contains("Run the control-plane commands directly."));
+        assert!(engineer_prompt.contains("## Anti-Narration Rules"));
+        assert!(engineer_prompt.contains("Execute commands directly."));
     }
 
     #[test]
