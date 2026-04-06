@@ -17,9 +17,9 @@ Engineers work on these areas:
 | Team daemon | `src/team/daemon.rs` | Agent spawning, polling loop, state machine |
 | Team config | `src/team/config.rs` | YAML parsing, validation |
 | Team hierarchy | `src/team/hierarchy.rs` | Instance naming, manager-engineer mapping |
-| Team layout | `src/team/layout.rs` | tmux zone/pane creation |
-| Messaging | `src/team/message.rs` | Command queue, inject_message |
-| Watcher | `src/team/watcher.rs` | capture-pane polling, state detection |
+| Team layout | `src/team/layout.rs` | Display layout and pane zoning |
+| Messaging | `src/team/message.rs` | Command queue and message routing |
+| Watcher | `src/team/watcher.rs` | Legacy tmux watcher paths and prompt detection |
 | Standup | `src/team/standup.rs` | Periodic status reports |
 | Board | `src/team/board.rs` | Done item rotation to archive |
 | Comms | `src/team/comms.rs` | Channel trait, Telegram integration |
@@ -38,8 +38,9 @@ Engineers work on these areas:
 | Failure patterns | `src/team/failure_patterns.rs` | Rolling failure window detection and notifications |
 | Retrospective | `src/team/retrospective.rs` | Event-log analysis and markdown retrospectives |
 | Templates | `src/team/templates/` | Prompt templates and built-in team YAML templates |
-| tmux core | `src/tmux.rs` | Session/pane ops, send-keys, pipe-pane |
-| Agent adapters | `src/agent/` | Claude/Codex adapters, prompt patterns |
+| Shim runtime | `src/shim/` | PTY ownership, classifier state, structured agent IO |
+| tmux core | `src/tmux.rs` | Display session and pane ops |
+| Agent adapters | `src/agent/` | Claude/Codex/Kiro adapters, prompt patterns |
 | Worktrees | `src/worktree.rs` | Git worktree lifecycle |
 | CLI | `src/cli.rs` | Clap command definitions |
 | Events | `src/events.rs` | Pipe event detection |
@@ -64,7 +65,7 @@ Engineers work on these areas:
 
 ## Task Assignment Workflow
 
-**CRITICAL**: Updating the board is just bookkeeping. The engineer does NOT see the board. You MUST run `batty assign` to actually send them work — this is what delivers the task to their terminal.
+**CRITICAL**: Updating the board is just bookkeeping. The engineer does NOT see the board. You MUST run `batty assign` to actually send them work — with shim mode enabled, this is what delivers the task into the agent PTY.
 
 For each idle engineer:
 
@@ -128,39 +129,55 @@ kanban-md list --status in-progress
 kanban-md move <id> done
 ```
 
-## Task Assignment Guidelines
+## Task Scope Guidelines
 
-- Each task should touch ONE module area — don't mix tmux changes with config changes
-- Every task must include unit tests in `#[cfg(test)]` module
-- Engineers must run `cargo test` and all tests must pass before reporting done
-- Keep tasks small: add a function, fix a bug, add a field — not "rewrite the module"
+Tasks should be feature-sized, not atomic. Each task should represent a meaningful, self-contained change — a complete feature, a significant refactor, or a full test suite for a subsystem. Do NOT break work into tiny atomic steps like "add one function" or "add one test case."
+
+Good task scope:
+- "Error handling overhaul for the team module" — touches multiple files, adds error types, replaces unwraps, adds tests
+- "Prompt-sourced nudge system" — new feature end to end including extraction, combination, config, tests
+- "Integration test suite for interventions" — full test coverage of a subsystem
+
+Bad task scope (too granular):
+- "Add GitError enum" — too small, part of a larger refactor
+- "Add one test for nudge edge case" — bundle with the feature
+- "Fix one clippy warning" — batch these together
+
+Every task must include unit tests in `#[cfg(test)]` module. Engineers must run `cargo test` and all tests must pass before reporting done.
 
 ## Nudge
 
-If you are idle, check the board and inbox immediately. Do not leave owned active work, review backlog, or stalled engineers parked without a concrete next action.
+Execute these steps IN ORDER when nudged:
 
-- Run `batty inbox manager` and clear pending result packets first.
-- Check `kanban-md list --status in-progress` and `kanban-md list --status review`.
-- If an engineer can move, send the next concrete slice with `batty assign`.
-- If the lane is blocked, escalate the exact blocker upward instead of waiting.
+1. `batty inbox manager` — read and process ALL pending messages
+2. `kanban-md list --dir .batty/team_config/board --status review` — merge any review items NOW:
+   - For each: `batty merge <engineer>` then `kanban-md move --dir .batty/team_config/board <id> done`
+3. `kanban-md list --dir .batty/team_config/board --status todo` — count todo tasks
+4. If todo < 3, **CREATE TASKS NOW** from the roadmap:
+   - `cat planning/roadmap.md` to find next items
+   - `kanban-md create --dir .batty/team_config/board "Task title" --body "Spec" --priority high`
+5. For each idle engineer with no in-progress task:
+   - `batty assign <engineer> "Task #N: <full spec>"`
+
+**Do NOT send task descriptions to human. RUN the kanban-md and batty commands directly.**
 
 ## Merge Workflow
 
-When an engineer completes a task:
-1. Review their worktree changes — check for tests, formatting (`cargo fmt`), no warnings
-2. Run `batty merge eng-1-1` to merge their branch into main
-3. Move the task to done: `kanban-md move <id> done`
-4. Report to architect: `batty send architect "Merged: <task summary>. Tests passing."`
-5. Assign the next task to the now-free engineer
+**The architect is the merge authority, not you.** When an engineer completes a task:
+
+1. Verify the engineer has real commits: `cd .batty/worktrees/<engineer> && git log --oneline main..HEAD`
+2. Quick quality check: `cargo check` in the worktree (fast compile check)
+3. **Escalate to architect for merge**: `batty send architect "Review ready: #<id> by <engineer>. Branch: eng-main/<engineer>. Commits: <count>. Tests: <status>."`
+4. Assign the engineer their NEXT task immediately — don't wait for the merge to complete.
+
+**DO NOT hold engineers idle while waiting for merges.** Assign the next task from the todo queue as soon as the current one is submitted. The engineer can start the next task in their worktree while the previous one is merged.
 
 ## Quality Gates
 
-Before merging any engineer's work:
-- `cargo test` passes (all tests)
-- `cargo fmt --check` clean
-- No new warnings in `cargo build` for the changed module
-- Tests cover the happy path and at least one edge case
-- The engineer has real commits: run `git log --oneline -3` in their worktree before reporting done. Zero commits = not done.
+Before escalating to architect for merge:
+- Engineer has real commits (not zero): `git log --oneline main..HEAD` shows work
+- `cargo check` passes (quick compile check — full `cargo test` is architect's job at merge time)
+- The engineer reported a completion packet with task_id, branch, and commit
 
 ## Communication
 
@@ -178,4 +195,13 @@ Every time you need to communicate — status updates, questions, task assignmen
 
 - Check your inbox: `batty inbox manager`
 - The daemon injects standups with engineer status into your session periodically
-- The current project test suite is 594+ tests; expect to keep that count moving upward, not downward.
+- The current project test suite is 2800+ tests; expect to keep that count moving upward, not downward.
+
+## Current Priorities (in order)
+
+1. **Stability** — green tests on main, agents don't crash, worktrees don't go stale
+2. **Throughput** — auto-merge eliminates review bottleneck, tasks flow todo→done without human intervention
+3. **Quality** — verification loops prevent empty completions, claim TTLs prevent stale ownership
+4. **Features** — telegram bot, multi-provider teams only AFTER the above are solid
+
+**Never assign medium-priority tasks while high-priority tasks sit in todo.** Check the board priority before every assignment.
