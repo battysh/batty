@@ -10,6 +10,7 @@ use serde_yaml::{Mapping, Value};
 use tracing::info;
 
 use super::errors::BoardError;
+use super::test_results::TestResults;
 use crate::task::{Task, load_tasks_from_dir};
 
 /// Workflow metadata stored in task frontmatter.
@@ -21,6 +22,7 @@ pub(crate) struct WorkflowMetadata {
     pub changed_paths: Vec<String>,
     pub tests_run: Option<bool>,
     pub tests_passed: Option<bool>,
+    pub test_results: Option<TestResults>,
     pub artifacts: Vec<String>,
     pub outcome: Option<String>,
     pub review_blockers: Vec<String>,
@@ -41,6 +43,8 @@ struct WorkflowFrontmatter {
     #[serde(default)]
     tests_passed: Option<bool>,
     #[serde(default)]
+    test_results: Option<TestResults>,
+    #[serde(default)]
     artifacts: Vec<String>,
     #[serde(default)]
     outcome: Option<String>,
@@ -57,6 +61,7 @@ impl From<WorkflowFrontmatter> for WorkflowMetadata {
             changed_paths: frontmatter.changed_paths,
             tests_run: frontmatter.tests_run,
             tests_passed: frontmatter.tests_passed,
+            test_results: frontmatter.test_results,
             artifacts: frontmatter.artifacts,
             outcome: frontmatter.outcome,
             review_blockers: frontmatter.review_blockers,
@@ -90,6 +95,7 @@ pub(crate) fn write_workflow_metadata(task_path: &Path, metadata: &WorkflowMetad
     set_string_list(&mut mapping, "changed_paths", &metadata.changed_paths);
     set_optional_bool(&mut mapping, "tests_run", metadata.tests_run);
     set_optional_bool(&mut mapping, "tests_passed", metadata.tests_passed);
+    set_optional_value(&mut mapping, "test_results", metadata.test_results.as_ref())?;
     set_string_list(&mut mapping, "artifacts", &metadata.artifacts);
     set_optional_string(&mut mapping, "outcome", metadata.outcome.as_deref());
     set_string_list(&mut mapping, "review_blockers", &metadata.review_blockers);
@@ -505,6 +511,26 @@ fn set_string_list(mapping: &mut Mapping, key: &str, values: &[String]) {
     );
 }
 
+fn set_optional_value<T>(mapping: &mut Mapping, key: &str, value: Option<&T>) -> Result<()>
+where
+    T: serde::Serialize,
+{
+    let key = yaml_key(key);
+    match value {
+        Some(value) => {
+            mapping.insert(
+                key,
+                serde_yaml::to_value(value)
+                    .context("failed to serialize workflow metadata value")?,
+            );
+        }
+        None => {
+            mapping.remove(&key);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,6 +662,10 @@ mod tests {
         assert_eq!(metadata.changed_paths, vec!["src/team/completion.rs"]);
         assert_eq!(metadata.tests_run, Some(true));
         assert_eq!(metadata.tests_passed, Some(false));
+        assert_eq!(
+            metadata.test_results.as_ref().map(|results| results.failed),
+            None
+        );
         assert_eq!(metadata.artifacts, vec!["docs/workflow.md"]);
         assert_eq!(metadata.outcome.as_deref(), Some("ready_for_review"));
         assert_eq!(metadata.review_blockers, vec!["missing screenshots"]);
@@ -658,6 +688,19 @@ mod tests {
             changed_paths: vec!["src/team/completion.rs".to_string()],
             tests_run: Some(true),
             tests_passed: Some(true),
+            test_results: Some(TestResults {
+                framework: "cargo".to_string(),
+                total: Some(3),
+                passed: 2,
+                failed: 1,
+                ignored: 0,
+                failures: vec![super::super::test_results::TestFailure {
+                    test_name: "tests::fails".to_string(),
+                    message: Some("assertion failed".to_string()),
+                    location: Some("src/team/completion.rs:10".to_string()),
+                }],
+                summary: Some("test result: FAILED. 2 passed; 1 failed; 0 ignored;".to_string()),
+            }),
             artifacts: vec!["docs/workflow.md".to_string()],
             outcome: Some("ready_for_review".to_string()),
             review_blockers: vec!["missing screenshots".to_string()],
@@ -670,6 +713,7 @@ mod tests {
         assert!(content.contains("branch: eng-1-4/task-27"));
         assert!(content.contains("tests_run: true"));
         assert!(content.contains("tests_passed: true"));
+        assert!(content.contains("test_results:"));
         assert!(content.contains("review_blockers:"));
         assert!(content.contains("Task body."));
         assert_eq!(read_workflow_metadata(&task).unwrap(), metadata);
@@ -694,6 +738,7 @@ mod tests {
         assert!(!content.contains("changed_paths:"));
         assert!(!content.contains("tests_run:"));
         assert!(!content.contains("tests_passed:"));
+        assert!(!content.contains("test_results:"));
         assert!(!content.contains("artifacts:"));
         assert!(!content.contains("outcome:"));
         assert!(!content.contains("review_blockers:"));
