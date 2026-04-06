@@ -57,6 +57,9 @@ use crate::agent::{self, BackendHealth};
 use crate::tmux;
 use dispatch::DispatchQueueEntry;
 
+const STALLED_MID_TURN_MARKER: &str = "stalled mid-turn";
+const STALLED_MID_TURN_RETRY_BACKOFF_SECS: [u64; 2] = [30, 60];
+
 #[path = "daemon/agent_handle.rs"]
 pub(super) mod agent_handle;
 #[path = "daemon/automation.rs"]
@@ -100,13 +103,13 @@ pub(crate) mod verification;
 
 #[cfg(test)]
 use self::dispatch::normalized_assignment_dir;
+pub(crate) use self::error_handling::{optional_subsystem_for_step, optional_subsystem_names};
 use self::helpers::{extract_nudge_section, role_prompt_path};
 use self::hot_reload::consume_hot_reload_marker;
 #[cfg(test)]
 use self::hot_reload::{
     BinaryFingerprint, hot_reload_daemon_args, hot_reload_marker_path, write_hot_reload_marker,
 };
-pub(crate) use self::error_handling::{optional_subsystem_for_step, optional_subsystem_names};
 pub(crate) use self::interventions::NudgeSchedule;
 use self::interventions::OwnedTaskInterventionState;
 use self::launcher::{
@@ -361,10 +364,8 @@ impl TeamDaemon {
             .team_config
             .workflow_policy
             .narration_detection_enabled;
-        let narration_threshold_polls = config
-            .team_config
-            .workflow_policy
-            .narration_threshold_polls;
+        let narration_threshold_polls =
+            config.team_config.workflow_policy.narration_threshold_polls;
 
         let states = HashMap::new();
 
@@ -1003,6 +1004,62 @@ impl TeamDaemon {
         *count
     }
 
+    pub(super) fn response_is_stalled_mid_turn(&self, response: &str) -> bool {
+        response
+            .lines()
+            .next()
+            .is_some_and(|line| line.contains(STALLED_MID_TURN_MARKER))
+    }
+
+    pub(super) fn handle_stalled_mid_turn_completion(
+        &mut self,
+        member_name: &str,
+        response: &str,
+    ) -> Result<bool> {
+        if !self.response_is_stalled_mid_turn(response) {
+            return Ok(false);
+        }
+
+        let attempt = self.increment_retry(member_name);
+        if let Some(backoff_secs) = stalled_mid_turn_backoff_secs(attempt) {
+            warn!(
+                member = member_name,
+                attempt,
+                backoff_secs,
+                "shim reported stalled mid-turn completion; retrying after backoff"
+            );
+            self.record_orchestrator_action(format!(
+                "stall: shim reported stalled mid-turn for {member_name}; retry {attempt} after {backoff_secs}s"
+            ));
+            sleep_stalled_mid_turn_backoff(Duration::from_secs(backoff_secs));
+
+            let retry_notice = format!(
+                "Claude SDK stalled mid-turn and Batty released the stuck turn. Waited {backoff_secs}s before retrying.\n{response}\n\nContinue from the current worktree state. Do not restart or discard prior work unless the task requires it."
+            );
+            self.queue_message("daemon", member_name, &retry_notice)?;
+            self.mark_member_working(member_name);
+            return Ok(true);
+        }
+
+        warn!(
+            member = member_name,
+            attempt, "shim reported stalled mid-turn completion; restarting agent"
+        );
+        self.record_orchestrator_action(format!(
+            "stall: shim reported stalled mid-turn for {member_name}; restarting on attempt {attempt}"
+        ));
+        self.restart_member_with_task_context(member_name, "stalled mid-turn")?;
+        if let Some(task_id) = self.active_task_id(member_name) {
+            self.record_agent_restarted(
+                member_name,
+                task_id.to_string(),
+                "stalled_mid_turn",
+                attempt,
+            );
+        }
+        Ok(true)
+    }
+
     pub(super) fn clear_active_task(&mut self, engineer: &str) {
         if let Some(task_id) = self.active_tasks.remove(engineer) {
             self.narration_rejection_counts.remove(&task_id);
@@ -1065,6 +1122,77 @@ impl TeamDaemon {
     }
 }
 
+fn stalled_mid_turn_backoff_secs(attempt: u32) -> Option<u64> {
+    STALLED_MID_TURN_RETRY_BACKOFF_SECS
+        .get(attempt.saturating_sub(1) as usize)
+        .copied()
+}
+
+#[cfg(not(test))]
+fn sleep_stalled_mid_turn_backoff(duration: Duration) {
+    std::thread::sleep(duration);
+}
+
+#[cfg(test)]
+fn sleep_stalled_mid_turn_backoff(_duration: Duration) {}
+
 #[cfg(test)]
 #[path = "daemon/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod stalled_mid_turn_tests {
+    use super::*;
+    use crate::team::inbox;
+    use crate::team::test_support::{TestDaemonBuilder, engineer_member, write_owned_task_file};
+
+    #[test]
+    fn stalled_mid_turn_backoff_schedule_matches_task_requirements() {
+        assert_eq!(stalled_mid_turn_backoff_secs(1), Some(30));
+        assert_eq!(stalled_mid_turn_backoff_secs(2), Some(60));
+        assert_eq!(stalled_mid_turn_backoff_secs(3), None);
+    }
+
+    #[test]
+    fn stalled_mid_turn_detection_matches_marker_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        assert!(daemon.response_is_stalled_mid_turn(
+            "stalled mid-turn: no stdout from Claude SDK for 120s while working."
+        ));
+        assert!(!daemon.response_is_stalled_mid_turn("normal completion"));
+    }
+
+    #[test]
+    fn stalled_mid_turn_first_retry_requeues_message_after_backoff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member_name = "eng-1";
+        write_owned_task_file(tmp.path(), 42, "sdk-stall", "in-progress", member_name);
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, member_name).unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![engineer_member(member_name, Some("manager"), true)])
+            .build();
+        daemon.active_tasks.insert(member_name.to_string(), 42);
+
+        let handled = daemon
+            .handle_stalled_mid_turn_completion(
+                member_name,
+                "stalled mid-turn: no stdout from Claude SDK for 120s while working.\nlast_sent_message_from: manager",
+            )
+            .unwrap();
+
+        assert!(handled);
+        assert_eq!(daemon.retry_count_for_test(member_name), Some(1));
+        assert_eq!(
+            daemon.member_state_for_test(member_name),
+            Some(MemberState::Working)
+        );
+
+        let inbox_entries = inbox::pending_messages(&inbox_root, member_name).unwrap();
+        assert_eq!(inbox_entries.len(), 1);
+        assert!(inbox_entries[0].body.contains("Waited 30s before retrying"));
+        assert!(inbox_entries[0].body.contains("stalled mid-turn"));
+    }
+}

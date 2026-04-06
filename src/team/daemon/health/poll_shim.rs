@@ -270,6 +270,10 @@ impl TeamDaemon {
                 self.update_automation_timers_for_state(member_name, MemberState::Idle);
                 self.maybe_persist_member_session_id(member_name);
 
+                if self.handle_stalled_mid_turn_completion(member_name, &response)? {
+                    return Ok(());
+                }
+
                 let is_architect = self
                     .config
                     .members
