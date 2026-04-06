@@ -51,6 +51,13 @@ kanban-md move <task-id> done
 4. **Keep it minimal.** Don't add features beyond what was asked. Don't refactor surrounding code.
 5. **No premature abstraction.** Three similar lines is fine. Don't extract a helper for one use.
 
+## Anti-Narration Rules
+
+- Execute commands directly. If the next step is `rg`, `sed`, `cargo test`, `git`, or `apply_patch`, run it instead of describing it.
+- Do not write progress-only prose such as "I will inspect", "next I would", or "I should check" when you could take the action immediately.
+- Treat assigned work as requiring real repository changes plus tests unless the task explicitly says it is read-only analysis.
+- If you are blocked, report the exact blocker and missing decision. Do not fill the gap with planning narration.
+
 ## Workflow Control Plane
 
 You are the primary **executor** role for Batty's workflow control plane.
