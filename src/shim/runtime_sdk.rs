@@ -496,6 +496,7 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                 body,
                 message_id,
             } => {
+                let delivery_id = message_id.clone();
                 last_keepalive = Instant::now();
                 let mut st = state_cmd.lock().unwrap();
                 match st.state {
@@ -515,6 +516,12 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
 
                         if let Ok(mut writer) = stdin_writer.lock() {
                             if let Err(e) = writeln!(writer, "{ndjson}") {
+                                if let Some(id) = delivery_id {
+                                    cmd_channel.send(&Event::DeliveryFailed {
+                                        id,
+                                        reason: format!("stdin write failed: {e}"),
+                                    })?;
+                                }
                                 cmd_channel.send(&Event::Error {
                                     command: "SendMessage".into(),
                                     reason: format!("stdin write failed: {e}"),
@@ -524,6 +531,9 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                             let _ = writer.flush();
                         }
 
+                        if let Some(id) = delivery_id {
+                            cmd_channel.send(&Event::MessageDelivered { id })?;
+                        }
                         cmd_channel.send(&Event::StateChanged {
                             from: ShimState::Idle,
                             to: ShimState::Working,

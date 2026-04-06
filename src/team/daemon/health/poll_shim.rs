@@ -241,6 +241,22 @@ impl TeamDaemon {
                 }
             }
 
+            Event::MessageDelivered { id } => {
+                let _ = append_shim_event_log(
+                    &self.config.project_root,
+                    member_name,
+                    &format!("<- message_delivered id={id}"),
+                );
+                if let Some(handle) = self.shim_handles.get_mut(member_name) {
+                    handle.record_activity();
+                }
+                debug!(
+                    member = member_name,
+                    message_id = id,
+                    "shim delivered message"
+                );
+            }
+
             Event::Completion {
                 message_id: _,
                 response,
@@ -441,6 +457,23 @@ impl TeamDaemon {
                     );
                     self.surface_shim_stall_warning(member_name, &message, idle_secs);
                 }
+            }
+
+            Event::DeliveryFailed { id, reason } => {
+                let _ = append_shim_event_log(
+                    &self.config.project_root,
+                    member_name,
+                    &format!("<- delivery_failed id={id}: {reason}"),
+                );
+                if let Some(handle) = self.shim_handles.get_mut(member_name) {
+                    handle.record_activity();
+                }
+                warn!(
+                    member = member_name,
+                    message_id = id,
+                    reason = reason.as_str(),
+                    "shim failed to deliver message"
+                );
             }
 
             Event::ScreenCapture { .. } | Event::State { .. } => {

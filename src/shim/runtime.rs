@@ -1156,6 +1156,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                 body,
                 message_id,
             } => {
+                let delivery_id = message_id.clone();
                 let mut inner = inner_cmd.lock().unwrap();
                 match inner.state {
                     ShimState::Idle => {
@@ -1174,6 +1175,12 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                             injected.as_bytes(),
                             enter.as_bytes(),
                         ) {
+                            if let Some(id) = delivery_id {
+                                cmd_channel.send(&Event::DeliveryFailed {
+                                    id,
+                                    reason: format!("PTY write failed: {e}"),
+                                })?;
+                            }
                             cmd_channel.send(&Event::Error {
                                 command: "SendMessage".into(),
                                 reason: format!("PTY write failed: {e}"),
@@ -1189,6 +1196,9 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                         let summary = inner.last_n_lines(3);
                         drop(inner);
 
+                        if let Some(id) = delivery_id {
+                            cmd_channel.send(&Event::MessageDelivered { id })?;
+                        }
                         cmd_channel.send(&Event::StateChanged {
                             from: old,
                             to: ShimState::Working,
