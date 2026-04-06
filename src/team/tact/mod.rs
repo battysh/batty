@@ -6,6 +6,15 @@ use anyhow::Result;
 pub mod parser;
 pub mod prompt;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TactPrompt {
+    pub board_summary: String,
+    pub recent_completions: Vec<String>,
+    pub roadmap_priorities: Vec<String>,
+    pub idle_count: usize,
+    pub todo_count: usize,
+}
+
 /// A parsed task specification from the architect's planning response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskSpec {
@@ -29,6 +38,18 @@ pub fn dispatchable_task_count(
 
 pub fn should_trigger_planning_cycle(idle_engineers: usize, dispatchable_tasks: usize) -> bool {
     idle_engineers > dispatchable_tasks
+}
+
+pub fn should_trigger(idle_engineers: usize, todo_tasks: usize) -> bool {
+    should_trigger_planning_cycle(idle_engineers, todo_tasks)
+}
+
+pub fn compose_prompt(ctx: &TactPrompt) -> String {
+    prompt::compose_prompt(ctx)
+}
+
+pub fn parse_task_specs(response: &str) -> Vec<TaskSpec> {
+    parser::parse_task_specs(response)
 }
 
 pub fn planning_cycle_ready(
@@ -117,5 +138,20 @@ roles:
 
         let count = dispatchable_task_count(board_dir, &solo_members()).unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_should_trigger_true() {
+        assert!(should_trigger(3, 1));
+    }
+
+    #[test]
+    fn test_should_trigger_false() {
+        assert!(!should_trigger(1, 3));
+    }
+
+    #[test]
+    fn test_should_trigger_equal() {
+        assert!(!should_trigger(2, 2));
     }
 }

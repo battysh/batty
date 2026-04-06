@@ -80,6 +80,38 @@ pub fn parse_planning_response(response: &str) -> Vec<TaskSpec> {
     specs
 }
 
+pub fn parse_task_specs(response: &str) -> Vec<TaskSpec> {
+    parse_planning_response(response)
+}
+
+fn build_create_task_args(spec: &TaskSpec) -> Vec<String> {
+    let mut args = vec![
+        "create".to_string(),
+        spec.title.clone(),
+        "--body".to_string(),
+        spec.body.clone(),
+    ];
+    if let Some(priority) = spec.priority.as_deref() {
+        args.push("--priority".to_string());
+        args.push(priority.to_string());
+    }
+    if !spec.tags.is_empty() {
+        args.push("--tags".to_string());
+        args.push(spec.tags.join(","));
+    }
+    if !spec.depends_on.is_empty() {
+        args.push("--depends-on".to_string());
+        args.push(
+            spec.depends_on
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+    args
+}
+
 /// Create board tasks from parsed specs by shelling out to kanban-md.
 pub fn create_board_tasks(specs: &[TaskSpec], board_dir: &Path) -> Result<Vec<u32>> {
     if !board_dir.exists() {
@@ -88,33 +120,16 @@ pub fn create_board_tasks(specs: &[TaskSpec], board_dir: &Path) -> Result<Vec<u3
 
     let mut created_ids = Vec::with_capacity(specs.len());
     for spec in specs {
-        let depends_on = if spec.depends_on.is_empty() {
-            None
-        } else {
-            Some(
-                spec.depends_on
-                    .iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(","),
-            )
-        };
-        let tags = if spec.tags.is_empty() {
-            None
-        } else {
-            Some(spec.tags.join(","))
-        };
+        let args = build_create_task_args(spec);
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = board_cmd::run_board(board_dir, &arg_refs)
+            .with_context(|| format!("failed to create board task '{}'", spec.title))?;
 
-        let task_id = board_cmd::create_task(
-            board_dir,
-            &spec.title,
-            &spec.body,
-            spec.priority.as_deref(),
-            tags.as_deref(),
-            depends_on.as_deref(),
-        )
-        .with_context(|| format!("failed to create board task '{}'", spec.title))?;
-
+        let task_id = output
+            .stdout
+            .trim()
+            .strip_prefix("Created task #")
+            .unwrap_or(output.stdout.trim());
         let parsed_id = task_id
             .parse::<u32>()
             .with_context(|| format!("invalid task id returned by kanban-md: '{task_id}'"))?;
@@ -163,6 +178,19 @@ Implement parser logic."#;
     }
 
     #[test]
+    fn test_parse_task_specs_single() {
+        let response = r#"---
+title: "Add tact parser"
+priority: high
+---
+Implement parser logic."#;
+
+        let specs = parse_task_specs(response);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].title, "Add tact parser");
+    }
+
+    #[test]
     fn parse_multiple_tasks() {
         let response = r#"---
 title: "Task one"
@@ -188,6 +216,23 @@ Body three."#;
     }
 
     #[test]
+    fn test_parse_task_specs_multiple() {
+        let response = r#"---
+title: "Task one"
+priority: low
+---
+Body one.
+---
+title: "Task two"
+priority: medium
+---
+Body two."#;
+
+        let specs = parse_task_specs(response);
+        assert_eq!(specs.len(), 2);
+    }
+
+    #[test]
     fn parse_with_dependencies() {
         let response = r#"---
 title: "Dependent task"
@@ -197,6 +242,18 @@ Body."#;
 
         let specs = parse_planning_response(response);
         assert_eq!(specs[0].depends_on, vec![1, 2, 8]);
+    }
+
+    #[test]
+    fn test_parse_task_specs_with_depends() {
+        let response = r#"---
+title: "Dependent task"
+depends_on: [42]
+---
+Body."#;
+
+        let specs = parse_task_specs(response);
+        assert_eq!(specs[0].depends_on, vec![42]);
     }
 
     #[test]
@@ -225,6 +282,12 @@ Second body."#;
     fn parse_empty_response() {
         assert!(parse_planning_response("").is_empty());
         assert!(parse_planning_response("   \n\t").is_empty());
+    }
+
+    #[test]
+    fn test_parse_task_specs_empty() {
+        assert!(parse_task_specs("").is_empty());
+        assert!(parse_task_specs("garbage").is_empty());
     }
 
     #[test]
@@ -292,5 +355,31 @@ No title here."#;
         let tmp = tempfile::tempdir().unwrap();
         let error = create_board_tasks(&specs, &tmp.path().join("missing")).unwrap_err();
         assert!(error.to_string().contains("board directory does not exist"),);
+    }
+
+    #[test]
+    fn test_create_board_tasks_formats_command() {
+        let args = build_create_task_args(&TaskSpec {
+            title: "Plan tact".into(),
+            body: "Create the daemon prompt.".into(),
+            priority: Some("high".into()),
+            depends_on: vec![17],
+            tags: vec!["tact".into(), "daemon".into()],
+        });
+        assert_eq!(
+            args,
+            vec![
+                "create",
+                "Plan tact",
+                "--body",
+                "Create the daemon prompt.",
+                "--priority",
+                "high",
+                "--tags",
+                "tact,daemon",
+                "--depends-on",
+                "17",
+            ]
+        );
     }
 }

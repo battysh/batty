@@ -903,7 +903,7 @@ impl TeamDaemon {
         Ok(())
     }
 
-    pub(super) fn maybe_trigger_planning_cycle(&mut self) -> Result<()> {
+    pub(super) fn tact_check(&mut self) -> Result<()> {
         let cooldown = Duration::from_secs(
             self.config
                 .team_config
@@ -927,6 +927,10 @@ impl TeamDaemon {
         let idle_engineer_count = self.truly_idle_engineer_count(&board_tasks);
         let dispatchable_task_count =
             crate::team::tact::dispatchable_task_count(&board_dir, &self.config.members)?;
+        let todo_count = board_tasks.iter().filter(|task| task.status == "todo").count();
+        if !crate::team::tact::should_trigger(idle_engineer_count, todo_count) {
+            return Ok(());
+        }
         if !crate::team::tact::planning_cycle_ready(
             self.planning_cycle_active,
             self.planning_cycle_last_fired,
@@ -975,6 +979,13 @@ impl TeamDaemon {
         })
         .collect::<Vec<_>>();
         let (roadmap_context, project_goals) = planning_prompt_context(&self.config.project_root);
+        let tact_prompt = crate::team::tact::TactPrompt {
+            board_summary: board_summary.clone(),
+            recent_completions: recent_completions.clone(),
+            roadmap_priorities: roadmap_context.clone(),
+            idle_count: idle_engineer_count,
+            todo_count,
+        };
         let prompt = crate::team::tact::compose_planning_prompt(
             idle_engineer_count,
             &board_summary,
@@ -1007,10 +1018,18 @@ impl TeamDaemon {
             "triggered planning cycle"
         );
         self.record_orchestrator_action(format!(
-            "planning: triggered planning cycle for {} (idle={}, dispatchable={})",
-            architect, idle_engineer_count, dispatchable_task_count
+            "planning: triggered planning cycle for {} (idle={}, dispatchable={})\n{}",
+            architect,
+            idle_engineer_count,
+            dispatchable_task_count,
+            crate::team::tact::compose_prompt(&tact_prompt)
         ));
         Ok(())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn maybe_trigger_planning_cycle(&mut self) -> Result<()> {
+        self.tact_check()
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
