@@ -45,6 +45,13 @@ pub struct ValidationCheck {
 }
 
 impl TeamConfig {
+    pub fn resolve_claude_auth(&self, role: &RoleDef) -> ClaudeAuth {
+        ClaudeAuth {
+            mode: role.auth_mode.unwrap_or_default(),
+            env: role.auth_env.clone(),
+        }
+    }
+
     pub fn role_def(&self, role_name: &str) -> Option<&RoleDef> {
         self.roles.iter().find(|role| role.name == role_name)
     }
@@ -197,6 +204,31 @@ impl TeamConfig {
                     agent_name,
                     valid_agents
                 );
+            }
+
+            let effective_agent = role.agent.as_deref().or(self.agent.as_deref());
+            if (role.auth_mode.is_some() || !role.auth_env.is_empty())
+                && !matches!(effective_agent, Some("claude" | "claude-code"))
+            {
+                bail!(
+                    "role '{}' configures Claude auth but effective agent is not claude",
+                    role.name
+                );
+            }
+            if role.auth_mode != Some(ClaudeAuthMode::Custom) && !role.auth_env.is_empty() {
+                bail!(
+                    "role '{}' sets auth_env but auth_mode is not 'custom'",
+                    role.name
+                );
+            }
+            for env_name in &role.auth_env {
+                if !is_valid_env_name(env_name) {
+                    bail!(
+                        "role '{}' has invalid auth_env entry '{}'; expected shell env name",
+                        role.name,
+                        env_name
+                    );
+                }
             }
         }
 
@@ -473,6 +505,21 @@ impl TeamConfig {
             })
             .collect()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeAuth {
+    pub mode: ClaudeAuthMode,
+    pub env: Vec<String>,
+}
+
+fn is_valid_env_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) if first == '_' || first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 pub fn load_planning_directive(

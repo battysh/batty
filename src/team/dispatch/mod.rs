@@ -26,6 +26,7 @@ use super::launcher::{
 };
 use super::*;
 use crate::team::append_shim_event_log;
+use crate::team::config::{ClaudeAuth, ClaudeAuthMode};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -242,6 +243,14 @@ impl TeamDaemon {
         let role_context = member
             .as_ref()
             .map(|m| strip_nudge_section(&self.load_prompt(m, &team_config_dir)));
+        let claude_auth = member
+            .as_ref()
+            .and_then(|m| self.config.team_config.role_def(&m.role_name))
+            .map(|role| self.config.team_config.resolve_claude_auth(role))
+            .unwrap_or(ClaudeAuth {
+                mode: ClaudeAuthMode::default(),
+                env: Vec::new(),
+            });
         let normalized_agent = canonical_agent_name(agent_name);
         let session_id = new_member_session_id(&normalized_agent);
 
@@ -250,6 +259,7 @@ impl TeamDaemon {
         let short_cmd = write_launch_script(
             engineer,
             agent_name,
+            &claude_auth,
             task,
             role_context.as_deref(),
             &work_dir,
