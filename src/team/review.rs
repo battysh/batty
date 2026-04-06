@@ -2,8 +2,10 @@
 
 //! Review and merge transitions for Batty-managed workflow metadata.
 
+use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use super::workflow::{ReviewDisposition, TaskState, WorkflowMeta, can_transition};
@@ -91,6 +93,69 @@ pub fn validate_review_readiness(meta: &WorkflowMeta) -> Result<(), String> {
             meta.state
         ))
     }
+}
+
+pub(crate) fn task_reference_mismatch_blockers(
+    expected_task_id: u32,
+    branch_name: &str,
+    commit_messages: &[String],
+) -> Vec<String> {
+    let branch_task_ids = extract_task_ids(branch_name);
+    let commit_task_ids = commit_messages
+        .iter()
+        .flat_map(|message| extract_task_ids(message))
+        .collect::<BTreeSet<_>>();
+    let mut blockers = Vec::new();
+
+    if !branch_task_ids.is_empty() && !branch_task_ids.contains(&expected_task_id) {
+        blockers.push(format!(
+            "branch `{branch_name}` references task(s) {} but assigned task is #{expected_task_id}",
+            format_task_id_list(&branch_task_ids)
+        ));
+    }
+
+    if !commit_task_ids.is_empty() && !commit_task_ids.contains(&expected_task_id) {
+        blockers.push(format!(
+            "commit messages reference task(s) {} but assigned task is #{expected_task_id}",
+            format_task_id_list(&commit_task_ids)
+        ));
+    }
+
+    blockers
+}
+
+fn extract_task_ids(text: &str) -> BTreeSet<u32> {
+    let mut ids = BTreeSet::new();
+    let hash_pattern = Regex::new(r"(?i)#(\d+)\b").expect("hash task id regex should compile");
+    let task_pattern =
+        Regex::new(r"(?i)\btask[-_ /]?(\d+)\b").expect("task task id regex should compile");
+
+    for captures in hash_pattern.captures_iter(text) {
+        if let Some(id) = captures
+            .get(1)
+            .and_then(|value| value.as_str().parse::<u32>().ok())
+        {
+            ids.insert(id);
+        }
+    }
+    for captures in task_pattern.captures_iter(text) {
+        if let Some(id) = captures
+            .get(1)
+            .and_then(|value| value.as_str().parse::<u32>().ok())
+        {
+            ids.insert(id);
+        }
+    }
+
+    ids
+}
+
+fn format_task_id_list(task_ids: &BTreeSet<u32>) -> String {
+    task_ids
+        .iter()
+        .map(|task_id| format!("#{task_id}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -217,5 +282,44 @@ mod tests {
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains("\"disposition\":\"merge_ready\""));
         assert!(json.contains("\"reviewed_at\":1700000000"));
+    }
+
+    #[test]
+    fn task_reference_mismatch_detects_branch_and_commit_ids() {
+        let blockers = task_reference_mismatch_blockers(
+            497,
+            "eng-1-1/task-449",
+            &[
+                "Task #449: implement wrong fix".to_string(),
+                "follow-up for task-449".to_string(),
+            ],
+        );
+
+        assert_eq!(blockers.len(), 2);
+        assert!(blockers[0].contains("assigned task is #497"));
+        assert!(blockers[0].contains("#449"));
+        assert!(blockers[1].contains("commit messages"));
+    }
+
+    #[test]
+    fn task_reference_mismatch_allows_expected_task_id() {
+        let blockers = task_reference_mismatch_blockers(
+            497,
+            "eng-1-1/task-497",
+            &[
+                "Task #497: implement expected fix".to_string(),
+                "follow-up for task-497".to_string(),
+            ],
+        );
+
+        assert!(blockers.is_empty());
+    }
+
+    #[test]
+    fn task_reference_mismatch_ignores_unlabeled_commits() {
+        let blockers =
+            task_reference_mismatch_blockers(497, "eng-1-1", &["refactor review flow".to_string()]);
+
+        assert!(blockers.is_empty());
     }
 }
