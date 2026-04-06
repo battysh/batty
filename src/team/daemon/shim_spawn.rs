@@ -84,6 +84,9 @@ fn query_pane_size(member_name: &str) -> Option<(u16, u16)> {
 
 /// Resolve the path to the `batty` binary.
 fn batty_binary() -> String {
+    if let Some(path) = std::env::var_os("BATTY_BINARY_PATH") {
+        return path.to_string_lossy().into_owned();
+    }
     std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(String::from))
