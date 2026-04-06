@@ -3,8 +3,8 @@ use batty_cli::{
     agent,
     cli::{
         self, AutoMergeAction, BoardCommand, Cli, Command, DepsFormatArg, GrafanaCommand,
-        InboxCommand, NudgeCommand, ResearchCommand, ResearchFormatArg, ResearchKeepPolicyArg,
-        ReviewDispositionArg, TaskCommand, TaskStateArg,
+        InboxCommand, NudgeCommand, OpenClawCommand, OpenClawFollowUpCommand, ResearchCommand,
+        ResearchFormatArg, ResearchKeepPolicyArg, ReviewDispositionArg, TaskCommand, TaskStateArg,
     },
     team,
 };
@@ -359,6 +359,25 @@ fn main() -> Result<()> {
         Command::Status { json, detail } => {
             team::team_status(&root, json, detail)?;
         }
+
+        Command::OpenClaw { command } => match command {
+            OpenClawCommand::Register { force } => {
+                let path = team::openclaw::register_project(&root, force)?;
+                println!("OpenClaw project config written to {}", path.display());
+            }
+            OpenClawCommand::Status { json } => {
+                team::openclaw::openclaw_status(&root, json)?;
+            }
+            OpenClawCommand::Instruct { role, message } => {
+                team::openclaw::send_openclaw_instruction(&root, &role, &message)?;
+                println!("OpenClaw instruction queued for {role}.");
+            }
+            OpenClawCommand::FollowUp { command } => match command {
+                OpenClawFollowUpCommand::Run { json } => {
+                    team::openclaw::run_follow_ups(&root, json)?;
+                }
+            },
+        },
 
         Command::Watchdog {
             project_root,
