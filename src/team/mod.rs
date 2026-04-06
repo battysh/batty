@@ -56,6 +56,7 @@ pub mod parity;
 pub mod policy;
 pub mod prompt_compose;
 pub mod resolver;
+pub mod reload;
 pub mod retrospective;
 pub mod retry;
 pub mod review;
