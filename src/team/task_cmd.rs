@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -162,6 +162,42 @@ pub(crate) fn reclaim_task_claim(board_dir: &Path, task_id: u32, next_action: &s
         set_status(mapping, TaskState::Todo);
     })?;
     Ok(())
+}
+
+pub(crate) fn append_task_dependencies(
+    board_dir: &Path,
+    task_id: u32,
+    dependency_ids: &[u32],
+) -> Result<Vec<u32>> {
+    let task_path = find_task_path(board_dir, task_id)?;
+    let mut merged = Vec::new();
+    update_task_frontmatter(&task_path, |mapping| {
+        let key = yaml_key("depends_on");
+        let mut deps = BTreeSet::new();
+        if let Some(Value::Sequence(existing)) = mapping.get(&key) {
+            for value in existing {
+                if let Some(dep_id) = value.as_u64() {
+                    deps.insert(dep_id as u32);
+                }
+            }
+        }
+        deps.extend(dependency_ids.iter().copied());
+        merged = deps.iter().copied().collect();
+        if merged.is_empty() {
+            mapping.remove(key);
+        } else {
+            mapping.insert(
+                key,
+                Value::Sequence(
+                    merged
+                        .iter()
+                        .map(|dep_id| Value::Number((*dep_id as u64).into()))
+                        .collect(),
+                ),
+            );
+        }
+    })?;
+    Ok(merged)
 }
 
 pub fn cmd_review(
