@@ -30,6 +30,17 @@ pub struct VerificationPhaseChangeInfo<'a> {
     pub iteration: u32,
 }
 
+pub struct QualityMetricsInfo<'a> {
+    pub backend: &'a str,
+    pub role: &'a str,
+    pub task: &'a str,
+    pub narration_ratio: f64,
+    pub commit_frequency: f64,
+    pub first_pass_test_rate: f64,
+    pub retry_rate: f64,
+    pub time_to_completion_secs: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
 pub struct TeamEvent {
@@ -72,6 +83,18 @@ pub struct TeamEvent {
     pub filename: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub narration_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_frequency: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_pass_test_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_to_completion_secs: Option<u64>,
     pub ts: u64,
 }
 
@@ -105,6 +128,12 @@ impl TeamEvent {
             output_bytes: None,
             filename: None,
             content_hash: None,
+            backend: None,
+            narration_ratio: None,
+            commit_frequency: None,
+            first_pass_test_rate: None,
+            retry_rate: None,
+            time_to_completion_secs: None,
             ts: Self::now(),
         }
     }
@@ -292,6 +321,20 @@ impl TeamEvent {
             role: Some(role.into()),
             task: task.map(|t| t.into()),
             ..Self::base("task_completed")
+        }
+    }
+
+    pub fn quality_metrics_recorded(info: &QualityMetricsInfo<'_>) -> Self {
+        Self {
+            role: Some(info.role.into()),
+            task: Some(info.task.into()),
+            backend: Some(info.backend.into()),
+            narration_ratio: Some(info.narration_ratio),
+            commit_frequency: Some(info.commit_frequency),
+            first_pass_test_rate: Some(info.first_pass_test_rate),
+            retry_rate: Some(info.retry_rate),
+            time_to_completion_secs: Some(info.time_to_completion_secs),
+            ..Self::base("quality_metrics_recorded")
         }
     }
 

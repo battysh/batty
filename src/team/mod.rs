@@ -56,6 +56,7 @@ pub mod nudge;
 pub mod parity;
 pub mod policy;
 pub mod prompt_compose;
+pub mod quality_metrics;
 pub mod reload;
 pub mod resolver;
 pub mod retrospective;

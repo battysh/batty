@@ -350,6 +350,12 @@ mod tests {
             output_bytes: None,
             filename: None,
             content_hash: None,
+            backend: None,
+            narration_ratio: None,
+            commit_frequency: None,
+            first_pass_test_rate: None,
+            retry_rate: None,
+            time_to_completion_secs: None,
             ts,
         }
     }
@@ -382,6 +388,12 @@ mod tests {
             output_bytes: None,
             filename: None,
             content_hash: None,
+            backend: None,
+            narration_ratio: None,
+            commit_frequency: None,
+            first_pass_test_rate: None,
+            retry_rate: None,
+            time_to_completion_secs: None,
             ts,
         }
     }
