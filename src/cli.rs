@@ -223,6 +223,16 @@ pub enum Command {
     /// Show pending dispatch queue entries
     Queue,
 
+    /// Explain which engineer would receive the next dispatch
+    Dispatch {
+        /// Print routing reasons for the chosen engineer
+        #[arg(long, default_value_t = false)]
+        explain: bool,
+        /// Explain routing for a specific task id
+        #[arg(long)]
+        task: Option<u32>,
+    },
+
     /// Estimate current run cost from agent session files
     Cost,
 
@@ -1515,6 +1525,18 @@ mod tests {
     fn queue_subcommand_parses() {
         let cli = Cli::parse_from(["batty", "queue"]);
         assert!(matches!(cli.command, Command::Queue));
+    }
+
+    #[test]
+    fn dispatch_explain_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "dispatch", "--explain", "--task", "42"]);
+        match cli.command {
+            Command::Dispatch { explain, task } => {
+                assert!(explain);
+                assert_eq!(task, Some(42));
+            }
+            other => panic!("expected dispatch command, got {other:?}"),
+        }
     }
 
     #[test]

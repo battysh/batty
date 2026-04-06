@@ -166,7 +166,8 @@ impl TeamDaemon {
             bail!("merge queue execution is not yet implemented for multi-repo projects");
         }
 
-        let _lock = MergeLock::acquire(self.project_root()).context("failed to acquire merge lock")?;
+        let _lock =
+            MergeLock::acquire(self.project_root()).context("failed to acquire merge lock")?;
         let board_dir = self.board_dir();
         let board_dir_str = board_dir.to_string_lossy().to_string();
         let manager_name = self.manager_name(&request.engineer);
@@ -175,17 +176,23 @@ impl TeamDaemon {
 
         match merge_engineer_branch(self.project_root(), &request.engineer)? {
             MergeOutcome::Success => {
-                if self.config.team_config.workflow_policy.auto_merge.post_merge_verify {
+                if self
+                    .config
+                    .team_config
+                    .workflow_policy
+                    .auto_merge
+                    .post_merge_verify
+                {
                     let verification_policy = &self.config.team_config.workflow_policy.verification;
-                    let test_command = verification_policy.test_command.as_deref().or(
-                        self.config
-                            .team_config
-                            .workflow_policy
-                            .test_command
-                            .as_deref(),
-                    );
-                    let verification = run_automatic_verification(self.project_root(), test_command)
-                        .context("post-merge verification on main failed to execute")?;
+                    let test_command = verification_policy.test_command.as_deref().or(self
+                        .config
+                        .team_config
+                        .workflow_policy
+                        .test_command
+                        .as_deref());
+                    let verification =
+                        run_automatic_verification(self.project_root(), test_command)
+                            .context("post-merge verification on main failed to execute")?;
                     if !verification.passed {
                         reset_main_to(self.project_root(), &pre_merge_head)?;
                         let engineer_notice = format!(
@@ -206,8 +213,13 @@ impl TeamDaemon {
                     }
                 }
 
-                let board_update_ok =
-                    move_task_to_done(self, &board_dir, &board_dir_str, request, manager_name.as_deref());
+                let board_update_ok = move_task_to_done(
+                    self,
+                    &board_dir,
+                    &board_dir_str,
+                    request,
+                    manager_name.as_deref(),
+                );
 
                 if let Some(ref manager_name) = manager_name {
                     let msg = format!(
@@ -283,7 +295,10 @@ impl TeamDaemon {
                             "--dir",
                             &board_dir_str,
                         ],
-                        &format!("block task #{} after merge conflict retries", request.task_id),
+                        &format!(
+                            "block task #{} after merge conflict retries",
+                            request.task_id
+                        ),
                         manager_name
                             .as_deref()
                             .into_iter()
@@ -387,12 +402,14 @@ fn move_task_to_done(
     manager_name: Option<&str>,
 ) -> bool {
     if crate::team::task_cmd::transition_task(board_dir, request.task_id, "done").is_ok() {
+        persist_completed_profile(daemon, board_dir, request.task_id);
         return true;
     }
 
     if crate::team::task_cmd::transition_task(board_dir, request.task_id, "review").is_ok()
         && crate::team::task_cmd::cmd_review(board_dir, request.task_id, "approved", None).is_ok()
     {
+        persist_completed_profile(daemon, board_dir, request.task_id);
         return true;
     }
 
@@ -411,6 +428,20 @@ fn move_task_to_done(
             .into_iter()
             .chain(std::iter::once(request.engineer.as_str())),
     )
+}
+
+fn persist_completed_profile(daemon: &TeamDaemon, board_dir: &std::path::Path, task_id: u32) {
+    let Ok(tasks) = crate::task::load_tasks_from_dir(&board_dir.join("tasks")) else {
+        return;
+    };
+    let Some(task) = tasks.into_iter().find(|task| task.id == task_id) else {
+        return;
+    };
+    if let Err(error) =
+        crate::team::allocation::persist_completed_task_profile(daemon.project_root(), &task)
+    {
+        warn!(task_id, error = %error, "failed to persist completed task profile");
+    }
 }
 
 #[cfg(test)]
@@ -537,7 +568,10 @@ mod tests {
 
         daemon.process_merge_queue().unwrap();
 
-        assert_eq!(std::fs::read_to_string(repo.join("note.txt")).unwrap(), "queued merge\n");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("note.txt")).unwrap(),
+            "queued merge\n"
+        );
         let task = crate::task::Task::from_file(
             &repo
                 .join(".batty")
@@ -549,7 +583,10 @@ mod tests {
         .unwrap();
         assert_eq!(task.status, "done");
         assert_eq!(daemon.active_task_id("eng-1"), None);
-        assert_eq!(daemon.member_state_for_test("eng-1"), Some(MemberState::Idle));
+        assert_eq!(
+            daemon.member_state_for_test("eng-1"),
+            Some(MemberState::Idle)
+        );
     }
 
     #[test]
@@ -563,7 +600,10 @@ mod tests {
         setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
         std::fs::write(worktree_dir.join("trigger.txt"), "fail main verify\n").unwrap();
         git_ok(&worktree_dir, &["add", "trigger.txt"]);
-        git_ok(&worktree_dir, &["commit", "-m", "trigger post-merge verify failure"]);
+        git_ok(
+            &worktree_dir,
+            &["commit", "-m", "trigger post-merge verify failure"],
+        );
 
         let members = vec![
             manager_member("manager", None),

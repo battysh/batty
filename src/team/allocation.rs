@@ -2,12 +2,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::task::Task;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-use super::config::AllocationPolicy;
-use super::team_config_dir;
+use super::config::{AllocationPolicy, RoleType, TeamConfig};
+use super::hierarchy::resolve_hierarchy;
+use super::standup::MemberState;
+use super::{daemon_state_path, team_config_dir};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EngineerProfile {
@@ -19,6 +22,10 @@ pub struct EngineerProfile {
     pub total_completions: u32,
     pub recent_merge_conflicts: u32,
     pub performance: Option<EngineerPerformanceProfile>,
+    pub telemetry_completed_tasks: u32,
+    pub completion_rate: f64,
+    pub avg_task_duration_secs: Option<f64>,
+    pub first_pass_test_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -27,6 +34,26 @@ pub struct EngineerPerformanceProfile {
     pub lines_per_hour: Option<f64>,
     pub first_pass_test_rate: Option<f64>,
     pub context_exhaustion_frequency: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EngineerRoutingBreakdown {
+    pub engineer: String,
+    pub total_score: i32,
+    pub tag_matches: usize,
+    pub file_matches: usize,
+    pub completion_rate: f64,
+    pub avg_task_duration_secs: Option<f64>,
+    pub first_pass_test_rate: Option<f64>,
+    pub telemetry_completed_tasks: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RoutingDecisionExplanation {
+    pub chosen_engineer: Option<String>,
+    pub fallback_to_round_robin: bool,
+    pub fallback_reason: Option<String>,
+    pub breakdowns: Vec<EngineerRoutingBreakdown>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -61,6 +88,20 @@ struct PersistedTaskProfile {
     recent_merge_conflict: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+struct EngineerTelemetryStats {
+    completed_tasks: u32,
+    completion_rate: f64,
+    avg_task_duration_secs: Option<f64>,
+    first_pass_test_rate: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PersistedDaemonStateView {
+    #[serde(default)]
+    states: HashMap<String, MemberState>,
+}
+
 fn engineer_profiles_format_version() -> u32 {
     1
 }
@@ -69,7 +110,7 @@ pub fn build_engineer_profiles(
     engineers: &[String],
     tasks: &[Task],
 ) -> Result<HashMap<String, EngineerProfile>> {
-    build_engineer_profiles_with_history(engineers, tasks, &[])
+    build_engineer_profiles_with_history(engineers, tasks, &[], &HashMap::new())
 }
 
 pub fn load_engineer_profiles(
@@ -78,7 +119,8 @@ pub fn load_engineer_profiles(
     tasks: &[Task],
 ) -> Result<HashMap<String, EngineerProfile>> {
     let persisted = load_persisted_task_profiles(project_root)?;
-    let mut profiles = build_engineer_profiles_with_history(engineers, tasks, &persisted)?;
+    let telemetry = load_engineer_telemetry_stats(project_root)?;
+    let mut profiles = build_engineer_profiles_with_history(engineers, tasks, &persisted, &telemetry)?;
     if let Ok(conn) = crate::team::telemetry_db::open(project_root)
         && let Ok(rows) = crate::team::telemetry_db::query_engineer_performance_profiles(&conn)
     {
@@ -135,6 +177,7 @@ fn build_engineer_profiles_with_history(
     engineers: &[String],
     tasks: &[Task],
     persisted: &[PersistedTaskProfile],
+    telemetry: &HashMap<String, EngineerTelemetryStats>,
 ) -> Result<HashMap<String, EngineerProfile>> {
     let mut profiles: HashMap<String, EngineerProfile> = engineers
         .iter()
@@ -189,6 +232,16 @@ fn build_engineer_profiles_with_history(
                 profile.recent_merge_conflicts += 1;
             }
         }
+    }
+
+    for (engineer, stats) in telemetry {
+        let Some(profile) = profiles.get_mut(engineer) else {
+            continue;
+        };
+        profile.telemetry_completed_tasks = stats.completed_tasks;
+        profile.completion_rate = stats.completion_rate;
+        profile.avg_task_duration_secs = stats.avg_task_duration_secs;
+        profile.first_pass_test_rate = stats.first_pass_test_rate;
     }
 
     Ok(profiles)
@@ -256,6 +309,7 @@ pub fn score_engineer_for_task(
         .collect();
     let dir_overlap = engineer_dirs.intersection(&task_dirs).count() as i32;
     score += dir_overlap * policy.file_overlap_weight;
+    score += (engineer.completion_rate * 100.0).round() as i32;
 
     score -= (engineer.active_task_count as i32) * policy.load_penalty;
     score -= (engineer.recent_merge_conflicts as i32) * policy.conflict_penalty;
@@ -313,19 +367,299 @@ pub fn rank_engineers_for_task(
     task: &Task,
     policy: &AllocationPolicy,
 ) -> Vec<String> {
-    let mut ranked: Vec<(String, i32)> = engineers
+    explain_routing_for_task(engineers, profiles, task, policy)
+        .breakdowns
+        .into_iter()
+        .map(|breakdown| breakdown.engineer)
+        .collect()
+}
+
+pub fn explain_routing_for_task(
+    engineers: &[String],
+    profiles: &HashMap<String, EngineerProfile>,
+    task: &Task,
+    policy: &AllocationPolicy,
+) -> RoutingDecisionExplanation {
+    let mut breakdowns: Vec<EngineerRoutingBreakdown> = engineers
         .iter()
-        .map(|name| {
-            let score = profiles
-                .get(name)
-                .map(|profile| score_engineer_for_task(profile, task, policy))
-                .unwrap_or_default();
-            (name.clone(), score)
-        })
+        .map(|engineer| engineer_breakdown(engineer, profiles.get(engineer), task, policy))
         .collect();
 
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    ranked.into_iter().map(|(name, _)| name).collect()
+    let telemetry_ready = breakdowns
+        .iter()
+        .all(|breakdown| breakdown.telemetry_completed_tasks >= 5);
+    if telemetry_ready {
+        breakdowns.sort_by(|left, right| compare_breakdowns(left, right));
+        let chosen_engineer = breakdowns.first().map(|breakdown| breakdown.engineer.clone());
+        return RoutingDecisionExplanation {
+            chosen_engineer,
+            fallback_to_round_robin: false,
+            fallback_reason: None,
+            breakdowns,
+        };
+    }
+
+    breakdowns.sort_by(|left, right| left.engineer.cmp(&right.engineer));
+    let chosen_engineer = breakdowns.first().map(|breakdown| breakdown.engineer.clone());
+    RoutingDecisionExplanation {
+        chosen_engineer,
+        fallback_to_round_robin: true,
+        fallback_reason: Some(
+            "telemetry fallback: each eligible engineer needs at least 5 completed tasks"
+                .to_string(),
+        ),
+        breakdowns,
+    }
+}
+
+pub fn print_dispatch_explanation(project_root: &Path, task_id: Option<u32>) -> Result<()> {
+    let board_dir = project_root.join(".batty").join("team_config").join("board");
+    let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
+    let task = select_dispatch_task(&tasks, task_id)
+        .with_context(|| format!("no dispatchable task found for {:?}", task_id))?;
+
+    let team_config = TeamConfig::load(&team_config_dir(project_root).join("team.yaml"))?;
+    let members = resolve_hierarchy(&team_config)?;
+    let mut engineers = load_idle_engineers(project_root, &members)?;
+    if engineers.is_empty() {
+        engineers = members
+            .into_iter()
+            .filter(|member| member.role_type == RoleType::Engineer)
+            .map(|member| member.name)
+            .collect();
+    }
+    engineers.sort();
+    let profiles = load_engineer_profiles(project_root, &engineers, &tasks)?;
+    let explanation = explain_routing_for_task(
+        &engineers,
+        &profiles,
+        &task,
+        &team_config.workflow_policy.allocation,
+    );
+
+    println!("Task #{}: {}", task.id, task.title);
+    if let Some(chosen) = &explanation.chosen_engineer {
+        println!("Chosen engineer: {chosen}");
+    } else {
+        println!("Chosen engineer: none");
+    }
+    if let Some(reason) = &explanation.fallback_reason {
+        println!("Routing mode: {reason}");
+    } else {
+        println!("Routing mode: telemetry-scored");
+    }
+    println!();
+    println!(
+        "{:<20} {:>6} {:>5} {:>5} {:>10} {:>10} {:>11} {:>8}",
+        "ENGINEER", "SCORE", "TAGS", "FILES", "COMPLETE%", "AVG SECS", "FIRST PASS%", "SAMPLES"
+    );
+    println!("{}", "-".repeat(88));
+    for breakdown in explanation.breakdowns {
+        println!(
+            "{:<20} {:>6} {:>5} {:>5} {:>10.1} {:>10} {:>11.1} {:>8}",
+            breakdown.engineer,
+            breakdown.total_score,
+            breakdown.tag_matches,
+            breakdown.file_matches,
+            breakdown.completion_rate * 100.0,
+            breakdown
+                .avg_task_duration_secs
+                .map(|secs| format!("{secs:.0}"))
+                .unwrap_or_else(|| "-".to_string()),
+            breakdown.first_pass_test_rate.unwrap_or(0.0) * 100.0,
+            breakdown.telemetry_completed_tasks,
+        );
+    }
+
+    Ok(())
+}
+
+fn engineer_breakdown(
+    engineer: &str,
+    profile: Option<&EngineerProfile>,
+    task: &Task,
+    policy: &AllocationPolicy,
+) -> EngineerRoutingBreakdown {
+    let profile = profile.cloned().unwrap_or_else(|| EngineerProfile {
+        name: engineer.to_string(),
+        ..EngineerProfile::default()
+    });
+    let task_dirs = task_hint_directories(task);
+    let engineer_dirs: HashSet<String> = profile
+        .active_file_paths
+        .iter()
+        .filter_map(|path| parent_dir(path))
+        .collect();
+    let tag_matches = task
+        .tags
+        .iter()
+        .filter(|tag| profile.domain_tags.contains(*tag))
+        .count();
+    let file_matches = engineer_dirs.intersection(&task_dirs).count();
+    EngineerRoutingBreakdown {
+        engineer: engineer.to_string(),
+        total_score: score_engineer_for_task(&profile, task, policy),
+        tag_matches,
+        file_matches,
+        completion_rate: profile.completion_rate,
+        avg_task_duration_secs: profile.avg_task_duration_secs,
+        first_pass_test_rate: profile.first_pass_test_rate,
+        telemetry_completed_tasks: profile.telemetry_completed_tasks,
+    }
+}
+
+fn compare_breakdowns(
+    left: &EngineerRoutingBreakdown,
+    right: &EngineerRoutingBreakdown,
+) -> std::cmp::Ordering {
+    right
+        .total_score
+        .cmp(&left.total_score)
+        .then_with(|| {
+            right
+                .first_pass_test_rate
+                .partial_cmp(&left.first_pass_test_rate)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| {
+            left.avg_task_duration_secs
+                .partial_cmp(&right.avg_task_duration_secs)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| left.engineer.cmp(&right.engineer))
+}
+
+fn select_dispatch_task<'a>(tasks: &'a [Task], task_id: Option<u32>) -> Option<&'a Task> {
+    if let Some(task_id) = task_id {
+        return tasks.iter().find(|task| task.id == task_id);
+    }
+
+    let task_status_by_id: HashMap<u32, String> = tasks
+        .iter()
+        .map(|task| (task.id, task.status.clone()))
+        .collect();
+    let mut dispatchable: Vec<&Task> = tasks
+        .iter()
+        .filter(|task| matches!(task.status.as_str(), "backlog" | "todo"))
+        .filter(|task| task.claimed_by.is_none())
+        .filter(|task| task.blocked.is_none())
+        .filter(|task| task.blocked_on.is_none())
+        .filter(|task| !task.is_schedule_blocked())
+        .filter(|task| {
+            task.depends_on.iter().all(|dep_id| {
+                task_status_by_id
+                    .get(dep_id)
+                    .is_none_or(|status| status == "done")
+            })
+        })
+        .collect();
+    dispatchable.sort_by_key(|task| {
+        (
+            match task.priority.as_str() {
+                "critical" => 0,
+                "high" => 1,
+                "medium" => 2,
+                "low" => 3,
+                _ => 4,
+            },
+            task.id,
+        )
+    });
+    dispatchable.into_iter().next()
+}
+
+fn load_idle_engineers(
+    project_root: &Path,
+    members: &[super::hierarchy::MemberInstance],
+) -> Result<Vec<String>> {
+    let path = daemon_state_path(project_root);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let state: PersistedDaemonStateView =
+        serde_json::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(members
+        .iter()
+        .filter(|member| member.role_type == RoleType::Engineer)
+        .filter(|member| state.states.get(&member.name) == Some(&MemberState::Idle))
+        .map(|member| member.name.clone())
+        .collect())
+}
+
+fn load_engineer_telemetry_stats(
+    project_root: &Path,
+) -> Result<HashMap<String, EngineerTelemetryStats>> {
+    let conn = match super::telemetry_db::open(project_root) {
+        Ok(conn) => conn,
+        Err(_) => return Ok(HashMap::new()),
+    };
+
+    let mut stats = load_quality_metric_stats(&conn)?;
+    for (engineer, completion_rate) in load_completion_rates(&conn)? {
+        stats.entry(engineer).or_default().completion_rate = completion_rate;
+    }
+    Ok(stats)
+}
+
+fn load_completion_rates(conn: &Connection) -> Result<HashMap<String, f64>> {
+    let mut stmt = conn.prepare(
+        "SELECT role,
+                SUM(CASE WHEN event_type = 'task_assigned' THEN 1 ELSE 0 END) AS assigned,
+                SUM(CASE WHEN event_type = 'task_completed' THEN 1 ELSE 0 END) AS completed
+         FROM events
+         WHERE role IS NOT NULL AND event_type IN ('task_assigned', 'task_completed')
+         GROUP BY role",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let role: String = row.get(0)?;
+        let assigned: i64 = row.get(1)?;
+        let completed: i64 = row.get(2)?;
+        let rate = if assigned > 0 {
+            completed as f64 / assigned as f64
+        } else {
+            0.0
+        };
+        Ok((role, rate))
+    })?;
+
+    let mut rates = HashMap::new();
+    for row in rows {
+        let (role, rate) = row?;
+        rates.insert(role, rate);
+    }
+    Ok(rates)
+}
+
+fn load_quality_metric_stats(conn: &Connection) -> Result<HashMap<String, EngineerTelemetryStats>> {
+    let mut stmt = conn.prepare(
+        "SELECT role,
+                COUNT(*) AS samples,
+                AVG(CAST(json_extract(payload, '$.time_to_completion_secs') AS REAL)) AS avg_secs,
+                AVG(CAST(json_extract(payload, '$.first_pass_test_rate') AS REAL)) AS first_pass
+         FROM events
+         WHERE role IS NOT NULL AND event_type = 'quality_metrics_recorded'
+         GROUP BY role",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            EngineerTelemetryStats {
+                completed_tasks: row.get::<_, i64>(1)? as u32,
+                completion_rate: 0.0,
+                avg_task_duration_secs: row.get(2)?,
+                first_pass_test_rate: row.get(3)?,
+            },
+        ))
+    })?;
+
+    let mut stats = HashMap::new();
+    for row in rows {
+        let (engineer, profile) = row?;
+        stats.insert(engineer, profile);
+    }
+    Ok(stats)
 }
 
 fn task_is_active_for_load(task: &Task) -> bool {
@@ -460,6 +794,8 @@ fn parent_dir(path: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::team::config::AllocationStrategy;
+    use crate::team::events::{QualityMetricsInfo, TeamEvent};
+    use crate::team::telemetry_db;
     use std::fs;
 
     fn task(tags: &[&str], description: &str) -> Task {
@@ -708,5 +1044,98 @@ mod tests {
                 .unwrap();
         assert_eq!(loaded.get("eng-1").unwrap().total_completions, 0);
         assert_eq!(loaded.get("eng-2").unwrap().total_completions, 1);
+    }
+
+    #[test]
+    fn load_engineer_profiles_reads_telemetry_reliability_metrics() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+        let conn = telemetry_db::open(tmp.path()).unwrap();
+        for task_id in 1..=5 {
+            telemetry_db::insert_event(
+                &conn,
+                &TeamEvent::task_assigned("eng-2", &task_id.to_string()),
+            )
+            .unwrap();
+            telemetry_db::insert_event(
+                &conn,
+                &TeamEvent::quality_metrics_recorded(&QualityMetricsInfo {
+                    backend: "codex",
+                    role: "eng-2",
+                    task: &task_id.to_string(),
+                    narration_ratio: 0.1,
+                    commit_frequency: 1.0,
+                    first_pass_test_rate: 1.0,
+                    retry_rate: 0.0,
+                    time_to_completion_secs: 120,
+                }),
+            )
+            .unwrap();
+            telemetry_db::insert_event(
+                &conn,
+                &TeamEvent::task_completed("eng-2", Some(&task_id.to_string())),
+            )
+            .unwrap();
+        }
+
+        let profiles = load_engineer_profiles(tmp.path(), &["eng-2".to_string()], &[]).unwrap();
+        let profile = profiles.get("eng-2").unwrap();
+        assert_eq!(profile.telemetry_completed_tasks, 5);
+        assert!((profile.completion_rate - 1.0).abs() < f64::EPSILON);
+        assert_eq!(profile.avg_task_duration_secs, Some(120.0));
+        assert_eq!(profile.first_pass_test_rate, Some(1.0));
+    }
+
+    #[test]
+    fn rank_engineers_prefers_higher_completion_rate_when_telemetry_is_sufficient() {
+        let engineers = vec!["eng-1".to_string(), "eng-2".to_string()];
+        let profiles = HashMap::from([
+            (
+                "eng-1".to_string(),
+                EngineerProfile {
+                    telemetry_completed_tasks: 5,
+                    completion_rate: 0.4,
+                    ..EngineerProfile::default()
+                },
+            ),
+            (
+                "eng-2".to_string(),
+                EngineerProfile {
+                    telemetry_completed_tasks: 5,
+                    completion_rate: 0.9,
+                    ..EngineerProfile::default()
+                },
+            ),
+        ]);
+
+        let ranked = rank_engineers_for_task(&engineers, &profiles, &task(&[], ""), &policy());
+        assert_eq!(ranked[0], "eng-2");
+    }
+
+    #[test]
+    fn explain_routing_falls_back_when_any_engineer_lacks_enough_samples() {
+        let engineers = vec!["eng-2".to_string(), "eng-1".to_string()];
+        let profiles = HashMap::from([
+            (
+                "eng-1".to_string(),
+                EngineerProfile {
+                    telemetry_completed_tasks: 4,
+                    completion_rate: 1.0,
+                    ..EngineerProfile::default()
+                },
+            ),
+            (
+                "eng-2".to_string(),
+                EngineerProfile {
+                    telemetry_completed_tasks: 7,
+                    completion_rate: 0.2,
+                    ..EngineerProfile::default()
+                },
+            ),
+        ]);
+
+        let explanation = explain_routing_for_task(&engineers, &profiles, &task(&[], ""), &policy());
+        assert!(explanation.fallback_to_round_robin);
+        assert_eq!(explanation.chosen_engineer.as_deref(), Some("eng-1"));
     }
 }
