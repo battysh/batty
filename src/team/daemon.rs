@@ -123,6 +123,29 @@ pub struct DaemonConfig {
     pub pane_map: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CleanroomBackend {
+    SkoolKit,
+    Ghidra,
+}
+
+impl CleanroomBackend {
+    fn detect(input_path: &Path) -> Result<Self> {
+        let extension = input_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase());
+        match extension.as_deref() {
+            Some("z80" | "sna") => Ok(Self::SkoolKit),
+            Some("nes" | "gb" | "gbc" | "com" | "exe") => Ok(Self::Ghidra),
+            _ => bail!(
+                "unsupported clean-room input '{}': expected one of .z80, .sna, .nes, .gb, .gbc, .com, or .exe",
+                input_path.display()
+            ),
+        }
+    }
+}
+
 /// The running team daemon.
 pub struct TeamDaemon {
     pub(super) config: DaemonConfig,
@@ -830,6 +853,61 @@ impl TeamDaemon {
         }
 
         self.write_analysis_artifact(author_role, output_relative_path, &output.stdout)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn run_ghidra_disassembly(
+        &mut self,
+        author_role: &str,
+        binary_path: &Path,
+        output_relative_path: &Path,
+    ) -> Result<PathBuf> {
+        let backend = CleanroomBackend::detect(binary_path)?;
+        if backend != CleanroomBackend::Ghidra {
+            bail!(
+                "unsupported Ghidra target '{}': expected .nes, .gb, .gbc, .com, or .exe",
+                binary_path.display()
+            );
+        }
+
+        let analyze_headless = std::env::var("BATTY_GHIDRA_HEADLESS")
+            .unwrap_or_else(|_| "analyzeHeadless".to_string());
+        let output = std::process::Command::new(&analyze_headless)
+            .arg(binary_path)
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to launch '{}' for target '{}'",
+                    analyze_headless,
+                    binary_path.display()
+                )
+            })?;
+        if !output.status.success() {
+            bail!(
+                "Ghidra disassembly failed for '{}': {}",
+                binary_path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+
+        self.write_analysis_artifact(author_role, output_relative_path, &output.stdout)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn run_cleanroom_disassembly(
+        &mut self,
+        author_role: &str,
+        input_path: &Path,
+        output_relative_path: &Path,
+    ) -> Result<PathBuf> {
+        match CleanroomBackend::detect(input_path)? {
+            CleanroomBackend::SkoolKit => {
+                self.run_skoolkit_disassembly(author_role, input_path, output_relative_path)
+            }
+            CleanroomBackend::Ghidra => {
+                self.run_ghidra_disassembly(author_role, input_path, output_relative_path)
+            }
+        }
     }
 
     #[cfg_attr(not(test), allow(dead_code))]

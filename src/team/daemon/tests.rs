@@ -2993,6 +2993,92 @@ fn clean_room_skoolkit_disassembly_supports_z80_and_sna_snapshots() {
 }
 
 #[test]
+fn clean_room_backend_detection_routes_supported_targets() {
+    assert_eq!(
+        CleanroomBackend::detect(Path::new("snapshot.z80")).unwrap(),
+        CleanroomBackend::SkoolKit
+    );
+    assert_eq!(
+        CleanroomBackend::detect(Path::new("snapshot.sna")).unwrap(),
+        CleanroomBackend::SkoolKit
+    );
+    assert_eq!(
+        CleanroomBackend::detect(Path::new("rom.nes")).unwrap(),
+        CleanroomBackend::Ghidra
+    );
+    assert_eq!(
+        CleanroomBackend::detect(Path::new("rom.gb")).unwrap(),
+        CleanroomBackend::Ghidra
+    );
+    assert_eq!(
+        CleanroomBackend::detect(Path::new("rom.gbc")).unwrap(),
+        CleanroomBackend::Ghidra
+    );
+    assert_eq!(
+        CleanroomBackend::detect(Path::new("program.com")).unwrap(),
+        CleanroomBackend::Ghidra
+    );
+    assert_eq!(
+        CleanroomBackend::detect(Path::new("program.exe")).unwrap(),
+        CleanroomBackend::Ghidra
+    );
+    assert!(
+        CleanroomBackend::detect(Path::new("program.bin"))
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported clean-room input")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_room_ghidra_disassembly_supports_multiple_non_z80_targets() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _path_lock = PATH_LOCK.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let mut daemon = clean_room_test_daemon(tmp.path());
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let analyze_headless = bin_dir.join("analyzeHeadless");
+    std::fs::write(
+        &analyze_headless,
+        "#!/bin/sh\nprintf '# Annotated disassembly for %s\\n' \"$1\"\n",
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&analyze_headless).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&analyze_headless, perms).unwrap();
+    let _ghidra_guard = EnvVarGuard::set(
+        "BATTY_GHIDRA_HEADLESS",
+        analyze_headless.to_string_lossy().as_ref(),
+    );
+
+    let nes = tmp.path().join("game.nes");
+    let gb = tmp.path().join("game.gb");
+    std::fs::write(&nes, b"nes").unwrap();
+    std::fs::write(&gb, b"gb").unwrap();
+
+    let nes_output = daemon
+        .run_cleanroom_disassembly("decompiler", &nes, Path::new("snapshots/game.nes.md"))
+        .unwrap();
+    let gb_output = daemon
+        .run_cleanroom_disassembly("decompiler", &gb, Path::new("snapshots/game.gb.md"))
+        .unwrap();
+
+    assert!(
+        std::fs::read_to_string(nes_output)
+            .unwrap()
+            .contains("game.nes")
+    );
+    assert!(
+        std::fs::read_to_string(gb_output)
+            .unwrap()
+            .contains("game.gb")
+    );
+}
+
+#[test]
 fn clean_room_pipeline_integration_flow_preserves_barrier_and_updates_parity() {
     let tmp = tempfile::tempdir().unwrap();
     crate::team::init_team(
