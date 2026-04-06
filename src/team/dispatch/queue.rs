@@ -1,6 +1,7 @@
 //! Dispatch queue population, processing, and task selection.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -14,6 +15,7 @@ use crate::team::allocation::{
     EngineerProfile, load_engineer_profiles, predict_task_file_paths, rank_engineers_for_task,
 };
 use crate::team::config::AllocationStrategy;
+use serde::Deserialize;
 
 /// Parse task IDs from "Blocked on:" or "Depends on:" lines in the task body.
 /// Returns None if no dependency line found, Some(vec) of referenced task IDs.
@@ -42,70 +44,177 @@ fn parse_body_dependency_ids(body: &str) -> Option<Vec<u32>> {
 }
 use super::{DISPATCH_QUEUE_FAILURE_LIMIT, DispatchQueueEntry, dispatch_priority_rank};
 
-fn parent_dir(path: &str) -> Option<String> {
-    std::path::Path::new(path)
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(|parent| parent.to_string_lossy().into_owned())
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlapConflict {
+    pub task_id: String,
+    pub conflicting_files: Vec<String>,
+    pub in_progress_engineer: String,
 }
 
-fn overlapping_task_paths(
-    project_root: &Path,
-    candidate: &crate::task::Task,
-    active_task: &crate::task::Task,
-) -> Result<Vec<String>> {
-    let candidate_paths = predict_task_file_paths(project_root, candidate)?;
-    let active_paths = predict_task_file_paths(project_root, active_task)?;
-    let mut overlaps: HashSet<String> = candidate_paths
-        .intersection(&active_paths)
-        .cloned()
-        .collect();
+#[derive(Debug, Default, Deserialize)]
+struct ChangedPathsFrontmatter {
+    #[serde(default)]
+    changed_paths: Vec<String>,
+}
 
-    if overlaps.is_empty() {
-        let candidate_dirs: HashSet<String> = candidate_paths
-            .iter()
-            .filter_map(|path| parent_dir(path))
-            .collect();
-        let active_dirs: HashSet<String> = active_paths
-            .iter()
-            .filter_map(|path| parent_dir(path))
-            .collect();
-        overlaps.extend(candidate_dirs.intersection(&active_dirs).cloned());
+fn board_tasks_dir(project_root: &Path) -> std::path::PathBuf {
+    project_root.join(".batty").join("team_config").join("board").join("tasks")
+}
+
+fn extract_frontmatter(content: &str) -> Option<&str> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return None;
     }
+    let after_open = trimmed[3..].strip_prefix('\n').unwrap_or(&trimmed[3..]);
+    let end = after_open.find("\n---")?;
+    Some(&after_open[..end])
+}
+
+fn load_changed_paths(path: &Path) -> Vec<String> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Some(frontmatter) = extract_frontmatter(&content) else {
+        return Vec::new();
+    };
+    serde_yaml::from_str::<ChangedPathsFrontmatter>(frontmatter)
+        .map(|parsed| parsed.changed_paths)
+        .unwrap_or_default()
+}
+
+fn normalize_predicted_path(path: &str) -> String {
+    path.trim_matches(|ch: char| matches!(ch, '.' | ',' | ';' | ':' | ')' | ']'))
+        .to_string()
+}
+
+pub fn predicted_files(task: &crate::task::Task, project_root: &Path) -> Vec<String> {
+    let mut paths = predict_task_file_paths(project_root, task)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| normalize_predicted_path(&path))
+        .collect::<Vec<_>>();
+    if let Ok(tasks) = crate::task::load_tasks_from_dir(&board_tasks_dir(project_root)) {
+        for historical in tasks {
+            if historical.id == task.id || historical.tags.is_empty() {
+                continue;
+            }
+            if !task
+                .tags
+                .iter()
+                .any(|tag| historical.tags.iter().any(|candidate| candidate == tag))
+            {
+                continue;
+            }
+            paths.extend(
+                load_changed_paths(historical.source_path.as_path())
+                    .into_iter()
+                    .map(|path| normalize_predicted_path(&path)),
+            );
+        }
+    }
+    paths.retain(|path| !path.is_empty());
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn overlapping_files(candidate_paths: &[String], active_paths: &[String]) -> Vec<String> {
+    let candidate_set: HashSet<&String> = candidate_paths.iter().collect();
+    let active_set: HashSet<&String> = active_paths.iter().collect();
+    let overlaps: HashSet<String> = candidate_set
+        .intersection(&active_set)
+        .map(|path| (*path).clone())
+        .collect();
 
     let mut overlaps: Vec<String> = overlaps.into_iter().collect();
     overlaps.sort();
-    Ok(overlaps)
+    overlaps
+}
+
+pub fn find_overlapping_tasks(
+    candidate: &crate::task::Task,
+    in_progress: &[crate::task::Task],
+    project_root: &Path,
+) -> Vec<OverlapConflict> {
+    let candidate_paths = predicted_files(candidate, project_root);
+    let mut conflicts = Vec::new();
+
+    for active_task in in_progress {
+        if active_task.id == candidate.id {
+            continue;
+        }
+        let active_paths = predicted_files(active_task, project_root);
+        let conflicting_files = overlapping_files(&candidate_paths, &active_paths);
+        if conflicting_files.is_empty() {
+            continue;
+        }
+        conflicts.push(OverlapConflict {
+            task_id: active_task.id.to_string(),
+            conflicting_files,
+            in_progress_engineer: active_task
+                .claimed_by
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+        });
+    }
+
+    conflicts.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+    conflicts
+}
+
+fn available_dispatch_tasks(
+    board_dir: &Path,
+    queued_task_ids: &HashSet<u32>,
+) -> Result<Vec<crate::task::Task>> {
+    let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
+    let task_status_by_id: HashMap<u32, String> = tasks
+        .iter()
+        .map(|task| (task.id, task.status.clone()))
+        .collect();
+
+    let mut available: Vec<crate::task::Task> = tasks
+        .into_iter()
+        .filter(|task| matches!(task.status.as_str(), "backlog" | "todo"))
+        .filter(|task| task.claimed_by.is_none())
+        .filter(|task| task.blocked.is_none())
+        .filter(|task| task.blocked_on.is_none())
+        .filter(|task| !task.is_schedule_blocked())
+        .filter(|task| !queued_task_ids.contains(&task.id))
+        .filter(|task| {
+            task.depends_on.iter().all(|dep_id| {
+                task_status_by_id
+                    .get(dep_id)
+                    .is_none_or(|status| status == "done")
+            })
+        })
+        .collect();
+
+    available.sort_by_key(|task| (dispatch_priority_rank(&task.priority), task.id));
+    Ok(available)
 }
 
 impl TeamDaemon {
-    fn prevent_dispatch_conflicts(
+    fn serialize_overlapping_candidate(
         &mut self,
         board_dir: &Path,
         candidate: &crate::task::Task,
+        conflicts: &[OverlapConflict],
     ) -> Result<bool> {
-        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
-        let mut blocking_task_ids = Vec::new();
-        let mut overlap_details = Vec::new();
-
-        for active_task in tasks.iter().filter(|task| task.status == "in-progress") {
-            if active_task.id == candidate.id {
-                continue;
-            }
-            let overlaps = overlapping_task_paths(self.project_root(), candidate, active_task)?;
-            if overlaps.is_empty() {
-                continue;
-            }
-            blocking_task_ids.push(active_task.id);
-            overlap_details.push(format!("#{} [{}]", active_task.id, overlaps.join(", ")));
-        }
-
-        if blocking_task_ids.is_empty() {
+        if conflicts.is_empty() {
             return Ok(false);
         }
 
+        let mut blocking_task_ids: Vec<u32> = conflicts
+            .iter()
+            .filter_map(|conflict| conflict.task_id.parse::<u32>().ok())
+            .collect();
         blocking_task_ids.sort_unstable();
         blocking_task_ids.dedup();
+        let overlap_details = conflicts
+            .iter()
+            .map(|conflict| format!("#{} [{}]", conflict.task_id, conflict.conflicting_files.join(", ")))
+            .collect::<Vec<_>>();
         let updated_dependencies =
             append_task_dependencies(board_dir, candidate.id, &blocking_task_ids)?;
         let details = format!(
@@ -137,36 +246,15 @@ impl TeamDaemon {
             .collect()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn next_dispatch_task(
         &self,
         board_dir: &Path,
         queued_task_ids: &HashSet<u32>,
     ) -> Result<Option<crate::task::Task>> {
-        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
-        let task_status_by_id: HashMap<u32, String> = tasks
-            .iter()
-            .map(|task| (task.id, task.status.clone()))
-            .collect();
-
-        let mut available: Vec<crate::task::Task> = tasks
+        Ok(available_dispatch_tasks(board_dir, queued_task_ids)?
             .into_iter()
-            .filter(|task| matches!(task.status.as_str(), "backlog" | "todo"))
-            .filter(|task| task.claimed_by.is_none())
-            .filter(|task| task.blocked.is_none())
-            .filter(|task| task.blocked_on.is_none())
-            .filter(|task| !task.is_schedule_blocked())
-            .filter(|task| !queued_task_ids.contains(&task.id))
-            .filter(|task| {
-                task.depends_on.iter().all(|dep_id| {
-                    task_status_by_id
-                        .get(dep_id)
-                        .is_none_or(|status| status == "done")
-                })
-            })
-            .collect();
-
-        available.sort_by_key(|task| (dispatch_priority_rank(&task.priority), task.id));
-        Ok(available.into_iter().next())
+            .next())
     }
 
     #[cfg(test)]
@@ -212,12 +300,50 @@ impl TeamDaemon {
         let profiles = load_engineer_profiles(self.project_root(), &all_engineers, &board_tasks)?;
 
         loop {
-            let Some(task) = self.next_dispatch_task(&board_dir, &queued_task_ids)? else {
+            let available_tasks = available_dispatch_tasks(&board_dir, &queued_task_ids)?;
+            if available_tasks.is_empty() {
+                break;
+            }
+
+            let in_progress_tasks: Vec<crate::task::Task> =
+                crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?
+                    .into_iter()
+                    .filter(|task| task.status == "in-progress")
+                    .collect();
+            let mut selected_task = None;
+            let mut least_conflicted: Option<(crate::task::Task, Vec<OverlapConflict>)> = None;
+
+            for task in available_tasks {
+                let conflicts = find_overlapping_tasks(&task, &in_progress_tasks, self.project_root());
+                if conflicts.is_empty() {
+                    selected_task = Some(task);
+                    break;
+                }
+
+                for conflict in &conflicts {
+                    self.emit_event(TeamEvent::dispatch_overlap_skipped(
+                        task.id,
+                        &conflict.task_id,
+                        &conflict.conflicting_files,
+                    ));
+                }
+
+                let replace = least_conflicted
+                    .as_ref()
+                    .is_none_or(|(_, existing)| conflicts.len() < existing.len());
+                if replace {
+                    least_conflicted = Some((task, conflicts));
+                }
+            }
+
+            let task = if let Some(task) = selected_task {
+                task
+            } else if let Some((task, conflicts)) = least_conflicted {
+                self.serialize_overlapping_candidate(&board_dir, &task, &conflicts)?;
+                continue;
+            } else {
                 break;
             };
-            if self.prevent_dispatch_conflicts(&board_dir, &task)? {
-                continue;
-            }
             let ranked_engineers =
                 self.rank_dispatch_engineers(&task, &queued_engineers, manual_cooldown, &profiles);
             let Some(engineer_name) = ranked_engineers.into_iter().find(|engineer_name| {
@@ -622,6 +748,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
 
+    use super::{OverlapConflict, find_overlapping_tasks, predicted_files};
     use crate::team::standup::MemberState;
     use crate::team::test_support::{
         TestDaemonBuilder, engineer_member, manager_member, write_open_task_file,
@@ -1021,7 +1148,7 @@ mod tests {
         let events =
             crate::team::events::read_events(&crate::team::team_events_path(tmp.path())).unwrap();
         assert!(events.iter().any(|event| {
-            event.event == "dispatch_overlap_prevented" && event.task.as_deref() == Some("11")
+            event.event == "dispatch_overlap_skipped" && event.task.as_deref() == Some("11")
         }));
     }
 
@@ -1071,5 +1198,256 @@ mod tests {
         )
         .unwrap();
         assert_eq!(task.depends_on, vec![20]);
+    }
+
+    #[test]
+    fn test_predicted_files_from_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_body(
+            tmp.path(),
+            30,
+            "body-path",
+            "todo",
+            None,
+            "Update src/team/daemon.rs to add the new check.",
+        );
+        let task = crate::task::Task::from_file(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("030-body-path.md"),
+        )
+        .unwrap();
+
+        assert!(predicted_files(&task, tmp.path()).contains(&"src/team/daemon.rs".to_string()));
+    }
+
+    #[test]
+    fn test_predicted_files_from_tags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join(".batty").join("team_config").join("board").join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("001-prior-shim.md"),
+            "---\nid: 1\ntitle: prior shim\nstatus: done\npriority: high\nclaimed_by: eng-2\ntags:\n  - shim\nchanged_paths:\n  - src/shim/runtime.rs\nclass: standard\n---\n\nEarlier shim work.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tasks_dir.join("031-new-shim.md"),
+            "---\nid: 31\ntitle: new shim\nstatus: todo\npriority: high\ntags:\n  - shim\nclass: standard\n---\n\nNo explicit paths.\n",
+        )
+        .unwrap();
+        let task = crate::task::Task::from_file(&tasks_dir.join("031-new-shim.md")).unwrap();
+
+        assert!(predicted_files(&task, tmp.path()).contains(&"src/shim/runtime.rs".to_string()));
+    }
+
+    #[test]
+    fn test_predicted_files_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_body(tmp.path(), 32, "no-hints", "todo", None, "No file hints here.");
+        let task = crate::task::Task::from_file(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("032-no-hints.md"),
+        )
+        .unwrap();
+
+        assert!(predicted_files(&task, tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn test_find_overlapping_no_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_body(tmp.path(), 40, "candidate", "todo", None, "Edit src/team/daemon.rs.");
+        write_task_with_body(
+            tmp.path(),
+            41,
+            "active",
+            "in-progress",
+            Some("eng-2"),
+            "Edit src/team/status.rs.",
+        );
+        let tasks_dir = tmp.path().join(".batty").join("team_config").join("board").join("tasks");
+        let candidate = crate::task::Task::from_file(&tasks_dir.join("040-candidate.md")).unwrap();
+        let active = crate::task::Task::from_file(&tasks_dir.join("041-active.md")).unwrap();
+
+        assert!(find_overlapping_tasks(&candidate, &[active], tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn test_find_overlapping_with_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_body(tmp.path(), 42, "candidate", "todo", None, "Edit src/team/daemon.rs.");
+        write_task_with_body(
+            tmp.path(),
+            43,
+            "active",
+            "in-progress",
+            Some("eng-2"),
+            "Edit src/team/daemon.rs too.",
+        );
+        let tasks_dir = tmp.path().join(".batty").join("team_config").join("board").join("tasks");
+        let candidate = crate::task::Task::from_file(&tasks_dir.join("042-candidate.md")).unwrap();
+        let active = crate::task::Task::from_file(&tasks_dir.join("043-active.md")).unwrap();
+
+        let conflicts = find_overlapping_tasks(&candidate, &[active], tmp.path());
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].task_id, "43");
+    }
+
+    #[test]
+    fn test_find_overlapping_multiple_conflicts() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_body(tmp.path(), 44, "candidate", "todo", None, "Edit src/team/daemon.rs.");
+        write_task_with_body(
+            tmp.path(),
+            45,
+            "active-a",
+            "in-progress",
+            Some("eng-2"),
+            "Edit src/team/daemon.rs too.",
+        );
+        write_task_with_body(
+            tmp.path(),
+            46,
+            "active-b",
+            "in-progress",
+            Some("eng-3"),
+            "Also touch src/team/daemon.rs.",
+        );
+        let tasks_dir = tmp.path().join(".batty").join("team_config").join("board").join("tasks");
+        let candidate = crate::task::Task::from_file(&tasks_dir.join("044-candidate.md")).unwrap();
+        let active_a = crate::task::Task::from_file(&tasks_dir.join("045-active-a.md")).unwrap();
+        let active_b = crate::task::Task::from_file(&tasks_dir.join("046-active-b.md")).unwrap();
+
+        let conflicts = find_overlapping_tasks(&candidate, &[active_a, active_b], tmp.path());
+        assert_eq!(conflicts.len(), 2);
+    }
+
+    #[test]
+    fn test_dispatch_skips_overlapping_candidate() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_body(
+            tmp.path(),
+            50,
+            "active",
+            "in-progress",
+            Some("eng-2"),
+            "Edit src/team/daemon.rs.",
+        );
+        write_task_with_body(
+            tmp.path(),
+            51,
+            "overlap",
+            "todo",
+            None,
+            "Edit src/team/daemon.rs.",
+        );
+        write_task_with_body(
+            tmp.path(),
+            52,
+            "safe",
+            "todo",
+            None,
+            "Edit src/team/status.rs.",
+        );
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+                engineer_member("eng-2", Some("mgr"), false),
+            ])
+            .states(HashMap::from([
+                ("eng-1".to_string(), MemberState::Idle),
+                ("eng-2".to_string(), MemberState::Working),
+            ]))
+            .build();
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].task_id, 52);
+    }
+
+    #[test]
+    fn test_dispatch_all_overlap_picks_least_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_body(
+            tmp.path(),
+            60,
+            "active-daemon",
+            "in-progress",
+            Some("eng-2"),
+            "Edit src/team/daemon.rs.",
+        );
+        write_task_with_body(
+            tmp.path(),
+            61,
+            "active-status",
+            "in-progress",
+            Some("eng-3"),
+            "Edit src/team/status.rs.",
+        );
+        write_task_with_body(
+            tmp.path(),
+            62,
+            "overlap-both",
+            "todo",
+            None,
+            "Edit src/team/daemon.rs and src/team/status.rs.",
+        );
+        write_task_with_body(
+            tmp.path(),
+            63,
+            "overlap-one",
+            "todo",
+            None,
+            "Edit src/team/daemon.rs only.",
+        );
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+                engineer_member("eng-2", Some("mgr"), false),
+                engineer_member("eng-3", Some("mgr"), false),
+            ])
+            .states(HashMap::from([
+                ("eng-1".to_string(), MemberState::Idle),
+                ("eng-2".to_string(), MemberState::Working),
+                ("eng-3".to_string(), MemberState::Working),
+            ]))
+            .build();
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+        assert!(daemon.dispatch_queue.is_empty());
+        let task = crate::task::Task::from_file(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("063-overlap-one.md"),
+        )
+        .unwrap();
+        assert_eq!(task.depends_on, vec![60]);
+    }
+
+    #[test]
+    fn test_overlap_conflict_struct_fields() {
+        let conflict = OverlapConflict {
+            task_id: "42".to_string(),
+            conflicting_files: vec!["src/team/daemon.rs".to_string()],
+            in_progress_engineer: "eng-2".to_string(),
+        };
+        assert_eq!(conflict.task_id, "42");
+        assert_eq!(conflict.conflicting_files, vec!["src/team/daemon.rs"]);
+        assert_eq!(conflict.in_progress_engineer, "eng-2");
     }
 }
