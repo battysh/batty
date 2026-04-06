@@ -1,6 +1,6 @@
 use super::*;
 use crate::shim::protocol::{Command, ShimState, socketpair};
-use crate::team::config::{BoardConfig, WorkflowPolicy};
+use crate::team::config::{AllocationPolicy, AllocationStrategy, BoardConfig, WorkflowPolicy};
 use crate::team::daemon::agent_handle::AgentHandle;
 use crate::team::events;
 use crate::team::inbox;
@@ -15,6 +15,16 @@ use crate::team::test_support::{
 };
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+
+fn write_task_file(project_root: &std::path::Path, file_name: &str, content: &str) {
+    let tasks_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    std::fs::create_dir_all(&tasks_dir).unwrap();
+    std::fs::write(tasks_dir.join(file_name), content).unwrap();
+}
 
 #[test]
 fn engineer_task_branch_name_uses_explicit_task_id() {
@@ -1264,6 +1274,169 @@ fn manual_cooldown_only_affects_assigned_engineer() {
         "only the non-cooldown engineer should be enqueued"
     );
     assert_eq!(daemon.dispatch_queue[0].engineer, "eng-2");
+}
+
+#[test]
+fn scored_dispatch_prefers_engineer_with_matching_tag_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_task_file(
+        tmp.path(),
+        "001-history.md",
+        "---\nid: 1\ntitle: prior dispatch work\nstatus: done\npriority: high\nclaimed_by: eng-2\ntags:\n  - dispatch\nclass: standard\n---\n\nCompleted dispatch work.\n",
+    );
+    write_task_file(
+        tmp.path(),
+        "101-new-task.md",
+        "---\nid: 101\ntitle: new dispatch task\nstatus: todo\npriority: high\ntags:\n  - dispatch\nclass: standard\n---\n\nImplement dispatch scoring.\n",
+    );
+
+    let members = vec![
+        manager_member("manager", None),
+        engineer_member("eng-1", Some("manager"), false),
+        engineer_member("eng-2", Some("manager"), false),
+    ];
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(members)
+        .workflow_policy(WorkflowPolicy {
+            allocation: AllocationPolicy {
+                strategy: AllocationStrategy::Scored,
+                ..AllocationPolicy::default()
+            },
+            ..WorkflowPolicy::default()
+        })
+        .board(BoardConfig {
+            auto_dispatch: true,
+            dispatch_stabilization_delay_secs: 0,
+            ..BoardConfig::default()
+        })
+        .states(HashMap::from([
+            ("eng-1".to_string(), MemberState::Idle),
+            ("eng-2".to_string(), MemberState::Idle),
+        ]))
+        .build();
+    daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+    daemon.idle_started_at.insert(
+        "eng-1".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+    daemon.idle_started_at.insert(
+        "eng-2".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+
+    daemon.maybe_auto_dispatch().unwrap();
+
+    assert_eq!(daemon.dispatch_queue.len(), 1);
+    assert_eq!(daemon.dispatch_queue[0].engineer, "eng-2");
+    assert_eq!(daemon.dispatch_queue[0].task_id, 101);
+}
+
+#[test]
+fn scored_dispatch_prefers_engineer_with_matching_changed_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_task_file(
+        tmp.path(),
+        "001-history.md",
+        "---\nid: 1\ntitle: prior queue work\nstatus: done\npriority: high\nclaimed_by: eng-2\nchanged_paths:\n  - src/team/dispatch/queue.rs\nclass: standard\n---\n\nCompleted queue work.\n",
+    );
+    write_task_file(
+        tmp.path(),
+        "101-new-task.md",
+        "---\nid: 101\ntitle: new dispatch task\nstatus: todo\npriority: high\nclass: standard\n---\n\nUpdate src/team/dispatch/mod.rs to wire scoring.\n",
+    );
+
+    let members = vec![
+        manager_member("manager", None),
+        engineer_member("eng-1", Some("manager"), false),
+        engineer_member("eng-2", Some("manager"), false),
+    ];
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(members)
+        .workflow_policy(WorkflowPolicy {
+            allocation: AllocationPolicy {
+                strategy: AllocationStrategy::Scored,
+                ..AllocationPolicy::default()
+            },
+            ..WorkflowPolicy::default()
+        })
+        .board(BoardConfig {
+            auto_dispatch: true,
+            dispatch_stabilization_delay_secs: 0,
+            ..BoardConfig::default()
+        })
+        .states(HashMap::from([
+            ("eng-1".to_string(), MemberState::Idle),
+            ("eng-2".to_string(), MemberState::Idle),
+        ]))
+        .build();
+    daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+    daemon.idle_started_at.insert(
+        "eng-1".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+    daemon.idle_started_at.insert(
+        "eng-2".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+
+    daemon.maybe_auto_dispatch().unwrap();
+
+    assert_eq!(daemon.dispatch_queue.len(), 1);
+    assert_eq!(daemon.dispatch_queue[0].engineer, "eng-2");
+}
+
+#[test]
+fn round_robin_allocation_ignores_profile_scoring() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_task_file(
+        tmp.path(),
+        "001-history.md",
+        "---\nid: 1\ntitle: prior dispatch work\nstatus: done\npriority: high\nclaimed_by: eng-2\ntags:\n  - dispatch\nclass: standard\n---\n\nCompleted dispatch work.\n",
+    );
+    write_task_file(
+        tmp.path(),
+        "101-new-task.md",
+        "---\nid: 101\ntitle: new dispatch task\nstatus: todo\npriority: high\ntags:\n  - dispatch\nclass: standard\n---\n\nImplement dispatch scoring.\n",
+    );
+
+    let members = vec![
+        manager_member("manager", None),
+        engineer_member("eng-1", Some("manager"), false),
+        engineer_member("eng-2", Some("manager"), false),
+    ];
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(members)
+        .workflow_policy(WorkflowPolicy {
+            allocation: AllocationPolicy {
+                strategy: AllocationStrategy::RoundRobin,
+                ..AllocationPolicy::default()
+            },
+            ..WorkflowPolicy::default()
+        })
+        .board(BoardConfig {
+            auto_dispatch: true,
+            dispatch_stabilization_delay_secs: 0,
+            ..BoardConfig::default()
+        })
+        .states(HashMap::from([
+            ("eng-1".to_string(), MemberState::Idle),
+            ("eng-2".to_string(), MemberState::Idle),
+        ]))
+        .build();
+    daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+    daemon.idle_started_at.insert(
+        "eng-1".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+    daemon.idle_started_at.insert(
+        "eng-2".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+
+    daemon.maybe_auto_dispatch().unwrap();
+
+    assert_eq!(daemon.dispatch_queue.len(), 1);
+    assert_eq!(daemon.dispatch_queue[0].engineer, "eng-1");
 }
 
 // -- dispatch_priority_rank tests --

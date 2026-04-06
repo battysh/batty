@@ -518,6 +518,39 @@ fn parse_workflow_policy_defaults_all_applied() {
     assert_eq!(p.health_check_interval_secs, 60);
     assert_eq!(p.uncommitted_warn_threshold, 200);
     assert!(p.test_command.is_none());
+    assert_eq!(p.allocation.strategy, AllocationStrategy::Scored);
+    assert_eq!(p.allocation.tag_weight, 15);
+    assert_eq!(p.allocation.file_overlap_weight, 10);
+    assert_eq!(p.allocation.load_penalty, 8);
+    assert_eq!(p.allocation.conflict_penalty, 12);
+    assert_eq!(p.allocation.experience_bonus, 3);
+}
+
+#[test]
+fn parse_workflow_policy_allocation_overrides() {
+    let yaml = r#"
+name: test
+workflow_policy:
+  allocation:
+    strategy: round_robin
+    tag_weight: 21
+    file_overlap_weight: 13
+    load_penalty: 5
+    conflict_penalty: 34
+    experience_bonus: 2
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#;
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    let allocation = &config.workflow_policy.allocation;
+    assert_eq!(allocation.strategy, AllocationStrategy::RoundRobin);
+    assert_eq!(allocation.tag_weight, 21);
+    assert_eq!(allocation.file_overlap_weight, 13);
+    assert_eq!(allocation.load_penalty, 5);
+    assert_eq!(allocation.conflict_penalty, 34);
+    assert_eq!(allocation.experience_bonus, 2);
 }
 
 #[test]

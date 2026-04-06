@@ -272,6 +272,10 @@ pub struct WorkflowPolicy {
     #[serde(default)]
     pub verification: VerificationPolicy,
     #[serde(default)]
+    pub claim_ttl: ClaimTtlPolicy,
+    #[serde(default)]
+    pub allocation: AllocationPolicy,
+    #[serde(default)]
     pub auto_merge: AutoMergePolicy,
     /// When true, context exhaustion restarts capture a work summary and
     /// inject it into the new agent session so it can continue where the
@@ -281,8 +285,6 @@ pub struct WorkflowPolicy {
     /// Number of PTY screen pages to include in the handoff summary.
     #[serde(default = "default_handoff_screen_history")]
     pub handoff_screen_history: usize,
-    #[serde(default)]
-    pub claim_ttl: ClaimTtlPolicy,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -350,10 +352,47 @@ impl Default for WorkflowPolicy {
             uncommitted_warn_threshold: default_uncommitted_warn_threshold(),
             test_command: None,
             verification: VerificationPolicy::default(),
+            claim_ttl: ClaimTtlPolicy::default(),
+            allocation: AllocationPolicy::default(),
             auto_merge: AutoMergePolicy::default(),
             context_handoff_enabled: default_context_handoff_enabled(),
             handoff_screen_history: default_handoff_screen_history(),
-            claim_ttl: ClaimTtlPolicy::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AllocationStrategy {
+    RoundRobin,
+    Scored,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AllocationPolicy {
+    #[serde(default = "default_allocation_strategy")]
+    pub strategy: AllocationStrategy,
+    #[serde(default = "default_allocation_tag_weight")]
+    pub tag_weight: i32,
+    #[serde(default = "default_allocation_file_overlap_weight")]
+    pub file_overlap_weight: i32,
+    #[serde(default = "default_allocation_load_penalty")]
+    pub load_penalty: i32,
+    #[serde(default = "default_allocation_conflict_penalty")]
+    pub conflict_penalty: i32,
+    #[serde(default = "default_allocation_experience_bonus")]
+    pub experience_bonus: i32,
+}
+
+impl Default for AllocationPolicy {
+    fn default() -> Self {
+        Self {
+            strategy: default_allocation_strategy(),
+            tag_weight: default_allocation_tag_weight(),
+            file_overlap_weight: default_allocation_file_overlap_weight(),
+            load_penalty: default_allocation_load_penalty(),
+            conflict_penalty: default_allocation_conflict_penalty(),
+            experience_bonus: default_allocation_experience_bonus(),
         }
     }
 }
@@ -397,22 +436,6 @@ fn default_verification_require_evidence() -> bool {
     true
 }
 
-fn default_auto_commit_on_restart() -> bool {
-    true
-}
-
-fn default_context_handoff_enabled() -> bool {
-    true
-}
-
-fn default_handoff_screen_history() -> usize {
-    20
-}
-
-fn default_handoff_directory() -> String {
-    ".batty/handoff".to_string()
-}
-
 fn default_claim_ttl_default_secs() -> u64 {
     1800
 }
@@ -431,6 +454,46 @@ fn default_claim_ttl_progress_check_interval_secs() -> u64 {
 
 fn default_claim_ttl_warning_secs() -> u64 {
     300
+}
+
+fn default_allocation_strategy() -> AllocationStrategy {
+    AllocationStrategy::Scored
+}
+
+fn default_allocation_tag_weight() -> i32 {
+    15
+}
+
+fn default_allocation_file_overlap_weight() -> i32 {
+    10
+}
+
+fn default_allocation_load_penalty() -> i32 {
+    8
+}
+
+fn default_allocation_conflict_penalty() -> i32 {
+    12
+}
+
+fn default_allocation_experience_bonus() -> i32 {
+    3
+}
+
+fn default_auto_commit_on_restart() -> bool {
+    true
+}
+
+fn default_context_handoff_enabled() -> bool {
+    true
+}
+
+fn default_handoff_screen_history() -> usize {
+    20
+}
+
+fn default_handoff_directory() -> String {
+    ".batty/handoff".to_string()
 }
 
 fn default_planning_cycle_cooldown_secs() -> u64 {
