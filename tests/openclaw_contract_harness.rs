@@ -2,6 +2,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use batty_cli::project_registry::{ProjectPolicyFlags, ProjectRegistration, register_project_at};
 use batty_cli::team::events::TeamEvent;
 use batty_cli::team::inbox::{self, InboxMessage};
 use batty_cli::team::openclaw;
@@ -123,6 +124,38 @@ fn seed_delivered_message(project_root: &Path, from: &str, to: &str, body: &str)
     inbox::mark_delivered(&root, to, &id).unwrap();
 }
 
+fn register_fixture_project(
+    registry_path: &Path,
+    project_id: &str,
+    name: &str,
+    root: &Path,
+    team_name: &str,
+    session_name: &str,
+) {
+    register_project_at(
+        registry_path,
+        ProjectRegistration {
+            project_id: project_id.to_string(),
+            name: name.to_string(),
+            aliases: Vec::new(),
+            project_root: root.to_path_buf(),
+            board_dir: root.join(".batty").join("team_config").join("board"),
+            team_name: team_name.to_string(),
+            session_name: session_name.to_string(),
+            channel_bindings: Vec::new(),
+            owner: None,
+            tags: vec!["openclaw".to_string()],
+            policy_flags: ProjectPolicyFlags {
+                allow_openclaw_supervision: true,
+                allow_cross_project_routing: false,
+                allow_shared_service_routing: false,
+                archived: false,
+            },
+        },
+    )
+    .unwrap();
+}
+
 #[test]
 fn event_fixture_matches_contract_schema() {
     let content = fs::read_to_string(
@@ -145,7 +178,13 @@ fn event_fixture_matches_contract_schema() {
     assert_eq!(events[1].role.as_deref(), Some("eng-1-1"));
     assert_eq!(events[2].event, "task_escalated");
     assert_eq!(events[2].task.as_deref(), Some("449"));
-    assert!(events[2].reason.as_deref().unwrap().contains("wording drift"));
+    assert!(
+        events[2]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("wording drift")
+    );
     assert_eq!(events[3].event, "task_completed");
     assert_eq!(events[3].role.as_deref(), Some("eng-1-1"));
 }
@@ -203,7 +242,12 @@ fn openclaw_status_contract_supports_stopped_fixture_snapshot() {
             .iter()
             .any(|item| item == "Batty daemon is not running")
     );
-    assert!(status.highlights.iter().any(|item| item == "Batty is paused"));
+    assert!(
+        status
+            .highlights
+            .iter()
+            .any(|item| item == "Batty is paused")
+    );
 }
 
 #[test]
@@ -290,6 +334,75 @@ fn openclaw_follow_up_harness_dispatches_reminders_and_escalations() {
         architect_messages[0]
             .body
             .contains("Unhealthy members are present")
+    );
+}
+
+#[test]
+#[serial]
+fn openclaw_watch_contract_keeps_registered_projects_separate() {
+    let degraded = copy_fixture_project("degraded");
+    let running = copy_fixture_project("running");
+    let registry_dir = tempfile::tempdir().unwrap();
+    let registry_path = registry_dir.path().join("project-registry.json");
+
+    register_fixture_project(
+        &registry_path,
+        "fixture-degraded",
+        "Fixture Degraded",
+        degraded.path(),
+        "fixture-team-degraded",
+        "batty-fixture-team-degraded",
+    );
+    register_fixture_project(
+        &registry_path,
+        "fixture-running",
+        "Fixture Running",
+        running.path(),
+        "fixture-team-running",
+        "batty-fixture-team-running",
+    );
+
+    unsafe {
+        std::env::set_var("BATTY_PROJECT_REGISTRY_PATH", &registry_path);
+    }
+    let all_events =
+        openclaw::watch_all_project_events(&openclaw::OpenClawEventSubscription::default())
+            .unwrap();
+    let degraded_events = openclaw::watch_project_events(
+        "fixture-degraded",
+        &openclaw::OpenClawEventSubscription {
+            topics: vec![openclaw::OpenClawEventTopic::Escalation],
+            ..openclaw::OpenClawEventSubscription::default()
+        },
+    )
+    .unwrap();
+    unsafe {
+        std::env::remove_var("BATTY_PROJECT_REGISTRY_PATH");
+    }
+
+    assert_eq!(all_events.len(), 6);
+    assert!(
+        all_events
+            .iter()
+            .all(|event| !event.project_id.is_empty() && !event.session_name.is_empty())
+    );
+    assert!(all_events.iter().any(|event| {
+        event.project_id == "fixture-running"
+            && event.team_name == "fixture-team-running"
+            && event.event_type == "task.completed"
+    }));
+    assert!(all_events.iter().any(|event| {
+        event.project_id == "fixture-degraded"
+            && event.team_name == "fixture-team-degraded"
+            && event.event_type == "task.escalated"
+    }));
+
+    assert_eq!(degraded_events.len(), 1);
+    assert_eq!(degraded_events[0].project_id, "fixture-degraded");
+    assert_eq!(degraded_events[0].event_type, "task.escalated");
+    assert_eq!(
+        degraded_events[0].identifiers.task_id.as_deref(),
+        Some("449")
     );
 }
 
