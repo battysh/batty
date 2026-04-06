@@ -772,4 +772,79 @@ roles:
         assert_eq!(inherited.model_class.as_deref(), Some("standard"));
         assert_eq!(inherited.posture.as_deref(), Some("deep_worker"));
     }
+
+    #[test]
+    fn resolved_member_agent_prefers_instance_override_then_role_then_team() {
+        let config = make_config(
+            r#"
+name: override-chain
+agent: claude
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: manager
+    role_type: manager
+  - name: role-eng
+    role_type: engineer
+    agent: codex
+    instances: 2
+    talks_to: [manager]
+    instance_overrides:
+      role-eng-1-1:
+        agent: kiro
+  - name: team-eng
+    role_type: engineer
+    instances: 1
+    talks_to: [manager]
+"#,
+        );
+
+        let members = resolve_hierarchy(&config).unwrap();
+        let override_member = members.iter().find(|m| m.name == "role-eng-1-1").unwrap();
+        let role_member = members.iter().find(|m| m.name == "role-eng-1-2").unwrap();
+        let team_member = members.iter().find(|m| m.name == "team-eng-1-1").unwrap();
+
+        assert_eq!(override_member.agent.as_deref(), Some("kiro"));
+        assert_eq!(role_member.agent.as_deref(), Some("codex"));
+        assert_eq!(team_member.agent.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn mixed_team_instance_overrides_resolve_per_member_agents() {
+        let config = make_config(
+            r#"
+name: mixed-providers
+agent: claude
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+  - name: manager
+    role_type: manager
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 3
+    talks_to: [manager]
+    instance_overrides:
+      eng-1-2:
+        agent: kiro
+        model: claude-opus-4.6-1m
+      eng-1-3:
+        agent: claude
+"#,
+        );
+
+        let members = resolve_hierarchy(&config).unwrap();
+        let eng_1 = members.iter().find(|m| m.name == "eng-1-1").unwrap();
+        let eng_2 = members.iter().find(|m| m.name == "eng-1-2").unwrap();
+        let eng_3 = members.iter().find(|m| m.name == "eng-1-3").unwrap();
+
+        assert_eq!(eng_1.agent.as_deref(), Some("codex"));
+        assert_eq!(eng_2.agent.as_deref(), Some("kiro"));
+        assert_eq!(eng_2.model.as_deref(), Some("claude-opus-4.6-1m"));
+        assert_eq!(eng_3.agent.as_deref(), Some("claude"));
+    }
 }
