@@ -2278,6 +2278,7 @@ fn hot_reload_fingerprint_detects_binary_change() {
 #[test]
 fn resume_decision_logged_to_orchestrator() {
     let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
     let member = MemberInstance {
         name: "architect".to_string(),
         role_name: "architect".to_string(),

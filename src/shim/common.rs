@@ -12,7 +12,7 @@ use super::protocol::{Event, ShimState};
 pub const MAX_QUEUE_DEPTH: usize = 16;
 
 /// How often to report session stats (secs).
-pub const SESSION_STATS_INTERVAL_SECS: u64 = 60;
+pub const SESSION_STATS_INTERVAL_SECS: u64 = 10;
 
 // ---------------------------------------------------------------------------
 // Message formatting

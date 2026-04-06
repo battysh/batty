@@ -7,12 +7,14 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use tracing::{info, warn};
 
 use super::helpers::MemberWorktreeContext;
 use super::*;
 
 const STATE_RECONCILIATION_AUDIT_KEY: &str = "state-reconciliation::audit";
+const CLAIM_PROGRESS_AUDIT_KEY_PREFIX: &str = "claim-progress::";
 
 fn normalized_context_line(line: &str) -> Option<String> {
     let trimmed = line.trim();
@@ -69,6 +71,203 @@ fn planning_prompt_context(project_root: &std::path::Path) -> (Vec<String>, Vec<
 }
 
 impl TeamDaemon {
+    pub(super) fn maybe_manage_task_claim_ttls(&mut self) -> Result<()> {
+        let tasks_dir = self.board_dir().join("tasks");
+        if !tasks_dir.exists() {
+            return Ok(());
+        }
+
+        let board_tasks = crate::task::load_tasks_from_dir(&tasks_dir)?;
+        let now = Utc::now();
+        let progress_interval = Duration::from_secs(
+            self.config
+                .team_config
+                .workflow_policy
+                .claim_ttl
+                .progress_check_interval_secs,
+        );
+
+        for task in board_tasks
+            .iter()
+            .filter(|task| task.status == "in-progress")
+            .filter(|task| task.claimed_by.is_some())
+        {
+            let Some(engineer) = task.claimed_by.as_deref() else {
+                continue;
+            };
+            let Some(member) = self
+                .config
+                .members
+                .iter()
+                .find(|member| member.name == engineer)
+            else {
+                continue;
+            };
+
+            let work_dir = self.member_work_dir(member);
+            let ttl_secs = self.claim_ttl_secs_for_priority(&task.priority);
+            let current_output_bytes = self
+                .shim_handles
+                .get(engineer)
+                .map(|handle| handle.output_bytes)
+                .unwrap_or(0);
+
+            if task.claim_expires_at.is_none()
+                || task.last_progress_at.is_none()
+                || task.claim_ttl_secs.is_none()
+            {
+                crate::team::task_cmd::initialize_task_claim(
+                    &self.board_dir(),
+                    task.id,
+                    ttl_secs,
+                    now,
+                    current_output_bytes,
+                )?;
+                self.emit_event(TeamEvent::task_claim_created(
+                    engineer,
+                    &task.id.to_string(),
+                    ttl_secs,
+                    &(now + chrono::Duration::seconds(ttl_secs as i64)).to_rfc3339(),
+                ));
+                continue;
+            }
+
+            let progress_key = format!("{CLAIM_PROGRESS_AUDIT_KEY_PREFIX}{}", task.id);
+            let should_check_progress = self
+                .intervention_cooldowns
+                .get(&progress_key)
+                .is_none_or(|last| last.elapsed() >= progress_interval);
+
+            if should_check_progress
+                && let Some(progress_type) =
+                    task_claim_progress_type(task, &work_dir, current_output_bytes)
+            {
+                let extensions = task.claim_extensions.unwrap_or(0).saturating_add(1).min(
+                    self.config
+                        .team_config
+                        .workflow_policy
+                        .claim_ttl
+                        .max_extensions,
+                );
+                crate::team::task_cmd::refresh_task_claim_progress(
+                    &self.board_dir(),
+                    task.id,
+                    ttl_secs,
+                    now,
+                    current_output_bytes,
+                    extensions,
+                )?;
+                self.emit_event(TeamEvent::task_claim_progress(
+                    engineer,
+                    &task.id.to_string(),
+                    progress_type,
+                ));
+                self.emit_event(TeamEvent::task_claim_extended(
+                    engineer,
+                    &task.id.to_string(),
+                    &(now + chrono::Duration::seconds(ttl_secs as i64)).to_rfc3339(),
+                ));
+                self.intervention_cooldowns
+                    .insert(progress_key, Instant::now());
+                continue;
+            }
+
+            self.intervention_cooldowns
+                .insert(progress_key, Instant::now());
+
+            let Some(expires_at) = task.claim_expires_at.as_deref().and_then(parse_rfc3339_utc)
+            else {
+                continue;
+            };
+
+            let expires_in_secs = expires_at.signed_duration_since(now).num_seconds().max(0) as u64;
+            if expires_in_secs
+                <= self
+                    .config
+                    .team_config
+                    .workflow_policy
+                    .claim_ttl
+                    .warning_secs
+                && task.claim_warning_sent_at.is_none()
+            {
+                crate::team::task_cmd::mark_task_claim_warning(&self.board_dir(), task.id, now)?;
+                self.emit_event(TeamEvent::task_claim_warning(
+                    engineer,
+                    &task.id.to_string(),
+                    expires_in_secs,
+                ));
+                let _ = self.queue_message(
+                    "daemon",
+                    engineer,
+                    &format!(
+                        "Your claim on task #{} expires in {} minutes. Commit your work or report a blocker to extend it.",
+                        task.id,
+                        (expires_in_secs / 60).max(1)
+                    ),
+                );
+            }
+
+            if expires_at > now {
+                continue;
+            }
+
+            let _ = self.preserve_member_worktree(
+                engineer,
+                &format!("wip: auto-save before claim reclaim [{engineer}]"),
+            );
+            let branch = task
+                .branch
+                .clone()
+                .or_else(|| current_worktree_branch(&work_dir).ok());
+            let next_action = match branch.as_deref() {
+                Some(branch) => {
+                    format!(
+                        "Reclaimed after TTL expiry. Previous work preserved on branch {branch}."
+                    )
+                }
+                None => {
+                    "Reclaimed after TTL expiry. Previous work preserved in the engineer worktree."
+                        .to_string()
+                }
+            };
+            crate::team::task_cmd::reclaim_task_claim(&self.board_dir(), task.id, &next_action)?;
+            self.clear_active_task(engineer);
+            self.emit_event(TeamEvent::task_claim_expired(
+                engineer,
+                &task.id.to_string(),
+                true,
+            ));
+            let manager = self.assignment_sender(engineer);
+            let _ = self.queue_message(
+                "daemon",
+                &manager,
+                &format!(
+                    "Task #{} reclaimed from {} after {} minutes with no progress.",
+                    task.id,
+                    engineer,
+                    ttl_secs / 60
+                ),
+            );
+            self.record_orchestrator_action(format!(
+                "claim ttl: reclaimed task #{} from {} after {} minutes without progress",
+                task.id,
+                engineer,
+                ttl_secs / 60
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn claim_ttl_secs_for_priority(&self, priority: &str) -> u64 {
+        let policy = &self.config.team_config.workflow_policy.claim_ttl;
+        if priority.eq_ignore_ascii_case("critical") {
+            policy.critical_secs
+        } else {
+            policy.default_secs
+        }
+    }
+
     pub(super) fn reconcile_active_tasks(&mut self) -> Result<()> {
         let tasks_dir = self.board_dir().join("tasks");
         let board_tasks = if tasks_dir.exists() {
@@ -1066,6 +1265,46 @@ impl TeamDaemon {
     }
 }
 
+fn parse_rfc3339_utc(value: &str) -> Option<DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+}
+
+fn latest_commit_timestamp(work_dir: &std::path::Path) -> Option<DateTime<Utc>> {
+    let output = std::process::Command::new("git")
+        .args(["log", "-1", "--format=%cI"])
+        .current_dir(work_dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_rfc3339_utc(stdout.trim())
+}
+
+fn task_claim_progress_type(
+    task: &crate::task::Task,
+    work_dir: &std::path::Path,
+    current_output_bytes: u64,
+) -> Option<&'static str> {
+    let last_progress_at = task
+        .last_progress_at
+        .as_deref()
+        .and_then(parse_rfc3339_utc)?;
+    if latest_commit_timestamp(work_dir).is_some_and(|ts| ts > last_progress_at) {
+        return Some("commit");
+    }
+    if crate::team::git_cmd::has_user_changes(work_dir).unwrap_or(false) {
+        return Some("dirty_files");
+    }
+    if current_output_bytes > task.last_output_bytes.unwrap_or(0) {
+        return Some("output");
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::*;
@@ -1073,11 +1312,14 @@ mod tests {
     use crate::team::config::{WorkflowMode, WorkflowPolicy};
     use crate::team::events::TeamEvent;
     use crate::team::hierarchy::MemberInstance;
+    use crate::team::task_cmd::{
+        set_optional_string, set_optional_u64, update_task_frontmatter, yaml_key,
+    };
     use crate::team::task_loop::setup_engineer_worktree;
     use crate::team::test_helpers::{make_test_daemon, write_event_log};
     use crate::team::test_support::{
         EnvVarGuard, PATH_LOCK, TestDaemonBuilder, architect_member, engineer_member, git_ok,
-        init_git_repo, write_board_task_file, write_owned_task_file,
+        init_git_repo, manager_member, write_board_task_file, write_owned_task_file,
     };
     use std::collections::HashMap;
 
@@ -2173,6 +2415,13 @@ Second body.
             status: "blocked".to_string(),
             priority: "high".to_string(),
             claimed_by: Some("eng-1".to_string()),
+            claimed_at: None,
+            claim_ttl_secs: None,
+            claim_expires_at: None,
+            last_progress_at: None,
+            claim_warning_sent_at: None,
+            claim_extensions: None,
+            last_output_bytes: None,
             blocked: None,
             tags: Vec::new(),
             depends_on: vec![1],
@@ -2217,6 +2466,13 @@ Second body.
             status: "blocked".to_string(),
             priority: "high".to_string(),
             claimed_by: None,
+            claimed_at: None,
+            claim_ttl_secs: None,
+            claim_expires_at: None,
+            last_progress_at: None,
+            claim_warning_sent_at: None,
+            claim_extensions: None,
+            last_output_bytes: None,
             blocked: None,
             tags: Vec::new(),
             depends_on: vec![1],
@@ -2261,6 +2517,13 @@ Second body.
             status: "blocked".to_string(),
             priority: "high".to_string(),
             claimed_by: Some("unknown-eng".to_string()),
+            claimed_at: None,
+            claim_ttl_secs: None,
+            claim_expires_at: None,
+            last_progress_at: None,
+            claim_warning_sent_at: None,
+            claim_extensions: None,
+            last_output_bytes: None,
             blocked: None,
             tags: Vec::new(),
             depends_on: vec![1],
@@ -2339,6 +2602,13 @@ Second body.
             status: "in-progress".to_string(),
             priority: "high".to_string(),
             claimed_by: Some("eng-2".to_string()),
+            claimed_at: None,
+            claim_ttl_secs: None,
+            claim_expires_at: None,
+            last_progress_at: None,
+            claim_warning_sent_at: None,
+            claim_extensions: None,
+            last_output_bytes: None,
             blocked: None,
             tags: Vec::new(),
             depends_on: Vec::new(),
@@ -2421,6 +2691,13 @@ Second body.
             status: "todo".to_string(),
             priority: "high".to_string(),
             claimed_by: Some("@eng-1".to_string()),
+            claimed_at: None,
+            claim_ttl_secs: None,
+            claim_expires_at: None,
+            last_progress_at: None,
+            claim_warning_sent_at: None,
+            claim_extensions: None,
+            last_output_bytes: None,
             blocked: None,
             tags: Vec::new(),
             depends_on: Vec::new(),
@@ -3439,5 +3716,145 @@ Second body.
             !daemon.pipeline_starvation_fired,
             "starvation should be suppressed when manager is recently working"
         );
+    }
+
+    #[test]
+    fn claim_ttl_initializes_tracking_for_claimed_in_progress_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "claim-ttl-init");
+        write_owned_task_file(&repo, 42, "ttl-init", "in-progress", "eng-1");
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), true),
+            ])
+            .build();
+
+        daemon.maybe_manage_task_claim_ttls().unwrap();
+
+        let task = crate::task::Task::from_file(
+            &repo.join(".batty/team_config/board/tasks/042-ttl-init.md"),
+        )
+        .unwrap();
+        assert_eq!(task.claim_ttl_secs, Some(900));
+        assert!(task.claimed_at.is_some());
+        assert!(task.claim_expires_at.is_some());
+        assert!(task.last_progress_at.is_some());
+
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(&repo)).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "task_claim_created" && event.task.as_deref() == Some("42")
+        }));
+    }
+
+    #[test]
+    fn claim_ttl_reclaims_expired_task_without_progress() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "claim-ttl-expire");
+        write_owned_task_file(&repo, 42, "ttl-expire", "in-progress", "eng-1");
+
+        let task_path = repo.join(".batty/team_config/board/tasks/042-ttl-expire.md");
+        let now = chrono::Utc::now();
+        let stale_time = (now - chrono::Duration::minutes(40)).to_rfc3339();
+        let recent_progress_time = now.to_rfc3339();
+        update_task_frontmatter(&task_path, |mapping| {
+            set_optional_string(mapping, "claimed_at", Some(&stale_time));
+            set_optional_u64(mapping, "claim_ttl_secs", Some(60));
+            set_optional_string(mapping, "claim_expires_at", Some(&stale_time));
+            set_optional_string(mapping, "last_progress_at", Some(&recent_progress_time));
+            set_optional_u64(mapping, "last_output_bytes", Some(0));
+            mapping.insert(
+                yaml_key("claim_extensions"),
+                serde_yaml::Value::Number(0.into()),
+            );
+        })
+        .unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), false),
+            ])
+            .build();
+        daemon.active_tasks.insert("eng-1".to_string(), 42);
+
+        daemon.maybe_manage_task_claim_ttls().unwrap();
+
+        let task = crate::task::Task::from_file(&task_path).unwrap();
+        assert_eq!(task.status, "todo");
+        assert!(task.claimed_by.is_none());
+        assert!(
+            task.next_action
+                .as_deref()
+                .unwrap_or("")
+                .contains("Reclaimed after TTL expiry")
+        );
+        assert_eq!(daemon.active_task_id("eng-1"), None);
+
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(&repo)).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "task_claim_expired" && event.task.as_deref() == Some("42")
+        }));
+    }
+
+    #[test]
+    fn claim_ttl_progress_from_output_extends_claim() {
+        use crate::shim::protocol::socketpair;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "claim-ttl-output");
+        write_owned_task_file(&repo, 42, "ttl-output", "in-progress", "eng-1");
+
+        let task_path = repo.join(".batty/team_config/board/tasks/042-ttl-output.md");
+        let now = chrono::Utc::now();
+        let stale_time = (now - chrono::Duration::minutes(20)).to_rfc3339();
+        let recent_progress_time = now.to_rfc3339();
+        update_task_frontmatter(&task_path, |mapping| {
+            set_optional_string(mapping, "claimed_at", Some(&stale_time));
+            set_optional_u64(mapping, "claim_ttl_secs", Some(1800));
+            set_optional_string(mapping, "claim_expires_at", Some(&stale_time));
+            set_optional_string(mapping, "last_progress_at", Some(&recent_progress_time));
+            set_optional_u64(mapping, "last_output_bytes", Some(0));
+            mapping.insert(
+                yaml_key("claim_extensions"),
+                serde_yaml::Value::Number(0.into()),
+            );
+        })
+        .unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), false),
+            ])
+            .build();
+        let (parent_sock, _child_sock) = socketpair().unwrap();
+        let mut handle = super::super::agent_handle::AgentHandle::new(
+            "eng-1".to_string(),
+            crate::shim::protocol::Channel::new(parent_sock),
+            12345,
+            "codex".to_string(),
+            "codex".to_string(),
+            repo.to_path_buf(),
+        );
+        handle.record_output_bytes(128);
+        daemon.shim_handles.insert("eng-1".to_string(), handle);
+
+        daemon.maybe_manage_task_claim_ttls().unwrap();
+
+        let task = crate::task::Task::from_file(&task_path).unwrap();
+        assert_eq!(task.last_output_bytes, Some(128));
+        assert!(task.claim_expires_at.as_deref().unwrap_or("") > stale_time.as_str());
+
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(&repo)).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "task_claim_progress"
+                && event.task.as_deref() == Some("42")
+                && event.reason.as_deref() == Some("output")
+        }));
     }
 }

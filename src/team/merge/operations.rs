@@ -234,11 +234,8 @@ fn try_auto_resolve_rebase(worktree_dir: &Path) -> bool {
                             &["checkout", "--theirs", r],
                             &format!("auto-resolve {r}"),
                         );
-                        let _ = run_git_with_context(
-                            worktree_dir,
-                            &["add", r],
-                            &format!("stage {r}"),
-                        );
+                        let _ =
+                            run_git_with_context(worktree_dir, &["add", r], &format!("stage {r}"));
                     } else {
                         return false;
                     }

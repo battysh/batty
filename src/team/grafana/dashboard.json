@@ -1610,10 +1610,10 @@
             "type": "frser-sqlite-datasource",
             "uid": "batty-telemetry"
           },
-          "queryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS restarts FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='agent_restarted' AND json_extract(payload, '$.reason')='context_exhausted' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "queryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS restarts FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='agent_restarted' AND json_extract(payload, '$.reason')='context_pressure' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
           "queryType": "table",
-          "rawQueryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS restarts FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='agent_restarted' AND json_extract(payload, '$.reason')='context_exhausted' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
-          "rawSql": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS restarts FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='agent_restarted' AND json_extract(payload, '$.reason')='context_exhausted' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "rawQueryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS restarts FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='agent_restarted' AND json_extract(payload, '$.reason')='context_pressure' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "rawSql": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS restarts FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='agent_restarted' AND json_extract(payload, '$.reason')='context_pressure' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
           "refId": "A",
           "timeColumns": [
             "time"
@@ -1634,8 +1634,7 @@
             "drawStyle": "line",
             "fillOpacity": 8,
             "lineWidth": 2
-          },
-          "unit": "bytes"
+          }
         }
       },
       "gridPos": {
@@ -1651,17 +1650,17 @@
             "type": "frser-sqlite-datasource",
             "uid": "batty-telemetry"
           },
-          "queryText": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.output_bytes') AS INTEGER), 0) AS output_bytes, role AS metric FROM events WHERE event_type='context_pressure_warning' ORDER BY time;",
+          "queryText": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.load') AS REAL), 0) AS pressure_score, role AS metric FROM events WHERE event_type='context_pressure_warning' ORDER BY time;",
           "queryType": "table",
-          "rawQueryText": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.output_bytes') AS INTEGER), 0) AS output_bytes, role AS metric FROM events WHERE event_type='context_pressure_warning' ORDER BY time;",
-          "rawSql": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.output_bytes') AS INTEGER), 0) AS output_bytes, role AS metric FROM events WHERE event_type='context_pressure_warning' ORDER BY time;",
+          "rawQueryText": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.load') AS REAL), 0) AS pressure_score, role AS metric FROM events WHERE event_type='context_pressure_warning' ORDER BY time;",
+          "rawSql": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.load') AS REAL), 0) AS pressure_score, role AS metric FROM events WHERE event_type='context_pressure_warning' ORDER BY time;",
           "refId": "A",
           "timeColumns": [
             "time"
           ]
         }
       ],
-      "title": "Agent Session Output Volume",
+      "title": "Context Pressure Score",
       "type": "timeseries"
     },
     {

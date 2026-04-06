@@ -27,6 +27,7 @@ automation_sender: human
 workflow_policy:
   clean_room_mode: true
   handoff_directory: .batty/handoff
+  context_pressure_threshold: 100
   barrier_groups:
     analysis: [decompiler, spec-writer]
     implementation: [test-writer, implementer]
