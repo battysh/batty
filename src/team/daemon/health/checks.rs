@@ -8,34 +8,47 @@ use tracing::{info, warn};
 
 use super::super::*;
 use crate::team::prompt_compose::{render_member_prompt, resolve_prompt_context};
+use crate::team::task_loop::git_has_unresolved_conflicts;
 
 const SHARED_TARGET_DISK_THRESHOLD_PCT: u8 = 80;
 const SHARED_TARGET_CLEANUP_INTERVAL: Duration = Duration::from_secs(900);
 
-/// Check if a worktree has unresolved merge conflicts (UU, AA, DU, UD entries).
-fn worktree_has_merge_conflicts(worktree_path: &Path) -> bool {
+fn conflict_paths(repo_dir: &Path) -> Vec<String> {
     let output = match std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(worktree_path)
+        .args(["diff", "--name-only", "--diff-filter=U"])
+        .current_dir(repo_dir)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .output()
     {
-        Ok(o) => o,
-        Err(_) => return false,
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
     };
-    if !output.status.success() {
-        return false;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.lines().any(|line| {
-        let bytes = line.as_bytes();
-        bytes.len() >= 2
-            && matches!(
-                (bytes[0], bytes[1]),
-                (b'U', _) | (_, b'U') | (b'A', b'A') | (b'D', b'D')
-            )
-    })
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn git_ref_exists(repo_dir: &Path, rev: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--verify", rev])
+        .current_dir(repo_dir)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn abort_conflicted_git_operation(repo_dir: &Path, args: &[&str]) {
+    let _ = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo_dir)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output();
 }
 
 impl TeamDaemon {
@@ -73,6 +86,58 @@ impl TeamDaemon {
     /// been cherry-picked onto main, and auto-reset them to the base branch.
     /// Also detects and auto-recovers worktrees stuck in merge conflict state.
     pub(in super::super) fn check_worktree_staleness(&mut self) -> Result<()> {
+        let project_root = self.project_root().to_path_buf();
+        if git_has_unresolved_conflicts(&project_root).unwrap_or(false) {
+            let conflict_files = conflict_paths(&project_root);
+            let operation = if git_ref_exists(&project_root, "CHERRY_PICK_HEAD") {
+                "cherry-pick"
+            } else if git_ref_exists(&project_root, "REBASE_HEAD") {
+                "rebase"
+            } else {
+                "merge"
+            };
+            let file_summary = if conflict_files.is_empty() {
+                "unknown files".to_string()
+            } else {
+                conflict_files.join(", ")
+            };
+
+            warn!(
+                operation,
+                files = %file_summary,
+                "project root has unresolved conflicts; auto-recovering control-plane worktree"
+            );
+
+            abort_conflicted_git_operation(&project_root, &["cherry-pick", "--abort"]);
+            abort_conflicted_git_operation(&project_root, &["merge", "--abort"]);
+            abort_conflicted_git_operation(&project_root, &["rebase", "--abort"]);
+            abort_conflicted_git_operation(&project_root, &["reset", "--hard", "HEAD"]);
+            abort_conflicted_git_operation(&project_root, &["clean", "-fd"]);
+
+            if git_has_unresolved_conflicts(&project_root).unwrap_or(false) {
+                let message = format!(
+                    "Main worktree is still conflicted after failed {operation} recovery. Conflicted files: {file_summary}. Clear the repo state manually before the next merge."
+                );
+                self.record_orchestrator_action(format!(
+                    "health: failed to recover main worktree after conflicted {operation} on {file_summary}"
+                ));
+                let _ = self.notify_architects(&message);
+            } else {
+                let message = format!(
+                    "Recovered the main worktree after a failed {operation}. Conflicted files were: {file_summary}. Re-run the merge manually after reviewing the conflict."
+                );
+                info!(
+                    operation,
+                    files = %file_summary,
+                    "project root conflict auto-recovered"
+                );
+                self.record_orchestrator_action(format!(
+                    "health: auto-recovered main worktree after conflicted {operation} on {file_summary}"
+                ));
+                let _ = self.notify_architects(&message);
+            }
+        }
+
         let members: Vec<_> = self
             .config
             .members
@@ -88,7 +153,7 @@ impl TeamDaemon {
             }
 
             // Check for merge conflicts first — these block all git operations
-            if worktree_has_merge_conflicts(&worktree_path) {
+            if git_has_unresolved_conflicts(&worktree_path).unwrap_or(false) {
                 let base = format!("eng-main/{}", name);
                 warn!(
                     member = %name,
@@ -1167,6 +1232,61 @@ mod tests {
             .current_dir(&repo)
             .args(["branch", "-D", &base])
             .output();
+    }
+
+    #[test]
+    fn check_worktree_staleness_recovers_failed_main_cherry_pick_and_notifies_architect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "staleness-main-conflict");
+
+        std::fs::write(repo.join("conflict.txt"), "base\n").unwrap();
+        git_ok(&repo, &["add", "conflict.txt"]);
+        git_ok(&repo, &["commit", "-m", "add conflict file"]);
+
+        git_ok(&repo, &["checkout", "-b", "feature/conflict"]);
+        std::fs::write(repo.join("conflict.txt"), "feature change\n").unwrap();
+        git_ok(&repo, &["add", "conflict.txt"]);
+        git_ok(&repo, &["commit", "-m", "feature change"]);
+
+        git_ok(&repo, &["checkout", "main"]);
+        std::fs::write(repo.join("conflict.txt"), "main change\n").unwrap();
+        git_ok(&repo, &["add", "conflict.txt"]);
+        git_ok(&repo, &["commit", "-m", "main change"]);
+
+        let cherry_pick = Command::new("git")
+            .current_dir(&repo)
+            .args(["cherry-pick", "feature/conflict"])
+            .output()
+            .unwrap();
+        assert!(
+            !cherry_pick.status.success(),
+            "test setup requires a conflicted cherry-pick"
+        );
+        assert!(super::git_ref_exists(&repo, "CHERRY_PICK_HEAD"));
+
+        let mut daemon = make_test_daemon(&repo, vec![architect_member("architect")]);
+        daemon.is_git_repo = true;
+
+        daemon.check_worktree_staleness().unwrap();
+
+        assert!(
+            !super::git_ref_exists(&repo, "CHERRY_PICK_HEAD"),
+            "cherry-pick state should be aborted"
+        );
+        assert!(
+            !crate::team::task_loop::git_has_unresolved_conflicts(&repo).unwrap(),
+            "repo should be clean after recovery"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("conflict.txt")).unwrap(),
+            "main change\n"
+        );
+
+        let inbox_root = inbox::inboxes_root(&repo);
+        let messages = inbox::pending_messages(&inbox_root, "architect").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].body.contains("failed cherry-pick"));
+        assert!(messages[0].body.contains("conflict.txt"));
     }
 
     #[test]
