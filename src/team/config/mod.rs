@@ -208,7 +208,7 @@ impl TeamConfig {
 
             for (instance_name, override_cfg) in &role.instance_overrides {
                 if let Some(agent_name) = override_cfg.agent.as_deref()
-                    && agent::adapter_from_name(agent_name).is_none()
+                    && !super::multi_provider::is_known_instance_override_backend(agent_name)
                 {
                     bail!(
                         "role '{}' instance override '{}' uses unknown agent '{}'; valid agents: {}",
@@ -412,6 +412,28 @@ impl TeamConfig {
                         format!("role '{}' uses unknown agent '{}'", role.name, agent_name)
                     },
                 });
+            }
+
+            for (instance_name, override_cfg) in &role.instance_overrides {
+                if let Some(agent_name) = override_cfg.agent.as_deref() {
+                    let valid =
+                        super::multi_provider::is_known_instance_override_backend(agent_name);
+                    checks.push(ValidationCheck {
+                        name: format!("role_instance_agent_valid:{}:{}", role.name, instance_name),
+                        passed: valid,
+                        detail: if valid {
+                            format!(
+                                "role '{}' instance override '{}' agent '{}' is valid",
+                                role.name, instance_name, agent_name
+                            )
+                        } else {
+                            format!(
+                                "role '{}' instance override '{}' uses unknown agent '{}'",
+                                role.name, instance_name, agent_name
+                            )
+                        },
+                    });
+                }
             }
 
             let instances_ok = role.instances > 0;
