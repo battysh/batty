@@ -36,6 +36,8 @@ pub(in crate::team) struct AgentHandle {
     pub last_rows: u16,
     /// Latest session output byte count reported by the shim.
     pub output_bytes: u64,
+    /// When the shim last reported activity.
+    pub last_activity_at: Option<Instant>,
 }
 
 impl AgentHandle {
@@ -61,6 +63,7 @@ impl AgentHandle {
             last_cols: 0,
             last_rows: 0,
             output_bytes: 0,
+            last_activity_at: None,
         }
     }
 
@@ -68,6 +71,7 @@ impl AgentHandle {
     pub fn apply_state_change(&mut self, new_state: ShimState) {
         self.state = new_state;
         self.state_changed_at = Instant::now();
+        self.record_activity();
     }
 
     /// Whether the agent is ready to receive messages.
@@ -112,16 +116,28 @@ impl AgentHandle {
 
     /// Record that a Pong was received.
     pub fn record_pong(&mut self) {
-        self.last_pong_at = Some(Instant::now());
+        let now = Instant::now();
+        self.last_pong_at = Some(now);
+        self.last_activity_at = Some(now);
     }
 
     pub fn record_output_bytes(&mut self, output_bytes: u64) {
         self.output_bytes = output_bytes;
+        self.record_activity();
+    }
+
+    pub fn record_activity(&mut self) {
+        self.last_activity_at = Some(Instant::now());
     }
 
     /// Seconds since last Pong, or None if no Pong received yet.
     pub fn secs_since_last_pong(&self) -> Option<u64> {
         self.last_pong_at.map(|t| t.elapsed().as_secs())
+    }
+
+    /// Seconds since the shim last reported any activity, or None if never.
+    pub fn secs_since_last_activity(&self) -> Option<u64> {
+        self.last_activity_at.map(|t| t.elapsed().as_secs())
     }
 
     /// Try to receive an event from the shim (non-blocking via timeout).
@@ -186,6 +202,7 @@ mod tests {
         assert!(!handle.is_working());
         assert!(!handle.is_terminal());
         assert!(handle.last_pong_at.is_none());
+        assert!(handle.last_activity_at.is_none());
         assert_eq!(handle.agent_type, "claude");
         assert_eq!(handle.agent_cmd, "claude");
         assert_eq!(handle.work_dir, PathBuf::from("/tmp/test"));
@@ -312,11 +329,27 @@ mod tests {
     fn record_pong_sets_last_pong_at() {
         let (mut handle, _child) = make_test_handle();
         assert!(handle.last_pong_at.is_none());
+        assert!(handle.last_activity_at.is_none());
         assert!(handle.secs_since_last_pong().is_none());
+        assert!(handle.secs_since_last_activity().is_none());
 
         handle.record_pong();
         assert!(handle.last_pong_at.is_some());
+        assert!(handle.last_activity_at.is_some());
         assert_eq!(handle.secs_since_last_pong(), Some(0));
+        assert_eq!(handle.secs_since_last_activity(), Some(0));
+    }
+
+    #[test]
+    fn record_output_bytes_marks_recent_activity() {
+        let (mut handle, _child) = make_test_handle();
+        assert!(handle.last_activity_at.is_none());
+
+        handle.record_output_bytes(128);
+
+        assert_eq!(handle.output_bytes, 128);
+        assert!(handle.last_activity_at.is_some());
+        assert_eq!(handle.secs_since_last_activity(), Some(0));
     }
 
     #[test]
