@@ -65,23 +65,29 @@ pub(crate) fn preserve_handoff(
     task: &crate::task::Task,
     recent_output: Option<&str>,
 ) -> Result<()> {
+    let branch_name = git_capture(worktree, &["branch", "--show-current"]).unwrap_or_default();
+    let last_commit = git_capture(worktree, &["rev-parse", "HEAD"]).unwrap_or_default();
     let changed_files = summarize_changed_files(worktree);
     let recent_commits = git_capture(worktree, &["log", "--oneline", "-5"]).unwrap_or_default();
     let tests_run = recent_output
         .map(extract_test_commands)
         .unwrap_or_default()
         .join("\n");
+    let progress_summary = summarize_recent_progress(worktree, task, recent_output);
     let recent_activity = recent_output
         .map(summarize_recent_activity)
         .unwrap_or_default();
 
     let handoff = format!(
-        "# Carry-Forward Summary\n## Task Spec\nTask #{}: {}\n\n{}\n\n## Work Completed So Far\n### Changed Files\n{}\n\n### Tests Run\n{}\n\n### Recent Activity\n{}\n\n### Recent Commits\n{}\n\n## What Remains\n{}\n",
+        "# Carry-Forward Summary\n## Task Spec\nTask #{}: {}\n\n{}\n\n## Work Completed So Far\n### Branch\n{}\n\n### Last Commit\n{}\n\n### Changed Files\n{}\n\n### Tests Run\n{}\n\n### Progress Summary\n{}\n\n### Recent Activity\n{}\n\n### Recent Commits\n{}\n\n## What Remains\n{}\n",
         task.id,
         task.title,
         empty_section_fallback(&task.description),
+        empty_section_fallback(&branch_name),
+        empty_section_fallback(&last_commit),
         empty_section_fallback(&changed_files),
         empty_section_fallback(&tests_run),
+        empty_section_fallback(&progress_summary),
         empty_section_fallback(&recent_activity),
         empty_section_fallback(&recent_commits),
         handoff_remaining_work(task)
@@ -133,6 +139,70 @@ fn summarize_recent_activity(output: &str) -> String {
         .collect();
     let start = lines.len().saturating_sub(40);
     lines[start..].join("\n")
+}
+
+fn summarize_recent_progress(
+    worktree: &Path,
+    task: &crate::task::Task,
+    recent_output: Option<&str>,
+) -> String {
+    let mut summary = summarize_progress_from_event_log(worktree, task);
+    if summary.trim().is_empty() {
+        summary = recent_output
+            .map(summarize_recent_activity)
+            .unwrap_or_default();
+    }
+    truncate_to_word_limit(&summary, 500)
+}
+
+fn summarize_progress_from_event_log(worktree: &Path, task: &crate::task::Task) -> String {
+    let events_path = crate::team::team_events_path(worktree);
+    let Ok(events) = crate::team::events::read_events(&events_path) else {
+        return String::new();
+    };
+
+    let task_id = task.id.to_string();
+    let claimed_by = task.claimed_by.as_deref();
+    let mut lines = Vec::new();
+    for event in events.iter().rev() {
+        let matches_task = event.task.as_deref() == Some(task_id.as_str());
+        let matches_role = claimed_by.is_some() && event.role.as_deref() == claimed_by;
+        if !matches_task && !matches_role {
+            continue;
+        }
+
+        let mut line = event.event.clone();
+        if let Some(reason) = event.reason.as_deref().filter(|reason| !reason.trim().is_empty()) {
+            line.push_str(": ");
+            line.push_str(reason.trim());
+        } else if let Some(details) = event
+            .details
+            .as_deref()
+            .filter(|details| !details.trim().is_empty())
+        {
+            line.push_str(": ");
+            line.push_str(details.trim());
+        } else if let Some(error) = event.error.as_deref().filter(|error| !error.trim().is_empty())
+        {
+            line.push_str(": ");
+            line.push_str(error.trim());
+        }
+        lines.push(line);
+        if lines.len() >= 12 {
+            break;
+        }
+    }
+    lines.reverse();
+    lines.join("\n")
+}
+
+fn truncate_to_word_limit(input: &str, word_limit: usize) -> String {
+    let words: Vec<&str> = input.split_whitespace().collect();
+    if words.len() <= word_limit {
+        return input.trim().to_string();
+    }
+    let truncated = words[..word_limit].join(" ");
+    format!("{truncated} ...")
 }
 
 fn summarize_changed_files(worktree: &Path) -> String {
@@ -1935,11 +2005,27 @@ mod tests {
     fn preserve_handoff_writes_diff_and_commit_summary() {
         let repo = tempfile::tempdir().unwrap();
         init_test_git_repo(repo.path());
+        let events_dir = repo.path().join(".batty").join("team_config");
+        std::fs::create_dir_all(&events_dir).unwrap();
 
         std::fs::write(repo.path().join("tracked.txt"), "one\n").unwrap();
         run_test_git(repo.path(), &["add", "tracked.txt"]);
         run_test_git(repo.path(), &["commit", "-m", "initial commit"]);
         std::fs::write(repo.path().join("tracked.txt"), "one\ntwo\n").unwrap();
+
+        let task_id = "42";
+        let event_lines = [
+            serde_json::to_string(&crate::team::events::TeamEvent::task_assigned("eng-1", task_id))
+                .unwrap(),
+            serde_json::to_string(&crate::team::events::TeamEvent::agent_restarted(
+                "eng-1",
+                task_id,
+                "context_exhausted",
+                1,
+            ))
+            .unwrap(),
+        ];
+        std::fs::write(events_dir.join("events.jsonl"), event_lines.join("\n")).unwrap();
 
         let recent_output = "\
 running cargo test --lib\n\
@@ -1983,10 +2069,16 @@ editing src/lib.rs\n";
         assert!(handoff.contains("## Task Spec"));
         assert!(handoff.contains("Task #42: resume widget"));
         assert!(handoff.contains("## Work Completed So Far"));
+        assert!(handoff.contains("### Branch"));
+        assert!(handoff.contains("master") || handoff.contains("main"));
+        assert!(handoff.contains("### Last Commit"));
         assert!(handoff.contains("### Changed Files"));
         assert!(handoff.contains("tracked.txt"));
         assert!(handoff.contains("### Tests Run"));
         assert!(handoff.contains("cargo test --lib"));
+        assert!(handoff.contains("### Progress Summary"));
+        assert!(handoff.contains("task_assigned"));
+        assert!(handoff.contains("agent_restarted: context_exhausted"));
         assert!(handoff.contains("### Recent Activity"));
         assert!(handoff.contains("editing src/lib.rs"));
         assert!(handoff.contains("### Recent Commits"));
