@@ -2,14 +2,16 @@ use super::*;
 use crate::shim::protocol::{Command, ShimState, socketpair};
 use crate::team::config::{BoardConfig, WorkflowPolicy};
 use crate::team::daemon::agent_handle::AgentHandle;
+use crate::team::events;
 use crate::team::inbox;
 use crate::team::standup::MemberState;
 use crate::team::task_loop::{
     current_worktree_branch, engineer_base_branch_name, setup_engineer_worktree,
 };
+use crate::team::team_events_path;
 use crate::team::test_support::{
-    TestDaemonBuilder, engineer_member, init_git_repo, manager_member, write_open_task_file,
-    write_owned_task_file,
+    TestDaemonBuilder, engineer_member, git_ok, git_stdout, init_git_repo, manager_member,
+    write_open_task_file, write_owned_task_file,
 };
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -74,6 +76,128 @@ fn prepare_assignment_launch_rebuilds_task_branch_even_if_engineer_state_is_work
 
     assert_eq!(launch.branch.as_deref(), Some("eng-1/41"));
     assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-1/41");
+}
+
+#[test]
+fn prepare_assignment_launch_refreshes_stale_worktree_before_dispatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "dispatch-stale-rebase");
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    let team_config_dir = repo.join(".batty").join("team_config");
+    let base_branch = engineer_base_branch_name("eng-1");
+
+    setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+
+    std::fs::write(repo.join("main.txt"), "new main content\n").unwrap();
+    git_ok(&repo, &["add", "main.txt"]);
+    git_ok(&repo, &["commit", "-m", "advance main"]);
+
+    let mut daemon = TestDaemonBuilder::new(repo.as_path())
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ])
+        .board(BoardConfig {
+            worktree_stale_rebase_threshold: 0,
+            ..BoardConfig::default()
+        })
+        .build();
+
+    let launch = daemon
+        .prepare_assignment_launch("eng-1", "Task #41: new assignment", Some(41))
+        .unwrap();
+
+    assert_eq!(launch.branch.as_deref(), Some("eng-1/41"));
+    assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-1/41");
+    assert_eq!(
+        git_stdout(&repo, &["rev-parse", "main"]),
+        git_stdout(&worktree_dir, &["rev-parse", "HEAD"])
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree_dir.join("main.txt")).unwrap(),
+        "new main content\n"
+    );
+
+    let events = events::read_events(&team_events_path(&repo)).unwrap();
+    let event = events
+        .iter()
+        .find(|event| event.event == "worktree_refreshed")
+        .unwrap();
+    assert_eq!(event.role.as_deref(), Some("eng-1"));
+    assert!(
+        event
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("rebased stale worktree"),
+        "unexpected reason: {:?}",
+        event.reason
+    );
+}
+
+#[test]
+fn prepare_assignment_launch_resets_stale_worktree_after_rebase_conflict() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "dispatch-stale-reset");
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    let team_config_dir = repo.join(".batty").join("team_config");
+    let base_branch = engineer_base_branch_name("eng-1");
+
+    std::fs::write(repo.join("file.txt"), "base\n").unwrap();
+    git_ok(&repo, &["add", "file.txt"]);
+    git_ok(&repo, &["commit", "-m", "add file"]);
+
+    setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+
+    std::fs::write(worktree_dir.join("file.txt"), "engineer change\n").unwrap();
+    git_ok(&worktree_dir, &["add", "file.txt"]);
+    git_ok(&worktree_dir, &["commit", "-m", "engineer change"]);
+
+    std::fs::write(repo.join("file.txt"), "main change\n").unwrap();
+    git_ok(&repo, &["add", "file.txt"]);
+    git_ok(&repo, &["commit", "-m", "main change"]);
+
+    let mut daemon = TestDaemonBuilder::new(repo.as_path())
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ])
+        .board(BoardConfig {
+            worktree_stale_rebase_threshold: 0,
+            ..BoardConfig::default()
+        })
+        .build();
+
+    let launch = daemon
+        .prepare_assignment_launch("eng-1", "Task #42: conflicted assignment", Some(42))
+        .unwrap();
+
+    assert_eq!(launch.branch.as_deref(), Some("eng-1/42"));
+    assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-1/42");
+    assert_eq!(
+        git_stdout(&repo, &["rev-parse", "main"]),
+        git_stdout(&worktree_dir, &["rev-parse", "HEAD"])
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree_dir.join("file.txt")).unwrap(),
+        "main change\n"
+    );
+
+    let events = events::read_events(&team_events_path(&repo)).unwrap();
+    let event = events
+        .iter()
+        .find(|event| event.event == "worktree_refreshed")
+        .unwrap();
+    assert_eq!(event.role.as_deref(), Some("eng-1"));
+    assert!(
+        event
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("reset stale worktree after rebase failed"),
+        "unexpected reason: {:?}",
+        event.reason
+    );
 }
 
 #[test]
