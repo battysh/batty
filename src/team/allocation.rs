@@ -385,10 +385,14 @@ pub fn explain_routing_for_task(
         .map(|engineer| engineer_breakdown(engineer, profiles.get(engineer), task, policy))
         .collect();
 
-    let telemetry_ready = breakdowns
+    let has_any_telemetry = breakdowns
         .iter()
-        .all(|breakdown| breakdown.telemetry_completed_tasks >= 5);
-    if telemetry_ready {
+        .any(|breakdown| breakdown.telemetry_completed_tasks > 0);
+    let telemetry_ready = has_any_telemetry
+        && breakdowns
+            .iter()
+            .all(|breakdown| breakdown.telemetry_completed_tasks >= 5);
+    if telemetry_ready || !has_any_telemetry {
         breakdowns.sort_by(|left, right| compare_breakdowns(left, right));
         let chosen_engineer = breakdowns.first().map(|breakdown| breakdown.engineer.clone());
         return RoutingDecisionExplanation {
@@ -1137,5 +1141,28 @@ mod tests {
         let explanation = explain_routing_for_task(&engineers, &profiles, &task(&[], ""), &policy());
         assert!(explanation.fallback_to_round_robin);
         assert_eq!(explanation.chosen_engineer.as_deref(), Some("eng-1"));
+    }
+
+    #[test]
+    fn explain_routing_keeps_scored_mode_when_no_telemetry_exists() {
+        let engineers = vec!["eng-1".to_string(), "eng-2".to_string()];
+        let profiles = HashMap::from([
+            (
+                "eng-1".to_string(),
+                EngineerProfile::default(),
+            ),
+            (
+                "eng-2".to_string(),
+                EngineerProfile {
+                    domain_tags: HashSet::from(["dispatch".to_string()]),
+                    ..EngineerProfile::default()
+                },
+            ),
+        ]);
+
+        let explanation =
+            explain_routing_for_task(&engineers, &profiles, &task(&["dispatch"], ""), &policy());
+        assert!(!explanation.fallback_to_round_robin);
+        assert_eq!(explanation.chosen_engineer.as_deref(), Some("eng-2"));
     }
 }
