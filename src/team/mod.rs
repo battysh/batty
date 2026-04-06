@@ -58,6 +58,7 @@ pub mod parity;
 pub mod policy;
 pub mod prompt_compose;
 pub mod quality_metrics;
+pub mod autoresearch;
 pub mod reload;
 pub mod resolver;
 pub mod retrospective;
