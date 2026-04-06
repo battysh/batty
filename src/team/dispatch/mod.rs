@@ -74,7 +74,11 @@ impl TeamDaemon {
         team_config_dir: &Path,
         repo_label: Option<&str>,
     ) -> Result<()> {
-        let threshold = self.config.team_config.board.worktree_stale_rebase_threshold;
+        let threshold = self
+            .config
+            .team_config
+            .board
+            .worktree_stale_rebase_threshold;
         let outcome = refresh_engineer_worktree_if_stale(
             project_root,
             worktree_dir,
@@ -152,6 +156,7 @@ impl TeamDaemon {
             .find(|m| m.name == engineer)
             .cloned();
         let team_config_dir = self.config.project_root.join(".batty").join("team_config");
+        let project_root = self.config.project_root.clone();
         let use_worktrees = (self.is_git_repo || self.is_multi_repo)
             && member.as_ref().map(|m| m.use_worktrees).unwrap_or(false);
         if !use_worktrees {
@@ -162,16 +167,12 @@ impl TeamDaemon {
         }
         let task_branch = use_worktrees.then(|| engineer_task_branch_name(engineer, task, task_id));
         let work_dir = if let Some(task_branch) = task_branch.as_deref() {
-            let work_dir = self
-                .config
-                .project_root
-                .join(".batty")
-                .join("worktrees")
-                .join(engineer);
+            let work_dir = project_root.join(".batty").join("worktrees").join(engineer);
             let base_branch = engineer_base_branch_name(engineer);
             if self.is_multi_repo {
-                for repo_name in &self.sub_repo_names {
-                    let repo_root = self.config.project_root.join(repo_name);
+                let sub_repo_names = self.sub_repo_names.clone();
+                for repo_name in &sub_repo_names {
+                    let repo_root = project_root.join(repo_name);
                     let sub_wt = work_dir.join(repo_name);
                     self.maybe_refresh_assignment_worktree(
                         engineer,
@@ -183,24 +184,24 @@ impl TeamDaemon {
                     )?;
                 }
                 prepare_multi_repo_assignment_worktree(
-                    &self.config.project_root,
+                    &project_root,
                     &work_dir,
                     engineer,
                     task_branch,
                     &team_config_dir,
-                    &self.sub_repo_names,
+                    &sub_repo_names,
                 )?
             } else {
                 self.maybe_refresh_assignment_worktree(
                     engineer,
-                    &self.config.project_root,
+                    &project_root,
                     &work_dir,
                     &base_branch,
                     &team_config_dir,
                     None,
                 )?;
                 prepare_engineer_assignment_worktree(
-                    &self.config.project_root,
+                    &project_root,
                     &work_dir,
                     engineer,
                     task_branch,
@@ -208,7 +209,7 @@ impl TeamDaemon {
                 )?
             }
         } else {
-            self.config.project_root.clone()
+            project_root
         };
 
         self.validate_member_work_dir(engineer, &work_dir)?;

@@ -337,7 +337,8 @@ pub(crate) fn refresh_engineer_worktree_if_stale(
         });
     }
 
-    let action = refresh_engineer_worktree(project_root, worktree_dir, branch_name, team_config_dir)?;
+    let action =
+        refresh_engineer_worktree(project_root, worktree_dir, branch_name, team_config_dir)?;
     Ok(WorktreeRefreshOutcome {
         action,
         behind_main,
