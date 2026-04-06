@@ -1818,4 +1818,46 @@ mod tests {
             ProjectLifecycleState::Running
         );
     }
+
+    #[test]
+    fn project_status_dto_serializes_stable_camel_case_shape() {
+        let dto = ProjectStatusDto {
+            project_id: "alpha".to_string(),
+            name: "Alpha".to_string(),
+            team_name: "alpha-team".to_string(),
+            session_name: "batty-alpha".to_string(),
+            project_root: PathBuf::from("/tmp/alpha"),
+            lifecycle: ProjectLifecycleState::Recovering,
+            running: true,
+            health: ProjectHealthSummary {
+                paused: false,
+                watchdog_state: "restarting".to_string(),
+                unhealthy_members: vec!["eng-1".to_string()],
+                member_count: 4,
+                active_member_count: 2,
+                pending_inbox_count: 3,
+                triage_backlog_count: 1,
+            },
+            pipeline: ProjectPipelineMetrics {
+                active_task_count: 2,
+                review_queue_count: 1,
+                runnable_count: 5,
+                blocked_count: 1,
+                stale_in_progress_count: 0,
+                stale_review_count: 1,
+                auto_merge_rate: Some(0.75),
+                rework_rate: Some(0.2),
+                avg_review_latency_secs: Some(120.0),
+            },
+        };
+
+        let value = serde_json::to_value(&dto).unwrap();
+        assert_eq!(value["projectId"], "alpha");
+        assert_eq!(value["teamName"], "alpha-team");
+        assert_eq!(value["sessionName"], "batty-alpha");
+        assert_eq!(value["lifecycle"], "recovering");
+        assert_eq!(value["health"]["watchdogState"], "restarting");
+        assert_eq!(value["pipeline"]["activeTaskCount"], 2);
+        assert_eq!(value["pipeline"]["avgReviewLatencySecs"], 120.0);
+    }
 }
