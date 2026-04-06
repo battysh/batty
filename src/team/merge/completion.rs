@@ -22,7 +22,7 @@ use crate::team::task_loop::{
     read_task_title,
 };
 use crate::team::telemetry_db;
-use crate::team::test_results::TestResults;
+use crate::team::test_results::{TestResults, TestRunOutput};
 use crate::team::verification::{EvidenceKind, VerificationPhase, VerificationState};
 
 use super::git_ops::{
@@ -143,6 +143,18 @@ fn structured_failure_details(results: &TestResults) -> Vec<String> {
             detail
         })
         .collect()
+}
+
+fn empty_test_results(framework: &str, summary: Option<String>) -> TestResults {
+    TestResults {
+        framework: framework.to_string(),
+        total: None,
+        passed: 0,
+        failed: 0,
+        ignored: 0,
+        failures: Vec::new(),
+        summary,
+    }
 }
 
 fn move_task_to_review(
@@ -340,6 +352,10 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
             crate::team::daemon::verification::VerificationRunResult {
                 passed: true,
                 output,
+                results: empty_test_results(
+                    "cargo",
+                    Some("automatic verification skipped by policy".to_string()),
+                ),
                 failures: Vec::new(),
                 file_paths: Vec::new(),
             },
@@ -354,11 +370,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     };
 
     if !has_required_evidence || !verification_run.passed {
-        let verification_results = crate::team::test_results::parse(
-            test_command.as_deref().unwrap_or("cargo test"),
-            &verification_run.output,
-            verification_run.passed,
-        );
+        let verification_results = verification_run.results.clone();
         if !verification_run.passed {
             persist_test_results(&board_dir, task_id, &verification_results)?;
             if let Some(conn) = &daemon.telemetry_db {
@@ -543,14 +555,10 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         current_worktree_branch(&worktree_dir)?
     };
     let previous_results = load_previous_test_results(&board_dir, task_id)?;
-    let test_run = crate::team::test_results::TestRunOutput {
+    let test_run = TestRunOutput {
         passed: verification_run.passed,
         output: verification_run.output.clone(),
-        results: crate::team::test_results::parse(
-            test_command.as_deref().unwrap_or("cargo test"),
-            &verification_run.output,
-            verification_run.passed,
-        ),
+        results: verification_run.results.clone(),
     };
     let flaky_failures = if test_run.passed {
         detect_flaky_failures(previous_results.as_ref(), &test_run.results)

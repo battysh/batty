@@ -110,6 +110,7 @@ pub(crate) struct StatusTaskEntry {
     pub(crate) worktree_path: Option<String>,
     pub(crate) commit: Option<String>,
     pub(crate) next_action: Option<String>,
+    pub(crate) test_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -849,6 +850,11 @@ pub(crate) fn board_status_task_queues(
     let mut review_queue = Vec::new();
     for task in task::load_tasks_from_dir(&tasks_dir)? {
         let inferred = infer_runtime_task_metadata(project_root, &task);
+        let test_summary = crate::team::board::read_workflow_metadata(&task.source_path)
+            .ok()
+            .and_then(|metadata| metadata.test_results)
+            .filter(|results| results.failed > 0)
+            .map(|results| results.failure_summary());
         let entry = StatusTaskEntry {
             id: task.id,
             title: task.title,
@@ -863,6 +869,7 @@ pub(crate) fn board_status_task_queues(
                 .or_else(|| inferred.worktree_path.clone()),
             commit: task.commit.or_else(|| inferred.commit.clone()),
             next_action: task.next_action,
+            test_summary,
         };
 
         match task.status.as_str() {
@@ -2291,6 +2298,7 @@ mod tests {
         assert_eq!(review_queue[0].id, 42);
         assert_eq!(review_queue[0].review_owner.as_deref(), Some("manager"));
         assert_eq!(review_queue[0].next_action.as_deref(), Some("review now"));
+        assert!(review_queue[0].test_summary.is_none());
     }
 
     #[test]
@@ -2337,6 +2345,33 @@ mod tests {
                 .is_some_and(|branch| branch.contains("eng-1"))
         );
         assert!(active_tasks[0].commit.as_deref().is_some());
+        assert!(active_tasks[0].test_summary.is_none());
+    }
+
+    #[test]
+    fn board_status_task_queues_surfaces_failed_test_summary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(
+            tasks_dir.join("041-active.md"),
+            "---\nid: 41\ntitle: Active task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\ntests_run: true\ntests_passed: false\ntest_results:\n  framework: cargo\n  total: 3\n  passed: 2\n  failed: 1\n  ignored: 0\n  failures:\n    - test_name: parser::it_works\n      message: assertion failed\n      location: src/parser.rs:12:5\n---\n",
+        )
+        .unwrap();
+
+        let (active_tasks, review_queue) = board_status_task_queues(tmp.path()).unwrap();
+
+        assert!(review_queue.is_empty());
+        assert_eq!(active_tasks.len(), 1);
+        assert_eq!(
+            active_tasks[0].test_summary.as_deref(),
+            Some("1 tests failed: parser::it_works (assertion failed at src/parser.rs:12:5)")
+        );
     }
 
     #[test]
@@ -2374,6 +2409,7 @@ mod tests {
                 worktree_path: None,
                 commit: None,
                 next_action: None,
+                test_summary: Some("1 tests failed: parser::it_works".to_string()),
             }],
             review_queue: vec![StatusTaskEntry {
                 id: 42,
@@ -2387,6 +2423,7 @@ mod tests {
                 worktree_path: None,
                 commit: None,
                 next_action: Some("review now".to_string()),
+                test_summary: None,
             }],
             engineer_profiles: None,
             members: vec![
