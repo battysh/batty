@@ -218,6 +218,14 @@ impl TeamEvent {
         }
     }
 
+    pub fn board_task_archived(task: &str, role: Option<&str>) -> Self {
+        Self {
+            role: role.map(str::to_string),
+            task: Some(task.into()),
+            ..Self::base("board_task_archived")
+        }
+    }
+
     pub fn performance_regression(task: &str, reason: &str) -> Self {
         Self {
             task: Some(task.into()),
@@ -288,6 +296,32 @@ impl TeamEvent {
             task: Some(task_id.to_string()),
             reason: Some(format!("rejection_count={rejection_count}")),
             ..Self::base("narration_rejection")
+        }
+    }
+
+    pub fn planning_cycle_triggered(role: &str, idle_engineers: u32, board_summary: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            working_members: Some(idle_engineers),
+            reason: Some(board_summary.into()),
+            ..Self::base("planning_cycle_triggered")
+        }
+    }
+
+    pub fn planning_cycle_completed(
+        role: &str,
+        tasks_created: u32,
+        latency_secs: u64,
+        success: bool,
+        error: Option<&str>,
+    ) -> Self {
+        Self {
+            role: Some(role.into()),
+            restart_count: Some(tasks_created),
+            uptime_secs: Some(latency_secs),
+            reason: Some(if success { "success" } else { "failure" }.into()),
+            error: error.map(str::to_string),
+            ..Self::base("planning_cycle_completed")
         }
     }
 
@@ -754,6 +788,18 @@ mod tests {
                 "context_pressure_warning",
                 TeamEvent::context_pressure_warning("eng-1", Some(42), 400_000, 512_000),
             ),
+            (
+                "planning_cycle_triggered",
+                TeamEvent::planning_cycle_triggered("architect", 3, "todo=0, backlog=1"),
+            ),
+            (
+                "planning_cycle_completed",
+                TeamEvent::planning_cycle_completed("architect", 2, 14, true, None),
+            ),
+            (
+                "board_task_archived",
+                TeamEvent::board_task_archived("42", Some("eng-1")),
+            ),
             ("message_routed", TeamEvent::message_routed("a", "b")),
             ("agent_spawned", TeamEvent::agent_spawned("eng-1")),
             (
@@ -972,6 +1018,35 @@ mod tests {
         assert_eq!(parsed["task"].as_str().unwrap(), "67");
         assert_eq!(parsed["output_bytes"].as_u64().unwrap(), 420_000);
         assert_eq!(parsed["reason"].as_str().unwrap(), "threshold_bytes=512000");
+    }
+
+    #[test]
+    fn planning_cycle_completed_includes_latency_status_and_created_count() {
+        let event =
+            TeamEvent::planning_cycle_completed("architect", 4, 19, false, Some("parse failed"));
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            parsed["event"].as_str().unwrap(),
+            "planning_cycle_completed"
+        );
+        assert_eq!(parsed["role"].as_str().unwrap(), "architect");
+        assert_eq!(parsed["restart_count"].as_u64().unwrap(), 4);
+        assert_eq!(parsed["uptime_secs"].as_u64().unwrap(), 19);
+        assert_eq!(parsed["reason"].as_str().unwrap(), "failure");
+        assert_eq!(parsed["error"].as_str().unwrap(), "parse failed");
+    }
+
+    #[test]
+    fn board_task_archived_includes_task_and_role() {
+        let event = TeamEvent::board_task_archived("88", Some("eng-1-2"));
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["event"].as_str().unwrap(), "board_task_archived");
+        assert_eq!(parsed["task"].as_str().unwrap(), "88");
+        assert_eq!(parsed["role"].as_str().unwrap(), "eng-1-2");
     }
 
     #[test]
@@ -1292,11 +1367,9 @@ mod tests {
         let events = read_events(&path).unwrap();
         assert_eq!(events.len(), 4);
         for idx in 0..4 {
-            assert!(
-                events
-                    .iter()
-                    .any(|event| event.role.as_deref() == Some(&format!("eng-{idx}")))
-            );
+            assert!(events
+                .iter()
+                .any(|event| event.role.as_deref() == Some(&format!("eng-{idx}"))));
         }
     }
 

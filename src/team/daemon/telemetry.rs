@@ -188,6 +188,40 @@ impl TeamDaemon {
         ));
     }
 
+    pub(super) fn record_planning_cycle_triggered(
+        &mut self,
+        architect: &str,
+        idle_engineers: u32,
+        board_summary: &str,
+    ) {
+        self.emit_event(TeamEvent::planning_cycle_triggered(
+            architect,
+            idle_engineers,
+            board_summary,
+        ));
+    }
+
+    pub(super) fn record_planning_cycle_completed(
+        &mut self,
+        architect: &str,
+        tasks_created: u32,
+        latency_secs: u64,
+        success: bool,
+        error: Option<&str>,
+    ) {
+        self.emit_event(TeamEvent::planning_cycle_completed(
+            architect,
+            tasks_created,
+            latency_secs,
+            success,
+            error,
+        ));
+    }
+
+    pub(super) fn record_board_task_archived(&mut self, task_id: u32, role: Option<&str>) {
+        self.emit_event(TeamEvent::board_task_archived(&task_id.to_string(), role));
+    }
+
     pub(super) fn record_standup_generated(&mut self, recipient: &str) {
         self.emit_event(TeamEvent::standup_generated(recipient));
     }
@@ -440,14 +474,14 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::team::LOG_ROTATION_BYTES;
     use crate::team::config::{
         AutomationConfig, BoardConfig, OrchestratorPosition, RoleDef, StandupConfig, TeamConfig,
         WorkflowMode, WorkflowPolicy,
     };
-    use crate::team::events::{EventSink, read_events};
+    use crate::team::events::{read_events, EventSink};
     use crate::team::failure_patterns::FailureTracker;
-    use crate::team::test_helpers::{RecordingChannel, daemon_config_with_roles};
+    use crate::team::test_helpers::{daemon_config_with_roles, RecordingChannel};
+    use crate::team::LOG_ROTATION_BYTES;
     use regex::Regex;
     use serial_test::serial;
 
@@ -779,12 +813,11 @@ mod tests {
 
         assert!(malformed_path.is_dir());
         assert!(malformed_ansi_path.is_dir());
-        assert!(
-            !tmp.path()
-                .join(".batty")
-                .join("orchestrator.log.1")
-                .exists()
-        );
+        assert!(!tmp
+            .path()
+            .join(".batty")
+            .join("orchestrator.log.1")
+            .exists());
     }
 
     #[test]
