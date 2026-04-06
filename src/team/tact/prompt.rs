@@ -25,7 +25,7 @@ pub fn compose_prompt(ctx: &TactPrompt) -> String {
     } else {
         ctx.roadmap_priorities.join(", ")
     };
-    let requested = ctx.idle_count.saturating_sub(ctx.todo_count);
+    let requested = ctx.idle_count.saturating_sub(ctx.dispatchable_count);
 
     format!(
         "Board state: {}. Recent completions: {}. Roadmap priorities: {}. Please specify {} new tasks as structured specs with title, body, priority, and optional depends_on.\n\nExpected response format:\n{}",
@@ -41,6 +41,12 @@ pub fn compose_planning_prompt(
     project_goals: &[String],
     project_name: &str,
 ) -> String {
+    let dispatchable_count = board_summary
+        .split(',')
+        .find_map(|part| part.trim().strip_prefix("dispatchable_tasks="))
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let requested_count = idle_engineer_count.saturating_sub(dispatchable_count);
     let tact_prompt = TactPrompt {
         board_summary: format!(
             "{board_summary}, idle_engineers={idle_engineer_count}, dispatchable_tasks={}",
@@ -52,11 +58,7 @@ pub fn compose_planning_prompt(
         recent_completions: recent_completions.to_vec(),
         roadmap_priorities: roadmap_context.to_vec(),
         idle_count: idle_engineer_count,
-        todo_count: board_summary
-            .split(',')
-            .find_map(|part| part.trim().strip_prefix("todo="))
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(0),
+        dispatchable_count,
     };
     let completions = if recent_completions.is_empty() {
         "None.".to_string()
@@ -97,11 +99,10 @@ Current board state:\n\
 Board summary:\n{board_summary}\n\n\
 Roadmap context:\n{roadmap}\n\n\
 Project goals:\n{goals}\n\n\
-Propose exactly {idle_engineer_count} task(s). Each task must be feature-sized, self-contained, \
+Propose exactly {requested_count} task(s). Each task must be feature-sized, self-contained, \
 and ready to hand directly to an engineer. Include concrete file paths and explicit acceptance \
 criteria in each task body.\n\n\
-Expected response format:\n{PLANNING_RESPONSE_FORMAT}"
-        ,
+Expected response format:\n{PLANNING_RESPONSE_FORMAT}",
         compose_prompt(&tact_prompt)
     )
 }
@@ -122,6 +123,20 @@ mod tests {
         let prompt = compose_planning_prompt(3, "board text", &[], &[], &[], "Batty");
         assert!(prompt.contains("Idle engineers available: 3"));
         assert!(prompt.contains("Propose exactly 3 task(s)."));
+    }
+
+    #[test]
+    fn compose_sizes_request_by_dispatchable_deficit() {
+        let prompt = compose_planning_prompt(
+            3,
+            "todo=4 backlog=1 in-progress=0 review=0 done=0 idle_engineers=3, dispatchable_tasks=1",
+            &[],
+            &[],
+            &[],
+            "Batty",
+        );
+        assert!(prompt.contains("Propose exactly 2 task(s)."));
+        assert!(prompt.contains("Please specify 2 new tasks"));
     }
 
     #[test]
@@ -184,10 +199,11 @@ mod tests {
             recent_completions: vec!["Finished parser".to_string()],
             roadmap_priorities: vec!["Ship tact".to_string()],
             idle_count: 2,
-            todo_count: 3,
+            dispatchable_count: 1,
         });
         assert!(prompt.contains("3 todo, 1 in-progress, 2 idle engineers"));
         assert!(prompt.contains("Finished parser"));
         assert!(prompt.contains("Ship tact"));
+        assert!(prompt.contains("Please specify 1 new tasks"));
     }
 }
