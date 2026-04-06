@@ -83,6 +83,9 @@ pub struct WorkflowMetrics {
     pub blocked_count: u32,
     pub in_review_count: u32,
     pub in_progress_count: u32,
+    pub stale_in_progress_count: u32,
+    pub aged_todo_count: u32,
+    pub stale_review_count: u32,
     pub idle_with_runnable: Vec<String>,
     pub oldest_review_age_secs: Option<u64>,
     pub oldest_assignment_age_secs: Option<u64>,
@@ -1062,7 +1065,7 @@ fn format_pct_0(value: Option<f64>) -> String {
 }
 
 pub fn compute_metrics(board_dir: &Path, members: &[MemberInstance]) -> Result<WorkflowMetrics> {
-    compute_metrics_with_telemetry(board_dir, members, None, None)
+    compute_metrics_with_aging(board_dir, members, crate::team::board::AgingThresholds::default())
 }
 
 /// Compute workflow metrics, preferring SQLite telemetry DB over JSONL events.
@@ -1075,7 +1078,31 @@ pub fn compute_metrics_with_telemetry(
     db: Option<&rusqlite::Connection>,
     events_path: Option<&Path>,
 ) -> Result<WorkflowMetrics> {
-    let board_metrics = compute_board_metrics(board_dir, members)?;
+    compute_metrics_with_telemetry_and_aging(
+        board_dir,
+        members,
+        crate::team::board::AgingThresholds::default(),
+        db,
+        events_path,
+    )
+}
+
+fn compute_metrics_with_aging(
+    board_dir: &Path,
+    members: &[MemberInstance],
+    thresholds: crate::team::board::AgingThresholds,
+) -> Result<WorkflowMetrics> {
+    compute_metrics_with_telemetry_and_aging(board_dir, members, thresholds, None, None)
+}
+
+fn compute_metrics_with_telemetry_and_aging(
+    board_dir: &Path,
+    members: &[MemberInstance],
+    thresholds: crate::team::board::AgingThresholds,
+    db: Option<&rusqlite::Connection>,
+    events_path: Option<&Path>,
+) -> Result<WorkflowMetrics> {
+    let board_metrics = compute_board_metrics(board_dir, members, thresholds)?;
 
     let review = if let Some(conn) = db {
         compute_review_metrics_from_db(conn)
@@ -1088,6 +1115,9 @@ pub fn compute_metrics_with_telemetry(
         blocked_count: board_metrics.blocked_count,
         in_review_count: board_metrics.in_review_count,
         in_progress_count: board_metrics.in_progress_count,
+        stale_in_progress_count: board_metrics.stale_in_progress_count,
+        aged_todo_count: board_metrics.aged_todo_count,
+        stale_review_count: board_metrics.stale_review_count,
         idle_with_runnable: board_metrics.idle_with_runnable,
         oldest_review_age_secs: board_metrics.oldest_review_age_secs,
         oldest_assignment_age_secs: board_metrics.oldest_assignment_age_secs,
@@ -1116,12 +1146,19 @@ struct BoardMetrics {
     blocked_count: u32,
     in_review_count: u32,
     in_progress_count: u32,
+    stale_in_progress_count: u32,
+    aged_todo_count: u32,
+    stale_review_count: u32,
     idle_with_runnable: Vec<String>,
     oldest_review_age_secs: Option<u64>,
     oldest_assignment_age_secs: Option<u64>,
 }
 
-fn compute_board_metrics(board_dir: &Path, members: &[MemberInstance]) -> Result<BoardMetrics> {
+fn compute_board_metrics(
+    board_dir: &Path,
+    members: &[MemberInstance],
+    thresholds: crate::team::board::AgingThresholds,
+) -> Result<BoardMetrics> {
     let tasks_dir = board_dir.join("tasks");
     if !tasks_dir.is_dir() {
         return Ok(BoardMetrics {
@@ -1129,6 +1166,9 @@ fn compute_board_metrics(board_dir: &Path, members: &[MemberInstance]) -> Result
             blocked_count: 0,
             in_review_count: 0,
             in_progress_count: 0,
+            stale_in_progress_count: 0,
+            aged_todo_count: 0,
+            stale_review_count: 0,
             idle_with_runnable: Vec::new(),
             oldest_review_age_secs: None,
             oldest_assignment_age_secs: None,
@@ -1142,6 +1182,9 @@ fn compute_board_metrics(board_dir: &Path, members: &[MemberInstance]) -> Result
             blocked_count: 0,
             in_review_count: 0,
             in_progress_count: 0,
+            stale_in_progress_count: 0,
+            aged_todo_count: 0,
+            stale_review_count: 0,
             idle_with_runnable: Vec::new(),
             oldest_review_age_secs: None,
             oldest_assignment_age_secs: None,
@@ -1191,12 +1234,20 @@ fn compute_board_metrics(board_dir: &Path, members: &[MemberInstance]) -> Result
         .max();
 
     let idle_with_runnable = compute_idle_with_runnable(board_dir, members, &tasks, runnable_count);
+    let aging = project_root_from_board_dir(board_dir)
+        .and_then(|project_root| {
+            crate::team::board::compute_task_aging(board_dir, project_root, thresholds).ok()
+        })
+        .unwrap_or_default();
 
     Ok(BoardMetrics {
         runnable_count,
         blocked_count,
         in_review_count,
         in_progress_count,
+        stale_in_progress_count: aging.stale_in_progress.len() as u32,
+        aged_todo_count: aging.aged_todo.len() as u32,
+        stale_review_count: aging.stale_review.len() as u32,
         idle_with_runnable,
         oldest_review_age_secs,
         oldest_assignment_age_secs,
@@ -1361,6 +1412,7 @@ Runnable: {}\n\
 Blocked: {}\n\
 In Review: {}\n\
 In Progress: {}\n\
+Aging Alerts: stale in-progress {} | aged todo {} | stale review {}\n\
 Idle With Runnable: {}\n\
 Oldest Review Age: {}\n\
 Oldest Assignment Age: {}\n\n\
@@ -1371,6 +1423,9 @@ Auto: {} | Manual: {} | Rework: {} | Nudges: {} | Escalations: {}",
         metrics.blocked_count,
         metrics.in_review_count,
         metrics.in_progress_count,
+        metrics.stale_in_progress_count,
+        metrics.aged_todo_count,
+        metrics.stale_review_count,
         idle,
         format_age(metrics.oldest_review_age_secs),
         format_age(metrics.oldest_assignment_age_secs),
@@ -1457,7 +1512,21 @@ pub(crate) fn workflow_metrics_section(
         None
     };
 
-    match compute_metrics_with_telemetry(&board_dir, members, db.as_ref(), events_fallback) {
+    let thresholds = config::TeamConfig::load(&config_path)
+        .map(|config| crate::team::board::AgingThresholds {
+            stale_in_progress_hours: config.workflow_policy.stale_in_progress_hours,
+            aged_todo_hours: config.workflow_policy.aged_todo_hours,
+            stale_review_hours: config.workflow_policy.stale_review_hours,
+        })
+        .unwrap_or_default();
+
+    match compute_metrics_with_telemetry_and_aging(
+        &board_dir,
+        members,
+        thresholds,
+        db.as_ref(),
+        events_fallback,
+    ) {
         Ok(metrics) => {
             let formatted = format_metrics(&metrics);
             Some((formatted, metrics))
