@@ -158,12 +158,34 @@ fn empty_test_results(framework: &str, summary: Option<String>) -> TestResults {
 }
 
 fn move_task_to_review(
-    _daemon: &mut TeamDaemon,
+    daemon: &mut TeamDaemon,
     board_dir: &Path,
     task_id: u32,
     manager_name: Option<&str>,
     engineer: &str,
-) {
+) -> Result<bool> {
+    let worktree_dir = daemon.worktree_dir(engineer);
+    let commits_ahead = if daemon.is_multi_repo {
+        multi_repo_commits_ahead_of_main(&worktree_dir, &daemon.sub_repo_names)?
+    } else {
+        commits_ahead_of_main(&worktree_dir)?
+    };
+
+    if commits_ahead == 0 {
+        warn!(
+            engineer,
+            task_id, "refusing to move task to review because branch has no commits ahead of main"
+        );
+        let msg = "Review blocked: your branch has no commits ahead of main, so Batty kept the task in progress instead of moving it to review.\n\
+                   Commit the work first:\n\
+                   ```\n\
+                   git add -A\n\
+                   git commit -m \"your task description\"\n\
+                   ```";
+        daemon.queue_message("batty", engineer, msg)?;
+        return Ok(false);
+    }
+
     if let Err(error) = crate::team::task_cmd::transition_task(board_dir, task_id, "review") {
         warn!(
             engineer,
@@ -201,6 +223,7 @@ fn move_task_to_review(
             "failed to set review owner"
         );
     }
+    Ok(true)
 }
 
 pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str) -> Result<()> {
@@ -607,13 +630,15 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                 engineer,
                 task_id, "auto-merge disabled by per-task override, routing to manual review"
             );
-            move_task_to_review(
+            if !move_task_to_review(
                 daemon,
                 &board_dir,
                 task_id,
                 manager_name.as_deref(),
                 engineer,
-            );
+            )? {
+                return Ok(());
+            }
             if let Some(ref manager_name) = manager_name {
                 let msg = format!(
                     "[{engineer}] Task #{task_id} passed tests. Auto-merge disabled by override — awaiting manual review.\nTitle: {task_title}"
@@ -671,13 +696,15 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                                 ?reasons,
                                 "routing to manual review"
                             );
-                            move_task_to_review(
+                            if !move_task_to_review(
                                 daemon,
                                 &board_dir,
                                 task_id,
                                 manager_name.as_deref(),
                                 engineer,
-                            );
+                            )? {
+                                return Ok(());
+                            }
                             if let Some(ref manager_name) = manager_name {
                                 let reason_text = reasons.join("; ");
                                 let msg = format!(
@@ -2314,6 +2341,69 @@ mod tests {
                 .iter()
                 .any(|m| m.body.contains("manual review")),
             "manager should receive manual review message: {:?}",
+            manager_messages
+        );
+    }
+
+    #[test]
+    fn move_task_to_review_requires_commits_ahead_of_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-review-gate-test");
+        write_task_file(&repo, 42, "review-gate-task");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        let mut daemon = make_test_daemon(
+            &repo,
+            vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), true),
+            ],
+        );
+
+        let moved = move_task_to_review(
+            &mut daemon,
+            &repo.join(".batty").join("team_config").join("board"),
+            42,
+            Some("manager"),
+            "eng-1",
+        )
+        .unwrap();
+
+        assert!(
+            !moved,
+            "review transition should be blocked without commits"
+        );
+
+        let task = crate::task::Task::from_file(
+            &repo
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("042-review-gate-task.md"),
+        )
+        .unwrap();
+        assert_eq!(task.status, "in-progress");
+        assert!(task.review_owner.is_none());
+
+        let engineer_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
+        assert!(
+            engineer_messages
+                .iter()
+                .any(|m| m.body.contains("no commits ahead of main")),
+            "engineer should receive review-blocked message: {:?}",
+            engineer_messages
+        );
+
+        let manager_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
+        assert!(
+            manager_messages.is_empty(),
+            "manager should not be paged for a blocked false-review: {:?}",
             manager_messages
         );
     }
