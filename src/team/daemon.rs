@@ -968,6 +968,15 @@ impl TeamDaemon {
             .and_then(|member| member.reports_to.clone())
     }
 
+    pub(super) fn architect_names(&self) -> Vec<String> {
+        self.config
+            .members
+            .iter()
+            .filter(|member| member.role_type == RoleType::Architect)
+            .map(|member| member.name.clone())
+            .collect()
+    }
+
     #[cfg(test)]
     pub(super) fn set_active_task_for_test(&mut self, engineer: &str, task_id: u32) {
         self.active_tasks.insert(engineer.to_string(), task_id);
@@ -1017,6 +1026,14 @@ impl TeamDaemon {
         };
         self.queue_message(from_role, &parent_name, msg)?;
         self.mark_member_working(&parent_name);
+        Ok(())
+    }
+
+    pub(super) fn notify_architects(&mut self, msg: &str) -> Result<()> {
+        for architect in self.architect_names() {
+            self.queue_message("daemon", &architect, msg)?;
+            self.mark_member_working(&architect);
+        }
         Ok(())
     }
 
