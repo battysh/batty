@@ -347,6 +347,7 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
     }
 
     let workflow_metrics = status::workflow_metrics_section(project_root, &members);
+    let watchdog = status::load_watchdog_status(project_root, session_running);
     let (active_tasks, review_queue) = match status::board_status_task_queues(project_root) {
         Ok(queues) => queues,
         Err(error) => {
@@ -361,6 +362,7 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
             session: session.clone(),
             session_running,
             paused,
+            watchdog,
             workflow_metrics: workflow_metrics
                 .as_ref()
                 .map(|(_, metrics)| metrics.clone()),
@@ -380,6 +382,7 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
                 "stopped"
             }
         );
+        println!("Watchdog: {}", status::format_watchdog_summary(&watchdog));
         println!();
         println!(
             "{:<20} {:<12} {:<10} {:<12} {:>5} {:>6} {:<14} {:<14} {:<16} {:<18} {:<24} {:<20}",

@@ -6,10 +6,11 @@
 use std::fs::File;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use super::{config, daemon, events, hierarchy, inbox, layout, team_config_path};
@@ -19,6 +20,15 @@ pub(crate) const LOG_ROTATION_BYTES: u64 = 5 * 1024 * 1024;
 const LOG_ROTATION_KEEP: usize = 3;
 pub(super) const DAEMON_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
 const DAEMON_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const WATCHDOG_INITIAL_BACKOFF_SECS: u64 = 1;
+const WATCHDOG_MAX_BACKOFF_SECS: u64 = 30;
+const WATCHDOG_CIRCUIT_BREAKER_THRESHOLD: usize = 5;
+const WATCHDOG_CIRCUIT_BREAKER_WINDOW_SECS: u64 = 60;
+const DAEMON_CHILD_PID_FILE: &str = "daemon-child.pid";
+
+#[cfg(unix)]
+static WATCHDOG_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Path to the daemon PID file.
 fn daemon_pid_path(project_root: &Path) -> PathBuf {
@@ -104,19 +114,81 @@ fn daemon_spawn_args(root_str: &str, resume: bool) -> Vec<String> {
     args
 }
 
+fn watchdog_spawn_args(root_str: &str, resume: bool) -> Vec<String> {
+    let mut args = vec![
+        "-v".to_string(),
+        "watchdog".to_string(),
+        "--project-root".to_string(),
+        root_str.to_string(),
+    ];
+    if resume {
+        args.push("--resume".to_string());
+    }
+    args
+}
+
 pub(crate) fn daemon_state_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("daemon-state.json")
+}
+
+pub(crate) fn watchdog_state_path(project_root: &Path) -> PathBuf {
+    project_root.join(".batty").join("watchdog-state.json")
+}
+
+fn daemon_child_pid_path(project_root: &Path) -> PathBuf {
+    project_root.join(".batty").join(DAEMON_CHILD_PID_FILE)
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct PersistedWatchdogState {
+    #[serde(default)]
+    pub restart_count: u32,
+    #[serde(default)]
+    pub crash_timestamps: Vec<u64>,
+    #[serde(default)]
+    pub circuit_breaker_tripped: bool,
+    #[serde(default)]
+    pub child_pid: Option<u32>,
+    #[serde(default)]
+    pub current_backoff_secs: Option<u64>,
+    #[serde(default)]
+    pub last_exit_reason: Option<String>,
+}
+
+fn load_watchdog_state(project_root: &Path) -> Result<PersistedWatchdogState> {
+    let path = watchdog_state_path(project_root);
+    if !path.exists() {
+        return Ok(PersistedWatchdogState::default());
+    }
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+fn save_watchdog_state(project_root: &Path, state: &PersistedWatchdogState) -> Result<()> {
+    let path = watchdog_state_path(project_root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let content =
+        serde_json::to_string_pretty(state).context("failed to serialize watchdog state")?;
+    std::fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))
 }
 
 /// Spawn the daemon as a detached background process.
 ///
 /// The daemon runs in its own process group with stdio redirected to a log
 /// file, so it survives terminal closure. PID is saved to `.batty/daemon.pid`.
-fn spawn_daemon(project_root: &Path, resume: bool) -> Result<u32> {
+fn spawn_detached_process(
+    project_root: &Path,
+    args: &[String],
+    pid_path: &Path,
+    process_name: &str,
+) -> Result<u32> {
     use std::process::{Command, Stdio};
 
     let log_path = daemon_log_path(project_root);
-    let pid_path = daemon_pid_path(project_root);
 
     // Ensure .batty/ exists
     if let Some(parent) = log_path.parent() {
@@ -129,15 +201,9 @@ fn spawn_daemon(project_root: &Path, resume: bool) -> Result<u32> {
         .context("failed to clone log file handle")?;
 
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
-    let root_str = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf())
-        .to_string_lossy()
-        .to_string();
 
     let mut cmd = Command::new(exe);
-    let args = daemon_spawn_args(&root_str, resume);
-    cmd.args(&args)
+    cmd.args(args)
         .stdin(Stdio::null())
         .stdout(log_file)
         .stderr(log_err);
@@ -171,13 +237,13 @@ fn spawn_daemon(project_root: &Path, resume: bool) -> Result<u32> {
             });
             match tail {
                 Some(detail) => bail!(
-                    "daemon process exited immediately with {status}\n\n\
+                    "{process_name} process exited immediately with {status}\n\n\
                      {detail}\n\n\
                      see full log: {log}",
                     log = log_path.display(),
                 ),
                 None => bail!(
-                    "daemon process exited immediately with {status}; \
+                    "{process_name} process exited immediately with {status}; \
                      see {log} for details",
                     log = log_path.display(),
                 ),
@@ -192,8 +258,139 @@ fn spawn_daemon(project_root: &Path, resume: bool) -> Result<u32> {
     std::fs::write(&pid_path, pid.to_string())
         .with_context(|| format!("failed to write PID file: {}", pid_path.display()))?;
 
-    info!(pid, log = %log_path.display(), "daemon spawned");
+    info!(pid, log = %log_path.display(), process = process_name, "background process spawned");
     Ok(pid)
+}
+
+fn spawn_watchdog(project_root: &Path, resume: bool) -> Result<u32> {
+    let root_str = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    let args = watchdog_spawn_args(&root_str, resume);
+    spawn_detached_process(
+        project_root,
+        &args,
+        &daemon_pid_path(project_root),
+        "watchdog",
+    )
+}
+
+fn spawn_daemon_child(project_root: &Path, resume: bool) -> Result<std::process::Child> {
+    use std::process::Command;
+
+    let exe = std::env::current_exe().context("failed to resolve current executable")?;
+    let root_str = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+
+    let mut cmd = Command::new(exe);
+    cmd.args(daemon_spawn_args(&root_str, resume));
+    cmd.spawn().context("failed to spawn daemon child")
+}
+
+#[cfg(unix)]
+extern "C" fn handle_watchdog_shutdown_signal(_signal: libc::c_int) {
+    WATCHDOG_SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn install_watchdog_signal_handlers() -> Result<()> {
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            handle_watchdog_shutdown_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            handle_watchdog_shutdown_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGHUP,
+            handle_watchdog_shutdown_signal as *const () as libc::sighandler_t,
+        );
+    }
+    WATCHDOG_SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn install_watchdog_signal_handlers() -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn watchdog_shutdown_requested() -> bool {
+    WATCHDOG_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
+}
+
+#[cfg(not(unix))]
+fn watchdog_shutdown_requested() -> bool {
+    false
+}
+
+fn record_watchdog_crash(
+    project_root: &Path,
+    state: &mut PersistedWatchdogState,
+    reason: String,
+) -> Result<Option<u64>> {
+    let now = super::now_unix();
+    state.restart_count += 1;
+    state.last_exit_reason = Some(reason);
+    state.child_pid = None;
+    state
+        .crash_timestamps
+        .retain(|ts| now.saturating_sub(*ts) < WATCHDOG_CIRCUIT_BREAKER_WINDOW_SECS);
+    state.crash_timestamps.push(now);
+
+    if state.crash_timestamps.len() >= WATCHDOG_CIRCUIT_BREAKER_THRESHOLD {
+        state.circuit_breaker_tripped = true;
+        state.current_backoff_secs = None;
+        save_watchdog_state(project_root, state)?;
+        return Ok(None);
+    }
+
+    let exponent = state.crash_timestamps.len().saturating_sub(1) as u32;
+    let backoff_secs = (WATCHDOG_INITIAL_BACKOFF_SECS
+        .saturating_mul(2u64.saturating_pow(exponent)))
+    .min(WATCHDOG_MAX_BACKOFF_SECS);
+    state.current_backoff_secs = Some(backoff_secs);
+    save_watchdog_state(project_root, state)?;
+    Ok(Some(backoff_secs))
+}
+
+fn clear_watchdog_child_pid(project_root: &Path, state: &mut PersistedWatchdogState) -> Result<()> {
+    state.child_pid = None;
+    let _ = std::fs::remove_file(daemon_child_pid_path(project_root));
+    save_watchdog_state(project_root, state)
+}
+
+fn terminate_daemon_child(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let _ = send_unix_signal(child.id(), libc::SIGTERM);
+    }
+
+    let deadline = std::time::Instant::now() + DAEMON_SHUTDOWN_GRACE_PERIOD;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(DAEMON_SHUTDOWN_POLL_INTERVAL);
+            }
+            Ok(None) | Err(_) => {
+                #[cfg(unix)]
+                {
+                    let _ = send_unix_signal(child.id(), libc::SIGKILL);
+                }
+                let _ = child.wait();
+                return;
+            }
+        }
+    }
 }
 
 /// Kill the daemon process if it's running.
@@ -359,9 +556,10 @@ pub fn start_team(project_root: &Path, attach: bool) -> Result<String> {
 
     info!(session = %session, members = members.len(), resume, "team session started");
 
-    // Spawn daemon as a detached background process
-    let pid = spawn_daemon(project_root, resume)?;
-    info!(pid, "daemon process launched");
+    // Spawn watchdog as a detached background process. It supervises the daemon
+    // child and handles crash backoff/restart policy.
+    let pid = spawn_watchdog(project_root, resume)?;
+    info!(pid, "watchdog process launched");
 
     // Give daemon a moment to start spawning agents
     std::thread::sleep(std::time::Duration::from_secs(2));
@@ -455,6 +653,101 @@ pub fn run_daemon(project_root: &Path, resume: bool) -> Result<()> {
                 let _ = sink.emit(events::TeamEvent::daemon_panic(&reason));
             }
             std::panic::resume_unwind(panic_payload);
+        }
+    }
+}
+
+pub fn run_watchdog(project_root: &Path, resume: bool) -> Result<()> {
+    install_watchdog_signal_handlers()?;
+
+    let mut state = load_watchdog_state(project_root).unwrap_or_default();
+    state.circuit_breaker_tripped = false;
+    state.current_backoff_secs = None;
+    state.last_exit_reason = None;
+    state.child_pid = None;
+    save_watchdog_state(project_root, &state)?;
+
+    let mut resume_on_launch = resume;
+
+    loop {
+        if watchdog_shutdown_requested() {
+            let _ = std::fs::remove_file(daemon_pid_path(project_root));
+            let _ = std::fs::remove_file(daemon_child_pid_path(project_root));
+            state.child_pid = None;
+            state.current_backoff_secs = None;
+            save_watchdog_state(project_root, &state)?;
+            return Ok(());
+        }
+
+        let mut child = spawn_daemon_child(project_root, resume_on_launch)?;
+        resume_on_launch = true;
+
+        state.child_pid = Some(child.id());
+        state.current_backoff_secs = None;
+        save_watchdog_state(project_root, &state)?;
+        std::fs::write(daemon_child_pid_path(project_root), child.id().to_string()).with_context(
+            || {
+                format!(
+                    "failed to write child PID file: {}",
+                    daemon_child_pid_path(project_root).display()
+                )
+            },
+        )?;
+
+        loop {
+            if watchdog_shutdown_requested() {
+                terminate_daemon_child(&mut child);
+                let _ = std::fs::remove_file(daemon_pid_path(project_root));
+                clear_watchdog_child_pid(project_root, &mut state)?;
+                return Ok(());
+            }
+
+            match child.try_wait() {
+                Ok(Some(exit_status)) => {
+                    clear_watchdog_child_pid(project_root, &mut state)?;
+                    let reason = if let Some(code) = exit_status.code() {
+                        format!("daemon exited with status {code}")
+                    } else {
+                        "daemon exited from signal".to_string()
+                    };
+                    if let Some(backoff_secs) =
+                        record_watchdog_crash(project_root, &mut state, reason.clone())?
+                    {
+                        warn!(backoff_secs, reason = %reason, "daemon crashed; watchdog restarting with backoff");
+                        std::thread::sleep(Duration::from_secs(backoff_secs));
+                        break;
+                    }
+
+                    warn!(
+                        reason = %reason,
+                        threshold = WATCHDOG_CIRCUIT_BREAKER_THRESHOLD,
+                        window_secs = WATCHDOG_CIRCUIT_BREAKER_WINDOW_SECS,
+                        "watchdog circuit breaker tripped; daemon will not be restarted"
+                    );
+                    let _ = std::fs::remove_file(daemon_pid_path(project_root));
+                    return Ok(());
+                }
+                Ok(None) => std::thread::sleep(WATCHDOG_POLL_INTERVAL),
+                Err(error) => {
+                    clear_watchdog_child_pid(project_root, &mut state)?;
+                    let reason = format!("failed to poll daemon child: {error}");
+                    if let Some(backoff_secs) =
+                        record_watchdog_crash(project_root, &mut state, reason.clone())?
+                    {
+                        warn!(backoff_secs, reason = %reason, "watchdog poll failed; retrying daemon launch");
+                        std::thread::sleep(Duration::from_secs(backoff_secs));
+                        break;
+                    }
+                    warn!(
+                        reason = %reason,
+                        threshold = WATCHDOG_CIRCUIT_BREAKER_THRESHOLD,
+                        window_secs = WATCHDOG_CIRCUIT_BREAKER_WINDOW_SECS,
+                        "watchdog circuit breaker tripped after daemon poll failures"
+                    );
+                    let _ = std::fs::remove_file(daemon_pid_path(project_root));
+                    return Ok(());
+                }
+            }
         }
     }
 }
@@ -753,5 +1046,57 @@ mod tests {
                 "--resume".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn watchdog_spawn_args_include_verbose_and_resume() {
+        assert_eq!(
+            watchdog_spawn_args("/tmp/project", false),
+            vec![
+                "-v".to_string(),
+                "watchdog".to_string(),
+                "--project-root".to_string(),
+                "/tmp/project".to_string()
+            ]
+        );
+        assert_eq!(
+            watchdog_spawn_args("/tmp/project", true),
+            vec![
+                "-v".to_string(),
+                "watchdog".to_string(),
+                "--project-root".to_string(),
+                "/tmp/project".to_string(),
+                "--resume".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn record_watchdog_crash_applies_exponential_backoff_until_circuit_breaker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = PersistedWatchdogState::default();
+
+        assert_eq!(
+            record_watchdog_crash(tmp.path(), &mut state, "boom-1".to_string()).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            record_watchdog_crash(tmp.path(), &mut state, "boom-2".to_string()).unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            record_watchdog_crash(tmp.path(), &mut state, "boom-3".to_string()).unwrap(),
+            Some(4)
+        );
+        assert_eq!(
+            record_watchdog_crash(tmp.path(), &mut state, "boom-4".to_string()).unwrap(),
+            Some(8)
+        );
+        assert_eq!(
+            record_watchdog_crash(tmp.path(), &mut state, "boom-5".to_string()).unwrap(),
+            None
+        );
+        assert!(state.circuit_breaker_tripped);
+        assert_eq!(state.restart_count, 5);
     }
 }

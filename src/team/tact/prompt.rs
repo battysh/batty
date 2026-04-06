@@ -71,14 +71,8 @@ mod tests {
 
     #[test]
     fn compose_produces_nonempty_prompt() {
-        let prompt = compose_planning_prompt(
-            2,
-            "board text",
-            &["Done".to_string()],
-            &[],
-            &[],
-            "Batty",
-        );
+        let prompt =
+            compose_planning_prompt(2, "board text", &["Done".to_string()], &[], &[], "Batty");
         assert!(!prompt.trim().is_empty());
     }
 

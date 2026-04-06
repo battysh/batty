@@ -1538,8 +1538,16 @@ Second body.
         let _path_guard = EnvVarGuard::set("PATH", &path);
 
         let mut daemon = planning_test_daemon(&tmp, 300);
-        daemon.config.team_config.workflow_policy.pipeline_starvation_threshold = Some(1);
-        daemon.config.team_config.board.dispatch_stabilization_delay_secs = 0;
+        daemon
+            .config
+            .team_config
+            .workflow_policy
+            .pipeline_starvation_threshold = Some(1);
+        daemon
+            .config
+            .team_config
+            .board
+            .dispatch_stabilization_delay_secs = 0;
         daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
         for engineer in ["eng-1", "eng-2", "eng-3"] {
             daemon.idle_started_at.insert(
@@ -1564,14 +1572,17 @@ Second body.
         assert!(planning_prompt.contains("Auto-dispatch new tact tasks."));
         assert!(planning_prompt.contains("Goal: Keep idle engineers fed with executable work."));
 
-        let created = daemon.handle_planning_response(THREE_TASK_RESPONSE).unwrap();
+        let created = daemon
+            .handle_planning_response(THREE_TASK_RESPONSE)
+            .unwrap();
         assert_eq!(created, 3);
 
         daemon.maybe_auto_dispatch().unwrap();
 
         let tasks = crate::task::load_tasks_from_dir(&daemon.board_dir().join("tasks")).unwrap();
         assert!(
-            tasks.iter()
+            tasks
+                .iter()
                 .any(|task| task.status == "in-progress" && task.claimed_by.is_some()),
             "expected at least one created tact task to be dispatched"
         );
