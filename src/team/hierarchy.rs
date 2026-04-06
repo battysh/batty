@@ -96,7 +96,7 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
                 format!("{}-{i}", role.name)
             };
             members.push(MemberInstance {
-                name,
+                name: name.clone(),
                 role_name: role.name.clone(),
                 role_type: RoleType::Architect,
                 agent: resolved_member_agent(role, &name, resolved_agent.clone()),
@@ -137,7 +137,7 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
                 });
 
             members.push(MemberInstance {
-                name,
+                name: name.clone(),
                 role_name: role.name.clone(),
                 role_type: RoleType::Manager,
                 agent: resolved_member_agent(role, &name, resolved_agent.clone()),
@@ -181,7 +181,7 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
                     format!("{}-{i}", role.name)
                 };
                 members.push(MemberInstance {
-                    name,
+                    name: name.clone(),
                     role_name: role.name.clone(),
                     role_type: RoleType::Engineer,
                     agent: resolved_member_agent(role, &name, resolved_agent.clone()),
@@ -205,7 +205,7 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
                         eng_idx,
                     );
                     members.push(MemberInstance {
-                        name,
+                        name: name.clone(),
                         role_name: role.name.clone(),
                         role_type: RoleType::Engineer,
                         agent: resolved_member_agent(role, &name, resolved_agent.clone()),
