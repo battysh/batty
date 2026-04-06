@@ -101,7 +101,8 @@ fn load_task_learnings(project_root: &Path) -> Result<Vec<LearningEntry>> {
         return Ok(Vec::new());
     }
 
-    let file = fs::File::open(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let file =
+        fs::File::open(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let reader = BufReader::new(file);
     let mut entries = Vec::new();
     for line in reader.lines() {
@@ -125,10 +126,15 @@ fn relevant_learnings(
     task: &Task,
     limit: usize,
 ) -> Result<Vec<LearningEntry>> {
-    let task_keywords: HashSet<String> = extract_keywords(&format!("{}\n{}", task.title, task.description))
-        .into_iter()
+    let task_keywords: HashSet<String> =
+        extract_keywords(&format!("{}\n{}", task.title, task.description))
+            .into_iter()
+            .collect();
+    let task_tags: HashSet<String> = task
+        .tags
+        .iter()
+        .map(|tag| tag.to_ascii_lowercase())
         .collect();
-    let task_tags: HashSet<String> = task.tags.iter().map(|tag| tag.to_ascii_lowercase()).collect();
 
     let mut scored: Vec<(usize, LearningEntry)> = load_task_learnings(project_root)?
         .into_iter()
@@ -156,7 +162,11 @@ fn relevant_learnings(
             .cmp(&left.0)
             .then_with(|| right.1.completed_at.cmp(&left.1.completed_at))
     });
-    Ok(scored.into_iter().take(limit).map(|(_, entry)| entry).collect())
+    Ok(scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, entry)| entry)
+        .collect())
 }
 
 fn extract_keywords(text: &str) -> Vec<String> {
