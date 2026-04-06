@@ -7,6 +7,7 @@ use anyhow::Result;
 use tracing::{info, warn};
 
 use super::super::*;
+use crate::team::prompt_compose::{render_member_prompt, resolve_prompt_context};
 
 const SHARED_TARGET_DISK_THRESHOLD_PCT: u8 = 80;
 const SHARED_TARGET_CLEANUP_INTERVAL: Duration = Duration::from_secs(900);
@@ -336,47 +337,22 @@ impl TeamDaemon {
         member: &MemberInstance,
         config_dir: &Path,
     ) -> String {
-        let prompt_file = member.prompt.as_deref().unwrap_or(match member.role_type {
-            RoleType::Architect => "architect.md",
-            RoleType::Manager => "manager.md",
-            RoleType::Engineer => "engineer.md",
-            RoleType::User => "architect.md", // shouldn't happen
-        });
-
-        let path = config_dir.join(prompt_file);
-        match std::fs::read_to_string(&path) {
-            Ok(content) => {
-                let mut prompt = content
-                    .replace("{{member_name}}", &member.name)
-                    .replace("{{role_name}}", &member.role_name)
-                    .replace(
-                        "{{reports_to}}",
-                        member.reports_to.as_deref().unwrap_or("none"),
-                    );
-                if self.config.team_config.workflow_policy.clean_room_mode
-                    && let Some(group) = self
-                        .config
-                        .team_config
-                        .role_barrier_group(&member.role_name)
-                {
-                    let work_dir = self.worktree_dir(&member.name);
-                    let handoff_dir = self.handoff_dir();
-                    prompt.push_str(&format!(
-                        "\n\n## Information Barrier\n\n- Barrier group: {group}\n- Allowed working directory: {}\n- Shared cross-barrier handoff directory: {}\n- Do not read or write outside your worktree and the handoff directory.\n",
-                        work_dir.display(),
-                        handoff_dir.display()
-                    ));
-                }
-                prompt
-            }
-            Err(e) => {
-                warn!(path = %path.display(), error = %e, "failed to load prompt template");
-                format!(
-                    "You are {} (role: {:?}). Work on assigned tasks.",
-                    member.name, member.role_type
-                )
-            }
+        let mut prompt = render_member_prompt(member, config_dir, &resolve_prompt_context(member));
+        if self.config.team_config.workflow_policy.clean_room_mode
+            && let Some(group) = self
+                .config
+                .team_config
+                .role_barrier_group(&member.role_name)
+        {
+            let work_dir = self.worktree_dir(&member.name);
+            let handoff_dir = self.handoff_dir();
+            prompt.push_str(&format!(
+                "\n\n## Information Barrier\n\n- Barrier group: {group}\n- Allowed working directory: {}\n- Shared cross-barrier handoff directory: {}\n- Do not read or write outside your worktree and the handoff directory.\n",
+                work_dir.display(),
+                handoff_dir.display()
+            ));
         }
+        prompt
     }
 }
 

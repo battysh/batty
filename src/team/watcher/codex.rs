@@ -225,7 +225,11 @@ pub(super) fn update_codex_quality_signals(
 
     if let Some(tool_name) = codex_tool_name(entry) {
         quality.tool_call_count += 1;
-        if !quality.unique_tool_names.iter().any(|name| name == &tool_name) {
+        if !quality
+            .unique_tool_names
+            .iter()
+            .any(|name| name == &tool_name)
+        {
             quality.unique_tool_names.push(tool_name);
         }
     }
