@@ -7,6 +7,7 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write as IoWrite};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -29,6 +30,8 @@ use super::sdk_types::{self, SdkControlResponse, SdkOutput, SdkUserMessage};
 const PROCESS_EXIT_POLL_MS: u64 = 100;
 const GROUP_TERM_GRACE_SECS: u64 = 2;
 const WORKING_READ_TIMEOUT: Duration = Duration::from_secs(120);
+const STALLED_MID_TURN_MARKER: &str = "stalled mid-turn";
+const MESSAGE_PREVIEW_LIMIT: usize = 160;
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -52,6 +55,17 @@ struct SdkState {
     message_queue: VecDeque<QueuedMessage>,
     /// Total bytes of response text received.
     cumulative_output_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ForcedCompletion {
+    previous_state: ShimState,
+    response: String,
+    last_lines: String,
+    message_id: Option<String>,
+    queued_message: Option<QueuedMessage>,
+    queue_depth: usize,
+    session_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -124,8 +138,34 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
     let pty_log_stdout = pty_log.clone();
     let shim_id = args.id.clone();
     let stdout_handle = thread::spawn(move || {
-        let reader = BufReader::new(child_stdout);
-        for line_result in reader.lines() {
+        let (line_tx, line_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let reader = BufReader::new(child_stdout);
+            for line_result in reader.lines() {
+                if line_tx.send(line_result).is_err() {
+                    break;
+                }
+            }
+        });
+
+        loop {
+            let line_result = match stdout_read_timeout(&state_stdout) {
+                Some(timeout) => match line_rx.recv_timeout(timeout) {
+                    Ok(line_result) => Some(line_result),
+                    Err(RecvTimeoutError::Timeout) => {
+                        if let Some(forced) = force_stalled_completion(&state_stdout, &shim_id) {
+                            emit_forced_completion(&mut evt_channel, &stdin_for_approve, forced);
+                        }
+                        continue;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => None,
+                },
+                None => line_rx.recv().ok(),
+            };
+
+            let Some(line_result) = line_result else {
+                break;
+            };
             let line = match line_result {
                 Ok(l) => l,
                 Err(e) => {
@@ -153,6 +193,9 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                         let text = sdk_types::extract_assistant_text(message);
                         if !text.is_empty() {
                             let mut st = state_stdout.lock().unwrap();
+                            if !turn_in_flight(&st) {
+                                continue;
+                            }
                             st.accumulated_response.push_str(&text);
                             st.cumulative_output_bytes += text.len() as u64;
 
@@ -177,6 +220,9 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                     if let Some(ref event) = msg.event {
                         if let Some(text) = sdk_types::extract_stream_text(event) {
                             let mut st = state_stdout.lock().unwrap();
+                            if !turn_in_flight(&st) {
+                                continue;
+                            }
                             st.accumulated_response.push_str(&text);
                             st.cumulative_output_bytes += text.len() as u64;
 
@@ -212,6 +258,9 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
 
                 "result" => {
                     let mut st = state_stdout.lock().unwrap();
+                    if !turn_in_flight(&st) {
+                        continue;
+                    }
 
                     // Capture session_id
                     if st.session_id.is_empty() {
@@ -279,9 +328,14 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                     // If injecting a queued message, stay Working
                     if let Some(ref qm) = queued_msg {
                         st.pending_message_id = qm.message_id.clone();
+                        st.last_sent_message_from = Some(qm.from.clone());
+                        st.last_sent_message_preview = Some(message_preview(&qm.body));
                         st.state = ShimState::Working;
                         st.state_changed_at = Instant::now();
                         st.accumulated_response.clear();
+                    } else {
+                        st.last_sent_message_from = None;
+                        st.last_sent_message_preview = None;
                     }
 
                     let queue_depth = st.message_queue.len();
@@ -426,6 +480,8 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                 match st.state {
                     ShimState::Idle => {
                         st.pending_message_id = message_id;
+                        st.last_sent_message_from = Some(from.clone());
+                        st.last_sent_message_preview = Some(message_preview(&body));
                         st.accumulated_response.clear();
                         let session_id = st.session_id.clone();
                         st.state = ShimState::Working;
@@ -621,6 +677,118 @@ fn last_n_lines_of(text: &str, n: usize) -> String {
     lines[start..].join("\n")
 }
 
+fn stdout_read_timeout(state: &Arc<Mutex<SdkState>>) -> Option<Duration> {
+    let st = state.lock().unwrap();
+    (st.state == ShimState::Working).then_some(WORKING_READ_TIMEOUT)
+}
+
+fn turn_in_flight(state: &SdkState) -> bool {
+    state.state == ShimState::Working || state.pending_message_id.is_some()
+}
+
+fn message_preview(body: &str) -> String {
+    let normalized = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= MESSAGE_PREVIEW_LIMIT {
+        normalized
+    } else {
+        let preview: String = normalized.chars().take(MESSAGE_PREVIEW_LIMIT).collect();
+        format!("{preview}...")
+    }
+}
+
+fn stalled_mid_turn_response(from: Option<&str>, preview: Option<&str>) -> String {
+    let source = from.unwrap_or("unknown");
+    let preview = preview.unwrap_or("(unavailable)");
+    format!(
+        "{STALLED_MID_TURN_MARKER}: no stdout from Claude SDK for {}s while working.\nlast_sent_message_from: {source}\nlast_sent_message_preview: {preview}",
+        WORKING_READ_TIMEOUT.as_secs()
+    )
+}
+
+fn force_stalled_completion(
+    state: &Arc<Mutex<SdkState>>,
+    shim_id: &str,
+) -> Option<ForcedCompletion> {
+    let mut st = state.lock().unwrap();
+    if st.state != ShimState::Working {
+        return None;
+    }
+
+    let response = stalled_mid_turn_response(
+        st.last_sent_message_from.as_deref(),
+        st.last_sent_message_preview.as_deref(),
+    );
+    let last_lines = last_n_lines_of(&response, 5);
+    let message_id = st.pending_message_id.take();
+    let previous_state = st.state;
+    let queued_message = st.message_queue.pop_front();
+
+    eprintln!(
+        "[shim-sdk {shim_id}] STALL DETECTED after {}s while working",
+        WORKING_READ_TIMEOUT.as_secs()
+    );
+
+    st.state = ShimState::Idle;
+    st.state_changed_at = Instant::now();
+    st.accumulated_response.clear();
+
+    if let Some(ref queued) = queued_message {
+        st.pending_message_id = queued.message_id.clone();
+        st.last_sent_message_from = Some(queued.from.clone());
+        st.last_sent_message_preview = Some(message_preview(&queued.body));
+        st.state = ShimState::Working;
+        st.state_changed_at = Instant::now();
+    } else {
+        st.last_sent_message_from = None;
+        st.last_sent_message_preview = None;
+    }
+
+    Some(ForcedCompletion {
+        previous_state,
+        response,
+        last_lines,
+        message_id,
+        queued_message,
+        queue_depth: st.message_queue.len(),
+        session_id: st.session_id.clone(),
+    })
+}
+
+fn emit_forced_completion<W: IoWrite>(
+    evt_channel: &mut Channel,
+    stdin_writer: &Arc<Mutex<W>>,
+    forced: ForcedCompletion,
+) {
+    let _ = evt_channel.send(&Event::StateChanged {
+        from: forced.previous_state,
+        to: ShimState::Idle,
+        summary: forced.last_lines.clone(),
+    });
+    let _ = evt_channel.send(&Event::Completion {
+        message_id: forced.message_id,
+        response: forced.response,
+        last_lines: forced.last_lines,
+    });
+
+    if let Some(qm) = forced.queued_message {
+        let text = format_injected_message(&qm.from, &qm.body);
+        let user_msg = SdkUserMessage::new(&forced.session_id, &text);
+        let ndjson = user_msg.to_ndjson();
+        if let Ok(mut writer) = stdin_writer.lock() {
+            let _ = writeln!(writer, "{ndjson}");
+            let _ = writer.flush();
+        }
+        let _ = evt_channel.send(&Event::StateChanged {
+            from: ShimState::Idle,
+            to: ShimState::Working,
+            summary: format!(
+                "delivering queued message ({} remaining)",
+                forced.queue_depth
+            ),
+        });
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -714,5 +882,85 @@ mod tests {
             "Error: the conversation is too long"
         ));
         assert!(!common::detect_context_exhausted("all good"));
+    }
+
+    #[test]
+    fn message_preview_normalizes_and_truncates() {
+        let preview = message_preview("hello\n\nthere    world");
+        assert_eq!(preview, "hello there world");
+
+        let long = "x".repeat(MESSAGE_PREVIEW_LIMIT + 10);
+        let truncated = message_preview(&long);
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.len() > MESSAGE_PREVIEW_LIMIT);
+    }
+
+    #[test]
+    fn stalled_mid_turn_response_includes_tracked_message_context() {
+        let response = stalled_mid_turn_response(Some("manager"), Some("continue task 496"));
+        assert!(response.starts_with(STALLED_MID_TURN_MARKER));
+        assert!(response.contains("last_sent_message_from: manager"));
+        assert!(response.contains("last_sent_message_preview: continue task 496"));
+    }
+
+    #[test]
+    fn force_stalled_completion_releases_working_turn() {
+        let state = Arc::new(Mutex::new(SdkState {
+            state: ShimState::Working,
+            state_changed_at: Instant::now(),
+            started_at: Instant::now(),
+            session_id: "sess-1".into(),
+            accumulated_response: "partial output".into(),
+            pending_message_id: Some("msg-1".into()),
+            last_sent_message_from: Some("manager".into()),
+            last_sent_message_preview: Some("continue task".into()),
+            message_queue: VecDeque::new(),
+            cumulative_output_bytes: 12,
+        }));
+
+        let forced = force_stalled_completion(&state, "sdk-test").expect("forced completion");
+        assert_eq!(forced.previous_state, ShimState::Working);
+        assert_eq!(forced.message_id.as_deref(), Some("msg-1"));
+        assert!(forced.response.starts_with(STALLED_MID_TURN_MARKER));
+
+        let st = state.lock().unwrap();
+        assert_eq!(st.state, ShimState::Idle);
+        assert!(st.pending_message_id.is_none());
+        assert!(st.accumulated_response.is_empty());
+        assert!(st.last_sent_message_from.is_none());
+        assert!(st.last_sent_message_preview.is_none());
+    }
+
+    #[test]
+    fn force_stalled_completion_promotes_queued_message() {
+        let state = Arc::new(Mutex::new(SdkState {
+            state: ShimState::Working,
+            state_changed_at: Instant::now(),
+            started_at: Instant::now(),
+            session_id: "sess-2".into(),
+            accumulated_response: String::new(),
+            pending_message_id: Some("msg-1".into()),
+            last_sent_message_from: Some("manager".into()),
+            last_sent_message_preview: Some("first".into()),
+            message_queue: VecDeque::from([QueuedMessage {
+                from: "architect".into(),
+                body: "second message".into(),
+                message_id: Some("msg-2".into()),
+            }]),
+            cumulative_output_bytes: 0,
+        }));
+
+        let forced = force_stalled_completion(&state, "sdk-test").expect("forced completion");
+        assert!(forced.queued_message.is_some());
+        assert_eq!(forced.queue_depth, 0);
+
+        let st = state.lock().unwrap();
+        assert_eq!(st.state, ShimState::Working);
+        assert_eq!(st.pending_message_id.as_deref(), Some("msg-2"));
+        assert_eq!(st.last_sent_message_from.as_deref(), Some("architect"));
+        assert_eq!(
+            st.last_sent_message_preview.as_deref(),
+            Some("second message")
+        );
     }
 }
