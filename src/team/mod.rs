@@ -56,6 +56,7 @@ pub mod metrics;
 pub mod metrics_cmd;
 pub mod multi_provider;
 pub mod nudge;
+pub mod openclaw;
 pub mod parity;
 pub mod policy;
 pub mod prompt_compose;
