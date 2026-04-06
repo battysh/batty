@@ -7,6 +7,7 @@ pub mod common;
 pub mod kiro_types;
 #[cfg(test)]
 mod live_agent_tests;
+pub mod meta_detector;
 pub mod protocol;
 pub mod pty_log;
 pub mod runtime;
