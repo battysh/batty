@@ -1791,6 +1791,7 @@ mod tests {
             review_queue: Vec::new(),
             engineer_profiles: None,
             members: Vec::new(),
+            optional_subsystems: None,
         };
 
         let mut stopped = base.clone();
