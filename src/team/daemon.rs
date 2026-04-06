@@ -356,8 +356,14 @@ impl TeamDaemon {
 
         // Create Telegram bot for inbound polling (if configured)
         let telegram_bot = telegram_bridge::build_telegram_bot(&config.team_config);
-        let narration_threshold = config.team_config.workflow_policy.narration_threshold;
-        let narration_nudge_max = config.team_config.workflow_policy.narration_nudge_max;
+        let narration_detection_enabled = config
+            .team_config
+            .workflow_policy
+            .narration_detection_enabled;
+        let narration_threshold_polls = config
+            .team_config
+            .workflow_policy
+            .narration_threshold_polls;
 
         let states = HashMap::new();
 
@@ -456,9 +462,8 @@ impl TeamDaemon {
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
             narration_tracker: health::narration::NarrationTracker::new(
-                50,
-                narration_threshold,
-                narration_nudge_max,
+                narration_detection_enabled,
+                narration_threshold_polls,
             ),
             context_pressure_tracker: health::context::ContextPressureTracker::new(
                 context_pressure_threshold,
