@@ -1090,6 +1090,7 @@ fn load_project_status_report(
             active_tasks,
             review_queue,
             engineer_profiles: None,
+            optional_subsystems: None,
             members: rows,
         },
     ))
