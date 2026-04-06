@@ -508,6 +508,7 @@ mod tests {
         assert_eq!(policy.max_modules_touched, 2);
         assert_eq!(policy.confidence_threshold, 0.8);
         assert!(policy.require_tests_pass);
+        assert!(policy.post_merge_verify);
         assert!(policy.sensitive_paths.contains(&"Cargo.toml".to_string()));
     }
 

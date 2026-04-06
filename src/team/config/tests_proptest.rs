@@ -344,7 +344,7 @@ proptest! {
         require_tests in proptest::bool::ANY,
     ) {
         let yaml = format!(
-            "name: test\nworkflow_policy:\n  auto_merge:\n    enabled: {enabled}\n    max_diff_lines: {max_diff}\n    max_files_changed: {max_files}\n    max_modules_touched: {max_modules}\n    confidence_threshold: {confidence}\n    require_tests_pass: {require_tests}\nroles:\n  - name: w\n    role_type: engineer\n    agent: codex\n"
+            "name: test\nworkflow_policy:\n  auto_merge:\n    enabled: {enabled}\n    max_diff_lines: {max_diff}\n    max_files_changed: {max_files}\n    max_modules_touched: {max_modules}\n    confidence_threshold: {confidence}\n    require_tests_pass: {require_tests}\n    post_merge_verify: true\nroles:\n  - name: w\n    role_type: engineer\n    agent: codex\n"
         );
         let result = serde_yaml::from_str::<TeamConfig>(&yaml);
         prop_assert!(result.is_ok(), "Parse failed: {:?}", result.err());
