@@ -1296,7 +1296,41 @@ impl TeamDaemon {
             };
 
             let base_branch = engineer_base_branch_name(&engineer);
-            if branch == base_branch || branch == "HEAD" {
+            if branch == "HEAD" {
+                continue;
+            }
+
+            if branch == base_branch {
+                match crate::team::task_loop::refresh_engineer_worktree(
+                    &self.config.project_root,
+                    &worktree_dir,
+                    &base_branch,
+                    &self.config.project_root.join(".batty").join("team_config"),
+                ) {
+                    Ok(crate::team::task_loop::WorktreeRefreshAction::Rebased)
+                    | Ok(crate::team::task_loop::WorktreeRefreshAction::Reset) => {
+                        info!(
+                            engineer = %engineer,
+                            branch = %base_branch,
+                            "auto-refreshed engineer worktree after main advanced"
+                        );
+                        self.emit_event(TeamEvent::worktree_refreshed(
+                            &engineer,
+                            "rebased clean base worktree onto main",
+                        ));
+                        self.record_orchestrator_action(format!(
+                            "worktree: auto-rebased clean base worktree for {engineer} onto main"
+                        ));
+                    }
+                    Ok(crate::team::task_loop::WorktreeRefreshAction::Unchanged)
+                    | Ok(crate::team::task_loop::WorktreeRefreshAction::SkippedDirty) => {}
+                    Err(error) => warn!(
+                        engineer = %engineer,
+                        branch = %base_branch,
+                        error = %error,
+                        "worktree refresh after main advance failed"
+                    ),
+                }
                 continue;
             }
 
@@ -1550,7 +1584,7 @@ mod tests {
     use crate::team::test_helpers::{make_test_daemon, write_event_log};
     use crate::team::test_support::{
         EnvVarGuard, PATH_LOCK, TestDaemonBuilder, architect_member, engineer_member, git_ok,
-        init_git_repo, manager_member, write_board_task_file, write_open_task_file,
+        git_stdout, init_git_repo, manager_member, write_board_task_file, write_open_task_file,
         write_owned_task_file,
     };
     use std::collections::HashMap;
@@ -4269,5 +4303,76 @@ Second body.
                 && event.task.as_deref() == Some("42")
                 && event.reason.as_deref() == Some("output")
         }));
+    }
+
+    #[test]
+    fn reconcile_stale_worktrees_rebases_clean_base_worktree_after_main_advances() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "worktree-auto-rebase");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+
+        std::fs::write(repo.join("main.txt"), "advance main\n").unwrap();
+        git_ok(&repo, &["add", "main.txt"]);
+        git_ok(&repo, &["commit", "-m", "advance main"]);
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), true),
+            ])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        daemon.maybe_reconcile_stale_worktrees().unwrap();
+
+        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), base_branch);
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "main"]),
+            git_stdout(&worktree_dir, &["rev-parse", "HEAD"])
+        );
+
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(&repo)).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "worktree_refreshed"
+                && event.role.as_deref() == Some("eng-1")
+                && event
+                    .reason
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("rebased clean base worktree onto main")
+        }));
+    }
+
+    #[test]
+    fn reconcile_stale_worktrees_skips_base_worktree_when_engineer_has_active_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "worktree-auto-rebase-active");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        let before_head = git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
+
+        std::fs::write(repo.join("main.txt"), "advance main\n").unwrap();
+        git_ok(&repo, &["add", "main.txt"]);
+        git_ok(&repo, &["commit", "-m", "advance main"]);
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), true),
+            ])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.active_tasks.insert("eng-1".to_string(), 488);
+
+        daemon.maybe_reconcile_stale_worktrees().unwrap();
+
+        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), base_branch);
+        assert_eq!(git_stdout(&worktree_dir, &["rev-parse", "HEAD"]), before_head);
     }
 }
