@@ -8,7 +8,7 @@
 
 use anyhow::{Result, bail};
 
-use super::config::{RoleType, TeamConfig};
+use super::config::{RoleDef, RoleType, TeamConfig};
 
 /// A resolved team member instance with its name, role, and hierarchy position.
 #[derive(Debug, Clone)]
@@ -21,8 +21,16 @@ pub struct MemberInstance {
     pub role_type: RoleType,
     /// Agent to use (None for user roles).
     pub agent: Option<String>,
+    /// Optional model hint used for prompt composition.
+    pub model: Option<String>,
     /// Prompt template filename (relative to team_config dir).
     pub prompt: Option<String>,
+    /// Optional prompt posture overlay.
+    pub posture: Option<String>,
+    /// Optional model capability class override.
+    pub model_class: Option<String>,
+    /// Optional provider-specific overlay.
+    pub provider_overlay: Option<String>,
     /// Instance name this member reports to (None for top-level/user roles).
     pub reports_to: Option<String>,
     /// Whether this member uses git worktrees.
@@ -64,7 +72,11 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
             role_name: role.name.clone(),
             role_type: RoleType::User,
             agent: None,
+            model: None,
             prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
         });
@@ -87,8 +99,12 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
                 name,
                 role_name: role.name.clone(),
                 role_type: RoleType::Architect,
-                agent: resolved_agent.clone(),
-                prompt: role.prompt.clone(),
+                agent: resolved_member_agent(role, &name, resolved_agent.clone()),
+                model: resolved_member_model(role, &name),
+                prompt: resolved_member_prompt(role, &name),
+                posture: resolved_member_posture(role, &name),
+                model_class: resolved_member_model_class(role, &name),
+                provider_overlay: resolved_member_provider_overlay(role, &name),
                 reports_to: None,
                 use_worktrees: role.use_worktrees,
             });
@@ -124,8 +140,12 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
                 name,
                 role_name: role.name.clone(),
                 role_type: RoleType::Manager,
-                agent: resolved_agent.clone(),
-                prompt: role.prompt.clone(),
+                agent: resolved_member_agent(role, &name, resolved_agent.clone()),
+                model: resolved_member_model(role, &name),
+                prompt: resolved_member_prompt(role, &name),
+                posture: resolved_member_posture(role, &name),
+                model_class: resolved_member_model_class(role, &name),
+                provider_overlay: resolved_member_provider_overlay(role, &name),
                 reports_to,
                 use_worktrees: role.use_worktrees,
             });
@@ -164,8 +184,12 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
                     name,
                     role_name: role.name.clone(),
                     role_type: RoleType::Engineer,
-                    agent: resolved_agent.clone(),
-                    prompt: role.prompt.clone(),
+                    agent: resolved_member_agent(role, &name, resolved_agent.clone()),
+                    model: resolved_member_model(role, &name),
+                    prompt: resolved_member_prompt(role, &name),
+                    posture: resolved_member_posture(role, &name),
+                    model_class: resolved_member_model_class(role, &name),
+                    provider_overlay: resolved_member_provider_overlay(role, &name),
                     reports_to: None,
                     use_worktrees: role.use_worktrees,
                 });
@@ -184,8 +208,12 @@ pub fn resolve_hierarchy(config: &TeamConfig) -> Result<Vec<MemberInstance>> {
                         name,
                         role_name: role.name.clone(),
                         role_type: RoleType::Engineer,
-                        agent: resolved_agent.clone(),
-                        prompt: role.prompt.clone(),
+                        agent: resolved_member_agent(role, &name, resolved_agent.clone()),
+                        model: resolved_member_model(role, &name),
+                        prompt: resolved_member_prompt(role, &name),
+                        posture: resolved_member_posture(role, &name),
+                        model_class: resolved_member_model_class(role, &name),
+                        provider_overlay: resolved_member_provider_overlay(role, &name),
                         reports_to: Some(mgr_name.clone()),
                         use_worktrees: role.use_worktrees,
                     });
@@ -217,6 +245,52 @@ fn engineer_instance_name(
     } else {
         format!("{role_name}-{manager_index}-{engineer_index}")
     }
+}
+
+fn resolved_member_agent(
+    role: &RoleDef,
+    member_name: &str,
+    resolved_agent: Option<String>,
+) -> Option<String> {
+    role.instance_overrides
+        .get(member_name)
+        .and_then(|override_cfg| override_cfg.agent.clone())
+        .or(resolved_agent)
+}
+
+fn resolved_member_model(role: &RoleDef, member_name: &str) -> Option<String> {
+    role.instance_overrides
+        .get(member_name)
+        .and_then(|override_cfg| override_cfg.model.clone())
+        .or_else(|| role.model.clone())
+}
+
+fn resolved_member_prompt(role: &RoleDef, member_name: &str) -> Option<String> {
+    role.instance_overrides
+        .get(member_name)
+        .and_then(|override_cfg| override_cfg.prompt.clone())
+        .or_else(|| role.prompt.clone())
+}
+
+fn resolved_member_posture(role: &RoleDef, member_name: &str) -> Option<String> {
+    role.instance_overrides
+        .get(member_name)
+        .and_then(|override_cfg| override_cfg.posture.clone())
+        .or_else(|| role.posture.clone())
+}
+
+fn resolved_member_model_class(role: &RoleDef, member_name: &str) -> Option<String> {
+    role.instance_overrides
+        .get(member_name)
+        .and_then(|override_cfg| override_cfg.model_class.clone())
+        .or_else(|| role.model_class.clone())
+}
+
+fn resolved_member_provider_overlay(role: &RoleDef, member_name: &str) -> Option<String> {
+    role.instance_overrides
+        .get(member_name)
+        .and_then(|override_cfg| override_cfg.provider_overlay.clone())
+        .or_else(|| role.provider_overlay.clone())
 }
 
 /// Count total panes needed (excludes user roles which have no pane).
@@ -641,5 +715,43 @@ roles:
         );
         let members = resolve_hierarchy(&config).unwrap();
         assert_eq!(members[0].agent.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn instance_overrides_apply_to_named_member() {
+        let config = make_config(
+            r#"
+name: overrides
+roles:
+  - name: manager
+    role_type: manager
+    agent: claude
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    posture: deep_worker
+    model_class: standard
+    instances: 2
+    instance_overrides:
+      eng-1-1:
+        agent: claude
+        model: claude-opus-4-1
+        model_class: frontier
+        posture: fast_lane
+"#,
+        );
+
+        let members = resolve_hierarchy(&config).unwrap();
+        let overridden = members.iter().find(|m| m.name == "eng-1-1").unwrap();
+        let inherited = members.iter().find(|m| m.name == "eng-1-2").unwrap();
+
+        assert_eq!(overridden.agent.as_deref(), Some("claude"));
+        assert_eq!(overridden.model.as_deref(), Some("claude-opus-4-1"));
+        assert_eq!(overridden.model_class.as_deref(), Some("frontier"));
+        assert_eq!(overridden.posture.as_deref(), Some("fast_lane"));
+
+        assert_eq!(inherited.agent.as_deref(), Some("codex"));
+        assert_eq!(inherited.model_class.as_deref(), Some("standard"));
+        assert_eq!(inherited.posture.as_deref(), Some("deep_worker"));
     }
 }
