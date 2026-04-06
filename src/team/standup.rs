@@ -138,6 +138,17 @@ pub fn generate_board_aware_standup_for(
                 idle_reports.join(", ")
             ));
         }
+        if !board_context.aging.stale_in_progress.is_empty()
+            || !board_context.aging.aged_todo.is_empty()
+            || !board_context.aging.stale_review.is_empty()
+        {
+            report.push_str(&format!(
+                "  aging alerts: stale in-progress {} | aged todo {} | stale review {}\n",
+                board_context.aging.stale_in_progress.len(),
+                board_context.aging.aged_todo.len(),
+                board_context.aging.stale_review.len()
+            ));
+        }
         let total_merges =
             board_context.metrics.auto_merge_count + board_context.metrics.manual_merge_count;
         if total_merges > 0 || board_context.metrics.rework_count > 0 {
@@ -486,6 +497,7 @@ pub enum MemberState {
 #[derive(Debug, Clone)]
 struct BoardContext {
     metrics: metrics::WorkflowMetrics,
+    aging: crate::team::board::TaskAgingReport,
     assigned_task_ids: HashMap<String, Vec<u32>>,
     idle_with_runnable: HashSet<String>,
 }
@@ -501,6 +513,23 @@ fn load_board_context(
     }
 
     let metrics = metrics::compute_metrics(board_dir, members).ok()?;
+    let thresholds = project_root_from_board_dir(Some(board_dir))
+        .and_then(|project_root| {
+            crate::team::config::TeamConfig::load(&crate::team::team_config_path(project_root))
+                .ok()
+        })
+        .map(|config| crate::team::board::AgingThresholds {
+            stale_in_progress_hours: config.workflow_policy.stale_in_progress_hours,
+            aged_todo_hours: config.workflow_policy.aged_todo_hours,
+            stale_review_hours: config.workflow_policy.stale_review_hours,
+        })
+        .unwrap_or_default();
+    let aging = crate::team::board::compute_task_aging(
+        board_dir,
+        project_root_from_board_dir(Some(board_dir))?,
+        thresholds,
+    )
+    .ok()?;
     let tasks = task::load_tasks_from_dir(&tasks_dir).ok()?;
     let mut assigned_task_ids = HashMap::<String, Vec<u32>>::new();
 
@@ -522,6 +551,7 @@ fn load_board_context(
     }
 
     Some(BoardContext {
+        aging,
         idle_with_runnable: metrics.idle_with_runnable.iter().cloned().collect(),
         metrics,
         assigned_task_ids,

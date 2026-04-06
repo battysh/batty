@@ -284,6 +284,31 @@ impl TeamEvent {
         }
     }
 
+    pub fn task_stale(role: &str, task: &str, reason: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            reason: Some(reason.into()),
+            ..Self::base("task_stale")
+        }
+    }
+
+    pub fn task_aged(task: &str, reason: &str) -> Self {
+        Self {
+            task: Some(task.into()),
+            reason: Some(reason.into()),
+            ..Self::base("task_aged")
+        }
+    }
+
+    pub fn review_stale(task: &str, reason: &str) -> Self {
+        Self {
+            task: Some(task.into()),
+            reason: Some(reason.into()),
+            ..Self::base("review_stale")
+        }
+    }
+
     pub fn task_unblocked(role: &str, task: &str) -> Self {
         Self {
             role: Some(role.into()),

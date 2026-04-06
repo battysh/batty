@@ -685,6 +685,122 @@ impl TeamDaemon {
         Ok(())
     }
 
+    pub(super) fn maybe_emit_task_aging_alerts(&mut self) -> Result<()> {
+        let board_dir = self.board_dir();
+        let tasks_dir = board_dir.join("tasks");
+        if !tasks_dir.exists() {
+            return Ok(());
+        }
+
+        let thresholds = crate::team::board::AgingThresholds {
+            stale_in_progress_hours: self.config.team_config.workflow_policy.stale_in_progress_hours,
+            aged_todo_hours: self.config.team_config.workflow_policy.aged_todo_hours,
+            stale_review_hours: self.config.team_config.workflow_policy.stale_review_hours,
+        };
+        let report =
+            crate::team::board::compute_task_aging(&board_dir, &self.config.project_root, thresholds)?;
+        let tasks = crate::task::load_tasks_from_dir(&tasks_dir)?;
+        let tasks_by_id = tasks
+            .iter()
+            .map(|task| (task.id, task))
+            .collect::<HashMap<_, _>>();
+
+        let active_keys: HashSet<String> = report
+            .stale_in_progress
+            .iter()
+            .map(|task| aging_cooldown_key("task_stale", task.task_id))
+            .chain(
+                report
+                    .aged_todo
+                    .iter()
+                    .map(|task| aging_cooldown_key("task_aged", task.task_id)),
+            )
+            .chain(
+                report
+                    .stale_review
+                    .iter()
+                    .map(|task| aging_cooldown_key("review_stale", task.task_id)),
+            )
+            .collect();
+        self.intervention_cooldowns
+            .retain(|key, _| !key.starts_with("aging::") || active_keys.contains(key));
+
+        for task in &report.stale_in_progress {
+            let key = aging_cooldown_key("task_stale", task.task_id);
+            if self.aging_alert_on_cooldown(&key) {
+                continue;
+            }
+
+            let owner = task.claimed_by.as_deref().unwrap_or("unassigned");
+            let reason = format!(
+                "stale in-progress after {}s with no commits ahead of main",
+                task.age_secs
+            );
+            self.emit_event(TeamEvent::task_stale(owner, &task.task_id.to_string(), &reason));
+            self.record_task_escalated(owner, task.task_id.to_string(), Some("task_stale"));
+
+            if let Some(recipient) = task
+                .claimed_by
+                .as_deref()
+                .and_then(|owner| self.manager_for_member_name(owner))
+                .map(str::to_string)
+                .or_else(|| first_manager_name(&self.config.members))
+            {
+                let body = format!(
+                    "Task #{} has been in progress for {}s with no commits ahead of `main`.\nTask: {}\nOwner: {}\nNext step: intervene, split the task, or confirm the engineer is still making progress.",
+                    task.task_id, task.age_secs, task.title, owner
+                );
+                let _ = self.queue_daemon_message(&recipient, &body);
+            }
+
+            self.intervention_cooldowns.insert(key, Instant::now());
+        }
+
+        for task in &report.aged_todo {
+            let key = aging_cooldown_key("task_aged", task.task_id);
+            if self.aging_alert_on_cooldown(&key) {
+                continue;
+            }
+
+            let reason = format!("todo task aged {}s without movement", task.age_secs);
+            self.emit_event(TeamEvent::task_aged(&task.task_id.to_string(), &reason));
+            self.intervention_cooldowns.insert(key, Instant::now());
+        }
+
+        for task in &report.stale_review {
+            let key = aging_cooldown_key("review_stale", task.task_id);
+            if self.aging_alert_on_cooldown(&key) {
+                continue;
+            }
+
+            let review_owner = tasks_by_id
+                .get(&task.task_id)
+                .and_then(|task| task.review_owner.as_deref())
+                .map(str::to_string)
+                .or_else(|| {
+                    task.claimed_by
+                        .as_deref()
+                        .and_then(|owner| self.manager_for_member_name(owner))
+                        .map(str::to_string)
+                })
+                .or_else(|| first_manager_name(&self.config.members));
+            let reason = format!("review queue stale after {}s", task.age_secs);
+            self.emit_event(TeamEvent::review_stale(&task.task_id.to_string(), &reason));
+
+            if let Some(recipient) = review_owner {
+                let body = format!(
+                    "Review urgency: task #{} has been in review for {}s.\nTask: {}\nNext step: merge it, request rework, or escalate immediately.",
+                    task.task_id, task.age_secs, task.title
+                );
+                let _ = self.queue_daemon_message(&recipient, &body);
+            }
+
+            self.intervention_cooldowns.insert(key, Instant::now());
+        }
+
+        Ok(())
+    }
+
     pub(super) fn maybe_auto_unblock_blocked_tasks(&mut self) -> Result<()> {
         let board_dir = self
             .config
@@ -787,6 +903,18 @@ impl TeamDaemon {
                     .find(|member| member.role_type == RoleType::Manager)
                     .map(|member| member.name.clone())
             })
+    }
+
+    fn aging_alert_on_cooldown(&self, key: &str) -> bool {
+        let cooldown = Duration::from_secs(
+            self.config
+                .team_config
+                .automation
+                .intervention_cooldown_secs,
+        );
+        self.intervention_cooldowns
+            .get(key)
+            .is_some_and(|fired_at| fired_at.elapsed() < cooldown)
     }
 
     pub(super) fn maybe_detect_pipeline_starvation(&mut self) -> Result<()> {
@@ -1338,6 +1466,17 @@ impl TeamDaemon {
         info!(path = %report_path.display(), "retrospective generated");
         Ok(())
     }
+}
+
+fn aging_cooldown_key(kind: &str, task_id: u32) -> String {
+    format!("aging::{kind}::{task_id}")
+}
+
+fn first_manager_name(members: &[MemberInstance]) -> Option<String> {
+    members
+        .iter()
+        .find(|member| member.role_type == RoleType::Manager)
+        .map(|member| member.name.clone())
 }
 
 fn parse_rfc3339_utc(value: &str) -> Option<DateTime<Utc>> {

@@ -3533,6 +3533,168 @@ fn stale_review_daemon(tmp: &tempfile::TempDir) -> TeamDaemon {
         .build()
 }
 
+fn write_aging_task(
+    project_root: &Path,
+    id: u32,
+    title: &str,
+    status: &str,
+    priority: &str,
+    claimed_by: Option<&str>,
+    review_owner: Option<&str>,
+    created: &str,
+    started: Option<&str>,
+    updated: Option<&str>,
+) {
+    let tasks_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    std::fs::create_dir_all(&tasks_dir).unwrap();
+    let mut content = format!(
+        "---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: {priority}\ncreated: {created}\n"
+    );
+    if let Some(started) = started {
+        content.push_str(&format!("started: {started}\n"));
+    }
+    if let Some(updated) = updated {
+        content.push_str(&format!("updated: {updated}\n"));
+    }
+    if let Some(claimed_by) = claimed_by {
+        content.push_str(&format!("claimed_by: {claimed_by}\n"));
+    }
+    if let Some(review_owner) = review_owner {
+        content.push_str(&format!("review_owner: {review_owner}\n"));
+    }
+    content.push_str("class: standard\n---\n\nTask description.\n");
+    std::fs::write(tasks_dir.join(format!("{id:03}-{title}.md")), content).unwrap();
+}
+
+#[test]
+fn aging_task_stale_alerts_manager_and_emits_event() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_aging_task(
+        tmp.path(),
+        70,
+        "aging-progress",
+        "in-progress",
+        "high",
+        Some("eng-1"),
+        None,
+        "2026-04-06T06:00:00Z",
+        Some("2026-04-06T06:00:00Z"),
+        Some("2026-04-06T06:00:00Z"),
+    );
+    let mut daemon = stale_review_daemon(&tmp);
+
+    daemon.maybe_emit_task_aging_alerts().unwrap();
+
+    let events_path = tmp
+        .path()
+        .join(".batty")
+        .join("team_config")
+        .join("events.jsonl");
+    let events = std::fs::read_to_string(&events_path).unwrap_or_default();
+    assert!(events.contains("\"event\":\"task_stale\""));
+
+    let manager_messages =
+        crate::team::inbox::all_messages(&crate::team::inbox::inboxes_root(tmp.path()), "manager")
+            .unwrap();
+    assert!(manager_messages
+        .iter()
+        .any(|(msg, _)| msg.body.contains("Task #70 has been in progress")));
+}
+
+#[test]
+fn aging_review_stale_alerts_review_owner() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_aging_task(
+        tmp.path(),
+        71,
+        "aging-review",
+        "review",
+        "high",
+        Some("eng-1"),
+        Some("manager"),
+        "2026-04-06T09:00:00Z",
+        None,
+        Some("2026-04-06T09:00:00Z"),
+    );
+    let mut daemon = stale_review_daemon(&tmp);
+
+    daemon.maybe_emit_task_aging_alerts().unwrap();
+
+    let events_path = tmp
+        .path()
+        .join(".batty")
+        .join("team_config")
+        .join("events.jsonl");
+    let events = std::fs::read_to_string(&events_path).unwrap_or_default();
+    assert!(events.contains("\"event\":\"review_stale\""));
+
+    let manager_messages =
+        crate::team::inbox::all_messages(&crate::team::inbox::inboxes_root(tmp.path()), "manager")
+            .unwrap();
+    assert!(manager_messages
+        .iter()
+        .any(|(msg, _)| msg.body.contains("Review urgency: task #71")));
+}
+
+#[test]
+fn aging_config_threshold_overrides_are_used_by_daemon() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_aging_task(
+        tmp.path(),
+        72,
+        "aging-override-progress",
+        "in-progress",
+        "high",
+        Some("eng-1"),
+        None,
+        "2026-04-06T10:30:00Z",
+        Some("2026-04-06T10:30:00Z"),
+        Some("2026-04-06T10:30:00Z"),
+    );
+    write_aging_task(
+        tmp.path(),
+        73,
+        "aging-override-todo",
+        "todo",
+        "high",
+        None,
+        None,
+        "2026-04-05T12:00:00Z",
+        None,
+        Some("2026-04-05T12:00:00Z"),
+    );
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(vec![
+            architect_member("architect"),
+            manager_member("manager", Some("architect")),
+            engineer_member("eng-1", Some("manager"), false),
+        ])
+        .workflow_policy(WorkflowPolicy {
+            stale_in_progress_hours: 1,
+            aged_todo_hours: 24,
+            stale_review_hours: 1,
+            ..WorkflowPolicy::default()
+        })
+        .build();
+
+    daemon.maybe_emit_task_aging_alerts().unwrap();
+
+    let events_path = tmp
+        .path()
+        .join(".batty")
+        .join("team_config")
+        .join("events.jsonl");
+    let events = std::fs::read_to_string(&events_path).unwrap_or_default();
+    assert!(events.contains("\"event\":\"task_stale\""));
+    assert!(events.contains("\"task\":\"72\""));
+    assert!(events.contains("\"event\":\"task_aged\""));
+    assert!(events.contains("\"task\":\"73\""));
+}
+
 #[test]
 fn stale_review_sends_nudge_at_threshold() {
     let tmp = tempfile::tempdir().unwrap();

@@ -114,6 +114,9 @@ mod tests {
             blocked_count: 1,
             in_review_count: 3,
             in_progress_count: 4,
+            stale_in_progress_count: 1,
+            aged_todo_count: 2,
+            stale_review_count: 3,
             idle_with_runnable: vec!["eng-1".to_string(), "eng-2".to_string()],
             oldest_review_age_secs: Some(120),
             oldest_assignment_age_secs: Some(360),
@@ -125,6 +128,7 @@ mod tests {
         assert!(text.contains("Blocked: 1"));
         assert!(text.contains("In Review: 3"));
         assert!(text.contains("In Progress: 4"));
+        assert!(text.contains("Aging Alerts: stale in-progress 1 | aged todo 2 | stale review 3"));
         assert!(text.contains("Idle With Runnable: eng-1, eng-2"));
         assert!(text.contains("Oldest Review Age: 120s"));
         assert!(text.contains("Oldest Assignment Age: 360s"));

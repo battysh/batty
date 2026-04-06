@@ -131,6 +131,9 @@ impl TeamDaemon {
             self.run_recoverable_step("maybe_escalate_stale_reviews", |daemon| {
                 daemon.maybe_escalate_stale_reviews()
             });
+            self.run_recoverable_step("maybe_emit_task_aging_alerts", |daemon| {
+                daemon.maybe_emit_task_aging_alerts()
+            });
             self.run_recoverable_step("maybe_auto_unblock_blocked_tasks", |daemon| {
                 daemon.maybe_auto_unblock_blocked_tasks()
             });

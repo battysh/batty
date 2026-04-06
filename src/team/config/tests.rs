@@ -42,6 +42,9 @@ fn parse_minimal_config() {
     assert!(!config.workflow_policy.clean_room_mode);
     assert!(config.workflow_policy.barrier_groups.is_empty());
     assert_eq!(config.workflow_policy.handoff_directory, ".batty/handoff");
+    assert_eq!(config.workflow_policy.stale_in_progress_hours, 4);
+    assert_eq!(config.workflow_policy.aged_todo_hours, 48);
+    assert_eq!(config.workflow_policy.stale_review_hours, 1);
 }
 
 #[test]
@@ -223,6 +226,9 @@ roles:
     );
     assert_eq!(config.workflow_policy.graceful_shutdown_timeout_secs, 5);
     assert!(config.workflow_policy.auto_commit_on_restart);
+    assert_eq!(config.workflow_policy.stale_in_progress_hours, 4);
+    assert_eq!(config.workflow_policy.aged_todo_hours, 48);
+    assert_eq!(config.workflow_policy.stale_review_hours, 1);
     assert!(config.cost.models.is_empty());
     assert_eq!(config.roles[0].instances, 1);
     assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
