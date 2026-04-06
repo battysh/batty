@@ -755,6 +755,23 @@ pub(crate) fn worktree_has_user_changes(worktree_dir: &Path) -> Result<bool> {
     .any(|line| !line.starts_with("?? .batty/") && !line.starts_with("?? .cargo/")))
 }
 
+pub(crate) fn git_has_unresolved_conflicts(repo_dir: &Path) -> Result<bool> {
+    let status = map_git_error(
+        retry_git(|| git_cmd::status_porcelain(repo_dir)),
+        "failed to inspect git conflict state",
+    )?;
+    Ok(status.lines().any(line_has_unresolved_conflict))
+}
+
+fn line_has_unresolved_conflict(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.len() >= 2
+        && matches!(
+            (bytes[0], bytes[1]),
+            (b'U', _) | (_, b'U') | (b'A', b'A') | (b'D', b'D')
+        )
+}
+
 /// Returns `false` if the worktree has uncommitted changes on a task branch
 /// (i.e. not an `eng-main/*` base branch). This gate should be checked before
 /// any operation that would destroy worktree state (reset, clean, checkout).
@@ -2860,5 +2877,14 @@ mod tests {
             count, 0,
             "production code should have zero bare .unwrap()/.expect() calls, found {count}"
         );
+    }
+
+    #[test]
+    fn git_has_unresolved_conflicts_detects_unmerged_status_entries() {
+        assert!(line_has_unresolved_conflict("UU src/team/verification.rs"));
+        assert!(line_has_unresolved_conflict("AA src/lib.rs"));
+        assert!(line_has_unresolved_conflict("DU src/main.rs"));
+        assert!(!line_has_unresolved_conflict(" M src/main.rs"));
+        assert!(!line_has_unresolved_conflict("?? scratch.txt"));
     }
 }
