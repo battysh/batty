@@ -404,6 +404,27 @@ mod tests {
     }
 
     #[test]
+    fn brief_planning_before_tool_use_does_not_trip_pressure_thresholds() {
+        let mut tracker = ContextPressureTracker::new(100, 512_000);
+        let inputs = ContextPressureInputs {
+            output_bytes: 120_000,
+            narration_detected: false,
+            meta_conversation_detected: false,
+            assistant_message_count: 2,
+            tool_call_count: 0,
+            unique_tool_names: 0,
+            shrinking_responses: false,
+            repeated_identical_outputs: false,
+            tool_failure_message: None,
+            secs_since_last_commit: Some(120),
+        };
+
+        let (score, actions) = tracker.observe_at("eng-1", &inputs, true, Instant::now());
+        assert!(score < 70, "brief planning should stay below the warning threshold");
+        assert!(actions.is_empty());
+    }
+
+    #[test]
     fn graduated_response_levels_fire_in_order() {
         let mut tracker = ContextPressureTracker::new(100, 512_000);
         let inputs = pressure_inputs();
