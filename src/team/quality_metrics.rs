@@ -12,12 +12,6 @@ pub struct QualityMetrics {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct AgentMetric {
-    pub backend: String,
-    pub quality: QualityMetrics,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct CompletionQualityMetrics {
     pub backend: String,
     pub role: String,
@@ -137,23 +131,23 @@ pub fn build_completion_quality_metrics(
     }
 }
 
-pub fn aggregate_by_backend(metrics: &[AgentMetric]) -> HashMap<String, QualityMetrics> {
-    let mut grouped: HashMap<String, Vec<&AgentMetric>> = HashMap::new();
-    for metric in metrics {
-        grouped.entry(metric.backend.clone()).or_default().push(metric);
+pub fn aggregate_by_backend(metrics: &[(String, QualityMetrics)]) -> HashMap<String, QualityMetrics> {
+    let mut grouped: HashMap<String, Vec<&QualityMetrics>> = HashMap::new();
+    for (backend, quality) in metrics {
+        grouped.entry(backend.clone()).or_default().push(quality);
     }
 
     grouped
         .into_iter()
         .map(|(backend, samples)| {
             let count = samples.len() as f64;
-            let avg = |f: fn(&AgentMetric) -> f64| -> f64 {
+            let avg = |f: fn(&QualityMetrics) -> f64| -> f64 {
                 if samples.is_empty() {
                     return 0.0;
                 }
                 samples.iter().map(|sample| f(sample)).sum::<f64>() / count
             };
-            let avg_u64 = |f: fn(&AgentMetric) -> u64| -> u64 {
+            let avg_u64 = |f: fn(&QualityMetrics) -> u64| -> u64 {
                 if samples.is_empty() {
                     return 0;
                 }
@@ -163,11 +157,11 @@ pub fn aggregate_by_backend(metrics: &[AgentMetric]) -> HashMap<String, QualityM
             (
                 backend,
                 QualityMetrics {
-                    narration_ratio: avg(|sample| sample.quality.narration_ratio),
-                    commit_frequency: avg(|sample| sample.quality.commit_frequency),
-                    first_pass_test_rate: avg(|sample| sample.quality.first_pass_test_rate),
-                    retry_rate: avg(|sample| sample.quality.retry_rate),
-                    time_to_completion_secs: avg_u64(|sample| sample.quality.time_to_completion_secs),
+                    narration_ratio: avg(|sample| sample.narration_ratio),
+                    commit_frequency: avg(|sample| sample.commit_frequency),
+                    first_pass_test_rate: avg(|sample| sample.first_pass_test_rate),
+                    retry_rate: avg(|sample| sample.retry_rate),
+                    time_to_completion_secs: avg_u64(|sample| sample.time_to_completion_secs),
                 },
             )
         })
@@ -278,30 +272,30 @@ mod tests {
     #[test]
     fn first_pass_rate_aggregation_handles_multiple_completions() {
         let stats = aggregate_by_backend(&[
-            AgentMetric {
-                backend: "codex".into(),
-                quality: QualityMetrics {
+            (
+                "codex".into(),
+                QualityMetrics {
                     first_pass_test_rate: 1.0,
                     retry_rate: 0.0,
                     ..QualityMetrics::default()
                 },
-            },
-            AgentMetric {
-                backend: "codex".into(),
-                quality: QualityMetrics {
+            ),
+            (
+                "codex".into(),
+                QualityMetrics {
                     first_pass_test_rate: 0.0,
                     retry_rate: 2.0,
                     ..QualityMetrics::default()
                 },
-            },
-            AgentMetric {
-                backend: "codex".into(),
-                quality: QualityMetrics {
+            ),
+            (
+                "codex".into(),
+                QualityMetrics {
                     first_pass_test_rate: 1.0,
                     retry_rate: 0.0,
                     ..QualityMetrics::default()
                 },
-            },
+            ),
         ]);
 
         let codex = stats.get("codex").unwrap();
@@ -312,36 +306,36 @@ mod tests {
     #[test]
     fn backend_grouping_produces_correct_per_backend_stats() {
         let stats = aggregate_by_backend(&[
-            AgentMetric {
-                backend: "claude".into(),
-                quality: QualityMetrics {
+            (
+                "claude".into(),
+                QualityMetrics {
                     narration_ratio: 0.5,
                     commit_frequency: 1.0,
                     first_pass_test_rate: 1.0,
                     retry_rate: 0.0,
                     time_to_completion_secs: 3600,
                 },
-            },
-            AgentMetric {
-                backend: "codex".into(),
-                quality: QualityMetrics {
+            ),
+            (
+                "codex".into(),
+                QualityMetrics {
                     narration_ratio: 0.0,
                     commit_frequency: 4.0,
                     first_pass_test_rate: 0.0,
                     retry_rate: 1.0,
                     time_to_completion_secs: 1800,
                 },
-            },
-            AgentMetric {
-                backend: "codex".into(),
-                quality: QualityMetrics {
+            ),
+            (
+                "codex".into(),
+                QualityMetrics {
                     narration_ratio: 0.5,
                     commit_frequency: 3.0,
                     first_pass_test_rate: 1.0,
                     retry_rate: 0.0,
                     time_to_completion_secs: 3600,
                 },
-            },
+            ),
         ]);
 
         assert!((stats.get("claude").unwrap().first_pass_test_rate - 1.0).abs() < 0.0001);
