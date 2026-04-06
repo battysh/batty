@@ -237,6 +237,12 @@ pub struct WorkflowPolicy {
     pub review_nudge_threshold_secs: u64,
     #[serde(default = "default_review_timeout_secs")]
     pub review_timeout_secs: u64,
+    #[serde(default = "default_stale_in_progress_hours")]
+    pub stale_in_progress_hours: u64,
+    #[serde(default = "default_aged_todo_hours")]
+    pub aged_todo_hours: u64,
+    #[serde(default = "default_stale_review_hours")]
+    pub stale_review_hours: u64,
     #[serde(default)]
     pub review_timeout_overrides: HashMap<String, ReviewTimeoutOverride>,
     #[serde(default)]
@@ -342,6 +348,9 @@ impl Default for WorkflowPolicy {
             escalation_threshold_secs: default_escalation_threshold_secs(),
             review_nudge_threshold_secs: default_review_nudge_threshold_secs(),
             review_timeout_secs: default_review_timeout_secs(),
+            stale_in_progress_hours: default_stale_in_progress_hours(),
+            aged_todo_hours: default_aged_todo_hours(),
+            stale_review_hours: default_stale_review_hours(),
             review_timeout_overrides: HashMap::new(),
             auto_archive_done_after_secs: None,
             capability_overrides: HashMap::new(),
@@ -946,6 +955,18 @@ fn default_review_nudge_threshold_secs() -> u64 {
 
 fn default_review_timeout_secs() -> u64 {
     7200
+}
+
+fn default_stale_in_progress_hours() -> u64 {
+    4
+}
+
+fn default_aged_todo_hours() -> u64 {
+    48
+}
+
+fn default_stale_review_hours() -> u64 {
+    1
 }
 
 fn default_stall_threshold_secs() -> u64 {

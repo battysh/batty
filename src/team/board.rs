@@ -52,6 +52,49 @@ struct WorkflowFrontmatter {
     review_blockers: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct TaskTimestampFrontmatter {
+    #[serde(default)]
+    created: Option<String>,
+    #[serde(default)]
+    started: Option<String>,
+    #[serde(default)]
+    updated: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AgingThresholds {
+    pub stale_in_progress_hours: u64,
+    pub aged_todo_hours: u64,
+    pub stale_review_hours: u64,
+}
+
+impl Default for AgingThresholds {
+    fn default() -> Self {
+        Self {
+            stale_in_progress_hours: 4,
+            aged_todo_hours: 48,
+            stale_review_hours: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgedTask {
+    pub task_id: u32,
+    pub title: String,
+    pub status: String,
+    pub claimed_by: Option<String>,
+    pub age_secs: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TaskAgingReport {
+    pub stale_in_progress: Vec<AgedTask>,
+    pub aged_todo: Vec<AgedTask>,
+    pub stale_review: Vec<AgedTask>,
+}
+
 impl From<WorkflowFrontmatter> for WorkflowMetadata {
     fn from(frontmatter: WorkflowFrontmatter) -> Self {
         Self {
@@ -76,6 +119,80 @@ pub(crate) fn read_workflow_metadata(task_path: &Path) -> Result<WorkflowMetadat
     let parsed: WorkflowFrontmatter =
         serde_yaml::from_str(frontmatter).context("failed to parse task frontmatter")?;
     Ok(parsed.into())
+}
+
+pub(crate) fn compute_task_aging(
+    board_dir: &Path,
+    project_root: &Path,
+    thresholds: AgingThresholds,
+) -> Result<TaskAgingReport> {
+    compute_task_aging_at(board_dir, project_root, thresholds, Utc::now())
+}
+
+pub(crate) fn compute_task_aging_at(
+    board_dir: &Path,
+    project_root: &Path,
+    thresholds: AgingThresholds,
+    now: DateTime<Utc>,
+) -> Result<TaskAgingReport> {
+    let tasks_dir = board_dir.join("tasks");
+    if !tasks_dir.is_dir() {
+        return Ok(TaskAgingReport::default());
+    }
+
+    let mut report = TaskAgingReport::default();
+    for task in load_tasks_from_dir(&tasks_dir)? {
+        match task.status.as_str() {
+            "in-progress" | "in_progress" => {
+                let age_secs = task_age_from_frontmatter(&task, now, AgeAnchor::Started)?;
+                if age_secs >= thresholds.stale_in_progress_hours.saturating_mul(3600)
+                    && commits_ahead_of_main(project_root, &task)? == 0
+                {
+                    report.stale_in_progress.push(AgedTask {
+                        task_id: task.id,
+                        title: task.title,
+                        status: task.status,
+                        claimed_by: task.claimed_by,
+                        age_secs,
+                    });
+                }
+            }
+            "todo" => {
+                let age_secs = task_age_from_frontmatter(&task, now, AgeAnchor::Updated)?;
+                if age_secs >= thresholds.aged_todo_hours.saturating_mul(3600) {
+                    report.aged_todo.push(AgedTask {
+                        task_id: task.id,
+                        title: task.title,
+                        status: task.status,
+                        claimed_by: task.claimed_by,
+                        age_secs,
+                    });
+                }
+            }
+            "review" => {
+                let age_secs = task_age_from_frontmatter(&task, now, AgeAnchor::Updated)?;
+                if age_secs >= thresholds.stale_review_hours.saturating_mul(3600) {
+                    report.stale_review.push(AgedTask {
+                        task_id: task.id,
+                        title: task.title,
+                        status: task.status,
+                        claimed_by: task.claimed_by,
+                        age_secs,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    report
+        .stale_in_progress
+        .sort_by_key(|entry| (entry.task_id, entry.age_secs));
+    report.aged_todo.sort_by_key(|entry| (entry.task_id, entry.age_secs));
+    report
+        .stale_review
+        .sort_by_key(|entry| (entry.task_id, entry.age_secs));
+    Ok(report)
 }
 
 pub(crate) fn write_workflow_metadata(task_path: &Path, metadata: &WorkflowMetadata) -> Result<()> {
@@ -463,6 +580,73 @@ fn split_task_frontmatter(content: &str) -> Result<(&str, &str)> {
     let frontmatter = &after_open[..close_pos];
     let body = &after_open[close_pos + 4..];
     Ok((frontmatter, body.strip_prefix('\n').unwrap_or(body)))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AgeAnchor {
+    Started,
+    Updated,
+}
+
+fn task_age_from_frontmatter(task: &Task, now: DateTime<Utc>, anchor: AgeAnchor) -> Result<u64> {
+    let content = std::fs::read_to_string(&task.source_path)
+        .with_context(|| format!("failed to read {}", task.source_path.display()))?;
+    let (frontmatter, _) = split_task_frontmatter(&content)?;
+    let parsed: TaskTimestampFrontmatter =
+        serde_yaml::from_str(frontmatter).context("failed to parse task timestamp frontmatter")?;
+
+    let timestamp = match anchor {
+        AgeAnchor::Started => parsed.started.or(parsed.updated).or(parsed.created),
+        AgeAnchor::Updated => parsed.updated.or(parsed.started).or(parsed.created),
+    };
+
+    Ok(timestamp
+        .as_deref()
+        .and_then(parse_task_timestamp)
+        .map(|value| now.signed_duration_since(value).num_seconds().max(0) as u64)
+        .unwrap_or(0))
+}
+
+fn parse_task_timestamp(value: &str) -> Option<DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
+}
+
+fn commits_ahead_of_main(project_root: &Path, task: &Task) -> Result<u32> {
+    if let Some(worktree_path) = task.worktree_path.as_deref() {
+        let worktree_dir = resolve_task_path(project_root, worktree_path);
+        if worktree_dir.is_dir() {
+            return crate::team::git_cmd::rev_list_count(&worktree_dir, "main..HEAD")
+                .map_err(Into::into);
+        }
+    }
+
+    if let Some(owner) = task.claimed_by.as_deref() {
+        let worktree_dir = project_root.join(".batty").join("worktrees").join(owner);
+        if worktree_dir.is_dir() {
+            return crate::team::git_cmd::rev_list_count(&worktree_dir, "main..HEAD")
+                .map_err(Into::into);
+        }
+    }
+
+    if let Some(branch) = task.branch.as_deref()
+        && !branch.is_empty()
+    {
+        return crate::team::git_cmd::rev_list_count(project_root, &format!("main..{branch}"))
+            .map_err(Into::into);
+    }
+
+    Ok(0)
+}
+
+fn resolve_task_path(project_root: &Path, value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        path
+    } else {
+        project_root.join(path)
+    }
 }
 
 fn yaml_key(name: &str) -> Value {
@@ -1193,5 +1377,183 @@ mod tests {
         assert_eq!(summary.skipped_count, 0);
         // Archive dir should not be created when there's nothing to archive
         assert!(!board_dir.join("archive").exists());
+    }
+
+    fn write_timed_task(
+        board_dir: &Path,
+        id: u32,
+        title: &str,
+        status: &str,
+        claimed_by: Option<&str>,
+        created: &str,
+        started: Option<&str>,
+        updated: Option<&str>,
+    ) {
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let mut content = format!(
+            "---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: medium\ncreated: {created}\n"
+        );
+        if let Some(started) = started {
+            content.push_str(&format!("started: {started}\n"));
+        }
+        if let Some(updated) = updated {
+            content.push_str(&format!("updated: {updated}\n"));
+        }
+        if let Some(claimed_by) = claimed_by {
+            content.push_str(&format!("claimed_by: {claimed_by}\n"));
+        }
+        content.push_str("class: standard\n---\n\nTask body.\n");
+        std::fs::write(tasks_dir.join(format!("{id:03}-{title}.md")), content).unwrap();
+    }
+
+    #[test]
+    fn aging_flags_tasks_at_threshold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        let now = DateTime::parse_from_rfc3339("2026-04-06T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        write_timed_task(
+            &board_dir,
+            1,
+            "stale-progress",
+            "in-progress",
+            Some("eng-1"),
+            "2026-04-06T08:00:00Z",
+            Some("2026-04-06T08:00:00Z"),
+            Some("2026-04-06T08:00:00Z"),
+        );
+        write_timed_task(
+            &board_dir,
+            2,
+            "aged-todo",
+            "todo",
+            None,
+            "2026-04-04T12:00:00Z",
+            None,
+            Some("2026-04-04T12:00:00Z"),
+        );
+        write_timed_task(
+            &board_dir,
+            3,
+            "stale-review",
+            "review",
+            Some("eng-2"),
+            "2026-04-06T11:00:00Z",
+            None,
+            Some("2026-04-06T11:00:00Z"),
+        );
+
+        let report = compute_task_aging_at(&board_dir, tmp.path(), AgingThresholds::default(), now)
+            .unwrap();
+
+        assert_eq!(report.stale_in_progress.len(), 1);
+        assert_eq!(report.stale_in_progress[0].task_id, 1);
+        assert_eq!(report.aged_todo.len(), 1);
+        assert_eq!(report.aged_todo[0].task_id, 2);
+        assert_eq!(report.stale_review.len(), 1);
+        assert_eq!(report.stale_review[0].task_id, 3);
+    }
+
+    #[test]
+    fn aging_ignores_fresh_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        let now = DateTime::parse_from_rfc3339("2026-04-06T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        write_timed_task(
+            &board_dir,
+            1,
+            "fresh-progress",
+            "in-progress",
+            Some("eng-1"),
+            "2026-04-06T08:00:01Z",
+            Some("2026-04-06T08:00:01Z"),
+            Some("2026-04-06T08:00:01Z"),
+        );
+        write_timed_task(
+            &board_dir,
+            2,
+            "fresh-todo",
+            "todo",
+            None,
+            "2026-04-04T12:00:01Z",
+            None,
+            Some("2026-04-04T12:00:01Z"),
+        );
+        write_timed_task(
+            &board_dir,
+            3,
+            "fresh-review",
+            "review",
+            Some("eng-2"),
+            "2026-04-06T11:00:01Z",
+            None,
+            Some("2026-04-06T11:00:01Z"),
+        );
+
+        let report = compute_task_aging_at(&board_dir, tmp.path(), AgingThresholds::default(), now)
+            .unwrap();
+
+        assert!(report.stale_in_progress.is_empty());
+        assert!(report.aged_todo.is_empty());
+        assert!(report.stale_review.is_empty());
+    }
+
+    #[test]
+    fn aging_respects_threshold_overrides() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        let now = DateTime::parse_from_rfc3339("2026-04-06T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        write_timed_task(
+            &board_dir,
+            1,
+            "progress",
+            "in-progress",
+            Some("eng-1"),
+            "2026-04-06T10:30:00Z",
+            Some("2026-04-06T10:30:00Z"),
+            Some("2026-04-06T10:30:00Z"),
+        );
+        write_timed_task(
+            &board_dir,
+            2,
+            "todo",
+            "todo",
+            None,
+            "2026-04-05T12:00:00Z",
+            None,
+            Some("2026-04-05T12:00:00Z"),
+        );
+        write_timed_task(
+            &board_dir,
+            3,
+            "review",
+            "review",
+            Some("eng-2"),
+            "2026-04-06T10:30:00Z",
+            None,
+            Some("2026-04-06T10:30:00Z"),
+        );
+
+        let report = compute_task_aging_at(
+            &board_dir,
+            tmp.path(),
+            AgingThresholds {
+                stale_in_progress_hours: 1,
+                aged_todo_hours: 24,
+                stale_review_hours: 1,
+            },
+            now,
+        )
+        .unwrap();
+
+        assert_eq!(report.stale_in_progress.len(), 1);
+        assert_eq!(report.aged_todo.len(), 1);
+        assert_eq!(report.stale_review.len(), 1);
     }
 }
