@@ -602,6 +602,19 @@ mod tests {
             !handoff_path.exists(),
             "handoff file should be removed after injection"
         );
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "handoff_injected"
+                && event.role.as_deref() == Some("eng-1")
+                && event.task.as_deref() == Some("42")
+        }));
     }
 
     #[test]
