@@ -404,11 +404,11 @@ impl TeamDaemon {
         let context_pressure_threshold = config
             .team_config
             .workflow_policy
-            .context_pressure_threshold_bytes;
-        let context_pressure_delay = config
+            .context_pressure_threshold;
+        let context_pressure_threshold_bytes = config
             .team_config
             .workflow_policy
-            .context_pressure_restart_delay_secs;
+            .context_pressure_threshold_bytes;
 
         Ok(Self {
             config,
@@ -456,7 +456,7 @@ impl TeamDaemon {
             ),
             context_pressure_tracker: health::context::ContextPressureTracker::new(
                 context_pressure_threshold,
-                context_pressure_delay,
+                context_pressure_threshold_bytes,
             ),
             // Start far enough in the past to trigger an immediate check.
             last_health_check: Instant::now() - Duration::from_secs(3600),

@@ -379,6 +379,9 @@ impl TeamDaemon {
                 output_bytes,
                 uptime_secs,
             } => {
+                if let Some(handle) = self.shim_handles.get_mut(member_name) {
+                    handle.record_output_bytes(output_bytes);
+                }
                 let _ = append_shim_event_log(
                     &self.config.project_root,
                     member_name,

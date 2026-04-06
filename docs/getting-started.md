@@ -571,6 +571,23 @@ workflow_policy:
   health_check_interval_secs: 60   # how often the daemon checks backend health (default: 60)
 ```
 
+## Context Pressure Detection
+
+Batty also watches for Codex sessions that drift into meta-conversation loops:
+high narration, low tool diversity, repeated outputs, shrinking responses, and
+long stretches without commits. When the combined pressure score stays above the
+configured threshold, Batty nudges the agent and then restarts it with task
+context before it burns the rest of the session window.
+
+```yaml
+workflow_policy:
+  context_pressure_threshold: 100        # score threshold before restart logic engages
+  context_pressure_threshold_bytes: 512000  # output-growth component of the score
+```
+
+Lower `context_pressure_threshold` to restart earlier; raise it if your agents
+legitimately spend longer planning before taking action.
+
 ## Task Estimation
 
 Batty estimates remaining time for in-progress tasks using historical cycle

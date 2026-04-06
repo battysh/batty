@@ -95,14 +95,16 @@ impl TeamDaemon {
         &mut self,
         role: &str,
         task: Option<u32>,
+        pressure_score: u64,
+        threshold: u64,
         output_bytes: u64,
-        threshold_bytes: u64,
     ) {
         self.emit_event(TeamEvent::context_pressure_warning(
             role,
             task,
+            pressure_score,
+            threshold,
             output_bytes,
-            threshold_bytes,
         ));
     }
 

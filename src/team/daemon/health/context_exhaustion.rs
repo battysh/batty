@@ -25,7 +25,7 @@ impl TeamDaemon {
         else {
             return Ok(());
         };
-        let Some(pane_id) = self.config.pane_map.get(member_name).cloned() else {
+        let Some(_pane_id) = self.config.pane_map.get(member_name).cloned() else {
             return Ok(());
         };
         let restart_cooldown_key = Self::context_restart_cooldown_key(member_name);
@@ -69,6 +69,50 @@ impl TeamDaemon {
             task_id = task.id,
             "context exhausted; restarting agent with task context"
         );
+        self.restart_member_with_task_context(member_name, "context exhaustion")?;
+        self.intervention_cooldowns
+            .insert(restart_cooldown_key, Instant::now());
+        self.record_agent_restarted(
+            member_name,
+            task.id.to_string(),
+            "context_exhausted",
+            prior_restarts + 1,
+        );
+        Ok(())
+    }
+
+    pub(super) fn handle_context_pressure_restart(&mut self, member_name: &str) -> Result<()> {
+        self.restart_member_with_task_context(member_name, "context pressure")?;
+        self.intervention_cooldowns
+            .insert(Self::context_restart_cooldown_key(member_name), Instant::now());
+        Ok(())
+    }
+
+    fn restart_member_with_task_context(
+        &mut self,
+        member_name: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let Some(task) = self.active_task(member_name)? else {
+            warn!(
+                member = %member_name,
+                reason,
+                "restart requested but no active task is recorded"
+            );
+            return Ok(());
+        };
+        let Some(member) = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let Some(pane_id) = self.config.pane_map.get(member_name).cloned() else {
+            return Ok(());
+        };
 
         let work_dir = self.member_work_dir(&member);
         if self
@@ -90,7 +134,6 @@ impl TeamDaemon {
             }
         }
 
-        // Write progress checkpoint before restarting.
         let checkpoint = super::super::super::checkpoint::gather_checkpoint(
             &self.config.project_root,
             member_name,
@@ -109,14 +152,13 @@ impl TeamDaemon {
         let assignment = self.restart_assignment_with_handoff(&task, &work_dir);
         let launch = self.launch_task_assignment(member_name, &assignment, Some(task.id), false)?;
         let mut restart_notice = format!(
-            "Restarted after context exhaustion. Continue task #{} from the current worktree state.",
+            "Restarted after {reason}. Continue task #{} from the current worktree state.",
             task.id
         );
         if let Some(branch) = launch.branch.as_deref() {
             restart_notice.push_str(&format!("\nBranch: {branch}"));
         }
         restart_notice.push_str(&format!("\nWorktree: {}", launch.work_dir.display()));
-        // Include checkpoint content in restart notice.
         if let Some(cp_content) =
             super::super::super::checkpoint::read_checkpoint(&self.config.project_root, member_name)
         {
@@ -126,19 +168,11 @@ impl TeamDaemon {
             warn!(member = %member_name, error = %error, "failed to inject restart notice");
         }
         self.record_orchestrator_action(format!(
-            "restart: relaunched {} on task #{} after context exhaustion",
-            member_name, task.id
+            "restart: relaunched {} on task #{} after {}",
+            member_name, task.id, reason
         ));
-        self.intervention_cooldowns
-            .insert(restart_cooldown_key, Instant::now());
-        self.record_agent_restarted(
-            member_name,
-            task.id.to_string(),
-            "context_exhausted",
-            prior_restarts + 1,
-        );
         if let Some(branch) = launch.branch.as_deref() {
-            info!(member = %member_name, task_id = task.id, branch, "context restart relaunched assignment");
+            info!(member = %member_name, task_id = task.id, branch, reason, "context restart relaunched assignment");
         }
         Ok(())
     }
