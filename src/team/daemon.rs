@@ -106,6 +106,7 @@ use self::hot_reload::consume_hot_reload_marker;
 use self::hot_reload::{
     BinaryFingerprint, hot_reload_daemon_args, hot_reload_marker_path, write_hot_reload_marker,
 };
+pub(crate) use self::error_handling::{optional_subsystem_for_step, optional_subsystem_names};
 pub(crate) use self::interventions::NudgeSchedule;
 use self::interventions::OwnedTaskInterventionState;
 use self::launcher::{

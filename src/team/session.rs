@@ -290,7 +290,7 @@ pub fn attach_team(project_root: &Path) -> Result<()> {
 }
 
 /// Show team status.
-pub fn team_status(project_root: &Path, json: bool, detail: bool) -> Result<()> {
+pub fn team_status(project_root: &Path, json: bool, detail: bool, health: bool) -> Result<()> {
     let config_path = team_config_path(project_root);
     if !config_path.exists() {
         bail!("no team config found at {}", config_path.display());
@@ -368,6 +368,7 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool) -> Result<()> 
     } else {
         None
     };
+    let optional_subsystems = health.then(|| status::load_optional_subsystem_statuses(project_root));
 
     if json {
         let report = status::build_team_status_json_report(status::TeamStatusJsonReportInput {
@@ -381,6 +382,7 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool) -> Result<()> 
                 .map(|(_, metrics)| metrics.clone()),
             active_tasks,
             review_queue,
+            optional_subsystems,
             engineer_profiles,
             members: rows,
         });
@@ -454,6 +456,13 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool) -> Result<()> 
             for line in failed_test_tasks {
                 println!("- {line}");
             }
+        }
+        if let Some(optional_subsystems) = optional_subsystems {
+            println!();
+            println!(
+                "{}",
+                status::format_optional_subsystem_statuses(&optional_subsystems)
+            );
         }
         if detail {
             if let Some(profiles) = engineer_profiles {

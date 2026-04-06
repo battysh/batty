@@ -167,7 +167,7 @@ impl TeamDaemon {
             self.run_recoverable_step("tact_check", |daemon| daemon.tact_check());
 
             // -- Recoverable with catch_unwind (panic-safe) --
-            self.run_recoverable_step_with_catch_unwind("process_telegram_queue", |daemon| {
+            self.run_optional_subsystem_step("process_telegram_queue", "telegram", |daemon| {
                 daemon.process_telegram_queue()
             });
             self.run_recoverable_step("maybe_fire_nudges", |daemon| daemon.maybe_fire_nudges());
@@ -198,7 +198,7 @@ impl TeamDaemon {
                 }
                 Ok(())
             });
-            self.run_recoverable_step_with_catch_unwind("maybe_generate_standup", |daemon| {
+            self.run_optional_subsystem_step("maybe_generate_standup", "standup", |daemon| {
                 let generated =
                     standup::maybe_generate_standup(standup::StandupGenerationContext {
                         project_root: &daemon.config.project_root,
