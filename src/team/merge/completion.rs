@@ -15,12 +15,14 @@ use crate::team::artifact::append_test_timing_record;
 use crate::team::artifact::read_test_timing_log;
 use crate::team::auto_merge::{self, AutoMergeDecision};
 use crate::team::daemon::TeamDaemon;
+use crate::team::daemon::verification::run_automatic_verification;
 use crate::team::task_loop::{
     checkout_worktree_branch_from_main, current_worktree_branch, engineer_base_branch_name,
     read_task_title, run_tests_in_worktree,
 };
 use crate::team::telemetry_db;
 use crate::team::test_results::TestResults;
+use crate::team::verification::{EvidenceKind, VerificationPhase, VerificationState};
 
 use super::git_ops::{
     code_files_changed_from_main, commits_ahead_of_main, diff_stat_from_main,
@@ -28,6 +30,72 @@ use super::git_ops::{
 };
 use super::lock::{MergeLock, MergeOutcome};
 use super::operations::merge_engineer_branch;
+
+fn transition_verification_phase(
+    daemon: &mut TeamDaemon,
+    engineer: &str,
+    task_id: u32,
+    state: &mut VerificationState,
+    next_phase: VerificationPhase,
+) {
+    let next_phase_name = format!("{next_phase:?}").to_ascii_lowercase();
+    let previous_phase = state.transition(next_phase);
+    let previous_phase_name = format!("{previous_phase:?}").to_ascii_lowercase();
+    daemon.record_verification_phase_changed(
+        engineer,
+        task_id,
+        &previous_phase_name,
+        &next_phase_name,
+        state.iteration,
+    );
+}
+
+fn record_verification_evidence(
+    daemon: &mut TeamDaemon,
+    engineer: &str,
+    task_id: u32,
+    state: &mut VerificationState,
+    kind: EvidenceKind,
+    detail: impl Into<String>,
+) {
+    let detail = detail.into();
+    let kind_name = format!("{kind:?}").to_ascii_lowercase();
+    state.record_evidence(kind, detail.clone());
+    daemon.record_verification_evidence_collected(engineer, task_id, &kind_name, &detail);
+}
+
+fn verification_fix_message(
+    state: &VerificationState,
+    headline: &str,
+    failures: &[String],
+    file_paths: &[String],
+    output: &str,
+) -> String {
+    let mut body = format!(
+        "{headline}\nFix attempt {}/{}.\n",
+        state.iteration, state.max_iterations
+    );
+    if !failures.is_empty() {
+        body.push_str("Failures:\n");
+        for failure in failures.iter().take(8) {
+            body.push_str("- ");
+            body.push_str(failure);
+            body.push('\n');
+        }
+    }
+    if !file_paths.is_empty() {
+        body.push_str("Likely files to inspect:\n");
+        for path in file_paths.iter().take(8) {
+            body.push_str("- ");
+            body.push_str(path);
+            body.push('\n');
+        }
+    }
+    body.push_str("Latest verification output:\n```\n");
+    body.push_str(output.trim());
+    body.push_str("\n```\nFix these failures, then report completion again.");
+    body
+}
 
 fn move_task_to_review(
     _daemon: &mut TeamDaemon,
@@ -94,95 +162,6 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     } else {
         commits_ahead_of_main(&worktree_dir)?
     };
-
-    if total_commits == 0 {
-        let rejection_count = daemon
-            .completion_rejection_counts
-            .entry(engineer.to_string())
-            .or_insert(0);
-        *rejection_count += 1;
-        let count = *rejection_count;
-
-        const MAX_REJECTIONS_BEFORE_RESET: u32 = 3;
-
-        warn!(
-            engineer,
-            task_id,
-            rejection_count = count,
-            "engineer idle but no commits on task branch — keeping task #{task_id} active for {engineer} (rejection {count}/{MAX_REJECTIONS_BEFORE_RESET})"
-        );
-
-        if count >= MAX_REJECTIONS_BEFORE_RESET {
-            // Auto-recovery: the branch never diverged from main.
-            // Reset the worktree to a fresh task branch so the engineer can start clean.
-            warn!(
-                engineer,
-                task_id,
-                "completion rejected {count} times — auto-resetting worktree branch for {engineer}"
-            );
-            let base_branch = engineer_base_branch_name(engineer);
-            if let Err(error) = checkout_worktree_branch_from_main(&worktree_dir, &base_branch) {
-                warn!(
-                    engineer,
-                    task_id,
-                    error = %error,
-                    "failed to auto-reset worktree to base branch"
-                );
-            }
-            daemon.completion_rejection_counts.remove(engineer);
-
-            // Escalate to manager so they know the engineer needs re-assignment
-            if let Some(ref manager_name) = manager_name {
-                let msg = format!(
-                    "[daemon] Engineer {engineer} reported completion {count} times for task #{task_id} but branch has no commits. Worktree has been auto-reset. The engineer may need a clearer task specification or is not committing work. Please re-assign or investigate."
-                );
-                daemon.queue_message("daemon", manager_name, &msg)?;
-            }
-            info!(
-                engineer,
-                task_id,
-                rejection_count = count,
-                "auto-reset worktree after repeated completion rejections (branch never diverged from main)"
-            );
-        } else {
-            // Check if there are uncommitted changes to give a more helpful message
-            let has_dirty_files = std::process::Command::new("git")
-                .args(["status", "--porcelain"])
-                .current_dir(&worktree_dir)
-                .output()
-                .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-                .unwrap_or(false);
-
-            let msg = if has_dirty_files {
-                format!(
-                    "Completion rejected ({count}/{MAX_REJECTIONS_BEFORE_RESET}): you have uncommitted changes but no commits ahead of main. Your work will be LOST if you don't commit. Run these commands NOW:\n\
-                    ```\n\
-                    git add -A\n\
-                    git commit -m \"your task description\"\n\
-                    ```\n\
-                    After {MAX_REJECTIONS_BEFORE_RESET} rejections, your worktree will be auto-reset and all uncommitted work will be destroyed."
-                )
-            } else {
-                format!(
-                    "Completion rejected ({count}/{MAX_REJECTIONS_BEFORE_RESET}): your branch has no commits ahead of main and no modified files. You need to actually create the deliverables for this task, then commit them:\n\
-                    ```\n\
-                    git add -A\n\
-                    git commit -m \"your task description\"\n\
-                    ```\n\
-                    After {MAX_REJECTIONS_BEFORE_RESET} rejections, your worktree will be auto-reset."
-                )
-            };
-            daemon.queue_message("batty", engineer, &msg)?;
-        }
-        return Ok(());
-    }
-
-    // Clear rejection counter on successful completion
-    daemon.completion_rejection_counts.remove(engineer);
-
-    // --- Narration-only quality gate ---
-    // Commits exist, but check if any files actually changed. If the agent produced
-    // commits with only commentary (e.g. empty commits, metadata-only), reject.
     let diff_stat = if daemon.is_multi_repo {
         multi_repo_diff_stat_from_main(&worktree_dir, &daemon.sub_repo_names)?
     } else {
@@ -198,66 +177,224 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     } else {
         code_files_changed_from_main(&worktree_dir)?
     };
+    let verification_policy = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .verification
+        .clone();
+    let test_command = verification_policy.test_command.clone().or_else(|| {
+        daemon
+            .config
+            .team_config
+            .workflow_policy
+            .test_command
+            .clone()
+    });
+    let mut verification_state = daemon
+        .verification_states
+        .remove(engineer)
+        .unwrap_or_else(|| VerificationState::new(verification_policy.max_iterations));
+    verification_state.max_iterations = verification_policy.max_iterations.max(1);
+    verification_state.clear_evidence();
 
-    if files_changed == 0 || code_files_changed == 0 {
-        let narration_count = daemon
-            .narration_rejection_counts
-            .entry(task_id)
-            .or_insert(0);
-        *narration_count += 1;
-        let count = *narration_count;
+    transition_verification_phase(
+        daemon,
+        engineer,
+        task_id,
+        &mut verification_state,
+        VerificationPhase::Verifying,
+    );
 
-        const MAX_NARRATION_REJECTIONS: u32 = 2;
-
-        warn!(
+    if total_commits > 0 {
+        record_verification_evidence(
+            daemon,
             engineer,
             task_id,
-            narration_rejection_count = count,
-            diff_stat = %diff_stat,
-            files_changed,
-            code_files_changed,
-            "commits exist but only narration/non-code diff — narration-only completion"
+            &mut verification_state,
+            EvidenceKind::CommitsAhead,
+            format!("commits_ahead={total_commits}"),
         );
-        daemon.record_narration_rejection(engineer, task_id, count);
+    }
+    if files_changed > 0 {
+        record_verification_evidence(
+            daemon,
+            engineer,
+            task_id,
+            &mut verification_state,
+            EvidenceKind::FilesChanged,
+            format!("files_changed={files_changed}"),
+        );
+    }
+    if code_files_changed > 0 {
+        record_verification_evidence(
+            daemon,
+            engineer,
+            task_id,
+            &mut verification_state,
+            EvidenceKind::CodeFilesChanged,
+            format!("code_files_changed={code_files_changed}"),
+        );
+    }
 
-        if count == MAX_NARRATION_REJECTIONS {
-            // Escalate to manager
-            if let Some(ref manager_name) = manager_name {
-                let msg = format!(
-                    "[daemon] Engineer {engineer} hit the narration-only quality gate {count} times on task #{task_id}. \
-                     Branch has {total_commits} commit(s) ahead of main, but the completion diff is narration-only ({files_changed} total file(s), {code_files_changed} code file(s)).\n\
-                     Follow-up prompt sent: \"Your previous attempt only produced commentary. Execute the actual commands to make the code changes.\"\n\
-                     Diff stat: {}\n\
-                     The agent may need a more directive prompt or task restart.",
-                    if diff_stat.is_empty() {
-                        "(empty)".to_string()
-                    } else {
-                        diff_stat.clone()
-                    }
-                );
-                daemon.queue_message("daemon", manager_name, &msg)?;
-            }
+    let (verification_run, test_duration_ms) = if verification_policy.auto_run_tests {
+        verification_state.begin_iteration();
+        let test_started = Instant::now();
+        let verification_run = run_automatic_verification(&worktree_dir, test_command.as_deref())
+            .with_context(|| {
+            format!(
+                "automatic verification failed while running tests in {}",
+                worktree_dir.display()
+            )
+        })?;
+        let test_duration_ms = test_started.elapsed().as_millis() as u64;
+        verification_state.last_test_passed = verification_run.passed;
+        verification_state.last_test_output = Some(verification_run.output.clone());
+        if verification_run.passed {
+            record_verification_evidence(
+                daemon,
+                engineer,
+                task_id,
+                &mut verification_state,
+                EvidenceKind::TestsPassed,
+                "tests_passed".to_string(),
+            );
+        } else {
+            record_verification_evidence(
+                daemon,
+                engineer,
+                task_id,
+                &mut verification_state,
+                EvidenceKind::TestsFailed,
+                verification_run
+                    .failures
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "tests_failed".to_string()),
+            );
+        }
+        (verification_run, test_duration_ms)
+    } else {
+        let output =
+            "automatic verification skipped because workflow_policy.verification.auto_run_tests=false"
+                .to_string();
+        verification_state.last_test_passed = true;
+        verification_state.last_test_output = Some(output.clone());
+        record_verification_evidence(
+            daemon,
+            engineer,
+            task_id,
+            &mut verification_state,
+            EvidenceKind::TestsPassed,
+            "automatic verification skipped by policy".to_string(),
+        );
+        (
+            crate::team::daemon::verification::VerificationRunResult {
+                passed: true,
+                output,
+                failures: Vec::new(),
+                file_paths: Vec::new(),
+            },
+            0,
+        )
+    };
+
+    let has_required_evidence = if verification_policy.require_evidence {
+        total_commits > 0 && code_files_changed > 0
+    } else {
+        true
+    };
+
+    if !has_required_evidence || !verification_run.passed {
+        let next_phase = if verification_state.reached_max_iterations() {
+            VerificationPhase::Failed
+        } else {
+            VerificationPhase::Fixing
+        };
+        transition_verification_phase(
+            daemon,
+            engineer,
+            task_id,
+            &mut verification_state,
+            next_phase,
+        );
+
+        if files_changed == 0 || code_files_changed == 0 {
+            let narration_count = daemon
+                .narration_rejection_counts
+                .entry(task_id)
+                .or_insert(0);
+            *narration_count += 1;
+            let narration_count = *narration_count;
+            daemon.record_narration_rejection(engineer, task_id, narration_count);
         }
 
-        let msg = format!(
-            "Your previous attempt only produced commentary. Execute the actual commands to make the code changes.\n\
-             Batty checked `git diff --stat main..HEAD` and found no code changes.\n\
-             Commits ahead of main: {total_commits}\n\
-             Files changed: {files_changed}\n\
-             Code files changed: {code_files_changed}\n\
-             Diff stat: {}",
-            if diff_stat.is_empty() {
-                "(empty)".to_string()
-            } else {
-                diff_stat.clone()
-            }
+        let headline = if !has_required_evidence {
+            format!(
+                "Verification could not accept this completion: no sufficient task evidence was found. Commits ahead of main: {total_commits}. Files changed: {files_changed}. Code files changed: {code_files_changed}. Diff stat: {}",
+                if diff_stat.is_empty() {
+                    "(empty)".to_string()
+                } else {
+                    diff_stat.clone()
+                }
+            )
+        } else {
+            "Verification failed because the test command did not pass.".to_string()
+        };
+        let engineer_message = verification_fix_message(
+            &verification_state,
+            &headline,
+            &verification_run.failures,
+            &verification_run.file_paths,
+            &verification_run.output,
         );
-        daemon.queue_message("batty", engineer, &msg)?;
+        daemon.queue_message("batty", engineer, &engineer_message)?;
+
+        if verification_state.phase == VerificationPhase::Failed
+            && let Some(ref manager_name) = manager_name
+        {
+            daemon.record_verification_max_iterations_reached(
+                engineer,
+                task_id,
+                verification_state.iteration,
+                manager_name,
+            );
+            let manager_message = format!(
+                "[daemon] Engineer {engineer} hit verification max iterations on task #{task_id}.\nLatest phase: failed\nAttempts: {}/{}\nDiff stat: {}\nRecent failures:\n{}\nLatest output:\n```\\n{}\\n```",
+                verification_state.iteration,
+                verification_state.max_iterations,
+                if diff_stat.is_empty() {
+                    "(empty)".to_string()
+                } else {
+                    diff_stat.clone()
+                },
+                verification_run
+                    .failures
+                    .iter()
+                    .take(8)
+                    .map(|failure| format!("- {failure}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                verification_run.output.trim()
+            );
+            daemon.queue_message("daemon", manager_name, &manager_message)?;
+        }
+
+        daemon
+            .verification_states
+            .insert(engineer.to_string(), verification_state);
         return Ok(());
     }
 
-    // Clear narration rejection counter on real file changes
     daemon.narration_rejection_counts.remove(&task_id);
+    transition_verification_phase(
+        daemon,
+        engineer,
+        task_id,
+        &mut verification_state,
+        VerificationPhase::Complete,
+    );
+    daemon.verification_states.remove(engineer);
 
     let task_branch = if daemon.is_multi_repo {
         multi_repo_task_branch(&worktree_dir, &daemon.sub_repo_names)?
@@ -265,7 +402,6 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         current_worktree_branch(&worktree_dir)?
     };
     let test_started = Instant::now();
-    // For multi-repo, run tests from the engineer's worktree root (parent of sub-repos)
     let previous_results = load_previous_test_results(&board_dir, task_id)?;
     let test_run = run_tests_in_worktree(
         &worktree_dir,
@@ -292,7 +428,9 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
             &flaky_failures,
         )?;
     }
-    if test_run.passed {
+    let tests_passed = test_run.passed;
+    let output_truncated = test_run.output.clone();
+    if tests_passed {
         let task_title = read_task_title(&board_dir, task_id);
 
         // --- Confidence scoring (always runs for observability) ---
@@ -1110,6 +1248,234 @@ mod tests {
         assert_eq!(timings[0].engineer, "eng-1");
         assert_eq!(timings[0].branch, "eng-1");
         assert!(!timings[0].regression_detected);
+    }
+
+    #[test]
+    fn completion_uses_verification_test_command_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        write_task_file(&repo, 42, "verification-test-command");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        std::fs::write(
+            worktree_dir.join("check.sh"),
+            "#!/bin/sh\necho verification override\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(worktree_dir.join("check.sh"))
+                .unwrap()
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(worktree_dir.join("check.sh"), perms).unwrap();
+        }
+
+        std::fs::write(worktree_dir.join("note.txt"), "done\n").unwrap();
+        git_ok(&worktree_dir, &["add", "check.sh", "note.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "add override command"]);
+
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.config.team_config.workflow_policy.test_command = Some("false".to_string());
+        daemon
+            .config
+            .team_config
+            .workflow_policy
+            .verification
+            .test_command = Some("./check.sh".to_string());
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        assert_eq!(daemon.active_task_id("eng-1"), None);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("note.txt")).unwrap(),
+            "done\n"
+        );
+    }
+
+    #[test]
+    fn completion_skips_automatic_verification_when_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        write_task_file(&repo, 42, "verification-skipped");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        std::fs::write(
+            worktree_dir.join("src").join("lib.rs"),
+            "pub fn smoke() -> bool { false }\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn smoke_test() {\n        assert!(smoke());\n    }\n}\n",
+        )
+        .unwrap();
+        git_ok(&worktree_dir, &["add", "src/lib.rs"]);
+        git_ok(&worktree_dir, &["commit", "-m", "introduce failing tests"]);
+
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon
+            .config
+            .team_config
+            .workflow_policy
+            .verification
+            .auto_run_tests = false;
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        assert_eq!(daemon.active_task_id("eng-1"), None);
+        assert_eq!(
+            daemon.member_state_for_test("eng-1"),
+            Some(MemberState::Idle)
+        );
+
+        let events =
+            read_events(&repo.join(".batty").join("team_config").join("events.jsonl")).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "verification_evidence_collected"
+                && event.reason.as_deref() == Some("automatic verification skipped by policy")
+        }));
+    }
+
+    #[test]
+    fn failing_verification_transitions_to_fixing_with_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        write_task_file(&repo, 42, "verification-fixing");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        std::fs::write(
+            worktree_dir.join("src").join("lib.rs"),
+            "pub fn smoke() -> bool { false }\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn smoke_test() {\n        assert!(smoke());\n    }\n}\n",
+        )
+        .unwrap();
+        git_ok(&worktree_dir, &["add", "src/lib.rs"]);
+        git_ok(&worktree_dir, &["commit", "-m", "introduce failing tests"]);
+
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+        assert_eq!(
+            daemon.member_state_for_test("eng-1"),
+            Some(MemberState::Working)
+        );
+
+        let verification_state = daemon.verification_states.get("eng-1").unwrap();
+        assert_eq!(verification_state.phase, VerificationPhase::Fixing);
+        assert_eq!(verification_state.iteration, 1);
+        assert!(!verification_state.last_test_passed);
+        assert!(
+            verification_state
+                .last_test_output
+                .as_deref()
+                .is_some_and(|output| output.contains("smoke_test"))
+        );
+
+        let engineer_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
+        assert_eq!(engineer_messages.len(), 1);
+        assert!(engineer_messages[0].body.contains("Fix attempt 1/5"));
+        assert!(engineer_messages[0].body.contains("Verification failed because the test command did not pass."));
+        assert!(engineer_messages[0].body.contains("Latest verification output:"));
+
+        let events =
+            read_events(&repo.join(".batty").join("team_config").join("events.jsonl")).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "verification_phase_changed"
+                && event.step.as_deref() == Some("verifying")
+                && event.reason.as_deref() == Some("from=executing to=verifying iteration=0")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event == "verification_phase_changed"
+                && event.step.as_deref() == Some("fixing")
+                && event.reason.as_deref() == Some("from=verifying to=fixing iteration=1")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event == "verification_evidence_collected"
+                && event.step.as_deref() == Some("tests_failed")
+        }));
+    }
+
+    #[test]
+    fn verification_max_iterations_escalates_to_manager_without_reset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        write_task_file(&repo, 42, "verification-failed");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        std::fs::write(
+            worktree_dir.join("src").join("lib.rs"),
+            "pub fn smoke() -> bool { false }\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn smoke_test() {\n        assert!(smoke());\n    }\n}\n",
+        )
+        .unwrap();
+        git_ok(&worktree_dir, &["add", "src/lib.rs"]);
+        git_ok(&worktree_dir, &["commit", "-m", "introduce failing tests"]);
+
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon
+            .config
+            .team_config
+            .workflow_policy
+            .verification
+            .max_iterations = 1;
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+        assert_eq!(
+            daemon.member_state_for_test("eng-1"),
+            Some(MemberState::Working)
+        );
+
+        let verification_state = daemon.verification_states.get("eng-1").unwrap();
+        assert_eq!(verification_state.phase, VerificationPhase::Failed);
+        assert_eq!(verification_state.iteration, 1);
+        assert_eq!(verification_state.max_iterations, 1);
+
+        let engineer_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
+        assert_eq!(engineer_messages.len(), 1);
+        assert!(engineer_messages[0].body.contains("Fix attempt 1/1"));
+
+        let manager_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
+        assert_eq!(manager_messages.len(), 1);
+        assert!(manager_messages[0]
+            .body
+            .contains("hit verification max iterations on task #42"));
+        assert!(manager_messages[0].body.contains("Latest phase: failed"));
+
+        let events =
+            read_events(&repo.join(".batty").join("team_config").join("events.jsonl")).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "verification_phase_changed"
+                && event.step.as_deref() == Some("failed")
+                && event.reason.as_deref() == Some("from=verifying to=failed iteration=1")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event == "verification_max_iterations_reached"
+                && event.task.as_deref() == Some("42")
+                && event.role.as_deref() == Some("eng-1")
+                && event.recipient.as_deref() == Some("manager")
+        }));
     }
 
     #[test]

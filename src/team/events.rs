@@ -22,6 +22,14 @@ pub struct MergeConfidenceInfo<'a> {
     pub rename_count: usize,
 }
 
+pub struct VerificationPhaseChangeInfo<'a> {
+    pub engineer: &'a str,
+    pub task: &'a str,
+    pub from_phase: &'a str,
+    pub to_phase: &'a str,
+    pub iteration: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
 pub struct TeamEvent {
@@ -467,6 +475,51 @@ impl TeamEvent {
             load: Some(info.confidence),
             reason: Some(detail),
             ..Self::base("merge_confidence_scored")
+        }
+    }
+
+    pub fn verification_phase_changed(info: &VerificationPhaseChangeInfo<'_>) -> Self {
+        Self {
+            role: Some(info.engineer.into()),
+            task: Some(info.task.into()),
+            step: Some(info.to_phase.into()),
+            reason: Some(format!(
+                "from={} to={} iteration={}",
+                info.from_phase, info.to_phase, info.iteration
+            )),
+            restart_count: Some(info.iteration),
+            ..Self::base("verification_phase_changed")
+        }
+    }
+
+    pub fn verification_evidence_collected(
+        engineer: &str,
+        task: &str,
+        evidence_kind: &str,
+        detail: &str,
+    ) -> Self {
+        Self {
+            role: Some(engineer.into()),
+            task: Some(task.into()),
+            step: Some(evidence_kind.into()),
+            reason: Some(detail.into()),
+            ..Self::base("verification_evidence_collected")
+        }
+    }
+
+    pub fn verification_max_iterations_reached(
+        engineer: &str,
+        task: &str,
+        iteration: u32,
+        escalated_to: &str,
+    ) -> Self {
+        Self {
+            role: Some(engineer.into()),
+            task: Some(task.into()),
+            recipient: Some(escalated_to.into()),
+            reason: Some(format!("iteration={iteration}")),
+            restart_count: Some(iteration),
+            ..Self::base("verification_max_iterations_reached")
         }
     }
 

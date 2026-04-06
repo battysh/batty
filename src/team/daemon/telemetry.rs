@@ -9,7 +9,7 @@ use std::path::Path;
 use anyhow::Result;
 use tracing::{info, warn};
 
-use super::super::events::TeamEvent;
+use super::super::events::{TeamEvent, VerificationPhaseChangeInfo};
 use super::*;
 
 impl TeamDaemon {
@@ -185,6 +185,55 @@ impl TeamDaemon {
             engineer,
             task_id,
             rejection_count,
+        ));
+    }
+
+    pub(crate) fn record_verification_phase_changed(
+        &mut self,
+        engineer: &str,
+        task_id: u32,
+        from_phase: &str,
+        to_phase: &str,
+        iteration: u32,
+    ) {
+        self.emit_event(TeamEvent::verification_phase_changed(
+            &VerificationPhaseChangeInfo {
+                engineer,
+                task: &task_id.to_string(),
+                from_phase,
+                to_phase,
+                iteration,
+            },
+        ));
+    }
+
+    pub(crate) fn record_verification_evidence_collected(
+        &mut self,
+        engineer: &str,
+        task_id: u32,
+        evidence_kind: &str,
+        detail: &str,
+    ) {
+        self.emit_event(TeamEvent::verification_evidence_collected(
+            engineer,
+            &task_id.to_string(),
+            evidence_kind,
+            detail,
+        ));
+    }
+
+    pub(crate) fn record_verification_max_iterations_reached(
+        &mut self,
+        engineer: &str,
+        task_id: u32,
+        iteration: u32,
+        escalated_to: &str,
+    ) {
+        self.emit_event(TeamEvent::verification_max_iterations_reached(
+            engineer,
+            &task_id.to_string(),
+            iteration,
+            escalated_to,
         ));
     }
 
@@ -620,7 +669,7 @@ mod tests {
             last_uncommitted_warn: HashMap::new(),
             last_shared_target_cleanup: Instant::now(),
             pending_delivery_queue: HashMap::new(),
-            completion_rejection_counts: HashMap::new(),
+            verification_states: HashMap::new(),
             narration_rejection_counts: HashMap::new(),
             shim_handles: HashMap::new(),
             planning_cycle_last_fired: None,
@@ -1039,7 +1088,7 @@ mod tests {
             last_uncommitted_warn: HashMap::new(),
             last_shared_target_cleanup: Instant::now(),
             pending_delivery_queue: HashMap::new(),
-            completion_rejection_counts: HashMap::new(),
+            verification_states: HashMap::new(),
             narration_rejection_counts: HashMap::new(),
             shim_handles: HashMap::new(),
             planning_cycle_last_fired: None,

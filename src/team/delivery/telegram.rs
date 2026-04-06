@@ -283,7 +283,7 @@ mod tests {
             last_uncommitted_warn: HashMap::new(),
             last_shared_target_cleanup: Instant::now(),
             pending_delivery_queue: HashMap::new(),
-            completion_rejection_counts: HashMap::new(),
+            verification_states: HashMap::new(),
             narration_rejection_counts: HashMap::new(),
             shim_handles: HashMap::new(),
             planning_cycle_last_fired: None,
