@@ -853,21 +853,12 @@ impl TeamDaemon {
     }
 
     pub(super) fn maybe_trigger_planning_cycle(&mut self) -> Result<()> {
-        if !self.pipeline_starvation_fired || self.planning_cycle_active {
-            return Ok(());
-        }
-
         let cooldown = Duration::from_secs(
             self.config
                 .team_config
                 .workflow_policy
                 .planning_cycle_cooldown_secs,
         );
-        if let Some(last) = self.planning_cycle_last_fired
-            && last.elapsed() < cooldown
-        {
-            return Ok(());
-        }
 
         let Some(architect) = self
             .config
@@ -879,11 +870,23 @@ impl TeamDaemon {
             return Ok(());
         };
 
+        let board_dir = self.board_dir();
         let board_tasks =
-            crate::task::load_tasks_from_dir(&self.board_dir().join("tasks")).unwrap_or_default();
+            crate::task::load_tasks_from_dir(&board_dir.join("tasks")).unwrap_or_default();
         let idle_engineer_count = self.truly_idle_engineer_count(&board_tasks);
+        let dispatchable_task_count =
+            crate::team::tact::dispatchable_task_count(&board_dir, &self.config.members)?;
+        if !crate::team::tact::planning_cycle_ready(
+            self.planning_cycle_active,
+            self.planning_cycle_last_fired,
+            cooldown,
+            idle_engineer_count,
+            dispatchable_task_count,
+        ) {
+            return Ok(());
+        }
         let board_summary = format!(
-            "todo={}, backlog={}, in-progress={}, review={}, done={}, idle_engineers={}",
+            "todo={}, backlog={}, in-progress={}, review={}, done={}, idle_engineers={}, dispatchable_tasks={}",
             board_tasks
                 .iter()
                 .filter(|task| task.status == "todo")
@@ -904,7 +907,8 @@ impl TeamDaemon {
                 .iter()
                 .filter(|task| task.status == "done")
                 .count(),
-            idle_engineer_count
+            idle_engineer_count,
+            dispatchable_task_count
         );
         let recent_completions = crate::team::events::read_events(&crate::team::team_events_path(
             &self.config.project_root,
@@ -929,7 +933,7 @@ impl TeamDaemon {
             &self.config.team_config.name,
         );
         let body = format!(
-            "HIGH PRIORITY: planning cycle triggered because the pipeline starved.\n\n{prompt}"
+            "HIGH PRIORITY: planning cycle triggered because idle engineers outnumber dispatchable tasks.\n\n{prompt}"
         );
 
         let inbox_root = inbox::inboxes_root(&self.config.project_root);
@@ -947,11 +951,13 @@ impl TeamDaemon {
         self.planning_cycle_active = true;
         info!(
             architect,
-            "triggered planning cycle after pipeline starvation"
+            idle_engineers = idle_engineer_count,
+            dispatchable_tasks = dispatchable_task_count,
+            "triggered planning cycle"
         );
         self.record_orchestrator_action(format!(
-            "planning: triggered planning cycle for {} after pipeline starvation",
-            architect
+            "planning: triggered planning cycle for {} (idle={}, dispatchable={})",
+            architect, idle_engineer_count, dispatchable_task_count
         ));
         Ok(())
     }
@@ -1482,7 +1488,6 @@ Second body.
     fn planning_cycle_trigger_generates_prompt_in_architect_inbox() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = planning_test_daemon(&tmp, 300);
-        daemon.pipeline_starvation_fired = true;
 
         daemon.maybe_trigger_planning_cycle().unwrap();
 
@@ -1507,7 +1512,6 @@ Second body.
         );
 
         let mut daemon = planning_test_daemon(&tmp, 300);
-        daemon.pipeline_starvation_fired = true;
         daemon.maybe_trigger_planning_cycle().unwrap();
 
         let messages = planning_inbox_messages(&tmp);
@@ -1519,7 +1523,6 @@ Second body.
     fn planning_cycle_prompt_uses_truly_idle_engineer_count() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = planning_test_daemon(&tmp, 300);
-        daemon.pipeline_starvation_fired = true;
 
         write_board_task_file(
             tmp.path(),
@@ -1540,9 +1543,12 @@ Second body.
     }
 
     #[test]
-    fn planning_cycle_does_not_trigger_without_starvation_signal() {
+    fn planning_cycle_does_not_trigger_when_dispatchable_work_is_sufficient() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = planning_test_daemon(&tmp, 300);
+        write_board_task_file(tmp.path(), 301, "ready-a", "todo", None, &[], None);
+        write_board_task_file(tmp.path(), 302, "ready-b", "todo", None, &[], None);
+        write_board_task_file(tmp.path(), 303, "ready-c", "todo", None, &[], None);
 
         daemon.maybe_trigger_planning_cycle().unwrap();
 
@@ -1563,7 +1569,6 @@ Second body.
         let _path_guard = EnvVarGuard::set("PATH", &path);
 
         let mut daemon = planning_test_daemon(&tmp, 300);
-        daemon.pipeline_starvation_fired = true;
         daemon.maybe_trigger_planning_cycle().unwrap();
         let created = daemon
             .handle_planning_response(THREE_TASK_RESPONSE)
@@ -1619,7 +1624,6 @@ Second body.
         let _path_guard = EnvVarGuard::set("PATH", &path);
 
         let mut daemon = planning_test_daemon(&tmp, 300);
-        daemon.pipeline_starvation_fired = true;
         daemon.planning_cycle_active = true;
 
         let created = daemon.handle_planning_response(MIXED_RESPONSE).unwrap();
@@ -1724,7 +1728,6 @@ Second body.
     fn planning_cycle_cooldown_blocks_immediate_retrigger() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = planning_test_daemon(&tmp, 300);
-        daemon.pipeline_starvation_fired = true;
 
         daemon.maybe_trigger_planning_cycle().unwrap();
         daemon.planning_cycle_active = false;
@@ -1737,7 +1740,6 @@ Second body.
     fn planning_cycle_retriggers_after_cooldown_expires() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = planning_test_daemon(&tmp, 300);
-        daemon.pipeline_starvation_fired = true;
 
         daemon.maybe_trigger_planning_cycle().unwrap();
         daemon.planning_cycle_active = false;

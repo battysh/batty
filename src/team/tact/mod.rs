@@ -1,3 +1,8 @@
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+
 pub mod parser;
 pub mod prompt;
 
@@ -13,3 +18,104 @@ pub struct TaskSpec {
 
 pub use parser::{create_board_tasks, parse_planning_response};
 pub use prompt::{PLANNING_RESPONSE_FORMAT, compose_planning_prompt};
+
+pub fn dispatchable_task_count(
+    board_dir: &Path,
+    members: &[crate::team::hierarchy::MemberInstance],
+) -> Result<usize> {
+    let resolutions = crate::team::resolver::resolve_board(board_dir, members)?;
+    Ok(crate::team::resolver::runnable_tasks(&resolutions).len())
+}
+
+pub fn should_trigger_planning_cycle(idle_engineers: usize, dispatchable_tasks: usize) -> bool {
+    idle_engineers > dispatchable_tasks
+}
+
+pub fn planning_cycle_ready(
+    active: bool,
+    last_fired: Option<Instant>,
+    cooldown: Duration,
+    idle_engineers: usize,
+    dispatchable_tasks: usize,
+) -> bool {
+    if active || !should_trigger_planning_cycle(idle_engineers, dispatchable_tasks) {
+        return false;
+    }
+
+    last_fired.is_none_or(|last| last.elapsed() >= cooldown)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::team::config::TeamConfig;
+    use crate::team::hierarchy::resolve_hierarchy;
+
+    fn solo_members() -> Vec<crate::team::hierarchy::MemberInstance> {
+        let config: TeamConfig = serde_yaml::from_str(
+            r#"
+name: solo
+roles:
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 1
+"#,
+        )
+        .unwrap();
+        resolve_hierarchy(&config).unwrap()
+    }
+
+    #[test]
+    fn trigger_fires_when_idle_exceeds_dispatchable() {
+        assert!(should_trigger_planning_cycle(3, 1));
+    }
+
+    #[test]
+    fn trigger_does_not_fire_when_board_has_enough_tasks() {
+        assert!(!should_trigger_planning_cycle(2, 2));
+        assert!(!should_trigger_planning_cycle(1, 3));
+    }
+
+    #[test]
+    fn cooldown_prevents_rapid_retrigger() {
+        assert!(!planning_cycle_ready(
+            false,
+            Some(Instant::now()),
+            Duration::from_secs(120),
+            3,
+            0,
+        ));
+    }
+
+    #[test]
+    fn planning_cycle_ready_when_cooldown_elapsed() {
+        assert!(planning_cycle_ready(
+            false,
+            Some(Instant::now() - Duration::from_secs(121)),
+            Duration::from_secs(120),
+            3,
+            0,
+        ));
+    }
+
+    #[test]
+    fn dispatchable_task_count_uses_workflow_resolver() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        std::fs::create_dir_all(board_dir.join("tasks")).unwrap();
+        std::fs::write(
+            board_dir.join("tasks/001-runnable.md"),
+            "---\nid: 1\ntitle: runnable\nstatus: backlog\npriority: medium\nclass: standard\n---\n\nBody.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            board_dir.join("tasks/002-blocked.md"),
+            "---\nid: 2\ntitle: blocked\nstatus: blocked\npriority: medium\nclass: standard\nblocked: waiting\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        let count = dispatchable_task_count(board_dir, &solo_members()).unwrap();
+        assert_eq!(count, 1);
+    }
+}

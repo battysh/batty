@@ -123,7 +123,10 @@ impl TeamDaemon {
         }
 
         monitor.mark_reload_attempt();
-        info!(forced, changed, "topology reload requested — computing topology diff");
+        info!(
+            forced,
+            changed, "topology reload requested — computing topology diff"
+        );
 
         // Parse the new config
         let new_config = match TeamConfig::load(&monitor.config_path) {
