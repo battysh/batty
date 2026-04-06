@@ -214,6 +214,21 @@ impl TeamEvent {
         }
     }
 
+    pub fn dispatch_overlap_prevented(task_id: u32, blocked_by: &[u32], details: &str) -> Self {
+        Self {
+            task: Some(task_id.to_string()),
+            reason: Some(
+                blocked_by
+                    .iter()
+                    .map(|task_id| task_id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            details: Some(details.into()),
+            ..Self::base("dispatch_overlap_prevented")
+        }
+    }
+
     pub fn cwd_corrected(role: &str, path: &str) -> Self {
         Self {
             role: Some(role.into()),
