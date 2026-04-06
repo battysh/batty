@@ -96,6 +96,16 @@ pub fn load_engineer_profiles(
     Ok(profiles)
 }
 
+pub(crate) fn predict_task_file_paths(project_root: &Path, task: &Task) -> Result<HashSet<String>> {
+    let mut paths = task_profile_paths(task)?;
+    for record in load_persisted_task_profiles(project_root)? {
+        if persisted_profile_matches_task(task, &record) {
+            paths.extend(record.changed_paths);
+        }
+    }
+    Ok(paths)
+}
+
 pub fn persist_completed_task_profile(project_root: &Path, task: &Task) -> Result<()> {
     let Some(engineer) = task.claimed_by.as_deref() else {
         return Ok(());
@@ -201,6 +211,27 @@ fn apply_completed_profile<I, J>(
     if recent_merge_conflict {
         profile.recent_merge_conflicts += 1;
     }
+}
+
+fn persisted_profile_matches_task(task: &Task, record: &PersistedTaskProfile) -> bool {
+    if task
+        .tags
+        .iter()
+        .any(|tag| record.tags.iter().any(|candidate| candidate == tag))
+    {
+        return true;
+    }
+
+    let hinted_dirs: HashSet<String> = task_hint_paths(task)
+        .into_iter()
+        .filter_map(|path| parent_dir(&path))
+        .collect();
+    let record_dirs: HashSet<String> = record
+        .changed_paths
+        .iter()
+        .filter_map(|path| parent_dir(path))
+        .collect();
+    !hinted_dirs.is_empty() && !hinted_dirs.is_disjoint(&record_dirs)
 }
 
 pub fn score_engineer_for_task(
