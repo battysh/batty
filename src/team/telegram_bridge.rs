@@ -2060,6 +2060,7 @@ mod tests {
                 owns: Vec::new(),
                 barrier_group: None,
                 use_worktrees: false,
+                ..Default::default()
             },
             RoleDef {
                 name: "eng".to_string(),
@@ -2078,6 +2079,7 @@ mod tests {
                 owns: Vec::new(),
                 barrier_group: None,
                 use_worktrees: false,
+                ..Default::default()
             },
         ];
         let mut config = daemon_config_with_roles(tmp.path(), roles);
@@ -2090,6 +2092,7 @@ mod tests {
                 prompt: None,
                 reports_to: None,
                 use_worktrees: false,
+                ..Default::default()
             },
             MemberInstance {
                 name: "eng".to_string(),
@@ -2099,6 +2102,7 @@ mod tests {
                 prompt: None,
                 reports_to: None,
                 use_worktrees: false,
+                ..Default::default()
             },
         ];
         let mut daemon = TeamDaemon::new(config).unwrap();
@@ -2136,6 +2140,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         }];
         let mut config = daemon_config_with_roles(tmp.path(), roles);
         config.members = vec![MemberInstance {
@@ -2146,6 +2151,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         }];
         let mut daemon = TeamDaemon::new(config).unwrap();
         daemon.states.insert("eng".to_string(), MemberState::Working);
@@ -2180,6 +2186,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         }];
         let mut config = daemon_config_with_roles(tmp.path(), roles);
         config.members = vec![MemberInstance {
@@ -2190,6 +2197,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         }];
         let mut daemon = TeamDaemon::new(config).unwrap();
         daemon.states.insert("eng".to_string(), MemberState::Idle);
@@ -2230,6 +2238,7 @@ mod tests {
                 owns: Vec::new(),
                 barrier_group: None,
                 use_worktrees: false,
+                ..Default::default()
             },
             RoleDef {
                 name: "architect".to_string(),
@@ -2248,6 +2257,7 @@ mod tests {
                 owns: Vec::new(),
                 barrier_group: None,
                 use_worktrees: false,
+                ..Default::default()
             },
         ];
         let mut config = daemon_config_with_roles(tmp.path(), roles);
@@ -2260,6 +2270,7 @@ mod tests {
                 prompt: None,
                 reports_to: None,
                 use_worktrees: false,
+                ..Default::default()
             },
             MemberInstance {
                 name: "eng".to_string(),
@@ -2269,6 +2280,7 @@ mod tests {
                 prompt: None,
                 reports_to: None,
                 use_worktrees: false,
+                ..Default::default()
             },
         ];
         let mut daemon = TeamDaemon::new(config).unwrap();
@@ -2402,6 +2414,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: true,
+            ..Default::default()
         }];
         let mut config = daemon_config_with_roles(tmp.path(), roles);
         config.members = vec![MemberInstance {
@@ -2412,6 +2425,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: true,
+            ..Default::default()
         }];
         let mut daemon = TeamDaemon::new(config).unwrap();
 
@@ -2475,6 +2489,7 @@ mod tests {
                 owns: Vec::new(),
                 barrier_group: None,
                 use_worktrees: false,
+                ..Default::default()
             },
             RoleDef {
                 name: "architect".to_string(),
@@ -2493,6 +2508,7 @@ mod tests {
                 owns: Vec::new(),
                 barrier_group: None,
                 use_worktrees: false,
+                ..Default::default()
             },
             RoleDef {
                 name: "eng".to_string(),
@@ -2511,6 +2527,7 @@ mod tests {
                 owns: Vec::new(),
                 barrier_group: None,
                 use_worktrees: false,
+                ..Default::default()
             },
         ];
         let mut config = daemon_config_with_roles(tmp.path(), roles);
@@ -2523,6 +2540,7 @@ mod tests {
                 prompt: None,
                 reports_to: None,
                 use_worktrees: false,
+                ..Default::default()
             },
             MemberInstance {
                 name: "eng".to_string(),
@@ -2532,6 +2550,7 @@ mod tests {
                 prompt: None,
                 reports_to: None,
                 use_worktrees: false,
+                ..Default::default()
             },
         ];
         let mut daemon = TeamDaemon::new(config).unwrap();
