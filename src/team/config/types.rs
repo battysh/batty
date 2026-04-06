@@ -579,6 +579,10 @@ pub struct RoleDef {
     pub role_type: RoleType,
     #[serde(default)]
     pub agent: Option<String>,
+    #[serde(default)]
+    pub auth_mode: Option<ClaudeAuthMode>,
+    #[serde(default)]
+    pub auth_env: Vec<String>,
     #[serde(default = "default_instances")]
     pub instances: u32,
     #[serde(default)]
@@ -602,6 +606,15 @@ pub struct RoleDef {
     pub barrier_group: Option<String>,
     #[serde(default)]
     pub use_worktrees: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeAuthMode {
+    #[default]
+    Oauth,
+    ApiKey,
+    Custom,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -475,6 +475,12 @@ impl TeamDaemon {
             let role_context = strip_nudge_section(&self.load_prompt(&member, &team_config_dir));
             let prompt = Self::restart_assignment_message(&task);
             let work_dir = self.member_work_dir(&member);
+            let role = self
+                .config
+                .team_config
+                .role_def(&member.role_name)
+                .with_context(|| format!("missing role definition for member '{}'", member.name))?;
+            let claude_auth = self.config.team_config.resolve_claude_auth(role);
             let normalized_agent =
                 canonical_agent_name(member.agent.as_deref().unwrap_or("claude"));
             let session_id = new_member_session_id(&normalized_agent);
@@ -484,6 +490,7 @@ impl TeamDaemon {
             let agent_cmd = write_launch_script(
                 member_name,
                 agent_name,
+                &claude_auth,
                 &prompt,
                 Some(&role_context),
                 &work_dir,
@@ -509,6 +516,12 @@ impl TeamDaemon {
         let team_config_dir = self.config.project_root.join(".batty").join("team_config");
         let prompt = strip_nudge_section(&self.load_prompt(&member, &team_config_dir));
         let work_dir = self.member_work_dir(&member);
+        let role = self
+            .config
+            .team_config
+            .role_def(&member.role_name)
+            .with_context(|| format!("missing role definition for member '{}'", member.name))?;
+        let claude_auth = self.config.team_config.resolve_claude_auth(role);
         let normalized_agent = canonical_agent_name(member.agent.as_deref().unwrap_or("claude"));
         let session_id = new_member_session_id(&normalized_agent);
         let agent_name_idle = member.agent.as_deref().unwrap_or("claude");
@@ -517,6 +530,7 @@ impl TeamDaemon {
         let agent_cmd = write_launch_script(
             member_name,
             agent_name_idle,
+            &claude_auth,
             &prompt,
             Some(&prompt),
             &work_dir,

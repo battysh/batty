@@ -1,4 +1,5 @@
 use super::*;
+use crate::team::config::{ClaudeAuth, ClaudeAuthMode};
 use crate::team::task_loop::setup_multi_repo_worktree;
 use crate::team::watcher::{SessionTrackerConfig, discover_claude_session_file};
 use crate::team::{layout, shim_events_log_path, shim_log_path, shim_logs_dir};
@@ -127,9 +128,15 @@ impl TeamDaemon {
         let team_config_dir = self.config.project_root.join(".batty").join("team_config");
         let work_dir = self.member_work_dir(member);
         self.validate_member_work_dir(&member.name, &work_dir)?;
+        let role = self
+            .config
+            .team_config
+            .role_def(&member.role_name)
+            .with_context(|| format!("missing role definition for member '{}'", member.name))?;
 
         let agent_name = member.agent.as_deref().unwrap_or("claude");
         let prompt_text = strip_nudge_section(&self.load_prompt(member, &team_config_dir));
+        let claude_auth = self.config.team_config.resolve_claude_auth(role);
         let idle = role_starts_idle();
         let normalized_agent = canonical_agent_name(agent_name);
         let requested_resume = should_resume_member(
@@ -181,6 +188,7 @@ impl TeamDaemon {
         let short_cmd = write_launch_script(
             &member.name,
             agent_name,
+            &claude_auth,
             &prompt_text,
             Some(&prompt_text),
             &work_dir,
@@ -560,6 +568,7 @@ pub(super) fn strip_nudge_section(prompt: &str) -> String {
 pub(super) fn write_launch_script(
     member_name: &str,
     agent_name: &str,
+    claude_auth: &ClaudeAuth,
     prompt: &str,
     role_context: Option<&str>,
     work_dir: &Path,
@@ -655,14 +664,32 @@ pub(super) fn write_launch_script(
     .ok();
     set_executable(&batty_wrapper);
 
+    let auth_prelude = claude_auth_prelude(agent_name, claude_auth);
+
     let script = format!(
-        "#!/bin/bash\nunset ANTHROPIC_API_KEY\nexport PATH='{}':\"$PATH\"\nexport BATTY_MEMBER='{member_name}'\ncd '{launch_dir_str}'\n{agent_cmd}\n",
-        wrapper_dir.to_string_lossy()
+        "#!/bin/bash\n{auth_prelude}export PATH='{}':\"$PATH\"\nexport BATTY_MEMBER='{member_name}'\ncd '{launch_dir_str}'\n{agent_cmd}\n",
+        wrapper_dir.to_string_lossy(),
     );
     std::fs::write(&script_path, &script)
         .with_context(|| format!("failed to write launch script {}", script_path.display()))?;
 
     Ok(format!("bash '{}'", script_path.to_string_lossy()))
+}
+
+fn claude_auth_prelude(agent_name: &str, claude_auth: &ClaudeAuth) -> String {
+    if !matches!(agent_name, "claude" | "claude-code") {
+        return String::new();
+    }
+
+    match claude_auth.mode {
+        ClaudeAuthMode::Oauth => "unset ANTHROPIC_API_KEY\n".to_string(),
+        ClaudeAuthMode::ApiKey => String::new(),
+        ClaudeAuthMode::Custom => claude_auth
+            .env
+            .iter()
+            .map(|name| format!("export {name}=\"${name}\"\n"))
+            .collect(),
+    }
 }
 
 /// Whether an agent supports SDK mode (structured JSON I/O).
@@ -1043,11 +1070,19 @@ mod tests {
     use std::collections::HashMap;
     use std::path::Path;
 
+    fn default_claude_auth() -> ClaudeAuth {
+        ClaudeAuth {
+            mode: ClaudeAuthMode::Oauth,
+            env: Vec::new(),
+        }
+    }
+
     #[test]
     fn launch_script_active_sends_prompt_as_user_message() {
         let cmd = write_launch_script(
             "arch-1",
             "claude",
+            &default_claude_auth(),
             "plan the project",
             None,
             Path::new("/project"),
@@ -1082,6 +1117,7 @@ mod tests {
         let cmd = write_launch_script(
             "mgr-1",
             "claude",
+            &default_claude_auth(),
             "You are the manager.",
             None,
             Path::new("/project"),
@@ -1110,6 +1146,7 @@ mod tests {
         write_launch_script(
             "eng-1",
             "claude",
+            &default_claude_auth(),
             "idle role prompt",
             None,
             project,
@@ -1145,6 +1182,7 @@ mod tests {
         write_launch_script(
             "eng-1",
             "codex",
+            &default_claude_auth(),
             "role context",
             Some("role context"),
             &work_dir,
@@ -1179,6 +1217,7 @@ mod tests {
         let cmd = write_launch_script(
             "codex-active-test",
             "codex",
+            &default_claude_auth(),
             "work the task",
             Some("role context"),
             &work_dir,
@@ -1214,6 +1253,7 @@ mod tests {
         write_launch_script(
             "eng-2",
             "claude",
+            &default_claude_auth(),
             "fix the user's bug",
             None,
             Path::new("/tmp"),
@@ -1234,6 +1274,7 @@ mod tests {
         write_launch_script(
             "architect",
             "claude",
+            &default_claude_auth(),
             "ignored",
             None,
             Path::new("/project"),
@@ -1252,6 +1293,82 @@ mod tests {
     }
 
     #[test]
+    fn launch_script_default_claude_auth_uses_oauth() {
+        write_launch_script(
+            "architect-auth-oauth",
+            "claude",
+            &default_claude_auth(),
+            "ignored",
+            None,
+            Path::new("/project"),
+            Path::new("/project"),
+            true,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
+        let script_path = std::env::temp_dir().join("batty-launch-project-architect-auth-oauth.sh");
+        let content = std::fs::read_to_string(&script_path).unwrap();
+        assert!(content.contains("unset ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn launch_script_claude_api_key_auth_preserves_env() {
+        write_launch_script(
+            "architect-auth-api-key",
+            "claude",
+            &ClaudeAuth {
+                mode: ClaudeAuthMode::ApiKey,
+                env: Vec::new(),
+            },
+            "ignored",
+            None,
+            Path::new("/project"),
+            Path::new("/project"),
+            true,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
+        let script_path =
+            std::env::temp_dir().join("batty-launch-project-architect-auth-api-key.sh");
+        let content = std::fs::read_to_string(&script_path).unwrap();
+        assert!(!content.contains("unset ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn launch_script_claude_custom_auth_exports_selected_envs() {
+        write_launch_script(
+            "architect-auth-custom",
+            "claude",
+            &ClaudeAuth {
+                mode: ClaudeAuthMode::Custom,
+                env: vec![
+                    "ANTHROPIC_API_KEY".to_string(),
+                    "ANTHROPIC_BASE_URL".to_string(),
+                ],
+            },
+            "ignored",
+            None,
+            Path::new("/project"),
+            Path::new("/project"),
+            true,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
+        let script_path =
+            std::env::temp_dir().join("batty-launch-project-architect-auth-custom.sh");
+        let content = std::fs::read_to_string(&script_path).unwrap();
+        assert!(content.contains("export ANTHROPIC_API_KEY=\"$ANTHROPIC_API_KEY\""));
+        assert!(content.contains("export ANTHROPIC_BASE_URL=\"$ANTHROPIC_BASE_URL\""));
+        assert!(!content.contains("unset ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
     fn launch_script_resume_codex_uses_explicit_session_id() {
         let tmp = tempfile::tempdir().unwrap();
         let work_dir = tmp.path().join("wt");
@@ -1260,6 +1377,7 @@ mod tests {
         write_launch_script(
             "eng-1",
             "codex",
+            &default_claude_auth(),
             "ignored",
             Some("role context"),
             &work_dir,
@@ -1287,6 +1405,7 @@ mod tests {
         write_launch_script(
             "eng-kiro",
             "kiro",
+            &default_claude_auth(),
             "idle role prompt",
             None,
             project,
@@ -1312,6 +1431,7 @@ mod tests {
         write_launch_script(
             "eng-kiro-active",
             "kiro",
+            &default_claude_auth(),
             "solve the bug",
             None,
             project,
