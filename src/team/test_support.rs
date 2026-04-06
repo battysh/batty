@@ -448,6 +448,7 @@ impl<'a> TestDaemonBuilder<'a> {
     }
 }
 
+#[allow(dead_code)]
 fn test_role_defs(members: &[MemberInstance]) -> Vec<RoleDef> {
     let mut roles = Vec::new();
     for member in members {

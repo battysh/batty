@@ -57,10 +57,12 @@ impl MergeQueue {
         self.queue.push_back(request);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn queued_len(&self) -> usize {
         self.queue.len()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn active_task_id(&self) -> Option<u32> {
         self.active.as_ref().map(|request| request.task_id)
     }
