@@ -691,9 +691,14 @@ roles:
             role_name: role_name.to_string(),
             role_type,
             agent: Some("codex".to_string()),
+            model: None,
             prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         }
     }
 
@@ -767,9 +772,14 @@ roles:
             role_name: "human".to_string(),
             role_type: RoleType::User,
             agent: None,
+            model: None,
             prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
 
         let pending = std::collections::HashMap::from([
@@ -976,6 +986,7 @@ roles:
                 prompt: None,
                 reports_to: Some("lead".to_string()),
                 use_worktrees: false,
+                ..Default::default()
             },
         ];
         std::fs::create_dir_all(

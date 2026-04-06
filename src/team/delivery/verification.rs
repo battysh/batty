@@ -539,6 +539,7 @@ mod tests {
             prompt: None,
             reports_to: Some("architect".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let engineer = MemberInstance {
             name: "eng-1".to_string(),
@@ -548,6 +549,7 @@ mod tests {
             prompt: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let architect = MemberInstance {
             name: "architect".to_string(),
@@ -557,6 +559,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
 
         TeamDaemon {
@@ -872,6 +875,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         });
 
         let target = daemon.failed_delivery_escalation_recipient("standalone");

@@ -565,9 +565,14 @@ mod tests {
             role_name: name.to_string(),
             role_type,
             agent: Some("claude".to_string()),
+            model: None,
             prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
             reports_to: reports_to.map(|s| s.to_string()),
             use_worktrees: false,
+            ..Default::default()
         }
     }
 
@@ -653,9 +658,14 @@ mod tests {
             role_name: "human".to_string(),
             role_type: RoleType::User,
             agent: None,
+            model: None,
             prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         }];
         let report =
             generate_standup_for(&members[0], &members, &HashMap::new(), &HashMap::new(), 5);
@@ -893,6 +903,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
@@ -974,6 +985,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
@@ -1037,6 +1049,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let architect = MemberInstance {
             name: "architect".to_string(),
@@ -1046,6 +1059,7 @@ mod tests {
             prompt: None,
             reports_to: Some("user".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let user_role = RoleDef {
             name: "user".to_string(),
@@ -1064,6 +1078,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let architect_role = RoleDef {
             name: "architect".to_string(),
@@ -1082,6 +1097,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
@@ -1463,6 +1479,7 @@ last_verified: 2026-04-05
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
@@ -1528,6 +1545,7 @@ last_verified: 2026-04-05
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
@@ -1585,6 +1603,7 @@ last_verified: 2026-04-05
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
@@ -1642,6 +1661,7 @@ last_verified: 2026-04-05
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
@@ -1731,6 +1751,7 @@ last_verified: 2026-04-05
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
@@ -1807,6 +1828,7 @@ last_verified: 2026-04-05
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let eng_role = RoleDef {
             name: "eng-1".to_string(),
@@ -1825,6 +1847,7 @@ last_verified: 2026-04-05
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
@@ -1902,6 +1925,7 @@ last_verified: 2026-04-05
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let eng_role = RoleDef {
             name: "eng-1".to_string(),
@@ -1920,6 +1944,7 @@ last_verified: 2026-04-05
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let team_config = TeamConfig {
             name: "test".to_string(),

@@ -453,6 +453,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
         daemon.last_health_check = Instant::now();
@@ -473,6 +474,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
         daemon.last_health_check = Instant::now() - Duration::from_secs(3600);
@@ -493,6 +495,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![user]);
         daemon.last_health_check = Instant::now() - Duration::from_secs(3600);
@@ -521,6 +524,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
         daemon.last_health_check = Instant::now() - Duration::from_secs(3600);
@@ -557,6 +561,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
         daemon.last_health_check = Instant::now() - Duration::from_secs(3600);
@@ -1147,6 +1152,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: true,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(&repo, vec![engineer]);
         daemon.is_git_repo = true;
@@ -1199,6 +1205,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: true,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(&repo, vec![engineer]);
         daemon.is_git_repo = true;
@@ -1241,9 +1248,14 @@ mod tests {
             role_name: "engineer".to_string(),
             role_type: RoleType::Engineer,
             agent: None,
+            model: None,
             prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let daemon = make_test_daemon(tmp.path(), vec![member.clone()]);
         let prompt = daemon.load_prompt(&member, &config_dir);
@@ -1263,9 +1275,14 @@ mod tests {
             role_name: "architect".to_string(),
             role_type: RoleType::Architect,
             agent: None,
+            model: None,
             prompt: Some("custom.md".to_string()),
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let daemon = make_test_daemon(tmp.path(), vec![member.clone()]);
         let prompt = daemon.load_prompt(&member, &config_dir);
@@ -1284,9 +1301,14 @@ mod tests {
             role_name: "engineer".to_string(),
             role_type: RoleType::Engineer,
             agent: None,
+            model: None,
             prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let daemon = make_test_daemon(tmp.path(), vec![member.clone()]);
         let prompt = daemon.load_prompt(&member, &config_dir);
@@ -1307,9 +1329,14 @@ mod tests {
             role_name: "architect".to_string(),
             role_type: RoleType::Architect,
             agent: None,
+            model: None,
             prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let daemon = make_test_daemon(tmp.path(), vec![member.clone()]);
         let prompt = daemon.load_prompt(&member, &config_dir);
@@ -1333,27 +1360,42 @@ mod tests {
             role_name: "a".to_string(),
             role_type: RoleType::Architect,
             agent: None,
+            model: None,
             prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let mgr = MemberInstance {
             name: "m".to_string(),
             role_name: "m".to_string(),
             role_type: RoleType::Manager,
             agent: None,
+            model: None,
             prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let eng = MemberInstance {
             name: "e".to_string(),
             role_name: "e".to_string(),
             role_type: RoleType::Engineer,
             agent: None,
+            model: None,
             prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         assert_eq!(daemon.load_prompt(&arch, &config_dir), "ARCH");
         assert_eq!(daemon.load_prompt(&mgr, &config_dir), "MGR");

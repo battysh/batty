@@ -136,6 +136,7 @@ mod tests {
                     owns: vec![],
                     barrier_group: None,
                     use_worktrees: false,
+                    ..Default::default()
                 },
                 RoleDef {
                     name: "manager".into(),
@@ -154,6 +155,7 @@ mod tests {
                     owns: vec![],
                     barrier_group: None,
                     use_worktrees: false,
+                    ..Default::default()
                 },
                 RoleDef {
                     name: "engineer".into(),
@@ -172,6 +174,7 @@ mod tests {
                     owns: vec![],
                     barrier_group: None,
                     use_worktrees: true,
+                    ..Default::default()
                 },
             ],
         }
@@ -240,6 +243,7 @@ mod tests {
                 prompt: None,
                 reports_to: None,
                 use_worktrees: false,
+                ..Default::default()
             },
             MemberInstance {
                 name: "eng-1-1".into(),
@@ -249,6 +253,7 @@ mod tests {
                 prompt: None,
                 reports_to: Some("manager".into()),
                 use_worktrees: true,
+                ..Default::default()
             },
         ];
         let new = vec![
@@ -260,6 +265,7 @@ mod tests {
                 prompt: None,
                 reports_to: None,
                 use_worktrees: false,
+                ..Default::default()
             },
             MemberInstance {
                 name: "eng-1-1".into(),
@@ -269,6 +275,7 @@ mod tests {
                 prompt: None,
                 reports_to: Some("manager".into()),
                 use_worktrees: true,
+                ..Default::default()
             },
             MemberInstance {
                 name: "eng-1-2".into(),
@@ -278,6 +285,7 @@ mod tests {
                 prompt: None,
                 reports_to: Some("manager".into()),
                 use_worktrees: true,
+                ..Default::default()
             },
         ];
         let diff = diff_members(&old, &new);

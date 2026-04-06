@@ -228,6 +228,7 @@ pub(crate) fn architect_member(name: &str) -> MemberInstance {
         provider_overlay: None,
         reports_to: None,
         use_worktrees: false,
+        ..Default::default()
     }
 }
 
@@ -244,6 +245,7 @@ pub(crate) fn manager_member(name: &str, reports_to: Option<&str>) -> MemberInst
         provider_overlay: None,
         reports_to: reports_to.map(str::to_string),
         use_worktrees: false,
+        ..Default::default()
     }
 }
 
@@ -481,6 +483,7 @@ fn test_role_defs(members: &[MemberInstance]) -> Vec<RoleDef> {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: member.use_worktrees,
+            ..Default::default()
         });
     }
     roles
