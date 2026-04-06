@@ -182,7 +182,10 @@ impl FaultInjector for SyntheticFaultInjector {
         let mut rng = Lcg::new(
             self.seed
                 ^ (fault.sequence as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                ^ fault.kind.ordinal().wrapping_mul(0xA24B_AED4_963E_E407),
+                ^ fault
+                    .kind
+                    .ordinal()
+                    .wrapping_mul(0xA24B_AED4_963E_E407),
         );
         let sla = fault.kind.sla_secs();
         let detect_cap = (sla / 5).max(2);
