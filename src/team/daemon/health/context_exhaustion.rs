@@ -143,7 +143,7 @@ impl TeamDaemon {
         Ok(())
     }
 
-    fn capture_context_handoff_output(&self, pane_id: &str) -> Option<String> {
+    pub(super) fn capture_context_handoff_output(&self, pane_id: &str) -> Option<String> {
         let screen_history = self
             .config
             .team_config
