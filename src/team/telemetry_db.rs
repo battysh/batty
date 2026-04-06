@@ -583,7 +583,9 @@ pub fn query_task_cycle_times(conn: &Connection) -> Result<Vec<TaskCycleTimeRow>
     Ok(rows)
 }
 
-pub fn query_average_cycle_time_by_priority(conn: &Connection) -> Result<Vec<PriorityCycleTimeRow>> {
+pub fn query_average_cycle_time_by_priority(
+    conn: &Connection,
+) -> Result<Vec<PriorityCycleTimeRow>> {
     let mut stmt = conn.prepare(
         "SELECT priority,
                 AVG(cycle_time_mins) AS avg_cycle_time_mins,
@@ -967,16 +969,8 @@ mod tests {
     #[test]
     fn meta_conversation_escalation_increments_task_escalations() {
         let conn = open_in_memory().unwrap();
-        insert_event(
-            &conn,
-            &TeamEvent::narration_restart("eng-1", Some(42)),
-        )
-        .unwrap();
-        insert_event(
-            &conn,
-            &TeamEvent::narration_restart("eng-1", Some(42)),
-        )
-        .unwrap();
+        insert_event(&conn, &TeamEvent::narration_restart("eng-1", Some(42))).unwrap();
+        insert_event(&conn, &TeamEvent::narration_restart("eng-1", Some(42))).unwrap();
 
         let tasks = query_task_metrics(&conn).unwrap();
         assert_eq!(tasks.len(), 1);
@@ -1021,9 +1015,16 @@ mod tests {
     #[test]
     fn agent_handoff_updates_attempt_and_success_counts() {
         let conn = open_in_memory().unwrap();
-        insert_event(&conn, &TeamEvent::agent_handoff("eng-1", "42", "stalled", true)).unwrap();
-        insert_event(&conn, &TeamEvent::agent_handoff("eng-1", "42", "shim_crash", false))
-            .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::agent_handoff("eng-1", "42", "stalled", true),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::agent_handoff("eng-1", "42", "shim_crash", false),
+        )
+        .unwrap();
 
         let tasks = query_task_metrics(&conn).unwrap();
         assert_eq!(tasks.len(), 1);

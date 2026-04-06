@@ -693,12 +693,19 @@ impl TeamDaemon {
         }
 
         let thresholds = crate::team::board::AgingThresholds {
-            stale_in_progress_hours: self.config.team_config.workflow_policy.stale_in_progress_hours,
+            stale_in_progress_hours: self
+                .config
+                .team_config
+                .workflow_policy
+                .stale_in_progress_hours,
             aged_todo_hours: self.config.team_config.workflow_policy.aged_todo_hours,
             stale_review_hours: self.config.team_config.workflow_policy.stale_review_hours,
         };
-        let report =
-            crate::team::board::compute_task_aging(&board_dir, &self.config.project_root, thresholds)?;
+        let report = crate::team::board::compute_task_aging(
+            &board_dir,
+            &self.config.project_root,
+            thresholds,
+        )?;
         let tasks = crate::task::load_tasks_from_dir(&tasks_dir)?;
         let tasks_by_id = tasks
             .iter()
@@ -736,7 +743,11 @@ impl TeamDaemon {
                 "stale in-progress after {}s with no commits ahead of main",
                 task.age_secs
             );
-            self.emit_event(TeamEvent::task_stale(owner, &task.task_id.to_string(), &reason));
+            self.emit_event(TeamEvent::task_stale(
+                owner,
+                &task.task_id.to_string(),
+                &reason,
+            ));
             self.record_task_escalated(owner, task.task_id.to_string(), Some("task_stale"));
 
             if let Some(recipient) = task
@@ -1130,11 +1141,7 @@ impl TeamDaemon {
         let message = inbox::InboxMessage::new_send(&sender, &architect, &body);
         inbox::deliver_to_inbox(&inbox_root, &message)?;
         self.record_message_routed(&sender, &architect);
-        self.record_tact_cycle_triggered(
-            &architect,
-            idle_engineer_count as u32,
-            &board_summary,
-        );
+        self.record_tact_cycle_triggered(&architect, idle_engineer_count as u32, &board_summary);
 
         self.planning_cycle_last_fired = Some(Instant::now());
         self.planning_cycle_active = true;
@@ -4373,6 +4380,9 @@ Second body.
         daemon.maybe_reconcile_stale_worktrees().unwrap();
 
         assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), base_branch);
-        assert_eq!(git_stdout(&worktree_dir, &["rev-parse", "HEAD"]), before_head);
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "HEAD"]),
+            before_head
+        );
     }
 }

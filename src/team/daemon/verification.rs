@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::task::{Task, load_tasks_from_dir};
+use crate::team::review::task_reference_mismatch_blockers;
 use crate::team::task_loop::run_tests_in_worktree;
 use crate::team::test_results::TestResults;
 
@@ -27,6 +28,9 @@ pub(crate) fn run_automatic_verification(
     worktree_dir: &Path,
     test_command: Option<&str>,
 ) -> Result<VerificationRunResult> {
+    if let Some(task_mismatch_failure) = task_mismatch_validation_failure(worktree_dir)? {
+        return Ok(task_mismatch_failure);
+    }
     if let Some(scope_failure) = scope_validation_failure(worktree_dir)? {
         return Ok(scope_failure);
     }
@@ -40,6 +44,43 @@ pub(crate) fn run_automatic_verification(
         failures,
         file_paths,
     })
+}
+
+fn task_mismatch_validation_failure(worktree_dir: &Path) -> Result<Option<VerificationRunResult>> {
+    let Some((project_root, engineer)) = engineer_worktree_context(worktree_dir) else {
+        return Ok(None);
+    };
+    let Some(task) = find_claimed_task_for_worktree(&project_root, &engineer, worktree_dir)? else {
+        return Ok(None);
+    };
+
+    let branch_name = current_branch_name(worktree_dir)?;
+    let commit_messages = commit_subjects_since_main(worktree_dir)?;
+    let blockers = task_reference_mismatch_blockers(task.id, &branch_name, &commit_messages);
+    if blockers.is_empty() {
+        return Ok(None);
+    }
+
+    let message = format!(
+        "task reference mismatch for task #{}: {}",
+        task.id,
+        blockers.join("; ")
+    );
+    Ok(Some(VerificationRunResult {
+        passed: false,
+        output: message.clone(),
+        results: TestResults {
+            framework: "task-mismatch".to_string(),
+            total: None,
+            passed: 0,
+            failed: 1,
+            ignored: 0,
+            failures: Vec::new(),
+            summary: Some(message.clone()),
+        },
+        failures: vec![message],
+        file_paths: Vec::new(),
+    }))
 }
 
 pub(crate) fn parse_scope_fence(task_text: &str) -> Vec<String> {
@@ -68,6 +109,54 @@ pub(crate) fn changed_files_from_main(worktree_dir: &Path) -> Result<Vec<String>
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!(
             "git diff --name-only main..HEAD failed in {}: {}",
+            worktree_dir.display(),
+            stderr.trim()
+        );
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_string())
+        .collect())
+}
+
+fn current_branch_name(worktree_dir: &Path) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(worktree_dir)
+        .output()
+        .with_context(|| format!("failed to read git branch in {}", worktree_dir.display()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "git branch --show-current failed in {}: {}",
+            worktree_dir.display(),
+            stderr.trim()
+        );
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn commit_subjects_since_main(worktree_dir: &Path) -> Result<Vec<String>> {
+    let output = std::process::Command::new("git")
+        .args(["log", "--format=%s", "main..HEAD"])
+        .current_dir(worktree_dir)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to read commit subjects in {}",
+                worktree_dir.display()
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "git log --format=%s main..HEAD failed in {}: {}",
             worktree_dir.display(),
             stderr.trim()
         );
@@ -206,7 +295,11 @@ fn parse_test_output(output: &str, results: &TestResults) -> (Vec<String>, Vec<S
 
     for failure in &results.failures {
         let mut detail = failure.test_name.clone();
-        if let Some(message) = failure.message.as_deref().filter(|message| !message.is_empty()) {
+        if let Some(message) = failure
+            .message
+            .as_deref()
+            .filter(|message| !message.is_empty())
+        {
             detail.push_str(": ");
             detail.push_str(message);
         }
@@ -234,7 +327,9 @@ fn parse_test_output(output: &str, results: &TestResults) -> (Vec<String>, Vec<S
 
         if failures.is_empty() && trimmed.starts_with("test ") && trimmed.ends_with("FAILED") {
             failures.push(trimmed.to_string());
-        } else if failures.is_empty() && (trimmed.starts_with("error:") || trimmed.contains("panicked at")) {
+        } else if failures.is_empty()
+            && (trimmed.starts_with("error:") || trimmed.contains("panicked at"))
+        {
             failures.push(trimmed.to_string());
         }
 
@@ -292,8 +387,10 @@ mod tests {
     use crate::team::test_results::{TestFailure, TestResults};
 
     use super::{
-        ScopeValidationResult, engineer_worktree_context, find_claimed_task_for_worktree,
-        parse_scope_fence, parse_test_output, scope_validation_failure, validate_declared_scope,
+        ScopeValidationResult, commit_subjects_since_main, current_branch_name,
+        engineer_worktree_context, find_claimed_task_for_worktree, parse_scope_fence,
+        parse_test_output, scope_validation_failure, task_mismatch_validation_failure,
+        validate_declared_scope,
     };
 
     #[test]
@@ -316,8 +413,16 @@ src/parser.rs:12: failure here\n";
             summary: Some("test result: FAILED. 0 passed; 1 failed; 0 ignored;".to_string()),
         };
         let (failures, paths) = parse_test_output(output, &results);
-        assert!(failures.iter().any(|line| line.contains("parser::it_works")));
-        assert!(failures.iter().any(|line| line.contains("assertion failed")));
+        assert!(
+            failures
+                .iter()
+                .any(|line| line.contains("parser::it_works"))
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|line| line.contains("assertion failed"))
+        );
         assert!(paths.iter().any(|path| path == "src/parser.rs"));
     }
 
@@ -448,5 +553,125 @@ src/parser.rs:12: failure here\n";
         assert!(!result.passed);
         assert!(result.output.contains("scope fence violation"));
         assert_eq!(result.file_paths, vec!["src/team/daemon.rs".to_string()]);
+    }
+
+    #[test]
+    fn task_mismatch_validation_failure_reports_wrong_branch_and_commit_task_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        let worktree_dir = tmp.path().join(".batty").join("worktrees").join("eng-1-3");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::create_dir_all(worktree_dir.join("src/team")).unwrap();
+        std::fs::write(
+            tasks_dir.join("011-task.md"),
+            "---\nid: 11\ntitle: target\nstatus: review\npriority: medium\nclaimed_by: eng-1-3\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&worktree_dir)
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init"]).status.success());
+        assert!(
+            git(&["config", "user.email", "test@example.com"])
+                .status
+                .success()
+        );
+        assert!(git(&["config", "user.name", "Test"]).status.success());
+        std::fs::write(worktree_dir.join("src/team/review.rs"), "base\n").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(git(&["commit", "-m", "base"]).status.success());
+        assert!(git(&["branch", "-M", "main"]).status.success());
+        assert!(
+            git(&["checkout", "-b", "eng-1-3/task-449"])
+                .status
+                .success()
+        );
+
+        std::fs::write(worktree_dir.join("src/team/review.rs"), "changed\n").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(
+            git(&["commit", "-m", "Task #449: implement wrong task"])
+                .status
+                .success()
+        );
+
+        let result = task_mismatch_validation_failure(&worktree_dir)
+            .unwrap()
+            .expect("task mismatch should be reported");
+        assert!(!result.passed);
+        assert!(result.output.contains("task reference mismatch"));
+        assert!(result.output.contains("assigned task is #11"));
+        assert!(result.output.contains("#449"));
+    }
+
+    #[test]
+    fn task_mismatch_validation_failure_allows_expected_task_references() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        let worktree_dir = tmp.path().join(".batty").join("worktrees").join("eng-1-3");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::create_dir_all(worktree_dir.join("src/team")).unwrap();
+        std::fs::write(
+            tasks_dir.join("011-task.md"),
+            "---\nid: 11\ntitle: target\nstatus: review\npriority: medium\nclaimed_by: eng-1-3\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&worktree_dir)
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init"]).status.success());
+        assert!(
+            git(&["config", "user.email", "test@example.com"])
+                .status
+                .success()
+        );
+        assert!(git(&["config", "user.name", "Test"]).status.success());
+        std::fs::write(worktree_dir.join("src/team/review.rs"), "base\n").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(git(&["commit", "-m", "base"]).status.success());
+        assert!(git(&["branch", "-M", "main"]).status.success());
+        assert!(git(&["checkout", "-b", "eng-1-3/task-11"]).status.success());
+
+        std::fs::write(worktree_dir.join("src/team/review.rs"), "changed\n").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(
+            git(&["commit", "-m", "Task #11: implement expected task"])
+                .status
+                .success()
+        );
+
+        assert!(
+            task_mismatch_validation_failure(&worktree_dir)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            current_branch_name(&worktree_dir).unwrap(),
+            "eng-1-3/task-11"
+        );
+        assert_eq!(
+            commit_subjects_since_main(&worktree_dir).unwrap(),
+            vec!["Task #11: implement expected task".to_string()]
+        );
     }
 }
