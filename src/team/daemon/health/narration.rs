@@ -2,7 +2,7 @@
 //! without actually invoking tools or commands.
 
 use std::collections::{HashMap, VecDeque};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Result;
 use tracing::warn;
@@ -11,19 +11,25 @@ use super::super::*;
 use crate::shim::classifier::AgentType;
 use crate::team::events::TeamEvent;
 
-const MIN_NARRATION_SPAN: Duration = Duration::from_secs(30);
-const RESTART_NARRATION_SPAN: Duration = Duration::from_secs(120);
+const META_CONVERSATION_THRESHOLD: usize = 3;
+const META_CONVERSATION_GRACE_CYCLES: usize = 2;
 
 #[derive(Debug, Clone)]
 pub(super) struct NarrationSample {
-    timestamp: Instant,
     line_count: usize,
     has_tool_markers: bool,
+    looks_meta_conversation: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BreakerState {
+    sample_len_at_nudge: usize,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct NarrationTracker {
     samples: HashMap<String, VecDeque<NarrationSample>>,
+    breaker_states: HashMap<String, BreakerState>,
     window_size: usize,
     threshold: usize,
 }
@@ -38,6 +44,7 @@ impl NarrationTracker {
     pub(crate) fn new(window_size: usize, threshold: usize) -> Self {
         Self {
             samples: HashMap::new(),
+            breaker_states: HashMap::new(),
             window_size: window_size.max(threshold.max(1)),
             threshold: threshold.max(1),
         }
@@ -45,6 +52,7 @@ impl NarrationTracker {
 
     pub(super) fn clear_member(&mut self, member: &str) {
         self.samples.remove(member);
+        self.breaker_states.remove(member);
     }
 
     pub(super) fn has_samples(&self, member: &str) -> bool {
@@ -65,11 +73,13 @@ impl NarrationTracker {
             self.clear_member(member);
             return;
         }
+        let looks_meta_conversation =
+            crate::shim::classifier::detect_meta_conversation(content, agent_type);
 
         let sample = NarrationSample {
-            timestamp: Instant::now(),
             line_count,
             has_tool_markers,
+            looks_meta_conversation,
         };
 
         let samples = self.samples.entry(member.to_string()).or_default();
@@ -110,20 +120,50 @@ impl NarrationTracker {
             return false;
         }
 
-        let Some(first) = window.first() else {
-            return false;
-        };
-        let Some(last) = window.last() else {
-            return false;
-        };
-        last.timestamp.duration_since(first.timestamp) >= MIN_NARRATION_SPAN
+        true
     }
 
-    fn narration_duration(&self, member: &str) -> Option<Duration> {
-        let samples = self.samples.get(member)?;
-        let first = samples.front()?;
-        let last = samples.back()?;
-        Some(last.timestamp.duration_since(first.timestamp))
+    pub(super) fn is_meta_conversation(&self, member: &str) -> bool {
+        let Some(samples) = self.samples.get(member) else {
+            return false;
+        };
+        if samples.len() < META_CONVERSATION_THRESHOLD {
+            return false;
+        }
+
+        let start = samples.len() - META_CONVERSATION_THRESHOLD;
+        let window: Vec<&NarrationSample> = samples.iter().skip(start).collect();
+        window.len() == META_CONVERSATION_THRESHOLD
+            && window.iter().all(|sample| sample.looks_meta_conversation)
+            && window
+                .windows(2)
+                .all(|pair| pair[1].line_count > pair[0].line_count)
+    }
+
+    pub(super) fn has_active_breaker(&self, member: &str) -> bool {
+        self.breaker_states.contains_key(member)
+    }
+
+    pub(super) fn note_breaker_nudge(&mut self, member: &str) {
+        let sample_len_at_nudge = self.samples.get(member).map(|samples| samples.len()).unwrap_or(0);
+        self.breaker_states
+            .insert(member.to_string(), BreakerState { sample_len_at_nudge });
+    }
+
+    pub(super) fn clear_breaker(&mut self, member: &str) {
+        self.breaker_states.remove(member);
+    }
+
+    pub(super) fn should_escalate_breaker(&self, member: &str) -> bool {
+        let Some(state) = self.breaker_states.get(member) else {
+            return false;
+        };
+        let Some(samples) = self.samples.get(member) else {
+            return false;
+        };
+        self.is_meta_conversation(member)
+            && samples.len()
+                >= state.sample_len_at_nudge.saturating_add(META_CONVERSATION_GRACE_CYCLES)
     }
 }
 
@@ -195,20 +235,38 @@ impl TeamDaemon {
 
             let agent_type = self.member_agent_type(&member_name);
             let line_count = capture.lines().count();
+            let had_active_breaker = self.narration_tracker.has_active_breaker(&member_name);
             self.narration_tracker
                 .record_sample(&member_name, line_count, &capture, agent_type);
 
             if !self.narration_tracker.has_samples(&member_name) {
+                if had_active_breaker {
+                    self.emit_event(TeamEvent::meta_conversation_recovered(
+                        &member_name,
+                        self.active_task_id(&member_name),
+                    ));
+                }
                 self.clear_narration_cooldowns(&member_name);
                 continue;
             }
 
-            if !self.narration_tracker.is_narrating(&member_name) {
+            let is_narrating = self.narration_tracker.is_narrating(&member_name);
+            let is_meta_conversation = self.narration_tracker.is_meta_conversation(&member_name);
+            if had_active_breaker && !is_meta_conversation {
+                self.emit_event(TeamEvent::meta_conversation_recovered(
+                    &member_name,
+                    self.active_task_id(&member_name),
+                ));
+                self.narration_tracker.clear_breaker(&member_name);
+                self.clear_narration_cooldowns(&member_name);
+            }
+
+            if !is_narrating && !is_meta_conversation {
                 continue;
             }
 
             let nudge_key = Self::narration_nudge_cooldown_key(&member_name);
-            if !self.intervention_cooldowns.contains_key(&nudge_key) {
+            if is_meta_conversation && !self.intervention_cooldowns.contains_key(&nudge_key) {
                 let task_id = self.active_task_id(&member_name);
                 warn!(member = %member_name, task_id, "detected narration loop");
                 self.emit_event(TeamEvent::narration_detected(&member_name, task_id));
@@ -219,27 +277,22 @@ impl TeamDaemon {
                     .find(|member| member.name == member_name)
                     .cloned()
                 {
-                    let message = self.prepend_member_nudge(
-                        &member,
-                        "You appear to be narrating instead of executing commands. Please use your tools to take action.",
-                    );
+                    let message = self.meta_conversation_nudge_message(&member_name, &member);
                     if let Err(error) = self.queue_message("daemon", &member_name, &message) {
                         warn!(member = %member_name, error = %error, "failed to queue narration nudge");
                     }
                 }
+                self.emit_event(TeamEvent::meta_conversation_nudged(&member_name, task_id));
                 self.record_orchestrator_action(format!(
-                    "health: detected narration loop for {}",
+                    "health: nudged {} to break meta-conversation loop",
                     member_name
                 ));
+                self.narration_tracker.note_breaker_nudge(&member_name);
                 self.intervention_cooldowns
                     .insert(nudge_key, Instant::now());
             }
 
-            if self
-                .narration_tracker
-                .narration_duration(&member_name)
-                .is_some_and(|duration| duration >= RESTART_NARRATION_SPAN)
-            {
+            if self.narration_tracker.should_escalate_breaker(&member_name) {
                 let restart_key = Self::narration_restart_cooldown_key(&member_name);
                 let on_cooldown = self
                     .intervention_cooldowns
@@ -254,6 +307,10 @@ impl TeamDaemon {
                 } else {
                     self.restart_member(&member_name)?;
                 }
+                self.emit_event(TeamEvent::meta_conversation_escalated(
+                    &member_name,
+                    self.active_task_id(&member_name),
+                ));
                 self.intervention_cooldowns
                     .insert(restart_key, Instant::now());
                 self.narration_tracker.clear_member(&member_name);
@@ -327,27 +384,30 @@ impl TeamDaemon {
         self.intervention_cooldowns
             .remove(&Self::narration_restart_cooldown_key(member_name));
     }
+
+    fn meta_conversation_nudge_message(
+        &self,
+        member_name: &str,
+        member: &MemberInstance,
+    ) -> String {
+        let task_context = self
+            .active_task(member_name)
+            .ok()
+            .flatten()
+            .map(|task| format!("Task #{}: {}", task.id, task.title))
+            .unwrap_or_else(|| "Continue the current assignment.".to_string());
+        self.prepend_member_nudge(
+            member,
+            &format!(
+                "STOP NARRATING. Execute the next concrete step now.\n{task_context}"
+            ),
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn backdate_member_samples(
-        tracker: &mut NarrationTracker,
-        member: &str,
-        start_secs_ago: u64,
-        step_secs: u64,
-    ) {
-        let now = Instant::now();
-        let Some(samples) = tracker.samples.get_mut(member) else {
-            return;
-        };
-        for (index, sample) in samples.iter_mut().enumerate() {
-            let secs_ago = start_secs_ago.saturating_sub((index as u64) * step_secs);
-            sample.timestamp = now - Duration::from_secs(secs_ago);
-        }
-    }
 
     #[test]
     fn has_tool_markers_claude_read() {
@@ -383,7 +443,6 @@ mod tests {
                 AgentType::Claude,
             );
         }
-        backdate_member_samples(&mut tracker, "eng-1", 35, 7);
         assert!(tracker.is_narrating("eng-1"));
     }
 
@@ -413,8 +472,80 @@ mod tests {
         for line_count in 1..=3 {
             tracker.record_sample("eng-1", line_count, "narrating", AgentType::Claude);
         }
-        backdate_member_samples(&mut tracker, "eng-1", 40, 10);
         assert!(!tracker.is_narrating("eng-1"));
+    }
+
+    #[test]
+    fn meta_conversation_detected_within_three_cycles() {
+        let mut tracker = NarrationTracker::default();
+        for line_count in 1..=3 {
+            tracker.record_sample(
+                "eng-1",
+                line_count,
+                "I should inspect the issue.\nNext step: I will check the daemon.\nShould I patch narration first?",
+                AgentType::Codex,
+            );
+        }
+        assert!(tracker.is_meta_conversation("eng-1"));
+    }
+
+    #[test]
+    fn meta_conversation_false_positive_avoids_tool_output() {
+        let mut tracker = NarrationTracker::default();
+        for line_count in 1..=3 {
+            tracker.record_sample(
+                "eng-1",
+                line_count,
+                "$ rg -n narration src/team\nExit code: 0",
+                AgentType::Codex,
+            );
+        }
+        assert!(!tracker.is_meta_conversation("eng-1"));
+    }
+
+    #[test]
+    fn breaker_escalates_after_two_more_cycles() {
+        let mut tracker = NarrationTracker::default();
+        for line_count in 1..=3 {
+            tracker.record_sample(
+                "eng-1",
+                line_count,
+                "I should inspect the issue.\nNext step: I will check the daemon.\nShould I patch narration first?",
+                AgentType::Codex,
+            );
+        }
+        tracker.note_breaker_nudge("eng-1");
+        tracker.record_sample(
+            "eng-1",
+            4,
+            "Maybe I should inspect more state first.\nI will think through the next step.",
+            AgentType::Codex,
+        );
+        assert!(!tracker.should_escalate_breaker("eng-1"));
+        tracker.record_sample(
+            "eng-1",
+            5,
+            "Perhaps I should plan a bit more.\nNext step: I will keep reasoning.",
+            AgentType::Codex,
+        );
+        assert!(tracker.should_escalate_breaker("eng-1"));
+    }
+
+    #[test]
+    fn breaker_clears_after_tool_execution() {
+        let mut tracker = NarrationTracker::default();
+        for line_count in 1..=3 {
+            tracker.record_sample(
+                "eng-1",
+                line_count,
+                "I should inspect the issue.\nNext step: I will check the daemon.\nShould I patch narration first?",
+                AgentType::Codex,
+            );
+        }
+        tracker.note_breaker_nudge("eng-1");
+        tracker.record_sample("eng-1", 4, "$ sed -n '1,40p' src/team/daemon.rs", AgentType::Codex);
+        assert!(!tracker.has_active_breaker("eng-1"));
+        assert!(!tracker.has_samples("eng-1"));
     }
 
     #[test]

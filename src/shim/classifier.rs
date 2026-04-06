@@ -79,6 +79,73 @@ pub fn classify(agent_type: AgentType, screen: &vt100::Screen) -> ScreenVerdict 
     }
 }
 
+/// Detect meta-conversation patterns where the agent keeps planning or
+/// narrating without moving to concrete execution.
+pub fn detect_meta_conversation(content: &str, agent_type: AgentType) -> bool {
+    let lower = content.to_lowercase();
+    let trimmed = lower.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let tool_markers = match agent_type {
+        AgentType::Claude => ["read(", "edit(", "bash(", "write(", "grep(", "glob(", "multiedit(", "⎿"],
+        AgentType::Codex => ["apply_patch", "*** begin patch", "$ ", "\n$ ", "exit code:", "target/"],
+        AgentType::Kiro => ["applying", "$ ", "\n$ ", "running…", "running..."],
+        AgentType::Generic => ["$ ", "\n$ ", "exit code:"],
+    };
+    if tool_markers.iter().any(|marker| trimmed.contains(marker)) {
+        return false;
+    }
+
+    let meta_patterns = [
+        "i should",
+        "i will",
+        "i'll",
+        "let me",
+        "next step",
+        "need to",
+        "we need to",
+        "should i",
+        "maybe i should",
+        "perhaps i should",
+        "i can",
+        "plan:",
+        "thinking through",
+        "first, i'll",
+        "then i'll",
+        "instead of",
+    ];
+    let question_patterns = [
+        "should i",
+        "what should i",
+        "do i need to",
+        "am i supposed to",
+        "would it make sense",
+    ];
+
+    let meta_hits = meta_patterns
+        .iter()
+        .filter(|pattern| trimmed.contains(**pattern))
+        .count();
+    let question_hits = question_patterns
+        .iter()
+        .filter(|pattern| trimmed.contains(**pattern))
+        .count();
+    let line_hits = trimmed
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            !line.is_empty()
+                && (meta_patterns.iter().any(|pattern| line.contains(pattern))
+                    || question_patterns.iter().any(|pattern| line.contains(pattern))
+                    || line.ends_with('?'))
+        })
+        .count();
+
+    (meta_hits + question_hits) >= 2 || line_hits >= 2
+}
+
 // ---------------------------------------------------------------------------
 // Context exhaustion (shared)
 // ---------------------------------------------------------------------------
@@ -478,6 +545,18 @@ mod tests {
             ScreenVerdict::AgentIdle,
             "placeholder text after › should be Idle"
         );
+    }
+
+    #[test]
+    fn detect_meta_conversation_flags_repeated_planning_without_tools() {
+        let content = "I should inspect the daemon first.\nNext step: I will review the health loop.\nShould I patch narration or the classifier?";
+        assert!(detect_meta_conversation(content, AgentType::Codex));
+    }
+
+    #[test]
+    fn detect_meta_conversation_ignores_tool_execution_output() {
+        let content = "I will inspect the daemon.\n$ rg -n narration src/team\nExit code: 0";
+        assert!(!detect_meta_conversation(content, AgentType::Codex));
     }
 
     // -- Kiro --
