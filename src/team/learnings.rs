@@ -212,7 +212,10 @@ fn related_completed_tasks(
     task: &Task,
     limit: usize,
 ) -> Result<Vec<RelatedTaskContext>> {
-    let board_dir = project_root.join(".batty").join("team_config").join("board");
+    let board_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board");
     let tasks_dir = board_dir.join("tasks");
     if !tasks_dir.exists() {
         return Ok(Vec::new());
@@ -314,17 +317,22 @@ fn relevant_failure_patterns(
         return Ok(Vec::new());
     }
 
-    let related_ids: HashSet<String> = related.iter().map(|entry| entry.task.id.to_string()).collect();
+    let related_ids: HashSet<String> = related
+        .iter()
+        .map(|entry| entry.task.id.to_string())
+        .collect();
     let events_path = crate::team::team_events_path(project_root);
     if !events_path.exists() {
         return Ok(Vec::new());
     }
     let events = crate::team::events::read_events(&events_path)?;
     let mut window = crate::team::failure_patterns::FailureWindow::new(100);
-    for event in events
-        .into_iter()
-        .filter(|event| event.task.as_deref().is_some_and(|task_id| related_ids.contains(task_id)))
-    {
+    for event in events.into_iter().filter(|event| {
+        event
+            .task
+            .as_deref()
+            .is_some_and(|task_id| related_ids.contains(task_id))
+    }) {
         window.push(&event);
     }
 
@@ -377,7 +385,11 @@ fn load_task_metrics(project_root: &Path) -> Result<HashMap<u32, TaskMetricsSumm
 }
 
 fn related_task_score(task: &Task, candidate: &Task, changed_paths: &[String]) -> usize {
-    let task_tags: HashSet<String> = task.tags.iter().map(|tag| tag.to_ascii_lowercase()).collect();
+    let task_tags: HashSet<String> = task
+        .tags
+        .iter()
+        .map(|tag| tag.to_ascii_lowercase())
+        .collect();
     let candidate_tags: HashSet<String> = candidate
         .tags
         .iter()
@@ -395,7 +407,10 @@ fn related_task_score(task: &Task, candidate: &Task, changed_paths: &[String]) -
         .into_iter()
         .filter_map(|path| parent_dir(&path))
         .collect();
-    let candidate_dirs: HashSet<String> = changed_paths.iter().filter_map(|path| parent_dir(path)).collect();
+    let candidate_dirs: HashSet<String> = changed_paths
+        .iter()
+        .filter_map(|path| parent_dir(path))
+        .collect();
 
     let tag_matches = task_tags.intersection(&candidate_tags).count();
     let keyword_matches = task_keywords.intersection(&candidate_keywords).count();
@@ -526,7 +541,11 @@ mod tests {
     use crate::team::telemetry_db;
 
     fn write_task_file(project_root: &Path, filename: &str, content: &str) {
-        let tasks_dir = project_root.join(".batty").join("team_config").join("board").join("tasks");
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
         fs::create_dir_all(&tasks_dir).unwrap();
         fs::write(tasks_dir.join(filename), content).unwrap();
     }
@@ -624,8 +643,7 @@ mod tests {
         let mut escalation = TeamEvent::task_escalated("eng-2", "10", Some("needed rework"));
         escalation.task = Some("10".to_string());
         telemetry_db::insert_event(&conn, &escalation).unwrap();
-        let mut escalation_repeat =
-            TeamEvent::task_escalated("eng-2", "10", Some("second rework"));
+        let mut escalation_repeat = TeamEvent::task_escalated("eng-2", "10", Some("second rework"));
         escalation_repeat.task = Some("10".to_string());
         telemetry_db::insert_event(&conn, &escalation_repeat).unwrap();
         let mut event_sink = EventSink::new(&crate::team::team_events_path(tmp.path())).unwrap();
@@ -670,7 +688,9 @@ mod tests {
 
     #[test]
     fn dispatch_context_is_capped_to_500_words() {
-        let repeated = std::iter::repeat_n("context", 700).collect::<Vec<_>>().join(" ");
+        let repeated = std::iter::repeat_n("context", 700)
+            .collect::<Vec<_>>()
+            .join(" ");
         let truncated = limit_word_count(&repeated, MAX_CONTEXT_WORDS);
         assert!(truncated.split_whitespace().count() <= MAX_CONTEXT_WORDS + 1);
     }

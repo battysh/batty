@@ -32,8 +32,11 @@ fn seed_dispatch_telemetry(project_root: &std::path::Path, engineer: &str, compl
     std::fs::create_dir_all(project_root.join(".batty")).unwrap();
     let conn = telemetry_db::open(project_root).unwrap();
     for task_id in 1..=5 {
-        telemetry_db::insert_event(&conn, &TeamEvent::task_assigned(engineer, &task_id.to_string()))
-            .unwrap();
+        telemetry_db::insert_event(
+            &conn,
+            &TeamEvent::task_assigned(engineer, &task_id.to_string()),
+        )
+        .unwrap();
         if completion_rate >= 1.0 || task_id as f64 <= completion_rate * 5.0 {
             telemetry_db::insert_event(
                 &conn,

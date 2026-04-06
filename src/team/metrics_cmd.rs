@@ -135,7 +135,7 @@ pub fn query_dashboard(conn: &Connection) -> Result<DashboardMetrics> {
     }
     let total_reviewed = total_merge + m.rework_count;
     if total_reviewed > 0 {
-    m.rework_rate = Some(m.rework_count as f64 / total_reviewed as f64 * 100.0);
+        m.rework_rate = Some(m.rework_count as f64 / total_reviewed as f64 * 100.0);
     }
 
     m.cycle_time_by_priority = telemetry_db::query_average_cycle_time_by_priority(conn)?;
@@ -348,7 +348,10 @@ pub fn run(project_root: &Path) -> Result<()> {
     }
 
     let conn = telemetry_db::open(project_root).context("failed to open telemetry database")?;
-    let board_dir = project_root.join(".batty").join("team_config").join("board");
+    let board_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board");
     let records = metrics::collect_task_cycle_time_records(&board_dir).unwrap_or_default();
     telemetry_db::replace_task_cycle_times(&conn, &records)?;
 

@@ -683,10 +683,7 @@ fn ensure_shared_cargo_target_config(project_root: &Path, worktree_dir: &Path) -
 }
 
 fn ensure_engineer_worktree_excludes(worktree_dir: &Path) -> Result<()> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .current_dir(worktree_dir)
-        .output()
+    let output = run_git_command_with_fallback(worktree_dir, &["rev-parse", "--git-dir"])
         .with_context(|| format!("failed to resolve git dir for {}", worktree_dir.display()))?;
     if !output.status.success() {
         bail!(
@@ -727,6 +724,30 @@ fn ensure_engineer_worktree_excludes(worktree_dir: &Path) -> Result<()> {
     std::fs::write(&exclude_path, content)
         .with_context(|| format!("failed to write {}", exclude_path.display()))?;
     Ok(())
+}
+
+fn run_git_command_with_fallback(
+    worktree_dir: &Path,
+    args: &[&str],
+) -> std::io::Result<std::process::Output> {
+    let mut last_not_found = None;
+    for program in ["git", "/usr/bin/git", "/opt/homebrew/bin/git"] {
+        match Command::new(program)
+            .args(args)
+            .current_dir(worktree_dir)
+            .output()
+        {
+            Ok(output) => return Ok(output),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                last_not_found = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(last_not_found.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "git binary not found")
+    }))
 }
 
 fn engineer_worktree_project_root(worktree_dir: &Path) -> Option<PathBuf> {
@@ -808,20 +829,48 @@ pub(crate) fn is_worktree_safe_to_mutate(worktree_dir: &Path) -> Result<bool> {
 }
 
 fn run_git_with_timeout(worktree_dir: &Path, args: &[&str], timeout: Duration) -> Result<()> {
-    let mut command = Command::new("git");
-    command.arg("-C").arg(worktree_dir).args(args);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
+    let mut last_not_found = None;
+    let mut child = None;
+    for program in ["git", "/usr/bin/git", "/opt/homebrew/bin/git"] {
+        let mut command = Command::new(program);
+        command.arg("-C").arg(worktree_dir).args(args);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        match command.spawn() {
+            Ok(process) => {
+                child = Some(process);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                last_not_found = Some(error);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to launch `git {}` in {}",
+                        args.join(" "),
+                        worktree_dir.display()
+                    )
+                });
+            }
+        }
     }
-    let mut child = command.spawn().with_context(|| {
-        format!(
-            "failed to launch `git {}` in {}",
-            args.join(" "),
-            worktree_dir.display()
-        )
-    })?;
+    let mut child = child
+        .ok_or_else(|| {
+            last_not_found.unwrap_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "git binary not found")
+            })
+        })
+        .with_context(|| {
+            format!(
+                "failed to launch `git {}` in {}",
+                args.join(" "),
+                worktree_dir.display()
+            )
+        })?;
 
     let deadline = Instant::now() + timeout;
     loop {
@@ -871,8 +920,31 @@ pub(crate) fn preserve_worktree_with_commit(
         return Ok(false);
     }
 
-    run_git_with_timeout(worktree_dir, &["add", "-A"], timeout)?;
-    run_git_with_timeout(worktree_dir, &["commit", "-m", commit_message], timeout)?;
+    run_git_with_timeout(
+        worktree_dir,
+        &[
+            "add",
+            "-A",
+            "--",
+            ".",
+            ":(exclude).batty",
+            ":(exclude).cargo",
+        ],
+        timeout,
+    )?;
+    run_git_with_timeout(
+        worktree_dir,
+        &[
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-m",
+            commit_message,
+        ],
+        timeout,
+    )?;
     Ok(true)
 }
 
@@ -1179,7 +1251,7 @@ pub(crate) fn recycle_cron_tasks(board_dir: &Path) -> Result<Vec<(u32, String)>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::team::test_support::{git, git_ok, git_stdout};
+    use crate::team::test_support::{EnvVarGuard, PATH_LOCK, git, git_ok, git_stdout};
 
     fn production_unwrap_expect_count(path: &Path) -> usize {
         let content = std::fs::read_to_string(path).unwrap();
@@ -1446,6 +1518,24 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(config_path).unwrap(),
             "[term]\nverbose = true\n"
+        );
+    }
+
+    #[test]
+    fn test_setup_engineer_worktree_finds_git_when_path_is_stripped() {
+        let _path_lock = PATH_LOCK.lock().unwrap();
+        let _path_guard = EnvVarGuard::set("PATH", "/definitely/missing");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-fallback");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-fallback", &team_config_dir).unwrap();
+
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "eng-fallback"
         );
     }
 
@@ -2426,7 +2516,7 @@ mod tests {
         let saved = preserve_worktree_with_commit(
             &wt_dir,
             "wip: auto-save before restart [batty]",
-            Duration::from_secs(1),
+            Duration::from_secs(5),
         )
         .unwrap();
         assert!(!saved);
@@ -2453,7 +2543,7 @@ mod tests {
         let saved = preserve_worktree_with_commit(
             &wt_dir,
             "wip: auto-save before restart [batty]",
-            Duration::from_secs(1),
+            Duration::from_secs(5),
         )
         .unwrap();
         assert!(saved, "dirty worktree should be auto-committed");

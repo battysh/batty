@@ -70,10 +70,7 @@ impl NarrationTracker {
     }
 
     pub(super) fn note_breach(&mut self, member: &str, narrating: bool) -> BreakerState {
-        let state = self
-            .breaker_states
-            .entry(member.to_string())
-            .or_default();
+        let state = self.breaker_states.entry(member.to_string()).or_default();
         if narrating {
             state.narration_polls = state.narration_polls.saturating_add(1);
             if state.nudged {
@@ -86,9 +83,9 @@ impl NarrationTracker {
     }
 
     pub(super) fn should_nudge(&self, member: &str) -> bool {
-        self.breaker_states.get(member).is_some_and(|state| {
-            !state.nudged && state.narration_polls >= self.threshold_polls
-        })
+        self.breaker_states
+            .get(member)
+            .is_some_and(|state| !state.nudged && state.narration_polls >= self.threshold_polls)
     }
 
     pub(super) fn note_nudge(&mut self, member: &str) {
@@ -99,9 +96,9 @@ impl NarrationTracker {
     }
 
     pub(super) fn should_restart(&self, member: &str) -> bool {
-        self.breaker_states.get(member).is_some_and(|state| {
-            state.nudged && state.post_nudge_polls >= self.threshold_polls
-        })
+        self.breaker_states
+            .get(member)
+            .is_some_and(|state| state.nudged && state.post_nudge_polls >= self.threshold_polls)
     }
 }
 
@@ -230,13 +227,7 @@ impl TeamDaemon {
 
         warn!(member = %member_name, task_id = task.id, "restarting agent after sustained narration loop");
         self.preserve_worktree_before_restart(member_name, &work_dir, "narration loop");
-        self.preserve_restart_context(
-            member_name,
-            &task,
-            Some(&pane_id),
-            &work_dir,
-            "narration",
-        );
+        self.preserve_restart_context(member_name, &task, Some(&pane_id), &work_dir, "narration");
 
         crate::tmux::respawn_pane(&pane_id, "bash")?;
         std::thread::sleep(Duration::from_millis(200));

@@ -527,7 +527,9 @@ fn load_persisted_daemon_health_state(path: &Path) -> Result<Option<PersistedDae
     Ok(Some(state))
 }
 
-pub(crate) fn load_optional_subsystem_statuses(project_root: &Path) -> Vec<OptionalSubsystemStatus> {
+pub(crate) fn load_optional_subsystem_statuses(
+    project_root: &Path,
+) -> Vec<OptionalSubsystemStatus> {
     let daemon_state = load_persisted_daemon_health_state(&daemon_state_path(project_root))
         .ok()
         .flatten()
@@ -579,11 +581,7 @@ pub(crate) fn format_optional_subsystem_statuses(statuses: &[OptionalSubsystemSt
         let last_error = status.last_error.as_deref().unwrap_or("-");
         lines.push(format!(
             "{:<12} {:<10} {:<12} {:<12} {}",
-            status.name,
-            status.state,
-            status.recent_errors,
-            retry,
-            last_error
+            status.name, status.state, status.recent_errors, retry, last_error
         ));
     }
 
@@ -1190,7 +1188,11 @@ fn format_pct_0(value: Option<f64>) -> String {
 }
 
 pub fn compute_metrics(board_dir: &Path, members: &[MemberInstance]) -> Result<WorkflowMetrics> {
-    compute_metrics_with_aging(board_dir, members, crate::team::board::AgingThresholds::default())
+    compute_metrics_with_aging(
+        board_dir,
+        members,
+        crate::team::board::AgingThresholds::default(),
+    )
 }
 
 /// Compute workflow metrics, preferring SQLite telemetry DB over JSONL events.
