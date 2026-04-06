@@ -1100,6 +1100,7 @@ mod tests {
             planning_cycle_last_fired: None,
             planning_cycle_active: false,
             last_shim_health_check: Instant::now(),
+            merge_queue: crate::team::daemon::MergeQueue::default(),
         };
 
         backdate_idle_grace(&mut daemon, "scientist");
@@ -1239,6 +1240,7 @@ mod tests {
             planning_cycle_last_fired: None,
             planning_cycle_active: false,
             last_shim_health_check: Instant::now(),
+            merge_queue: crate::team::daemon::MergeQueue::default(),
         };
 
         let root = inbox::inboxes_root(tmp.path());
@@ -1397,6 +1399,7 @@ mod tests {
             planning_cycle_last_fired: None,
             planning_cycle_active: false,
             last_shim_health_check: Instant::now(),
+            merge_queue: crate::team::daemon::MergeQueue::default(),
         };
 
         assert_eq!(daemon.automation_sender_for("eng-1"), "lead");

@@ -719,6 +719,7 @@ mod tests {
             planning_cycle_last_fired: None,
             planning_cycle_active: false,
             last_shim_health_check: Instant::now(),
+            merge_queue: crate::team::daemon::MergeQueue::default(),
         }
     }
 
