@@ -636,6 +636,7 @@ mod tests {
                 worktree_path: None,
                 commit: None,
                 next_action: None,
+                test_summary: None,
             }],
             review_queue: vec![status::StatusTaskEntry {
                 id: 13,
@@ -649,6 +650,7 @@ mod tests {
                 worktree_path: None,
                 commit: None,
                 next_action: None,
+                test_summary: None,
             }],
             engineer_profiles: None,
             members: Vec::new(),
