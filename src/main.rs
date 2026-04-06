@@ -3,7 +3,8 @@ use batty_cli::{
     agent,
     cli::{
         self, AutoMergeAction, BoardCommand, Cli, Command, DepsFormatArg, GrafanaCommand,
-        InboxCommand, NudgeCommand, ReviewDispositionArg, TaskCommand, TaskStateArg,
+        InboxCommand, NudgeCommand, ResearchCommand, ResearchFormatArg, ResearchKeepPolicyArg,
+        ReviewDispositionArg, TaskCommand, TaskStateArg,
     },
     team,
 };
@@ -1070,6 +1071,62 @@ fn main() -> Result<()> {
             team::reload::request_topology_reload(&root)?;
             println!("Topology reload requested. The daemon will pick it up on the next poll.");
         }
+
+        Command::Research { command } => match command {
+            ResearchCommand::Start {
+                hypothesis,
+                evaluator,
+                format,
+                keep_policy,
+                max_iterations,
+                worktree,
+            } => {
+                let worktree_dir = if worktree.is_absolute() {
+                    worktree
+                } else {
+                    std::env::current_dir()?.join(worktree)
+                };
+                let mission = team::autoresearch::start_research(
+                    &root,
+                    team::autoresearch::StartResearchOptions {
+                        hypothesis,
+                        evaluator_command: evaluator,
+                        evaluator_format: match format {
+                            ResearchFormatArg::Json => team::autoresearch::EvaluatorFormat::Json,
+                            ResearchFormatArg::ExitCode => {
+                                team::autoresearch::EvaluatorFormat::ExitCode
+                            }
+                        },
+                        keep_policy: match keep_policy {
+                            ResearchKeepPolicyArg::PassOnly => {
+                                team::autoresearch::KeepPolicy::PassOnly
+                            }
+                            ResearchKeepPolicyArg::ScoreImprovement => {
+                                team::autoresearch::KeepPolicy::ScoreImprovement
+                            }
+                            ResearchKeepPolicyArg::ParityImprovement => {
+                                team::autoresearch::KeepPolicy::ParityImprovement
+                            }
+                        },
+                        max_iterations,
+                        worktree_dir,
+                    },
+                )?;
+                println!("Started research mission {}", mission.id);
+                println!("Hypothesis: {}", mission.hypothesis);
+                println!("Worktree: {}", mission.worktree_dir.display());
+            }
+            ResearchCommand::Status => {
+                team::autoresearch::print_status(&root)?;
+            }
+            ResearchCommand::Ledger => {
+                team::autoresearch::print_ledger(&root)?;
+            }
+            ResearchCommand::Stop => match team::autoresearch::stop_current_research(&root)? {
+                Some(mission) => println!("Stopped research mission {}", mission.id),
+                None => println!("No active research mission."),
+            },
+        },
 
         Command::Doctor { fix, yes } => {
             print!("{}", team::doctor::run(&root, fix, yes)?);
