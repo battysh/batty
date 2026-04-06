@@ -10,6 +10,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
+use crate::task::load_tasks_from_dir;
 use crate::team::artifact::append_test_timing_record;
 #[cfg(test)]
 use crate::team::artifact::read_test_timing_log;
@@ -760,6 +761,28 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                         }
                     );
                     daemon.notify_reports_to(manager_name, &rollup)?;
+                }
+
+                if let Ok(tasks) = load_tasks_from_dir(&board_dir.join("tasks")) {
+                    if let Some(task) = tasks.into_iter().find(|task| task.id == task_id) {
+                        let learning_summary = format!(
+                            "Task #{task_id} merged cleanly after passing verification. Title: {}",
+                            task.title
+                        );
+                        if let Err(error) = crate::team::learnings::append_task_completion_learning(
+                            daemon.project_root(),
+                            &task,
+                            engineer,
+                            &learning_summary,
+                        ) {
+                            warn!(
+                                engineer,
+                                task_id,
+                                error = %error,
+                                "failed to persist task learning"
+                            );
+                        }
+                    }
                 }
 
                 daemon.clear_active_task(engineer);

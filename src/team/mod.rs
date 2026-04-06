@@ -44,6 +44,7 @@ pub mod harness;
 pub mod hierarchy;
 pub mod inbox;
 pub mod layout;
+pub mod learnings;
 pub use daemon_mgmt::*;
 mod session;
 pub use session::*;
