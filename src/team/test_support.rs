@@ -5,8 +5,8 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::team::config::{
-    AutomationConfig, BoardConfig, OrchestratorPosition, RoleType, StandupConfig, TeamConfig,
-    WorkflowMode, WorkflowPolicy,
+    AutomationConfig, BoardConfig, OrchestratorPosition, RoleDef, RoleType, StandupConfig,
+    TeamConfig, WorkflowMode, WorkflowPolicy,
 };
 use crate::team::daemon::{DaemonConfig, NudgeSchedule, TeamDaemon};
 use crate::team::failure_patterns::FailureTracker;
@@ -332,6 +332,7 @@ impl<'a> TestDaemonBuilder<'a> {
     }
 
     pub(crate) fn build(self) -> TeamDaemon {
+        let roles = test_role_defs(&self.members);
         let config = DaemonConfig {
             project_root: self.project_root.to_path_buf(),
             team_config: TeamConfig {
@@ -359,7 +360,7 @@ impl<'a> TestDaemonBuilder<'a> {
                 pending_queue_max_age_secs: 600,
                 event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
                 retro_min_duration_secs: 60,
-                roles: Vec::new(),
+                roles,
             },
             session: self.session,
             members: self.members,
@@ -391,6 +392,46 @@ impl<'a> TestDaemonBuilder<'a> {
         }
         daemon
     }
+}
+
+fn test_role_defs(members: &[MemberInstance]) -> Vec<RoleDef> {
+    let mut roles = Vec::new();
+    for member in members {
+        if let Some(existing) = roles
+            .iter_mut()
+            .find(|role: &&mut RoleDef| role.name == member.role_name)
+        {
+            existing.instances += 1;
+            existing.use_worktrees |= member.use_worktrees;
+            if existing.agent.is_none() {
+                existing.agent = member.agent.clone();
+            }
+            if existing.prompt.is_none() {
+                existing.prompt = member.prompt.clone();
+            }
+            continue;
+        }
+
+        roles.push(RoleDef {
+            name: member.role_name.clone(),
+            role_type: member.role_type,
+            agent: member.agent.clone(),
+            auth_mode: None,
+            auth_env: Vec::new(),
+            instances: 1,
+            prompt: member.prompt.clone(),
+            talks_to: Vec::new(),
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: None,
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            barrier_group: None,
+            use_worktrees: member.use_worktrees,
+        });
+    }
+    roles
 }
 
 pub(crate) fn write_open_task_file(project_root: &Path, id: u32, title: &str, status: &str) {

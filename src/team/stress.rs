@@ -181,11 +181,7 @@ impl FaultInjector for SyntheticFaultInjector {
     fn inject(&self, fault: &ScheduledFault) -> InjectedFault {
         let sequence_mix = (fault.sequence as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let kind_mix = fault.kind.ordinal().wrapping_mul(0xA24B_AED4_963E_E407);
-        let mut rng = Lcg::new(
-            self.seed
-                ^ sequence_mix
-                ^ kind_mix,
-        );
+        let mut rng = Lcg::new(self.seed ^ sequence_mix ^ kind_mix);
         let sla = fault.kind.sla_secs();
         let detect_cap = (sla / 5).max(2);
         let detected_after_secs = 1 + rng.next_bounded(detect_cap);
