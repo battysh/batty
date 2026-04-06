@@ -42,7 +42,7 @@ impl TeamDaemon {
         }
 
         format!(
-            "You are continuing work on Task #{}. Previous session progress:\n{}\n\nResume from where you left off.\n\n{}",
+            "You are continuing work on Task #{}.\n\n{}\n\nResume from where you left off. Do not repeat already completed work.\n\n{}",
             task.id,
             handoff.trim_end(),
             assignment
@@ -575,12 +575,16 @@ mod tests {
             source_path: tmp.path().join("task-42.md"),
         };
         let handoff_path = tmp.path().join(crate::shim::runtime::HANDOFF_FILE_NAME);
-        std::fs::write(&handoff_path, "# Handoff\nchanged files").unwrap();
+        std::fs::write(
+            &handoff_path,
+            "# Carry-Forward Summary\n## Task Spec\nTask #42: resume widget",
+        )
+        .unwrap();
 
         let message = daemon.restart_assignment_with_handoff(&task, tmp.path());
 
         assert!(message.contains("You are continuing work on Task #42."));
-        assert!(message.contains("# Handoff"));
+        assert!(message.contains("# Carry-Forward Summary"));
         assert!(message.contains("Continue widget implementation."));
         assert!(
             !handoff_path.exists(),
