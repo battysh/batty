@@ -64,10 +64,16 @@ impl FaultKind {
     fn description(self) -> &'static str {
         match self {
             Self::AgentCrash => "Shim-backed agent process exits unexpectedly during active work.",
-            Self::ContextExhaustion => "Agent exceeds context budget and must be restarted with handoff state.",
+            Self::ContextExhaustion => {
+                "Agent exceeds context budget and must be restarted with handoff state."
+            }
             Self::MergeConflict => "Engineer worktree is left in unresolved merge-conflict state.",
-            Self::BoardStarvation => "Idle engineers outnumber dispatchable tasks and planning must replenish work.",
-            Self::WorktreeCorruption => "Engineer worktree becomes unusable and must be rebuilt or reset to base.",
+            Self::BoardStarvation => {
+                "Idle engineers outnumber dispatchable tasks and planning must replenish work."
+            }
+            Self::WorktreeCorruption => {
+                "Engineer worktree becomes unusable and must be rebuilt or reset to base."
+            }
             Self::ShimEof => "Shim command channel closes and daemon must detect the dead runtime.",
         }
     }
@@ -433,8 +439,7 @@ mod tests {
 
     impl FaultInjector for FixedInjector {
         fn inject(&self, fault: &ScheduledFault) -> InjectedFault {
-            let (detected_after_secs, recovered_after_secs) =
-                self.recoveries[fault.sequence - 1];
+            let (detected_after_secs, recovered_after_secs) = self.recoveries[fault.sequence - 1];
             InjectedFault {
                 detected_after_secs,
                 recovered_after_secs,
@@ -460,9 +465,11 @@ mod tests {
         for kind in FaultKind::ALL {
             assert!(schedule.iter().any(|fault| fault.kind == kind));
         }
-        assert!(schedule.windows(2).all(|pair| {
-            pair[0].injected_at_secs < pair[1].injected_at_secs
-        }));
+        assert!(
+            schedule
+                .windows(2)
+                .all(|pair| { pair[0].injected_at_secs < pair[1].injected_at_secs })
+        );
     }
 
     #[test]
@@ -472,22 +479,17 @@ mod tests {
         for kind in FaultKind::ALL {
             assert!(schedule.iter().any(|fault| fault.kind == kind));
         }
-        assert!(schedule
-            .iter()
-            .all(|fault| fault.injected_at_secs < 8 * 3600));
+        assert!(
+            schedule
+                .iter()
+                .all(|fault| fault.injected_at_secs < 8 * 3600)
+        );
     }
 
     #[test]
     fn sla_failure_is_reported_when_recovery_exceeds_threshold() {
         let injector = FixedInjector {
-            recoveries: vec![
-                (2, 61),
-                (2, 89),
-                (2, 88),
-                (2, 100),
-                (2, 115),
-                (2, 59),
-            ],
+            recoveries: vec![(2, 61), (2, 89), (2, 88), (2, 100), (2, 115), (2, 59)],
         };
         let report = run_with_injector(&options(true), &injector);
 
