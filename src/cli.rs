@@ -211,6 +211,12 @@ pub enum Command {
     /// Set up Telegram bot for human communication
     Telegram,
 
+    /// Manage the global Batty project registry for multi-project supervision
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
+    },
+
     /// Estimate team load and show recent load history
     Load,
 
@@ -451,6 +457,77 @@ pub enum GrafanaCommand {
     Status,
     /// Open the Grafana dashboard in the default browser
     Open,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProjectCommand {
+    /// Register a project in the global Batty/OpenClaw registry
+    Register {
+        /// Stable unique project identifier
+        #[arg(long = "project-id")]
+        project_id: String,
+        /// Operator-facing project name
+        #[arg(long)]
+        name: String,
+        /// Repository root for the supervised project
+        #[arg(long = "project-root")]
+        project_root: PathBuf,
+        /// Kanban board directory for the project
+        #[arg(long = "board-dir")]
+        board_dir: PathBuf,
+        /// Batty team name from team.yaml
+        #[arg(long = "team-name")]
+        team_name: String,
+        /// Explicit runtime session name
+        #[arg(long = "session-name")]
+        session_name: String,
+        /// Optional owner or owning team
+        #[arg(long)]
+        owner: Option<String>,
+        /// Tag metadata
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// Channel binding in the form <channel>=<binding>
+        #[arg(long = "channel-binding")]
+        channel_bindings: Vec<String>,
+        /// Allow OpenClaw supervision actions for this project
+        #[arg(long, default_value_t = false)]
+        allow_openclaw_supervision: bool,
+        /// Allow cross-project routing for this project
+        #[arg(long, default_value_t = false)]
+        allow_cross_project_routing: bool,
+        /// Allow shared-service routing for this project
+        #[arg(long, default_value_t = false)]
+        allow_shared_service_routing: bool,
+        /// Mark the project archived at registration time
+        #[arg(long, default_value_t = false)]
+        archived: bool,
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Remove a project from the registry
+    Unregister {
+        /// Stable unique project identifier
+        project_id: String,
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// List all registered projects
+    List {
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Show one registered project by projectId
+    Get {
+        /// Stable unique project identifier
+        project_id: String,
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1525,6 +1602,89 @@ mod tests {
     fn telegram_subcommand_parses() {
         let cli = Cli::parse_from(["batty", "telegram"]);
         assert!(matches!(cli.command, Command::Telegram));
+    }
+
+    #[test]
+    fn project_register_subcommand_parses() {
+        let cli = Cli::parse_from([
+            "batty",
+            "project",
+            "register",
+            "--project-id",
+            "batty-core",
+            "--name",
+            "Batty Core",
+            "--project-root",
+            "/tmp/batty",
+            "--board-dir",
+            "/tmp/batty/.batty/team_config/board",
+            "--team-name",
+            "batty",
+            "--session-name",
+            "batty-batty",
+            "--owner",
+            "platform",
+            "--tag",
+            "openclaw",
+            "--channel-binding",
+            "telegram=chat:123",
+            "--allow-openclaw-supervision",
+            "--json",
+        ]);
+        match cli.command {
+            Command::Project {
+                command:
+                    ProjectCommand::Register {
+                        project_id,
+                        name,
+                        project_root,
+                        board_dir,
+                        team_name,
+                        session_name,
+                        owner,
+                        tags,
+                        channel_bindings,
+                        allow_openclaw_supervision,
+                        allow_cross_project_routing,
+                        allow_shared_service_routing,
+                        archived,
+                        json,
+                    },
+            } => {
+                assert_eq!(project_id, "batty-core");
+                assert_eq!(name, "Batty Core");
+                assert_eq!(project_root, PathBuf::from("/tmp/batty"));
+                assert_eq!(
+                    board_dir,
+                    PathBuf::from("/tmp/batty/.batty/team_config/board")
+                );
+                assert_eq!(team_name, "batty");
+                assert_eq!(session_name, "batty-batty");
+                assert_eq!(owner.as_deref(), Some("platform"));
+                assert_eq!(tags, vec!["openclaw"]);
+                assert_eq!(channel_bindings, vec!["telegram=chat:123"]);
+                assert!(allow_openclaw_supervision);
+                assert!(!allow_cross_project_routing);
+                assert!(!allow_shared_service_routing);
+                assert!(!archived);
+                assert!(json);
+            }
+            other => panic!("expected project register command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_get_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "project", "get", "batty-core", "--json"]);
+        match cli.command {
+            Command::Project {
+                command: ProjectCommand::Get { project_id, json },
+            } => {
+                assert_eq!(project_id, "batty-core");
+                assert!(json);
+            }
+            other => panic!("expected project get command, got {other:?}"),
+        }
     }
 
     #[test]
