@@ -1867,6 +1867,7 @@ mod tests {
         write_task_file(&repo, 42, "rebase-conflict-retry");
 
         let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.config.team_config.workflow_policy.auto_merge.enabled = false;
         daemon.set_active_task_for_test("eng-1", 42);
         daemon.set_member_state_for_test("eng-1", MemberState::Working);
 
@@ -1889,6 +1890,7 @@ mod tests {
         write_task_file(&repo, 42, "rebase-conflict-state");
 
         let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.config.team_config.workflow_policy.auto_merge.enabled = false;
         daemon.set_active_task_for_test("eng-1", 42);
         daemon.set_member_state_for_test("eng-1", MemberState::Working);
 
@@ -1908,6 +1910,7 @@ mod tests {
         write_task_file(&repo, 42, "rebase-conflict-escalation");
 
         let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.config.team_config.workflow_policy.auto_merge.enabled = false;
         daemon.set_active_task_for_test("eng-1", 42);
         daemon.set_member_state_for_test("eng-1", MemberState::Working);
         daemon.increment_retry("eng-1");
@@ -1931,6 +1934,7 @@ mod tests {
         write_task_file(&repo, 42, "rebase-conflict-reset");
 
         let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.config.team_config.workflow_policy.auto_merge.enabled = false;
         daemon.set_active_task_for_test("eng-1", 42);
         daemon.set_member_state_for_test("eng-1", MemberState::Working);
         daemon.increment_retry("eng-1");
@@ -1952,6 +1956,7 @@ mod tests {
         write_task_file(&repo, 42, "rebase-conflict-event");
 
         let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.config.team_config.workflow_policy.auto_merge.enabled = false;
         daemon.set_active_task_for_test("eng-1", 42);
         daemon.increment_retry("eng-1");
         daemon.increment_retry("eng-1");
@@ -2268,8 +2273,10 @@ mod tests {
     fn completion_respects_disabled_policy() {
         let (_tmp, repo, _worktree_dir) = setup_auto_merge_repo("eng-1");
 
-        // Default policy has enabled: false
-        let policy = AutoMergePolicy::default();
+        let policy = AutoMergePolicy {
+            enabled: false,
+            ..AutoMergePolicy::default()
+        };
         assert!(!policy.enabled);
 
         let mut daemon = auto_merge_daemon(&repo, policy);

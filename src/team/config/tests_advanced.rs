@@ -635,7 +635,7 @@ roles:
 fn parse_auto_merge_policy_defaults() {
     let config: TeamConfig = serde_yaml::from_str(minimal_yaml()).unwrap();
     let am = &config.workflow_policy.auto_merge;
-    assert!(!am.enabled);
+    assert!(am.enabled);
     assert_eq!(am.max_diff_lines, 200);
     assert_eq!(am.max_files_changed, 5);
     assert_eq!(am.max_modules_touched, 2);
