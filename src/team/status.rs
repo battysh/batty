@@ -42,6 +42,7 @@ pub(crate) struct TeamStatusRow {
     pub(crate) review_owned_tasks: Vec<u32>,
     pub(crate) signal: Option<String>,
     pub(crate) runtime_label: Option<String>,
+    pub(crate) worktree_staleness: Option<u32>,
     pub(crate) health: AgentHealthSummary,
     pub(crate) health_summary: String,
     pub(crate) eta: String,
@@ -274,6 +275,7 @@ pub(crate) fn build_team_status_rows(
     pending_inbox_counts: &HashMap<String, usize>,
     triage_backlog_counts: &HashMap<String, usize>,
     owned_task_buckets: &HashMap<String, OwnedTaskBuckets>,
+    worktree_staleness: &HashMap<String, u32>,
     agent_health: &HashMap<String, AgentHealthSummary>,
 ) -> Vec<TeamStatusRow> {
     members
@@ -329,9 +331,41 @@ pub(crate) fn build_team_status_rows(
                 review_owned_tasks: owned_tasks.review,
                 signal,
                 runtime_label,
+                worktree_staleness: worktree_staleness.get(&member.name).copied(),
                 health,
                 health_summary,
                 eta: "-".to_string(),
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn worktree_staleness_by_member(
+    project_root: &Path,
+    members: &[MemberInstance],
+) -> HashMap<String, u32> {
+    members
+        .iter()
+        .filter(|member| member.role_type == RoleType::Engineer && member.use_worktrees)
+        .filter_map(|member| {
+            let worktree_dir = project_root
+                .join(".batty")
+                .join("worktrees")
+                .join(&member.name);
+            if !worktree_dir.exists() {
+                return None;
+            }
+
+            match super::task_loop::worktree_commits_behind_main(&worktree_dir) {
+                Ok(count) => Some((member.name.clone(), count)),
+                Err(error) => {
+                    warn!(
+                        member = %member.name,
+                        error = %error,
+                        "failed to measure engineer worktree staleness for status"
+                    );
+                    None
+                }
             }
         })
         .collect()
@@ -1689,6 +1723,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
         );
 
         assert_eq!(rows[0].state, "stopped");
@@ -1717,6 +1752,7 @@ mod tests {
             &runtime_statuses,
             &HashMap::new(),
             &triage_backlog_counts,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
         );
@@ -1752,6 +1788,7 @@ mod tests {
             &HashMap::new(),
             &owned_task_buckets,
             &HashMap::new(),
+            &HashMap::new(),
         );
 
         assert_eq!(rows[0].state, "reviewing");
@@ -1767,6 +1804,7 @@ mod tests {
         let rows = build_team_status_rows(
             &members,
             true,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1794,6 +1832,7 @@ mod tests {
                 review_owned_tasks: Vec::new(),
                 signal: None,
                 runtime_label: None,
+                worktree_staleness: None,
                 health: AgentHealthSummary::default(),
                 health_summary: "-".to_string(),
                 eta: "-".to_string(),
@@ -1811,6 +1850,7 @@ mod tests {
                 review_owned_tasks: Vec::new(),
                 signal: None,
                 runtime_label: Some("working".to_string()),
+                worktree_staleness: None,
                 health: AgentHealthSummary {
                     restart_count: 1,
                     context_exhaustion_count: 0,
@@ -1834,6 +1874,7 @@ mod tests {
                 review_owned_tasks: vec![1],
                 signal: None,
                 runtime_label: Some("idle".to_string()),
+                worktree_staleness: None,
                 health: AgentHealthSummary {
                     restart_count: 0,
                     context_exhaustion_count: 1,
@@ -2055,6 +2096,7 @@ mod tests {
                 review_owned_tasks: Vec::new(),
                 signal: None,
                 runtime_label: Some("idle".to_string()),
+                worktree_staleness: None,
                 health: AgentHealthSummary::default(),
                 health_summary: "-".to_string(),
                 eta: "-".to_string(),
@@ -2278,6 +2320,7 @@ mod tests {
                     review_owned_tasks: vec![],
                     signal: None,
                     runtime_label: Some("working".to_string()),
+                    worktree_staleness: Some(3),
                     health: AgentHealthSummary {
                         restart_count: 1,
                         context_exhaustion_count: 0,
@@ -2301,6 +2344,7 @@ mod tests {
                     review_owned_tasks: vec![42],
                     signal: Some("needs review (1)".to_string()),
                     runtime_label: Some("idle".to_string()),
+                    worktree_staleness: Some(0),
                     health: AgentHealthSummary::default(),
                     health_summary: "-".to_string(),
                     eta: "-".to_string(),
@@ -2545,6 +2589,7 @@ mod tests {
             review_owned_tasks: Vec::new(),
             signal: None,
             runtime_label: Some("working".to_string()),
+            worktree_staleness: None,
             health: AgentHealthSummary {
                 backend_health: crate::agent::BackendHealth::Unreachable,
                 ..AgentHealthSummary::default()
