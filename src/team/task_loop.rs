@@ -623,18 +623,20 @@ pub(crate) fn is_worktree_safe_to_mutate(worktree_dir: &Path) -> Result<bool> {
 }
 
 fn run_git_with_timeout(worktree_dir: &Path, args: &[&str], timeout: Duration) -> Result<()> {
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(worktree_dir)
-        .args(args)
-        .spawn()
-        .with_context(|| {
-            format!(
-                "failed to launch `git {}` in {}",
-                args.join(" "),
-                worktree_dir.display()
-            )
-        })?;
+    let mut command = Command::new("git");
+    command.arg("-C").arg(worktree_dir).args(args);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().with_context(|| {
+        format!(
+            "failed to launch `git {}` in {}",
+            args.join(" "),
+            worktree_dir.display()
+        )
+    })?;
 
     let deadline = Instant::now() + timeout;
     loop {
@@ -651,7 +653,7 @@ fn run_git_with_timeout(worktree_dir: &Path, args: &[&str], timeout: Duration) -
         }
 
         if Instant::now() >= deadline {
-            let _ = child.kill();
+            terminate_process_tree(&mut child);
             let _ = child.wait();
             bail!(
                 "`git {}` timed out after {}s in {}",
@@ -663,6 +665,16 @@ fn run_git_with_timeout(worktree_dir: &Path, args: &[&str], timeout: Duration) -
 
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[cfg(unix)]
+fn terminate_process_tree(child: &mut std::process::Child) {
+    let _ = unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+}
+
+#[cfg(not(unix))]
+fn terminate_process_tree(child: &mut std::process::Child) {
+    let _ = child.kill();
 }
 
 pub(crate) fn preserve_worktree_with_commit(
