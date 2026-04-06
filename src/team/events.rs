@@ -569,6 +569,14 @@ impl TeamEvent {
         }
     }
 
+    pub fn worktree_refreshed(role: &str, reason: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            reason: Some(reason.into()),
+            ..Self::base("worktree_refreshed")
+        }
+    }
+
     /// Emitted when the daemon reconciles a topology change.
     ///
     /// `reason` contains a human-readable summary (e.g. "+2 added, -1 removed").
