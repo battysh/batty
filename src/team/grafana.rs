@@ -29,6 +29,9 @@ pub const REQUIRED_ROWS: &[&str] = &[
     "Event Breakdown",
     "Recent Activity",
     "Throughput Over Time",
+    "Tact Engine",
+    "Health Signals",
+    "Board Health",
 ];
 
 /// Expected alert names provisioned alongside the dashboard.
@@ -784,6 +787,14 @@ mod tests {
             "Events Per Hour",
             "Delivery Success Rate Per Hour (%)",
             "Narration Rejection Rate Per Hour (%)",
+            "Planning Cycles Triggered Per Hour",
+            "Tasks Created Per Planning Cycle",
+            "Planning Cycle Latency",
+            "Planning Cycle Success vs Failure",
+            "Narration Events Detected Per Agent",
+            "Context Pressure Warnings Per Agent",
+            "Board Task Count by Status Over Time",
+            "Tasks Archived Per Hour",
         ];
         for expected in required {
             assert!(
@@ -823,8 +834,8 @@ mod tests {
             .filter(|p| p["type"].as_str() != Some("row"))
             .collect();
         assert!(
-            non_row_panels.len() >= 16,
-            "expected at least 16 data panels, got {}",
+            non_row_panels.len() >= 28,
+            "expected at least 28 data panels, got {}",
             non_row_panels.len()
         );
     }

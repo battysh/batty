@@ -1257,6 +1257,567 @@
       ],
       "title": "Verification Pass Rate Over Time",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 87
+      },
+      "id": 115,
+      "title": "Tact Engine",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 12,
+            "lineWidth": 2
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 88
+      },
+      "id": 116,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS triggered FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='planning_cycle_triggered' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "queryType": "table",
+          "rawQueryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS triggered FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='planning_cycle_triggered' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "rawSql": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS triggered FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='planning_cycle_triggered' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Planning Cycles Triggered Per Hour",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "fieldConfig": {
+        "defaults": {}
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 88
+      },
+      "id": 117,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.restart_count') AS INTEGER), 0) AS tasks_created FROM events WHERE event_type='planning_cycle_completed' AND json_extract(payload, '$.reason')='success' ORDER BY time;",
+          "queryType": "table",
+          "rawQueryText": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.restart_count') AS INTEGER), 0) AS tasks_created FROM events WHERE event_type='planning_cycle_completed' AND json_extract(payload, '$.reason')='success' ORDER BY time;",
+          "rawSql": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.restart_count') AS INTEGER), 0) AS tasks_created FROM events WHERE event_type='planning_cycle_completed' AND json_extract(payload, '$.reason')='success' ORDER BY time;",
+          "refId": "A"
+        }
+      ],
+      "title": "Tasks Created Per Planning Cycle",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 96
+      },
+      "id": 118,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.uptime_secs') AS INTEGER), 0) AS latency_secs FROM events WHERE event_type='planning_cycle_completed' ORDER BY time;",
+          "queryType": "table",
+          "rawQueryText": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.uptime_secs') AS INTEGER), 0) AS latency_secs FROM events WHERE event_type='planning_cycle_completed' ORDER BY time;",
+          "rawSql": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.uptime_secs') AS INTEGER), 0) AS latency_secs FROM events WHERE event_type='planning_cycle_completed' ORDER BY time;",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Planning Cycle Latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "fieldConfig": {
+        "defaults": {}
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 96
+      },
+      "id": 119,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "SELECT CASE COALESCE(json_extract(payload, '$.reason'), 'unknown') WHEN 'success' THEN 'success' WHEN 'failure' THEN 'failure' ELSE 'unknown' END AS metric, COUNT(*) AS value FROM events WHERE event_type='planning_cycle_completed' GROUP BY metric ORDER BY value DESC;",
+          "queryType": "table",
+          "rawQueryText": "SELECT CASE COALESCE(json_extract(payload, '$.reason'), 'unknown') WHEN 'success' THEN 'success' WHEN 'failure' THEN 'failure' ELSE 'unknown' END AS metric, COUNT(*) AS value FROM events WHERE event_type='planning_cycle_completed' GROUP BY metric ORDER BY value DESC;",
+          "rawSql": "SELECT CASE COALESCE(json_extract(payload, '$.reason'), 'unknown') WHEN 'success' THEN 'success' WHEN 'failure' THEN 'failure' ELSE 'unknown' END AS metric, COUNT(*) AS value FROM events WHERE event_type='planning_cycle_completed' GROUP BY metric ORDER BY value DESC;",
+          "refId": "A"
+        }
+      ],
+      "title": "Planning Cycle Success vs Failure",
+      "type": "piechart"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 104
+      },
+      "id": 120,
+      "title": "Health Signals",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 105
+      },
+      "id": 121,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "SELECT timestamp AS time, COUNT(*) AS detections, role AS metric FROM events WHERE event_type='narration_detected' GROUP BY timestamp, role ORDER BY time;",
+          "queryType": "table",
+          "rawQueryText": "SELECT timestamp AS time, COUNT(*) AS detections, role AS metric FROM events WHERE event_type='narration_detected' GROUP BY timestamp, role ORDER BY time;",
+          "rawSql": "SELECT timestamp AS time, COUNT(*) AS detections, role AS metric FROM events WHERE event_type='narration_detected' GROUP BY timestamp, role ORDER BY time;",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Narration Events Detected Per Agent",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 12,
+            "lineWidth": 2
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 105
+      },
+      "id": 122,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS restarts FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='agent_restarted' AND json_extract(payload, '$.reason')='narration' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "queryType": "table",
+          "rawQueryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS restarts FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='agent_restarted' AND json_extract(payload, '$.reason')='narration' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "rawSql": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS restarts FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='agent_restarted' AND json_extract(payload, '$.reason')='narration' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Narration-Triggered Restarts Per Hour",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 113
+      },
+      "id": 123,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "SELECT COALESCE(ROUND(AVG(n.timestamp - a.timestamp), 1), 0) AS value FROM events n LEFT JOIN events a ON a.role = n.role AND a.task_id = n.task_id AND a.event_type='task_assigned' AND a.timestamp <= n.timestamp WHERE n.event_type='narration_detected';",
+          "queryType": "table",
+          "rawQueryText": "SELECT COALESCE(ROUND(AVG(n.timestamp - a.timestamp), 1), 0) AS value FROM events n LEFT JOIN events a ON a.role = n.role AND a.task_id = n.task_id AND a.event_type='task_assigned' AND a.timestamp <= n.timestamp WHERE n.event_type='narration_detected';",
+          "rawSql": "SELECT COALESCE(ROUND(AVG(n.timestamp - a.timestamp), 1), 0) AS value FROM events n LEFT JOIN events a ON a.role = n.role AND a.task_id = n.task_id AND a.event_type='task_assigned' AND a.timestamp <= n.timestamp WHERE n.event_type='narration_detected';",
+          "refId": "A"
+        }
+      ],
+      "title": "Average Narration Duration Before Detection",
+      "type": "gauge"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "normal",
+              "group": "B"
+            }
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 113
+      },
+      "id": 124,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "SELECT timestamp AS time, COUNT(*) AS warnings, role AS metric FROM events WHERE event_type='context_pressure_warning' GROUP BY timestamp, role ORDER BY time;",
+          "queryType": "table",
+          "rawQueryText": "SELECT timestamp AS time, COUNT(*) AS warnings, role AS metric FROM events WHERE event_type='context_pressure_warning' GROUP BY timestamp, role ORDER BY time;",
+          "rawSql": "SELECT timestamp AS time, COUNT(*) AS warnings, role AS metric FROM events WHERE event_type='context_pressure_warning' GROUP BY timestamp, role ORDER BY time;",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Context Pressure Warnings Per Agent",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 12,
+            "lineWidth": 2
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 121
+      },
+      "id": 125,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS restarts FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='agent_restarted' AND json_extract(payload, '$.reason')='context_exhausted' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "queryType": "table",
+          "rawQueryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS restarts FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='agent_restarted' AND json_extract(payload, '$.reason')='context_exhausted' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "rawSql": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS restarts FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='agent_restarted' AND json_extract(payload, '$.reason')='context_exhausted' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Context-Triggered Restarts Per Hour",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "lineWidth": 2
+          },
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 121
+      },
+      "id": 126,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.output_bytes') AS INTEGER), 0) AS output_bytes, role AS metric FROM events WHERE event_type='context_pressure_warning' ORDER BY time;",
+          "queryType": "table",
+          "rawQueryText": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.output_bytes') AS INTEGER), 0) AS output_bytes, role AS metric FROM events WHERE event_type='context_pressure_warning' ORDER BY time;",
+          "rawSql": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.output_bytes') AS INTEGER), 0) AS output_bytes, role AS metric FROM events WHERE event_type='context_pressure_warning' ORDER BY time;",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Agent Session Output Volume",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 129
+      },
+      "id": 127,
+      "title": "Board Health",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 14,
+            "lineWidth": 2,
+            "stacking": {
+              "mode": "normal",
+              "group": "C"
+            }
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 130
+      },
+      "id": 128,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, (SELECT COUNT(*) FROM events e2 WHERE e2.event_type='task_assigned' AND e2.timestamp <= (h + 1) * 3600) - (SELECT COUNT(*) FROM events e3 WHERE e3.event_type='task_completed' AND e3.timestamp <= (h + 1) * 3600) AS in_progress FROM hours ORDER BY time;",
+          "queryType": "table",
+          "rawQueryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, (SELECT COUNT(*) FROM events e2 WHERE e2.event_type='task_assigned' AND e2.timestamp <= (h + 1) * 3600) - (SELECT COUNT(*) FROM events e3 WHERE e3.event_type='task_completed' AND e3.timestamp <= (h + 1) * 3600) AS in_progress FROM hours ORDER BY time;",
+          "rawSql": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, (SELECT COUNT(*) FROM events e2 WHERE e2.event_type='task_assigned' AND e2.timestamp <= (h + 1) * 3600) - (SELECT COUNT(*) FROM events e3 WHERE e3.event_type='task_completed' AND e3.timestamp <= (h + 1) * 3600) AS in_progress FROM hours ORDER BY time;",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        },
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, (SELECT COUNT(*) FROM events e2 WHERE e2.event_type='task_completed' AND e2.timestamp <= (h + 1) * 3600) - (SELECT COUNT(*) FROM events e3 WHERE e3.event_type='board_task_archived' AND e3.timestamp <= (h + 1) * 3600) AS done FROM hours ORDER BY time;",
+          "queryType": "table",
+          "rawQueryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, (SELECT COUNT(*) FROM events e2 WHERE e2.event_type='task_completed' AND e2.timestamp <= (h + 1) * 3600) - (SELECT COUNT(*) FROM events e3 WHERE e3.event_type='board_task_archived' AND e3.timestamp <= (h + 1) * 3600) AS done FROM hours ORDER BY time;",
+          "rawSql": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, (SELECT COUNT(*) FROM events e2 WHERE e2.event_type='task_completed' AND e2.timestamp <= (h + 1) * 3600) - (SELECT COUNT(*) FROM events e3 WHERE e3.event_type='board_task_archived' AND e3.timestamp <= (h + 1) * 3600) AS done FROM hours ORDER BY time;",
+          "refId": "B",
+          "timeColumns": [
+            "time"
+          ]
+        },
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, (SELECT COUNT(*) FROM events e2 WHERE e2.event_type='board_task_archived' AND e2.timestamp <= (h + 1) * 3600) AS archived FROM hours ORDER BY time;",
+          "queryType": "table",
+          "rawQueryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, (SELECT COUNT(*) FROM events e2 WHERE e2.event_type='board_task_archived' AND e2.timestamp <= (h + 1) * 3600) AS archived FROM hours ORDER BY time;",
+          "rawSql": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, (SELECT COUNT(*) FROM events e2 WHERE e2.event_type='board_task_archived' AND e2.timestamp <= (h + 1) * 3600) AS archived FROM hours ORDER BY time;",
+          "refId": "C",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Board Task Count by Status Over Time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 130
+      },
+      "id": 129,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "WITH stage_metrics AS ( SELECT 'in_progress' AS stage, AVG(completed_at - started_at) AS avg_secs FROM task_metrics WHERE started_at IS NOT NULL AND completed_at IS NOT NULL UNION ALL SELECT 'done' AS stage, AVG(a.timestamp - tm.completed_at) AS avg_secs FROM task_metrics tm JOIN events a ON a.task_id = tm.task_id AND a.event_type='board_task_archived' WHERE tm.completed_at IS NOT NULL ) SELECT stage, ROUND(COALESCE(avg_secs, 0), 1) AS value FROM stage_metrics;",
+          "queryType": "table",
+          "rawQueryText": "WITH stage_metrics AS ( SELECT 'in_progress' AS stage, AVG(completed_at - started_at) AS avg_secs FROM task_metrics WHERE started_at IS NOT NULL AND completed_at IS NOT NULL UNION ALL SELECT 'done' AS stage, AVG(a.timestamp - tm.completed_at) AS avg_secs FROM task_metrics tm JOIN events a ON a.task_id = tm.task_id AND a.event_type='board_task_archived' WHERE tm.completed_at IS NOT NULL ) SELECT stage, ROUND(COALESCE(avg_secs, 0), 1) AS value FROM stage_metrics;",
+          "rawSql": "WITH stage_metrics AS ( SELECT 'in_progress' AS stage, AVG(completed_at - started_at) AS avg_secs FROM task_metrics WHERE started_at IS NOT NULL AND completed_at IS NOT NULL UNION ALL SELECT 'done' AS stage, AVG(a.timestamp - tm.completed_at) AS avg_secs FROM task_metrics tm JOIN events a ON a.task_id = tm.task_id AND a.event_type='board_task_archived' WHERE tm.completed_at IS NOT NULL ) SELECT stage, ROUND(COALESCE(avg_secs, 0), 1) AS value FROM stage_metrics;",
+          "refId": "A"
+        }
+      ],
+      "title": "Average Time in Status by Lifecycle Stage",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 12,
+            "lineWidth": 2
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 138
+      },
+      "id": 130,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS archived FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='board_task_archived' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "queryType": "table",
+          "rawQueryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS archived FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='board_task_archived' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "rawSql": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS archived FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='board_task_archived' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Tasks Archived Per Hour",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
@@ -1265,6 +1826,6 @@
     "from": "now-24h",
     "to": "now"
   },
-  "title": "Batty \u2014 Nether Earth",
+  "title": "Batty — Nether Earth",
   "uid": "batty-project"
 }
