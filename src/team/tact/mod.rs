@@ -12,7 +12,7 @@ pub struct TactPrompt {
     pub recent_completions: Vec<String>,
     pub roadmap_priorities: Vec<String>,
     pub idle_count: usize,
-    pub todo_count: usize,
+    pub dispatchable_count: usize,
 }
 
 /// A parsed task specification from the architect's planning response.
@@ -40,8 +40,8 @@ pub fn should_trigger_planning_cycle(idle_engineers: usize, dispatchable_tasks: 
     idle_engineers > dispatchable_tasks
 }
 
-pub fn should_trigger(idle_engineers: usize, todo_tasks: usize) -> bool {
-    should_trigger_planning_cycle(idle_engineers, todo_tasks)
+pub fn should_trigger(idle_engineers: usize, dispatchable_tasks: usize) -> bool {
+    should_trigger_planning_cycle(idle_engineers, dispatchable_tasks)
 }
 
 pub fn compose_prompt(ctx: &TactPrompt) -> String {
@@ -153,5 +153,17 @@ roles:
     #[test]
     fn test_should_trigger_equal() {
         assert!(!should_trigger(2, 2));
+    }
+
+    #[test]
+    fn prompt_request_count_uses_dispatchable_deficit() {
+        let prompt = compose_prompt(&TactPrompt {
+            board_summary: "todo=3, dispatchable_tasks=1, idle_engineers=2".to_string(),
+            recent_completions: vec!["Finished parser".to_string()],
+            roadmap_priorities: vec!["Ship tact".to_string()],
+            idle_count: 2,
+            dispatchable_count: 1,
+        });
+        assert!(prompt.contains("Please specify 1 new tasks"));
     }
 }

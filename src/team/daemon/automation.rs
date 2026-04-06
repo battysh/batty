@@ -927,8 +927,7 @@ impl TeamDaemon {
         let idle_engineer_count = self.truly_idle_engineer_count(&board_tasks);
         let dispatchable_task_count =
             crate::team::tact::dispatchable_task_count(&board_dir, &self.config.members)?;
-        let todo_count = board_tasks.iter().filter(|task| task.status == "todo").count();
-        if !crate::team::tact::should_trigger(idle_engineer_count, todo_count) {
+        if !crate::team::tact::should_trigger(idle_engineer_count, dispatchable_task_count) {
             return Ok(());
         }
         if !crate::team::tact::planning_cycle_ready(
@@ -984,7 +983,7 @@ impl TeamDaemon {
             recent_completions: recent_completions.clone(),
             roadmap_priorities: roadmap_context.clone(),
             idle_count: idle_engineer_count,
-            todo_count,
+            dispatchable_count: dispatchable_task_count,
         };
         let prompt = crate::team::tact::compose_planning_prompt(
             idle_engineer_count,
@@ -1642,6 +1641,29 @@ Second body.
 
         assert!(planning_inbox_messages(&tmp).is_empty());
         assert!(!daemon.planning_cycle_active);
+    }
+
+    #[test]
+    fn planning_cycle_triggers_when_todo_exists_but_no_work_is_dispatchable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        write_board_task_file(
+            tmp.path(),
+            401,
+            "blocked-by-dependency",
+            "todo",
+            None,
+            &[999],
+            None,
+        );
+
+        daemon.maybe_trigger_planning_cycle().unwrap();
+
+        let messages = planning_inbox_messages(&tmp);
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].body.contains("dispatchable_tasks=0"));
+        assert!(messages[0].body.contains("Propose exactly 3 task(s)."));
+        assert!(daemon.planning_cycle_active);
     }
 
     #[test]
