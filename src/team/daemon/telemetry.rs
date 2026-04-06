@@ -346,11 +346,13 @@ impl TeamDaemon {
         engineer: &str,
         task_id: u32,
         reclaimed: bool,
+        time_held_secs: Option<u64>,
     ) {
         self.emit_event(TeamEvent::task_claim_expired(
             engineer,
             &task_id.to_string(),
             reclaimed,
+            time_held_secs,
         ));
     }
 
