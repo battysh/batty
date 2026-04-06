@@ -59,10 +59,16 @@ pub(crate) fn run_tests_in_worktree(
 ) -> Result<TestRunOutput> {
     let command_text = test_command.unwrap_or("cargo test");
     let mut command = std::process::Command::new("sh");
+    let cargo_home = engineer_worktree_project_root(worktree_dir)
+        .map(|project_root| project_root.join(".batty").join("cargo-home"))
+        .unwrap_or_else(|| worktree_dir.join(".batty").join("cargo-home"));
+    std::fs::create_dir_all(&cargo_home)
+        .with_context(|| format!("failed to create {}", cargo_home.display()))?;
     command
         .arg("-lc")
         .arg(command_text)
         .current_dir(worktree_dir);
+    command.env("CARGO_HOME", &cargo_home);
     if let Some(project_root) = engineer_worktree_project_root(worktree_dir) {
         command.env("CARGO_TARGET_DIR", shared_cargo_target_dir(&project_root));
     }
