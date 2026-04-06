@@ -232,6 +232,12 @@ pub enum Command {
     /// Trigger an explicit topology reload for the running daemon
     Reload,
 
+    /// Run autonomous evaluator-driven research missions
+    Research {
+        #[command(subcommand)]
+        command: ResearchCommand,
+    },
+
     /// Dump diagnostic state from Batty state files
     Doctor {
         /// Remove orphan branches and worktrees after confirmation
@@ -650,6 +656,53 @@ pub enum ScaleCommand {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum ResearchCommand {
+    /// Start a new research mission
+    Start {
+        /// Short hypothesis or mission description
+        hypothesis: String,
+        /// Evaluator shell command to run inside the worktree
+        #[arg(long)]
+        evaluator: String,
+        /// Evaluator output contract
+        #[arg(long, value_enum, default_value_t = ResearchFormatArg::Json)]
+        format: ResearchFormatArg,
+        /// Rule for keeping or discarding candidate iterations
+        #[arg(long, value_enum, default_value_t = ResearchKeepPolicyArg::PassOnly)]
+        keep_policy: ResearchKeepPolicyArg,
+        /// Stop after this many iterations
+        #[arg(long, default_value_t = 10)]
+        max_iterations: u32,
+        /// Worktree to mutate during the mission
+        #[arg(long, default_value = ".")]
+        worktree: PathBuf,
+    },
+    /// Show the current mission status
+    Status,
+    /// Show the current mission ledger
+    Ledger,
+    /// Stop the current research mission
+    Stop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ResearchFormatArg {
+    Json,
+    #[value(name = "exit-code")]
+    ExitCode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ResearchKeepPolicyArg {
+    #[value(name = "pass-only")]
+    PassOnly,
+    #[value(name = "score-improvement")]
+    ScoreImprovement,
+    #[value(name = "parity-improvement")]
+    ParityImprovement,
+}
+
+#[derive(Subcommand, Debug)]
 pub enum NudgeCommand {
     /// Disable an intervention at runtime
     Disable {
@@ -767,6 +820,58 @@ mod tests {
         match cli.command {
             Command::Reload => {}
             other => panic!("expected reload command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn research_start_subcommand_parses() {
+        let cli = Cli::parse_from([
+            "batty",
+            "research",
+            "start",
+            "improve baseline",
+            "--evaluator",
+            "cargo test",
+            "--format",
+            "exit-code",
+            "--keep-policy",
+            "parity-improvement",
+            "--max-iterations",
+            "3",
+            "--worktree",
+            "tmp/research",
+        ]);
+        match cli.command {
+            Command::Research {
+                command:
+                    ResearchCommand::Start {
+                        hypothesis,
+                        evaluator,
+                        format,
+                        keep_policy,
+                        max_iterations,
+                        worktree,
+                    },
+            } => {
+                assert_eq!(hypothesis, "improve baseline");
+                assert_eq!(evaluator, "cargo test");
+                assert_eq!(format, ResearchFormatArg::ExitCode);
+                assert_eq!(keep_policy, ResearchKeepPolicyArg::ParityImprovement);
+                assert_eq!(max_iterations, 3);
+                assert_eq!(worktree, PathBuf::from("tmp/research"));
+            }
+            other => panic!("expected research start command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn research_status_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "research", "status"]);
+        match cli.command {
+            Command::Research {
+                command: ResearchCommand::Status,
+            } => {}
+            other => panic!("expected research status command, got {other:?}"),
         }
     }
 
