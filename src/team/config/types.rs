@@ -522,7 +522,7 @@ fn default_sensitive_paths() -> Vec<String> {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AutoMergePolicy {
-    #[serde(default)]
+    #[serde(default = "default_auto_merge_enabled")]
     pub enabled: bool,
     #[serde(default = "default_max_diff_lines")]
     pub max_diff_lines: usize,
@@ -540,6 +540,9 @@ pub struct AutoMergePolicy {
 
 fn default_max_diff_lines() -> usize {
     200
+}
+fn default_auto_merge_enabled() -> bool {
+    true
 }
 fn default_max_files_changed() -> usize {
     5
@@ -560,7 +563,7 @@ fn default_require_tests_pass() -> bool {
 impl Default for AutoMergePolicy {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             max_diff_lines: default_max_diff_lines(),
             max_files_changed: default_max_files_changed(),
             max_modules_touched: default_max_modules_touched(),

@@ -483,7 +483,8 @@ mod tests {
     #[test]
     fn disabled_policy_always_manual() {
         let summary = make_summary(1, 5, 2, vec!["team"], vec![], false);
-        let policy = default_policy(); // enabled: false by default
+        let mut policy = default_policy();
+        policy.enabled = false;
         let decision = should_auto_merge(&summary, &policy, true);
         match decision {
             AutoMergeDecision::ManualReview { reasons, .. } => {
@@ -501,7 +502,7 @@ mod tests {
     fn config_deserializes_with_defaults() {
         let yaml = "{}";
         let policy: AutoMergePolicy = serde_yaml::from_str(yaml).unwrap();
-        assert!(!policy.enabled);
+        assert!(policy.enabled);
         assert_eq!(policy.max_diff_lines, 200);
         assert_eq!(policy.max_files_changed, 5);
         assert_eq!(policy.max_modules_touched, 2);
