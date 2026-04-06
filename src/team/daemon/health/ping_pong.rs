@@ -39,17 +39,32 @@ impl TeamDaemon {
             // Check for stale handles (no Pong within timeout)
             if let Some(secs_since_pong) = handle.secs_since_last_pong() {
                 if secs_since_pong > timeout_secs {
-                    warn!(
-                        member = name.as_str(),
-                        secs_since_pong, timeout_secs, "shim handle stale — no Pong within timeout"
-                    );
-                    self.record_orchestrator_action(format!(
-                        "health: shim {} stale (no Pong for {}s, timeout={}s)",
-                        name, secs_since_pong, timeout_secs
-                    ));
-                    // Don't kill here — just log. The stall detector will handle
-                    // escalation if the agent is truly stuck.
-                    continue;
+                    let recently_active = handle
+                        .secs_since_last_activity()
+                        .is_some_and(|secs_since_activity| secs_since_activity <= timeout_secs);
+                    if handle.state == crate::shim::protocol::ShimState::Working && recently_active
+                    {
+                        debug!(
+                            member = name.as_str(),
+                            secs_since_pong,
+                            timeout_secs,
+                            "shim missed recent Pong but has fresh activity; suppressing stale warning"
+                        );
+                    } else {
+                        warn!(
+                            member = name.as_str(),
+                            secs_since_pong,
+                            timeout_secs,
+                            "shim handle stale — no Pong within timeout"
+                        );
+                        self.record_orchestrator_action(format!(
+                            "health: shim {} stale (no Pong for {}s, timeout={}s)",
+                            name, secs_since_pong, timeout_secs
+                        ));
+                        // Don't kill here — just log. The stall detector will handle
+                        // escalation if the agent is truly stuck.
+                        continue;
+                    }
                 }
             }
 
@@ -239,5 +254,31 @@ mod tests {
 
         // Should log warning about stale handle but not panic
         daemon.shim_health_check().unwrap();
+    }
+
+    #[test]
+    fn shim_health_check_suppresses_stale_warning_for_recently_active_working_handle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let mut child = insert_handle_with_channel(&mut daemon, "eng-1");
+
+        daemon.shim_handles.get_mut("eng-1").unwrap().last_pong_at =
+            Some(Instant::now() - Duration::from_secs(300));
+        daemon
+            .shim_handles
+            .get_mut("eng-1")
+            .unwrap()
+            .last_activity_at = Some(Instant::now() - Duration::from_secs(10));
+        daemon
+            .shim_handles
+            .get_mut("eng-1")
+            .unwrap()
+            .apply_state_change(ShimState::Working);
+
+        daemon.last_shim_health_check = Instant::now() - Duration::from_secs(120);
+        daemon.shim_health_check().unwrap();
+
+        let cmd: Command = child.recv().unwrap().unwrap();
+        assert!(matches!(cmd, Command::Ping));
     }
 }
