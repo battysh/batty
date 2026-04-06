@@ -24,6 +24,9 @@ automation:
 
 automation_sender: human
 
+workflow_policy:
+  context_pressure_threshold: 100
+
 layout:
   zones:
     - name: architect
