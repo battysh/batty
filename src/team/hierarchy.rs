@@ -37,6 +37,24 @@ pub struct MemberInstance {
     pub use_worktrees: bool,
 }
 
+impl Default for MemberInstance {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            role_name: String::new(),
+            role_type: RoleType::Engineer,
+            agent: None,
+            model: None,
+            prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
+            reports_to: None,
+            use_worktrees: false,
+        }
+    }
+}
+
 /// Resolve the team hierarchy into a flat list of member instances.
 ///
 /// Engineer instances are multiplicative across compatible managers: each

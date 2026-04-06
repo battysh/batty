@@ -225,6 +225,7 @@ fn daemon_registers_per_role_nudge_intervals_from_prompt_sections() {
                     owns: Vec::new(),
                     barrier_group: None,
                     use_worktrees: false,
+                    ..Default::default()
                 },
                 RoleDef {
                     name: "engineer".to_string(),
@@ -243,6 +244,7 @@ fn daemon_registers_per_role_nudge_intervals_from_prompt_sections() {
                     owns: Vec::new(),
                     barrier_group: None,
                     use_worktrees: false,
+                    ..Default::default()
                 },
             ],
         },
@@ -256,6 +258,7 @@ fn daemon_registers_per_role_nudge_intervals_from_prompt_sections() {
                 prompt: None,
                 reports_to: None,
                 use_worktrees: false,
+                ..Default::default()
             },
             MemberInstance {
                 name: "eng-1".to_string(),
@@ -265,6 +268,7 @@ fn daemon_registers_per_role_nudge_intervals_from_prompt_sections() {
                 prompt: None,
                 reports_to: Some("lead".to_string()),
                 use_worktrees: true,
+                ..Default::default()
             },
         ],
         pane_map: HashMap::new(),
@@ -386,6 +390,7 @@ fn test_auto_dispatch_filters_idle_engineers_only() {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         },
         RoleDef {
             name: "manager".to_string(),
@@ -404,6 +409,7 @@ fn test_auto_dispatch_filters_idle_engineers_only() {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         },
         RoleDef {
             name: "eng-1".to_string(),
@@ -422,6 +428,7 @@ fn test_auto_dispatch_filters_idle_engineers_only() {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         },
         RoleDef {
             name: "eng-2".to_string(),
@@ -440,6 +447,7 @@ fn test_auto_dispatch_filters_idle_engineers_only() {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         },
     ];
     let members = vec![
@@ -451,6 +459,7 @@ fn test_auto_dispatch_filters_idle_engineers_only() {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         },
         MemberInstance {
             name: "manager".to_string(),
@@ -460,6 +469,7 @@ fn test_auto_dispatch_filters_idle_engineers_only() {
             prompt: None,
             reports_to: Some("architect".to_string()),
             use_worktrees: false,
+            ..Default::default()
         },
         MemberInstance {
             name: "eng-1".to_string(),
@@ -469,6 +479,7 @@ fn test_auto_dispatch_filters_idle_engineers_only() {
             prompt: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
+            ..Default::default()
         },
         MemberInstance {
             name: "eng-2".to_string(),
@@ -478,6 +489,7 @@ fn test_auto_dispatch_filters_idle_engineers_only() {
             prompt: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
+            ..Default::default()
         },
     ];
 
@@ -600,6 +612,7 @@ fn daemon_lifecycle_happy_path_exercises_decomposed_modules() {
         prompt: None,
         reports_to: None,
         use_worktrees: true,
+        ..Default::default()
     };
     let mut daemon = TeamDaemon::new(DaemonConfig {
         project_root: repo.clone(),
@@ -2287,6 +2300,7 @@ fn resume_decision_logged_to_orchestrator() {
         prompt: None,
         reports_to: None,
         use_worktrees: false,
+        ..Default::default()
     };
     let mut daemon = TeamDaemon::new(DaemonConfig {
         project_root: tmp.path().to_path_buf(),
@@ -2332,6 +2346,7 @@ fn resume_decision_logged_to_orchestrator() {
                 owns: Vec::new(),
                 barrier_group: None,
                 use_worktrees: false,
+                ..Default::default()
             }],
         },
         session: "test".to_string(),
@@ -2454,6 +2469,7 @@ fn spawn_all_agents_resume_reports_missing_sessions_across_primary_roles() {
                     owns: Vec::new(),
                     barrier_group: None,
                     use_worktrees: false,
+                    ..Default::default()
                 },
                 RoleDef {
                     name: "manager".to_string(),
@@ -2472,6 +2488,7 @@ fn spawn_all_agents_resume_reports_missing_sessions_across_primary_roles() {
                     owns: Vec::new(),
                     barrier_group: None,
                     use_worktrees: false,
+                    ..Default::default()
                 },
                 RoleDef {
                     name: "eng".to_string(),
@@ -2490,6 +2507,7 @@ fn spawn_all_agents_resume_reports_missing_sessions_across_primary_roles() {
                     owns: Vec::new(),
                     barrier_group: None,
                     use_worktrees: false,
+                    ..Default::default()
                 },
             ],
         },
@@ -2671,6 +2689,7 @@ fn clean_room_test_daemon(project_root: &Path) -> TeamDaemon {
                 owns: Vec::new(),
                 barrier_group: Some("analysis".to_string()),
                 use_worktrees: true,
+                ..Default::default()
             },
             RoleDef {
                 name: "spec-writer".to_string(),
@@ -2689,6 +2708,7 @@ fn clean_room_test_daemon(project_root: &Path) -> TeamDaemon {
                 owns: Vec::new(),
                 barrier_group: Some("analysis".to_string()),
                 use_worktrees: true,
+                ..Default::default()
             },
             RoleDef {
                 name: "analyst".to_string(),
@@ -2707,6 +2727,7 @@ fn clean_room_test_daemon(project_root: &Path) -> TeamDaemon {
                 owns: Vec::new(),
                 barrier_group: Some("analysis".to_string()),
                 use_worktrees: true,
+                ..Default::default()
             },
             RoleDef {
                 name: "engineer".to_string(),
@@ -2725,6 +2746,7 @@ fn clean_room_test_daemon(project_root: &Path) -> TeamDaemon {
                 owns: Vec::new(),
                 barrier_group: Some("implementation".to_string()),
                 use_worktrees: true,
+                ..Default::default()
             },
         ],
     };
@@ -2742,6 +2764,7 @@ fn clean_room_test_daemon(project_root: &Path) -> TeamDaemon {
                 prompt: None,
                 reports_to: Some("spec-writer".to_string()),
                 use_worktrees: true,
+                ..Default::default()
             },
             MemberInstance {
                 name: "spec-writer".to_string(),
@@ -2751,6 +2774,7 @@ fn clean_room_test_daemon(project_root: &Path) -> TeamDaemon {
                 prompt: None,
                 reports_to: None,
                 use_worktrees: true,
+                ..Default::default()
             },
             MemberInstance {
                 name: "analyst".to_string(),
@@ -2760,6 +2784,7 @@ fn clean_room_test_daemon(project_root: &Path) -> TeamDaemon {
                 prompt: None,
                 reports_to: None,
                 use_worktrees: true,
+                ..Default::default()
             },
             MemberInstance {
                 name: "eng-1".to_string(),
@@ -2769,6 +2794,7 @@ fn clean_room_test_daemon(project_root: &Path) -> TeamDaemon {
                 prompt: None,
                 reports_to: None,
                 use_worktrees: true,
+                ..Default::default()
             },
         ],
         pane_map: HashMap::new(),
@@ -2792,6 +2818,7 @@ fn cleanroom_pipeline_daemon(project_root: &Path) -> TeamDaemon {
                 prompt: Some("batty_decompiler.md".to_string()),
                 reports_to: None,
                 use_worktrees: false,
+                ..Default::default()
             },
             MemberInstance {
                 name: "spec-writer".to_string(),
@@ -2801,6 +2828,7 @@ fn cleanroom_pipeline_daemon(project_root: &Path) -> TeamDaemon {
                 prompt: Some("batty_spec_writer.md".to_string()),
                 reports_to: Some("decompiler".to_string()),
                 use_worktrees: false,
+                ..Default::default()
             },
             MemberInstance {
                 name: "test-writer".to_string(),
@@ -2810,6 +2838,7 @@ fn cleanroom_pipeline_daemon(project_root: &Path) -> TeamDaemon {
                 prompt: Some("batty_test_writer.md".to_string()),
                 reports_to: Some("spec-writer".to_string()),
                 use_worktrees: true,
+                ..Default::default()
             },
             MemberInstance {
                 name: "implementer".to_string(),
@@ -2819,6 +2848,7 @@ fn cleanroom_pipeline_daemon(project_root: &Path) -> TeamDaemon {
                 prompt: Some("batty_implementer.md".to_string()),
                 reports_to: Some("spec-writer".to_string()),
                 use_worktrees: true,
+                ..Default::default()
             },
         ],
         pane_map: HashMap::new(),

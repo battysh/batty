@@ -1841,6 +1841,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let engineer = MemberInstance {
             name: "eng-1".to_string(),
@@ -1850,6 +1851,7 @@ Second body.
             prompt: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![manager, engineer]);
         let board_tasks_dir = tmp
@@ -1915,6 +1917,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![manager]);
         let inbox_root = inbox::inboxes_root(tmp.path());
@@ -1961,6 +1964,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![manager]);
         let board_tasks_dir = tmp
@@ -2077,6 +2081,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
         daemon.active_tasks.insert("eng-1".to_string(), 10);
@@ -2106,6 +2111,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
         daemon.active_tasks.insert("eng-1".to_string(), 10);
@@ -2135,6 +2141,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
         daemon.active_tasks.insert("eng-1".to_string(), 999);
@@ -2163,6 +2170,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
         daemon.active_tasks.insert("eng-1".to_string(), 10);
@@ -2192,6 +2200,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
 
@@ -2236,6 +2245,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let engineer = MemberInstance {
             name: "eng-1".to_string(),
@@ -2245,6 +2255,7 @@ Second body.
             prompt: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: true,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(&repo, vec![manager, engineer]);
         daemon.set_member_idle("eng-1");
@@ -2292,6 +2303,7 @@ Second body.
             prompt: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let manager = MemberInstance {
             name: "manager".to_string(),
@@ -2301,6 +2313,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![manager, engineer]);
         daemon.active_tasks.insert("eng-1".to_string(), 10);
@@ -2356,6 +2369,7 @@ Second body.
             prompt: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let manager = MemberInstance {
             name: "manager".to_string(),
@@ -2365,6 +2379,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let daemon = make_test_daemon(tmp.path(), vec![manager, engineer]);
         assert_eq!(daemon.manager_for_member_name("eng-1"), Some("manager"));
@@ -2381,6 +2396,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let daemon = make_test_daemon(tmp.path(), vec![architect]);
         assert_eq!(daemon.manager_for_member_name("architect"), None);
@@ -2406,6 +2422,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let daemon = make_test_daemon(tmp.path(), vec![engineer]);
 
@@ -2457,6 +2474,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let daemon = make_test_daemon(tmp.path(), vec![manager]);
 
@@ -2508,6 +2526,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let daemon = make_test_daemon(tmp.path(), vec![manager]);
 
@@ -2570,6 +2589,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let eng2 = MemberInstance {
             name: "eng-2".to_string(),
@@ -2579,6 +2599,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let eng3 = MemberInstance {
             name: "eng-3".to_string(),
@@ -2588,6 +2609,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
 
         let daemon = TestDaemonBuilder::new(tmp.path())
@@ -2651,6 +2673,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
 
         let daemon = TestDaemonBuilder::new(tmp.path())
@@ -2678,6 +2701,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
 
         let daemon = TestDaemonBuilder::new(tmp.path())
@@ -2746,6 +2770,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let manager = MemberInstance {
             name: "manager".to_string(),
@@ -2755,6 +2780,7 @@ Second body.
             prompt: None,
             reports_to: Some("architect".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
 
         // Use tiny thresholds for testing
@@ -2832,6 +2858,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
 
         let policy = WorkflowPolicy {
@@ -2887,6 +2914,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
 
         let policy = WorkflowPolicy {
@@ -2924,6 +2952,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
 
         let mut daemon = TestDaemonBuilder::new(tmp.path())
@@ -3050,6 +3079,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let daemon = make_test_daemon(tmp.path(), vec![engineer]);
         assert!(daemon.member_worktree_context("eng-1").is_none());
@@ -3068,6 +3098,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: true,
+            ..Default::default()
         };
 
         let mut daemon = TestDaemonBuilder::new(tmp.path())
@@ -3128,6 +3159,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
 
         let mut states = std::collections::HashMap::new();
@@ -3173,6 +3205,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let eng1 = MemberInstance {
             name: "eng-1".to_string(),
@@ -3182,6 +3215,7 @@ Second body.
             prompt: None,
             reports_to: Some("architect".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
 
         let mut states = std::collections::HashMap::new();
@@ -3229,6 +3263,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let eng1 = MemberInstance {
             name: "eng-1".to_string(),
@@ -3238,6 +3273,7 @@ Second body.
             prompt: None,
             reports_to: Some("architect".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
 
         let mut states = std::collections::HashMap::new();
@@ -3284,6 +3320,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let manager = MemberInstance {
             name: "manager".to_string(),
@@ -3293,6 +3330,7 @@ Second body.
             prompt: None,
             reports_to: Some("architect".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let eng1 = MemberInstance {
             name: "eng-1".to_string(),
@@ -3302,6 +3340,7 @@ Second body.
             prompt: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
 
         let mut states = std::collections::HashMap::new();
@@ -3575,6 +3614,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let manager = MemberInstance {
             name: "manager".to_string(),
@@ -3584,6 +3624,7 @@ Second body.
             prompt: None,
             reports_to: Some("architect".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let eng1 = MemberInstance {
             name: "eng-1".to_string(),
@@ -3593,6 +3634,7 @@ Second body.
             prompt: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
 
         let mut states = std::collections::HashMap::new();
@@ -3664,6 +3706,7 @@ Second body.
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let manager = MemberInstance {
             name: "manager".to_string(),
@@ -3673,6 +3716,7 @@ Second body.
             prompt: None,
             reports_to: Some("architect".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let eng1 = MemberInstance {
             name: "eng-1".to_string(),
@@ -3682,6 +3726,7 @@ Second body.
             prompt: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
 
         let mut states = std::collections::HashMap::new();

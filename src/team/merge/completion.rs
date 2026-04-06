@@ -1299,6 +1299,7 @@ mod tests {
             prompt: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
 
@@ -1326,6 +1327,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: true,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(&repo, vec![engineer]);
 
@@ -1360,6 +1362,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: true,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(&repo, vec![engineer]);
 
@@ -1644,6 +1647,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let engineer = MemberInstance {
             name: "eng-1".to_string(),
@@ -1653,6 +1657,7 @@ mod tests {
             prompt: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: true,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(&repo, vec![manager, engineer]);
 
@@ -2013,6 +2018,7 @@ mod tests {
                 prompt: None,
                 reports_to: None,
                 use_worktrees: false,
+                ..Default::default()
             },
             MemberInstance {
                 name: "eng-1".to_string(),
@@ -2022,6 +2028,7 @@ mod tests {
                 prompt: None,
                 reports_to: Some("manager".to_string()),
                 use_worktrees: true,
+                ..Default::default()
             },
         ];
 
@@ -2106,6 +2113,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: true,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(&repo, vec![engineer]);
         daemon.set_active_task_for_test("eng-1", 42);

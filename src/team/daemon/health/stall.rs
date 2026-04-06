@@ -252,6 +252,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let engineer = MemberInstance {
             name: member_name.to_string(),
@@ -261,6 +262,7 @@ mod tests {
             prompt: None,
             reports_to: Some(lead_name.to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![lead, engineer]);
         daemon.active_tasks.insert(member_name.to_string(), 77);
@@ -373,6 +375,7 @@ mod tests {
             prompt: None,
             reports_to: Some("architect".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let engineer = MemberInstance {
             name: member_name.to_string(),
@@ -382,6 +385,7 @@ mod tests {
             prompt: None,
             reports_to: Some(lead_name.to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = TeamDaemon::new(DaemonConfig {
             project_root: tmp.path().to_path_buf(),
@@ -533,6 +537,7 @@ mod tests {
             prompt: None,
             reports_to: Some("architect".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let engineer = MemberInstance {
             name: member_name.to_string(),
@@ -542,6 +547,7 @@ mod tests {
             prompt: None,
             reports_to: Some(lead_name.to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = TeamDaemon::new(DaemonConfig {
             project_root: tmp.path().to_path_buf(),
@@ -713,6 +719,7 @@ mod tests {
             prompt: None,
             reports_to: Some("architect".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let engineer = MemberInstance {
             name: member_name.to_string(),
@@ -722,6 +729,7 @@ mod tests {
             prompt: None,
             reports_to: Some(lead_name.to_string()),
             use_worktrees: true,
+            ..Default::default()
         };
         let mut daemon = TeamDaemon::new(DaemonConfig {
             project_root: repo.clone(),
@@ -788,6 +796,7 @@ mod tests {
             prompt: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
         daemon
@@ -894,6 +903,7 @@ mod tests {
             prompt: None,
             reports_to: Some("architect".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let engineer = MemberInstance {
             name: member_name.to_string(),
@@ -903,6 +913,7 @@ mod tests {
             prompt: None,
             reports_to: Some(lead_name.to_string()),
             use_worktrees: true,
+            ..Default::default()
         };
         let mut daemon = TeamDaemon::new(DaemonConfig {
             project_root: repo.clone(),
@@ -989,6 +1000,7 @@ mod tests {
             prompt: None,
             reports_to: Some("architect".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let engineer = MemberInstance {
             name: member_name.to_string(),
@@ -998,6 +1010,7 @@ mod tests {
             prompt: None,
             reports_to: Some(lead_name.to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = TeamDaemon::new(DaemonConfig {
             project_root: tmp.path().to_path_buf(),
@@ -1040,6 +1053,7 @@ mod tests {
             prompt: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
         daemon.active_tasks.insert(member_name.to_string(), 88);

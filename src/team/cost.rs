@@ -705,6 +705,7 @@ mod tests {
                     owns: Vec::new(),
                     barrier_group: None,
                     use_worktrees: false,
+                    ..Default::default()
                 },
                 crate::team::config::RoleDef {
                     name: "engineer".to_string(),
@@ -723,6 +724,7 @@ mod tests {
                     owns: Vec::new(),
                     barrier_group: None,
                     use_worktrees: true,
+                    ..Default::default()
                 },
             ],
         }
@@ -935,6 +937,7 @@ mod tests {
                 owns: Vec::new(),
                 barrier_group: None,
                 use_worktrees: false,
+                ..Default::default()
             },
         );
         config.roles.push(crate::team::config::RoleDef {
@@ -954,6 +957,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         });
 
         let claude_root = project_root.join("claude-projects");
@@ -1045,6 +1049,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         assert!(member_session_target(Path::new("/tmp"), &member).is_none());
     }
@@ -1059,6 +1064,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let (agent, cwd, label) = member_session_target(Path::new("/tmp/repo"), &member).unwrap();
         assert!(matches!(agent, SessionAgent::Codex));
@@ -1076,6 +1082,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let (agent, cwd, label) = member_session_target(Path::new("/tmp/repo"), &member).unwrap();
         assert!(matches!(agent, SessionAgent::Claude));
@@ -1093,6 +1100,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let (agent, _, label) = member_session_target(Path::new("/tmp/repo"), &member).unwrap();
         assert!(matches!(agent, SessionAgent::Claude));
@@ -1109,6 +1117,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let (agent, _, label) = member_session_target(Path::new("/tmp/repo"), &member).unwrap();
         assert!(matches!(agent, SessionAgent::Claude));
@@ -1125,6 +1134,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         assert!(member_session_target(Path::new("/tmp/repo"), &member).is_none());
     }
@@ -1139,6 +1149,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: true,
+            ..Default::default()
         };
         let (_, cwd, _) = member_session_target(Path::new("/tmp/repo"), &member).unwrap();
         assert!(cwd.starts_with("/tmp/repo/.batty/worktrees/eng-1"));
@@ -1154,6 +1165,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: true,
+            ..Default::default()
         };
         let (_, cwd, _) = member_session_target(Path::new("/tmp/repo"), &member).unwrap();
         assert_eq!(cwd, Path::new("/tmp/repo/.batty/worktrees/eng-1"));

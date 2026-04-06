@@ -22,6 +22,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         }
     }
 

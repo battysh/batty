@@ -339,6 +339,7 @@ mod tests {
             prompt: None,
             reports_to: Some("architect".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = TeamDaemon {
             config: DaemonConfig {

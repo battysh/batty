@@ -394,7 +394,11 @@ roles:
             role_name: "human".to_string(),
             role_type: RoleType::User,
             agent: None,
+            model: None,
             prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
         };
@@ -722,7 +726,11 @@ roles:
             role_name: "human".to_string(),
             role_type: RoleType::User,
             agent: None,
+            model: None,
             prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
         };

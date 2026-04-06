@@ -783,6 +783,34 @@ pub struct RoleDef {
     pub use_worktrees: bool,
 }
 
+impl Default for RoleDef {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            role_type: RoleType::Engineer,
+            agent: None,
+            model: None,
+            auth_mode: None,
+            auth_env: Vec::new(),
+            instances: default_instances(),
+            prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
+            instance_overrides: HashMap::new(),
+            talks_to: Vec::new(),
+            channel: None,
+            channel_config: None,
+            nudge_interval_secs: None,
+            receives_standup: None,
+            standup_interval_secs: None,
+            owns: Vec::new(),
+            barrier_group: None,
+            use_worktrees: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RoleInstanceOverride {
     #[serde(default)]

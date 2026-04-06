@@ -731,6 +731,7 @@ mod tests {
             prompt: None,
             reports_to: Some("architect".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let engineer = MemberInstance {
             name: "eng-1".to_string(),
@@ -740,6 +741,7 @@ mod tests {
             prompt: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let architect = MemberInstance {
             name: "architect".to_string(),
@@ -749,6 +751,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
 
         TeamDaemon {
@@ -908,6 +911,7 @@ mod tests {
                         owns: Vec::new(),
                         barrier_group: None,
                         use_worktrees: false,
+                        ..Default::default()
                     }],
                 },
                 session: "test".to_string(),
@@ -919,6 +923,7 @@ mod tests {
                     prompt: None,
                     reports_to: None,
                     use_worktrees: false,
+                    ..Default::default()
                 }],
                 pane_map: HashMap::new(),
             },
@@ -969,6 +974,7 @@ mod tests {
                 owns: Vec::new(),
                 barrier_group: None,
                 use_worktrees: false,
+                ..Default::default()
             },
             RoleDef {
                 name: "eng-1".to_string(),
@@ -987,6 +993,7 @@ mod tests {
                 owns: Vec::new(),
                 barrier_group: None,
                 use_worktrees: false,
+                ..Default::default()
             },
         ];
         let members = vec![
@@ -998,6 +1005,7 @@ mod tests {
                 prompt: None,
                 reports_to: None,
                 use_worktrees: false,
+                ..Default::default()
             },
             MemberInstance {
                 name: "eng-1".to_string(),
@@ -1007,6 +1015,7 @@ mod tests {
                 prompt: None,
                 reports_to: Some("manager".to_string()),
                 use_worktrees: false,
+                ..Default::default()
             },
         ];
 
@@ -1089,6 +1098,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = TeamDaemon {
             config: DaemonConfig {
@@ -1161,6 +1171,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         }];
         daemon.config.members = vec![MemberInstance {
             name: "manager".to_string(),
@@ -1170,6 +1181,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         }];
 
         daemon
@@ -1219,6 +1231,7 @@ mod tests {
                 owns: Vec::new(),
                 barrier_group: None,
                 use_worktrees: false,
+                ..Default::default()
             },
             RoleDef {
                 name: "eng".to_string(),
@@ -1237,6 +1250,7 @@ mod tests {
                 owns: Vec::new(),
                 barrier_group: None,
                 use_worktrees: false,
+                ..Default::default()
             },
         ];
         let members = vec![
@@ -1248,6 +1262,7 @@ mod tests {
                 prompt: None,
                 reports_to: None,
                 use_worktrees: false,
+                ..Default::default()
             },
             MemberInstance {
                 name: "eng-1".to_string(),
@@ -1257,6 +1272,7 @@ mod tests {
                 prompt: None,
                 reports_to: Some("manager".to_string()),
                 use_worktrees: false,
+                ..Default::default()
             },
         ];
 
@@ -1510,6 +1526,7 @@ mod tests {
             prompt: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
+            ..Default::default()
         });
 
         let result = daemon

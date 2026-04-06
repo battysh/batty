@@ -239,6 +239,7 @@ mod tests {
                     owns: Vec::new(),
                     barrier_group: None,
                     use_worktrees: false,
+                    ..Default::default()
                 }],
             },
             session: "test".to_string(),
@@ -274,9 +275,14 @@ mod tests {
             role_name: "scientist".to_string(),
             role_type: RoleType::Architect,
             agent: Some("claude".to_string()),
+            model: None,
             prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
+            ..Default::default()
         };
         let mut watchers = HashMap::new();
         let mut scientist_watcher = SessionWatcher::new("%9999999", "scientist", 300, None);
@@ -430,6 +436,7 @@ mod tests {
             prompt: None,
             reports_to: Some("architect".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let engineer = MemberInstance {
             name: "eng-1".to_string(),
@@ -439,6 +446,7 @@ mod tests {
             prompt: None,
             reports_to: Some("lead".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let mut watchers = HashMap::new();
         let mut lead_watcher = SessionWatcher::new(&pane_id, "lead", 300, None);
@@ -611,6 +619,7 @@ mod tests {
                         prompt: None,
                         reports_to: None,
                         use_worktrees: false,
+                        ..Default::default()
                     },
                     MemberInstance {
                         name: "lead".to_string(),
@@ -620,6 +629,7 @@ mod tests {
                         prompt: None,
                         reports_to: Some("architect".to_string()),
                         use_worktrees: false,
+                        ..Default::default()
                     },
                     MemberInstance {
                         name: "eng-1".to_string(),
@@ -629,6 +639,7 @@ mod tests {
                         prompt: None,
                         reports_to: Some("lead".to_string()),
                         use_worktrees: false,
+                        ..Default::default()
                     },
                 ],
                 pane_map: HashMap::new(),
@@ -716,6 +727,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         }];
 
         let config = daemon_config_with_roles(tmp.path(), roles);
@@ -743,6 +755,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         }];
 
         let config = daemon_config_with_roles(tmp.path(), roles);
@@ -771,6 +784,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         }];
         let tc = crate::team::test_helpers::team_config_with_roles(roles);
         assert!(build_telegram_bot(&tc).is_none());
@@ -795,6 +809,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         }];
         let tc = crate::team::test_helpers::team_config_with_roles(roles);
         assert!(build_telegram_bot(&tc).is_none());
@@ -819,6 +834,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         }];
         let tc = crate::team::test_helpers::team_config_with_roles(roles);
         assert!(build_telegram_bot(&tc).is_none());
@@ -844,6 +860,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         }];
         let config = daemon_config_with_roles(tmp.path(), roles);
         let mut daemon = TeamDaemon::new(config).unwrap();
@@ -880,6 +897,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         }];
         let config = daemon_config_with_roles(tmp.path(), roles);
         let mut daemon = TeamDaemon::new(config).unwrap();
@@ -932,6 +950,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         }];
         let config = daemon_config_with_roles(tmp.path(), roles);
         let mut daemon = TeamDaemon::new(config).unwrap();
@@ -1054,6 +1073,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         }];
         let config = daemon_config_with_roles(tmp.path(), roles);
         let mut daemon = TeamDaemon::new(config).unwrap();
@@ -1099,6 +1119,7 @@ mod tests {
             owns: Vec::new(),
             barrier_group: None,
             use_worktrees: false,
+            ..Default::default()
         }];
         let config = daemon_config_with_roles(tmp.path(), roles);
         let mut daemon = TeamDaemon::new(config).unwrap();
@@ -1147,6 +1168,7 @@ mod tests {
                 owns: Vec::new(),
                 barrier_group: None,
                 use_worktrees: false,
+                ..Default::default()
             },
             RoleDef {
                 name: "bob".to_string(),
@@ -1165,6 +1187,7 @@ mod tests {
                 owns: Vec::new(),
                 barrier_group: None,
                 use_worktrees: false,
+                ..Default::default()
             },
         ];
         let config = daemon_config_with_roles(tmp.path(), roles);
@@ -1243,6 +1266,7 @@ mod tests {
                 prompt: None,
                 reports_to: Some("boss".to_string()),
                 use_worktrees: false,
+                ..Default::default()
             }],
             pane_map: HashMap::new(),
         };

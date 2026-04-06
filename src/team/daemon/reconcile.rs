@@ -383,6 +383,7 @@ mod tests {
             prompt: None,
             reports_to: None,
             use_worktrees: role_type == RoleType::Engineer,
+            ..Default::default()
         }
     }
 

@@ -284,6 +284,7 @@ mod tests {
             prompt: None,
             reports_to: Some(lead_name.to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = TeamDaemon::new(DaemonConfig {
             project_root: tmp.path().to_path_buf(),
@@ -390,6 +391,7 @@ mod tests {
             prompt: None,
             reports_to: Some(lead_name.to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = TeamDaemon::new(DaemonConfig {
             project_root: tmp.path().to_path_buf(),
@@ -460,6 +462,7 @@ mod tests {
             prompt: None,
             reports_to: Some(lead_name.to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = TeamDaemon::new(DaemonConfig {
             project_root: tmp.path().to_path_buf(),
@@ -474,6 +477,7 @@ mod tests {
                     prompt: None,
                     reports_to: None,
                     use_worktrees: false,
+                    ..Default::default()
                 },
                 member,
             ],
@@ -541,6 +545,7 @@ mod tests {
             prompt: None,
             reports_to: Some(lead_name.to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let mut daemon = TeamDaemon::new(DaemonConfig {
             project_root: tmp.path().to_path_buf(),
