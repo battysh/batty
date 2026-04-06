@@ -1,0 +1,360 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: batty-stall-detection
+    folder: Batty
+    interval: 60s
+    rules:
+      - uid: batty_zero_activity_30m
+        title: Zero Activity
+        condition: B
+        data:
+          - refId: A
+            datasourceUid: batty-telemetry
+            relativeTimeRange:
+              from: 1800
+              to: 0
+            model:
+              datasource:
+                type: frser-sqlite-datasource
+                uid: batty-telemetry
+              intervalMs: 1000
+              maxDataPoints: 43200
+              queryText: >
+                SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END AS value
+                FROM events
+                WHERE timestamp BETWEEN $__from / 1000 AND $__to / 1000;
+              queryType: table
+              rawQueryText: >
+                SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END AS value
+                FROM events
+                WHERE timestamp BETWEEN $__from / 1000 AND $__to / 1000;
+              rawSql: >
+                SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END AS value
+                FROM events
+                WHERE timestamp BETWEEN $__from / 1000 AND $__to / 1000;
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 1800
+              to: 0
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0.5
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: classic_conditions
+        noDataState: OK
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: No telemetry events have been recorded for 30 minutes.
+        labels:
+          severity: warning
+          alert_class: stall
+
+      - uid: batty_dispatch_stall_20m
+        title: Dispatch Stall
+        condition: B
+        data:
+          - refId: A
+            datasourceUid: batty-telemetry
+            relativeTimeRange:
+              from: 1200
+              to: 0
+            model:
+              datasource:
+                type: frser-sqlite-datasource
+                uid: batty-telemetry
+              intervalMs: 1000
+              maxDataPoints: 43200
+              queryText: >
+                WITH starvation AS (
+                  SELECT
+                    CAST(
+                      substr(
+                        json_extract(payload, '$.reason'),
+                        instr(json_extract(payload, '$.reason'), 'todo_tasks=') + 11
+                      ) AS INTEGER
+                    ) AS todo_tasks
+                  FROM events
+                  WHERE event_type = 'pipeline_starvation_detected'
+                    AND timestamp BETWEEN $__from / 1000 AND $__to / 1000
+                  ORDER BY timestamp DESC
+                  LIMIT 1
+                ),
+                dispatches AS (
+                  SELECT COUNT(*) AS dispatch_count
+                  FROM events
+                  WHERE event_type = 'task_assigned'
+                    AND timestamp BETWEEN $__from / 1000 AND $__to / 1000
+                )
+                SELECT CASE
+                  WHEN COALESCE((SELECT todo_tasks FROM starvation), 0) > 0
+                   AND (SELECT dispatch_count FROM dispatches) = 0
+                  THEN 1 ELSE 0
+                END AS value;
+              queryType: table
+              rawQueryText: >
+                WITH starvation AS (
+                  SELECT
+                    CAST(
+                      substr(
+                        json_extract(payload, '$.reason'),
+                        instr(json_extract(payload, '$.reason'), 'todo_tasks=') + 11
+                      ) AS INTEGER
+                    ) AS todo_tasks
+                  FROM events
+                  WHERE event_type = 'pipeline_starvation_detected'
+                    AND timestamp BETWEEN $__from / 1000 AND $__to / 1000
+                  ORDER BY timestamp DESC
+                  LIMIT 1
+                ),
+                dispatches AS (
+                  SELECT COUNT(*) AS dispatch_count
+                  FROM events
+                  WHERE event_type = 'task_assigned'
+                    AND timestamp BETWEEN $__from / 1000 AND $__to / 1000
+                )
+                SELECT CASE
+                  WHEN COALESCE((SELECT todo_tasks FROM starvation), 0) > 0
+                   AND (SELECT dispatch_count FROM dispatches) = 0
+                  THEN 1 ELSE 0
+                END AS value;
+              rawSql: >
+                WITH starvation AS (
+                  SELECT
+                    CAST(
+                      substr(
+                        json_extract(payload, '$.reason'),
+                        instr(json_extract(payload, '$.reason'), 'todo_tasks=') + 11
+                      ) AS INTEGER
+                    ) AS todo_tasks
+                  FROM events
+                  WHERE event_type = 'pipeline_starvation_detected'
+                    AND timestamp BETWEEN $__from / 1000 AND $__to / 1000
+                  ORDER BY timestamp DESC
+                  LIMIT 1
+                ),
+                dispatches AS (
+                  SELECT COUNT(*) AS dispatch_count
+                  FROM events
+                  WHERE event_type = 'task_assigned'
+                    AND timestamp BETWEEN $__from / 1000 AND $__to / 1000
+                )
+                SELECT CASE
+                  WHEN COALESCE((SELECT todo_tasks FROM starvation), 0) > 0
+                   AND (SELECT dispatch_count FROM dispatches) = 0
+                  THEN 1 ELSE 0
+                END AS value;
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 1200
+              to: 0
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0.5
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: classic_conditions
+        noDataState: OK
+        execErrState: Alerting
+        for: 2m
+        annotations:
+          summary: Todo work is waiting but no task assignments have occurred for 20 minutes.
+        labels:
+          severity: warning
+          alert_class: stall
+
+      - uid: batty_agent_crash_spike_10m
+        title: Agent Crash Spike
+        condition: B
+        data:
+          - refId: A
+            datasourceUid: batty-telemetry
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              datasource:
+                type: frser-sqlite-datasource
+                uid: batty-telemetry
+              intervalMs: 1000
+              maxDataPoints: 43200
+              queryText: >
+                SELECT COUNT(*) AS value
+                FROM events
+                WHERE event_type IN ('member_crashed', 'pane_death')
+                  AND timestamp BETWEEN $__from / 1000 AND $__to / 1000;
+              queryType: table
+              rawQueryText: >
+                SELECT COUNT(*) AS value
+                FROM events
+                WHERE event_type IN ('member_crashed', 'pane_death')
+                  AND timestamp BETWEEN $__from / 1000 AND $__to / 1000;
+              rawSql: >
+                SELECT COUNT(*) AS value
+                FROM events
+                WHERE event_type IN ('member_crashed', 'pane_death')
+                  AND timestamp BETWEEN $__from / 1000 AND $__to / 1000;
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 3
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: classic_conditions
+        noDataState: OK
+        execErrState: Alerting
+        for: 2m
+        annotations:
+          summary: More than three agent crash events have been recorded in 10 minutes.
+        labels:
+          severity: critical
+          alert_class: crash
+
+      - uid: batty_review_queue_backup_30m
+        title: Review Queue Backup
+        condition: B
+        data:
+          - refId: A
+            datasourceUid: batty-telemetry
+            relativeTimeRange:
+              from: 1800
+              to: 0
+            model:
+              datasource:
+                type: frser-sqlite-datasource
+                uid: batty-telemetry
+              intervalMs: 1000
+              maxDataPoints: 43200
+              queryText: >
+                SELECT COUNT(*) AS value
+                FROM task_metrics tm
+                WHERE tm.completed_at IS NOT NULL
+                  AND tm.completed_at <= strftime('%s', 'now') - 1800
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM events e
+                    WHERE e.task_id = tm.task_id
+                      AND e.event_type IN ('task_auto_merged', 'task_manual_merged', 'task_reworked')
+                      AND e.timestamp >= tm.completed_at
+                  );
+              queryType: table
+              rawQueryText: >
+                SELECT COUNT(*) AS value
+                FROM task_metrics tm
+                WHERE tm.completed_at IS NOT NULL
+                  AND tm.completed_at <= strftime('%s', 'now') - 1800
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM events e
+                    WHERE e.task_id = tm.task_id
+                      AND e.event_type IN ('task_auto_merged', 'task_manual_merged', 'task_reworked')
+                      AND e.timestamp >= tm.completed_at
+                  );
+              rawSql: >
+                SELECT COUNT(*) AS value
+                FROM task_metrics tm
+                WHERE tm.completed_at IS NOT NULL
+                  AND tm.completed_at <= strftime('%s', 'now') - 1800
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM events e
+                    WHERE e.task_id = tm.task_id
+                      AND e.event_type IN ('task_auto_merged', 'task_manual_merged', 'task_reworked')
+                      AND e.timestamp >= tm.completed_at
+                  );
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 1800
+              to: 0
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: classic_conditions
+        noDataState: OK
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: At least one completed task has been waiting for merge or rework for more than 30 minutes.
+        labels:
+          severity: warning
+          alert_class: review
