@@ -74,24 +74,16 @@ impl TeamDaemon {
             return Ok(());
         }
 
+        let work_dir = self.member_work_dir(&member);
+
         // Write progress checkpoint before restarting.
-        let checkpoint = super::super::super::checkpoint::gather_checkpoint(
-            &self.config.project_root,
-            member_name,
-            &task,
-        );
-        if let Err(error) = super::super::super::checkpoint::write_checkpoint(
-            &self.config.project_root,
-            &checkpoint,
-        ) {
-            warn!(member = %member_name, error = %error, "failed to write progress checkpoint");
-        }
+        self.preserve_restart_context(member_name, &task, Some(&pane_id), &work_dir, "stalled");
 
         // Restart the stalled agent with task context.
         tmux::respawn_pane(&pane_id, "bash")?;
         std::thread::sleep(std::time::Duration::from_millis(200));
 
-        let assignment = Self::restart_assignment_message(&task);
+        let assignment = self.restart_assignment_with_handoff(&task, &work_dir);
         let launch = self.launch_task_assignment(member_name, &assignment, Some(task.id), false)?;
         let mut restart_notice = format!(
             "Restarted after stall ({}s no output). Continue task #{} from the current worktree state.",

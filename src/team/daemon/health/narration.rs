@@ -352,40 +352,13 @@ impl TeamDaemon {
 
         warn!(member = %member_name, task_id = task.id, "restarting agent after sustained narration loop");
         self.preserve_worktree_before_restart(member_name, &work_dir, "narration loop");
-        if self
-            .config
-            .team_config
-            .workflow_policy
-            .context_handoff_enabled
-        {
-            let recent_output = self.capture_context_handoff_output(&pane_id);
-            if let Err(error) =
-                crate::shim::runtime::preserve_handoff(&work_dir, &task, recent_output.as_deref())
-            {
-                warn!(
-                    member = %member_name,
-                    task_id = task.id,
-                    error = %error,
-                    "failed to preserve narration restart handoff"
-                );
-            }
-        }
-
-        let checkpoint = super::super::super::checkpoint::gather_checkpoint(
-            &self.config.project_root,
+        self.preserve_restart_context(
             member_name,
             &task,
+            Some(&pane_id),
+            &work_dir,
+            "narration",
         );
-        if let Err(error) = super::super::super::checkpoint::write_checkpoint(
-            &self.config.project_root,
-            &checkpoint,
-        ) {
-            warn!(
-                member = %member_name,
-                error = %error,
-                "failed to write narration restart checkpoint"
-            );
-        }
 
         crate::tmux::respawn_pane(&pane_id, "bash")?;
         std::thread::sleep(Duration::from_millis(200));

@@ -326,6 +326,11 @@ impl TeamDaemon {
     }
 
     fn execute_telegram_kick_command(&mut self, member: &str) -> Result<String> {
+        if self.active_task_id(member).is_some() {
+            self.restart_member_with_task_context(member, "telegram kick")?;
+            return Ok(format!("Restarted {member} with structured handoff."));
+        }
+
         let mut saved = false;
         if self.member_uses_worktrees(member) {
             let worktree_dir = self.worktree_dir(member);

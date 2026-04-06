@@ -71,6 +71,8 @@ fn init_schema(conn: &Connection) -> Result<()> {
             narration_rejections INTEGER NOT NULL DEFAULT 0,
             escalations      INTEGER NOT NULL DEFAULT 0,
             context_restart_count INTEGER NOT NULL DEFAULT 0,
+            handoff_attempts INTEGER NOT NULL DEFAULT 0,
+            handoff_successes INTEGER NOT NULL DEFAULT 0,
             carry_forward_effective INTEGER,
             merge_time_secs  INTEGER,
             confidence_score REAL
@@ -104,6 +106,14 @@ fn init_schema(conn: &Connection) -> Result<()> {
     );
     let _ = conn.execute(
         "ALTER TABLE task_metrics ADD COLUMN carry_forward_effective INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE task_metrics ADD COLUMN handoff_attempts INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE task_metrics ADD COLUMN handoff_successes INTEGER NOT NULL DEFAULT 0",
         [],
     );
     Ok(())
@@ -274,6 +284,18 @@ fn update_metrics_for_event(conn: &Connection, event: &TeamEvent) -> Result<()> 
                 )?;
             }
         }
+        "agent_handoff" => {
+            if let Some(task) = &event.task {
+                let success = if event.success == Some(true) { 1 } else { 0 };
+                conn.execute(
+                    "INSERT INTO task_metrics (task_id, handoff_attempts, handoff_successes) VALUES (?1, 1, ?2)
+                     ON CONFLICT(task_id) DO UPDATE SET
+                       handoff_attempts = handoff_attempts + 1,
+                       handoff_successes = handoff_successes + ?2",
+                    params![task, success],
+                )?;
+            }
+        }
         "task_auto_merged" | "task_manual_merged" => {
             if let Some(task) = &event.task {
                 conn.execute(
@@ -438,6 +460,8 @@ pub struct TaskMetricsRow {
     pub narration_rejections: i64,
     pub escalations: i64,
     pub context_restart_count: i64,
+    pub handoff_attempts: i64,
+    pub handoff_successes: i64,
     pub carry_forward_effective: Option<bool>,
     pub merge_time_secs: Option<i64>,
     pub confidence_score: Option<f64>,
@@ -446,7 +470,8 @@ pub struct TaskMetricsRow {
 pub fn query_task_metrics(conn: &Connection) -> Result<Vec<TaskMetricsRow>> {
     let mut stmt = conn.prepare(
         "SELECT task_id, started_at, completed_at, retries, narration_rejections, escalations,
-                context_restart_count, carry_forward_effective, merge_time_secs, confidence_score
+                context_restart_count, handoff_attempts, handoff_successes,
+                carry_forward_effective, merge_time_secs, confidence_score
          FROM task_metrics ORDER BY started_at DESC NULLS LAST LIMIT 50",
     )?;
     let rows = stmt
@@ -459,9 +484,11 @@ pub fn query_task_metrics(conn: &Connection) -> Result<Vec<TaskMetricsRow>> {
                 narration_rejections: row.get(4)?,
                 escalations: row.get(5)?,
                 context_restart_count: row.get(6)?,
-                carry_forward_effective: row.get::<_, Option<i64>>(7)?.map(|value| value != 0),
-                merge_time_secs: row.get(8)?,
-                confidence_score: row.get(9)?,
+                handoff_attempts: row.get(7)?,
+                handoff_successes: row.get(8)?,
+                carry_forward_effective: row.get::<_, Option<i64>>(9)?.map(|value| value != 0),
+                merge_time_secs: row.get(10)?,
+                confidence_score: row.get(11)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -809,7 +836,22 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].task_id, "42");
         assert_eq!(tasks[0].context_restart_count, 2);
+        assert_eq!(tasks[0].handoff_attempts, 0);
         assert_eq!(tasks[0].carry_forward_effective, None);
+    }
+
+    #[test]
+    fn agent_handoff_updates_attempt_and_success_counts() {
+        let conn = open_in_memory().unwrap();
+        insert_event(&conn, &TeamEvent::agent_handoff("eng-1", "42", "stalled", true)).unwrap();
+        insert_event(&conn, &TeamEvent::agent_handoff("eng-1", "42", "shim_crash", false))
+            .unwrap();
+
+        let tasks = query_task_metrics(&conn).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, "42");
+        assert_eq!(tasks[0].handoff_attempts, 2);
+        assert_eq!(tasks[0].handoff_successes, 1);
     }
 
     #[test]
