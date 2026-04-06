@@ -16,8 +16,10 @@ use crate::team::events::TeamEvent;
 use crate::team::hierarchy::MemberInstance;
 use crate::team::inbox;
 use crate::team::standup::MemberState;
+use crate::team::task_cmd::{set_optional_string, update_task_frontmatter, yaml_key};
 use crate::team::watcher::SessionWatcher;
 use crate::tmux;
+use serde_yaml::Value;
 
 impl TeamDaemon {
     /// Apply a topology diff to the running daemon: spawn new agents, remove old ones,
@@ -165,6 +167,7 @@ impl TeamDaemon {
     /// Remove a member: graceful shim shutdown, kill tmux pane, clean up state.
     fn remove_member(&mut self, name: &str) -> Result<()> {
         info!(member = name, "removing member from topology");
+        self.requeue_removed_member_tasks(name)?;
 
         // Check if agent is currently working
         let is_working = self
@@ -261,6 +264,38 @@ impl TeamDaemon {
         Ok(())
     }
 
+    fn requeue_removed_member_tasks(&mut self, name: &str) -> Result<()> {
+        let board_dir = self.config.project_root.join(".batty").join("team_config").join("board");
+        let tasks_dir = board_dir.join("tasks");
+        if !tasks_dir.is_dir() {
+            return Ok(());
+        }
+
+        let tasks = crate::task::load_tasks_from_dir(&tasks_dir)?;
+        for task in tasks
+            .iter()
+            .filter(|task| task.claimed_by.as_deref() == Some(name))
+            .filter(|task| matches!(task.status.as_str(), "todo" | "in-progress"))
+        {
+            update_task_frontmatter(&task.source_path, |mapping| {
+                set_optional_string(mapping, "claimed_by", None);
+                set_optional_string(mapping, "review_owner", None);
+                set_optional_string(mapping, "claimed_at", None);
+                if task.status == "in-progress" {
+                    mapping.insert(yaml_key("status"), Value::String("todo".to_string()));
+                }
+            })?;
+
+            self.record_state_reconciliation(Some(name), Some(task.id), "requeue_removed_member_task");
+            self.record_orchestrator_action(format!(
+                "topology: requeued task #{} from removed member {}",
+                task.id, name
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Create a new tmux pane for a member by splitting an existing one.
     fn create_pane_for_member(&self, member: &MemberInstance) -> Result<String> {
         let target_pane = self.find_split_target(member);
@@ -331,6 +366,7 @@ mod tests {
     use crate::team::config::RoleType;
     use crate::team::config_diff::{MemberChange, TopologyDiff};
     use crate::team::hierarchy::MemberInstance;
+    use crate::team::test_support::{TestDaemonBuilder, write_board_task_file};
 
     fn make_member(name: &str, role_type: RoleType) -> MemberInstance {
         MemberInstance {
@@ -456,5 +492,63 @@ mod tests {
             }
         }
         assert_eq!(target, Some("%0".to_string()));
+    }
+
+    #[test]
+    fn requeue_removed_member_tasks_moves_in_progress_work_back_to_todo() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_board_task_file(
+            tmp.path(),
+            42,
+            "active-task",
+            "in-progress",
+            Some("eng-1"),
+            &[],
+            None,
+        );
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![make_member("eng-1", RoleType::Engineer)])
+            .build();
+
+        daemon.requeue_removed_member_tasks("eng-1").unwrap();
+
+        let task = crate::task::load_tasks_from_dir(
+            &tmp.path().join(".batty").join("team_config").join("board").join("tasks"),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|task| task.id == 42)
+        .unwrap();
+        assert_eq!(task.status, "todo");
+        assert!(task.claimed_by.is_none());
+    }
+
+    #[test]
+    fn requeue_removed_member_tasks_unclaims_todo_work_without_changing_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_board_task_file(
+            tmp.path(),
+            43,
+            "queued-task",
+            "todo",
+            Some("eng-1"),
+            &[],
+            None,
+        );
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![make_member("eng-1", RoleType::Engineer)])
+            .build();
+
+        daemon.requeue_removed_member_tasks("eng-1").unwrap();
+
+        let task = crate::task::load_tasks_from_dir(
+            &tmp.path().join(".batty").join("team_config").join("board").join("tasks"),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|task| task.id == 43)
+        .unwrap();
+        assert_eq!(task.status, "todo");
+        assert!(task.claimed_by.is_none());
     }
 }
