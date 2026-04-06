@@ -105,27 +105,32 @@ impl TeamDaemon {
         let member_names: Vec<String> = self.shim_handles.keys().cloned().collect();
 
         for name in &member_names {
-            // Try to receive an event from the shim (non-blocking).
-            // We need to extract the handle, process events, then put it back.
-            let event = {
-                let Some(handle) = self.shim_handles.get_mut(name) else {
-                    continue;
-                };
-                match handle.try_recv_event() {
-                    Ok(Some(event)) => event,
-                    Ok(None) => continue, // EOF — shim disconnected
-                    Err(error) => {
-                        debug!(
-                            member = name.as_str(),
-                            error = %error,
-                            "shim channel recv error"
-                        );
-                        continue;
+            loop {
+                // Drain all currently queued events for this shim before
+                // moving on. A busy shim can emit SessionStats, state
+                // transitions, and a Pong between daemon polls; reading only
+                // one event per 5s daemon tick can leave Pong buried long
+                // enough to trigger false stale warnings.
+                let event = {
+                    let Some(handle) = self.shim_handles.get_mut(name) else {
+                        break;
+                    };
+                    match handle.try_recv_event() {
+                        Ok(Some(event)) => event,
+                        Ok(None) => break,
+                        Err(error) => {
+                            debug!(
+                                member = name.as_str(),
+                                error = %error,
+                                "shim channel recv error"
+                            );
+                            break;
+                        }
                     }
-                }
-            };
+                };
 
-            self.handle_shim_event(name, event)?;
+                self.handle_shim_event(name, event)?;
+            }
         }
 
         Ok(())
@@ -845,7 +850,10 @@ mod tests {
 
     fn insert_mock_handle(daemon: &mut TeamDaemon, name: &str) -> crate::shim::protocol::Channel {
         let (parent, child) = crate::shim::protocol::socketpair().unwrap();
-        let channel = crate::shim::protocol::Channel::new(parent);
+        let mut channel = crate::shim::protocol::Channel::new(parent);
+        channel
+            .set_read_timeout(Some(std::time::Duration::from_millis(5)))
+            .unwrap();
         let handle = crate::team::daemon::agent_handle::AgentHandle::new(
             name.into(),
             channel,
@@ -933,6 +941,36 @@ mod tests {
 
         assert_eq!(daemon.states.get("eng-1"), Some(&MemberState::Working));
         assert!(daemon.shim_handles["eng-1"].is_working());
+    }
+
+    #[test]
+    fn poll_shim_handles_drains_multiple_queued_events_in_one_tick() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let mut child = insert_mock_handle(&mut daemon, "eng-1");
+
+        child
+            .send(&Event::StateChanged {
+                from: ShimState::Idle,
+                to: ShimState::Working,
+                summary: "started work".into(),
+            })
+            .unwrap();
+        child
+            .send(&Event::SessionStats {
+                output_bytes: 512,
+                uptime_secs: 42,
+            })
+            .unwrap();
+        child.send(&Event::Pong).unwrap();
+
+        daemon.poll_shim_handles().unwrap();
+
+        let handle = daemon.shim_handles.get("eng-1").unwrap();
+        assert!(handle.is_working());
+        assert_eq!(handle.output_bytes, 512);
+        assert!(handle.last_pong_at.is_some());
+        assert!(handle.last_activity_at.is_some());
     }
 
     #[test]
