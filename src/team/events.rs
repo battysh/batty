@@ -229,6 +229,19 @@ impl TeamEvent {
         }
     }
 
+    pub fn dispatch_overlap_skipped(
+        candidate_task_id: u32,
+        conflicting_task_id: &str,
+        conflicting_files: &[String],
+    ) -> Self {
+        Self {
+            task: Some(candidate_task_id.to_string()),
+            reason: Some(conflicting_task_id.to_string()),
+            details: Some(conflicting_files.join(",")),
+            ..Self::base("dispatch_overlap_skipped")
+        }
+    }
+
     pub fn cwd_corrected(role: &str, path: &str) -> Self {
         Self {
             role: Some(role.into()),
