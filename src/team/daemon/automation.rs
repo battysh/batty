@@ -14,6 +14,60 @@ use super::*;
 
 const STATE_RECONCILIATION_AUDIT_KEY: &str = "state-reconciliation::audit";
 
+fn normalized_context_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with("```") {
+        return None;
+    }
+
+    let trimmed = trimmed.trim_start_matches('#').trim();
+    let trimmed = trimmed.trim_start_matches('-').trim();
+    let trimmed = trimmed.trim_start_matches('*').trim();
+    let trimmed = trimmed
+        .strip_prefix(|ch: char| ch.is_ascii_digit())
+        .and_then(|rest| rest.strip_prefix('.'))
+        .map(str::trim)
+        .unwrap_or(trimmed);
+
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn collect_context_lines(path: &std::path::Path, limit: usize) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|content| {
+            content
+                .lines()
+                .filter_map(normalized_context_line)
+                .take(limit)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn planning_prompt_context(project_root: &std::path::Path) -> (Vec<String>, Vec<String>) {
+    let planning_dir = project_root.join("planning");
+    let roadmap = collect_context_lines(&planning_dir.join("roadmap.md"), 6);
+
+    let goals = [
+        planning_dir.join("architecture.md"),
+        planning_dir.join("dev-philosophy.md"),
+        project_root.join("README.md"),
+    ]
+    .into_iter()
+    .find_map(|path| {
+        let lines = collect_context_lines(&path, 6);
+        if lines.is_empty() { None } else { Some(lines) }
+    })
+    .unwrap_or_default();
+
+    (roadmap, goals)
+}
+
 impl TeamDaemon {
     pub(super) fn reconcile_active_tasks(&mut self) -> Result<()> {
         let tasks_dir = self.board_dir().join("tasks");
@@ -666,11 +720,13 @@ impl TeamDaemon {
             _ => "recent completion recorded".to_string(),
         })
         .collect::<Vec<_>>();
+        let (roadmap_context, project_goals) = planning_prompt_context(&self.config.project_root);
         let prompt = crate::team::tact::compose_planning_prompt(
             idle_engineer_count,
             &board_summary,
             &recent_completions,
-            &[],
+            &roadmap_context,
+            &project_goals,
             &self.config.team_config.name,
         );
         let body = format!(
@@ -1117,6 +1173,21 @@ printf 'Created task #%s\n' \"$id\"
         inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "architect").unwrap()
     }
 
+    fn write_planning_docs(tmp: &tempfile::TempDir) {
+        let planning_dir = tmp.path().join("planning");
+        std::fs::create_dir_all(&planning_dir).unwrap();
+        std::fs::write(
+            planning_dir.join("roadmap.md"),
+            "# Roadmap\n\nPhase 2: Productionize tact planning.\n- Auto-dispatch new tact tasks.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            planning_dir.join("architecture.md"),
+            "# Architecture\n\nGoal: Keep idle engineers fed with executable work.\n- Prefer small end-to-end automation loops.\n",
+        )
+        .unwrap();
+    }
+
     const SINGLE_TASK_RESPONSE: &str = r#"---
 title: "Add planning telemetry"
 priority: high
@@ -1200,6 +1271,41 @@ Second body.
         let messages = planning_inbox_messages(&tmp);
         assert_eq!(messages.len(), 1);
         assert!(messages[0].body.contains("eng-2 completed task #44"));
+    }
+
+    #[test]
+    fn planning_cycle_prompt_uses_truly_idle_engineer_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        daemon.pipeline_starvation_fired = true;
+
+        write_board_task_file(
+            tmp.path(),
+            201,
+            "eng-1-active-review",
+            "review",
+            Some("eng-1"),
+            &[],
+            None,
+        );
+
+        daemon.maybe_trigger_planning_cycle().unwrap();
+
+        let messages = planning_inbox_messages(&tmp);
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].body.contains("Idle engineers available: 2"));
+        assert!(messages[0].body.contains("Propose exactly 2 task(s)."));
+    }
+
+    #[test]
+    fn planning_cycle_does_not_trigger_without_starvation_signal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = planning_test_daemon(&tmp, 300);
+
+        daemon.maybe_trigger_planning_cycle().unwrap();
+
+        assert!(planning_inbox_messages(&tmp).is_empty());
+        assert!(!daemon.planning_cycle_active);
     }
 
     #[test]
@@ -1406,6 +1512,7 @@ Second body.
             "todo=0 backlog=2 in-progress=1 review=0 done=3 idle_engineers=3",
             &["eng-1 completed task #44".to_string()],
             &["Improve planning automation".to_string()],
+            &["Improve planning automation".to_string()],
             "Batty",
         );
 
@@ -1413,6 +1520,57 @@ Second body.
         assert!(prompt.contains("Improve planning automation"));
         assert_eq!(specs.len(), 3);
         assert_eq!(specs[2].depends_on, vec![1, 2]);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    #[cfg_attr(not(feature = "integration"), ignore)]
+    fn planning_cycle_end_to_end_includes_context_and_dispatches_created_work() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        write_planning_docs(&tmp);
+        let (fake_bin, _log_path) = setup_fake_kanban_for_planning(&tmp);
+        let path = format!(
+            "{}:{}",
+            fake_bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let _path_guard = EnvVarGuard::set("PATH", &path);
+
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        daemon.config.team_config.workflow_policy.pipeline_starvation_threshold = Some(1);
+        daemon.config.team_config.board.dispatch_stabilization_delay_secs = 0;
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        for engineer in ["eng-1", "eng-2", "eng-3"] {
+            daemon.idle_started_at.insert(
+                engineer.to_string(),
+                Instant::now() - Duration::from_secs(60),
+            );
+        }
+
+        daemon.maybe_detect_pipeline_starvation().unwrap();
+        assert!(daemon.pipeline_starvation_fired);
+
+        daemon.maybe_trigger_planning_cycle().unwrap();
+
+        let messages = planning_inbox_messages(&tmp);
+        assert_eq!(messages.len(), 2);
+        let planning_prompt = &messages[1].body;
+        assert!(planning_prompt.contains("Phase 2: Productionize tact planning."));
+        assert!(planning_prompt.contains("Auto-dispatch new tact tasks."));
+        assert!(planning_prompt.contains("Goal: Keep idle engineers fed with executable work."));
+
+        let created = daemon.handle_planning_response(THREE_TASK_RESPONSE).unwrap();
+        assert_eq!(created, 3);
+
+        daemon.maybe_auto_dispatch().unwrap();
+
+        let tasks = crate::task::load_tasks_from_dir(&daemon.board_dir().join("tasks")).unwrap();
+        assert!(
+            tasks.iter()
+                .any(|task| task.status == "in-progress" && task.claimed_by.is_some()),
+            "expected at least one created tact task to be dispatched"
+        );
     }
 
     #[test]

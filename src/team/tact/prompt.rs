@@ -16,6 +16,7 @@ pub fn compose_planning_prompt(
     idle_engineer_count: usize,
     board_summary: &str,
     recent_completions: &[String],
+    roadmap_context: &[String],
     project_goals: &[String],
     project_name: &str,
 ) -> String {
@@ -39,12 +40,23 @@ pub fn compose_planning_prompt(
             .join("\n")
     };
 
+    let roadmap = if roadmap_context.is_empty() {
+        "- No roadmap context was available.".to_string()
+    } else {
+        roadmap_context
+            .iter()
+            .map(|item| format!("- {item}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
     format!(
         "You are planning the next execution wave for the project `{project_name}`.\n\n\
 Current board state:\n\
 - Idle engineers available: {idle_engineer_count}\n\
 - Recently completed work:\n{completions}\n\n\
 Board summary:\n{board_summary}\n\n\
+Roadmap context:\n{roadmap}\n\n\
 Project goals:\n{goals}\n\n\
 Propose exactly {idle_engineer_count} task(s). Each task must be feature-sized, self-contained, \
 and ready to hand directly to an engineer. Include concrete file paths and explicit acceptance \
@@ -59,15 +71,39 @@ mod tests {
 
     #[test]
     fn compose_produces_nonempty_prompt() {
-        let prompt = compose_planning_prompt(2, "board text", &["Done".to_string()], &[], "Batty");
+        let prompt = compose_planning_prompt(
+            2,
+            "board text",
+            &["Done".to_string()],
+            &[],
+            &[],
+            "Batty",
+        );
         assert!(!prompt.trim().is_empty());
     }
 
     #[test]
     fn compose_includes_engineer_count() {
-        let prompt = compose_planning_prompt(3, "board text", &[], &[], "Batty");
+        let prompt = compose_planning_prompt(3, "board text", &[], &[], &[], "Batty");
         assert!(prompt.contains("Idle engineers available: 3"));
         assert!(prompt.contains("Propose exactly 3 task(s)."));
+    }
+
+    #[test]
+    fn compose_includes_roadmap_context() {
+        let prompt = compose_planning_prompt(
+            1,
+            "board text",
+            &[],
+            &[
+                "Phase 2: Deliver tact planning loop".to_string(),
+                "Milestone: auto-dispatch created work".to_string(),
+            ],
+            &[],
+            "Batty",
+        );
+        assert!(prompt.contains("- Phase 2: Deliver tact planning loop"));
+        assert!(prompt.contains("- Milestone: auto-dispatch created work"));
     }
 
     #[test]
@@ -75,6 +111,7 @@ mod tests {
         let prompt = compose_planning_prompt(
             1,
             "board text",
+            &[],
             &[],
             &[
                 "Ship tact".to_string(),
@@ -88,13 +125,19 @@ mod tests {
 
     #[test]
     fn compose_handles_empty_completions() {
-        let prompt = compose_planning_prompt(1, "board text", &[], &[], "Batty");
+        let prompt = compose_planning_prompt(1, "board text", &[], &[], &[], "Batty");
         assert!(prompt.contains("Recently completed work:\nNone."));
     }
 
     #[test]
+    fn compose_handles_empty_roadmap_context() {
+        let prompt = compose_planning_prompt(1, "board text", &[], &[], &[], "Batty");
+        assert!(prompt.contains("Roadmap context:\n- No roadmap context was available."));
+    }
+
+    #[test]
     fn compose_handles_zero_idle() {
-        let prompt = compose_planning_prompt(0, "board text", &[], &[], "Batty");
+        let prompt = compose_planning_prompt(0, "board text", &[], &[], &[], "Batty");
         assert!(prompt.contains("Idle engineers available: 0"));
         assert!(prompt.contains("Propose exactly 0 task(s)."));
     }
