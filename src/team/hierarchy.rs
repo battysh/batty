@@ -833,7 +833,7 @@ roles:
         agent: kiro
         model: claude-opus-4.6-1m
       eng-1-3:
-        agent: claude
+        agent: gemini
 "#,
         );
 
@@ -845,6 +845,6 @@ roles:
         assert_eq!(eng_1.agent.as_deref(), Some("codex"));
         assert_eq!(eng_2.agent.as_deref(), Some("kiro"));
         assert_eq!(eng_2.model.as_deref(), Some("claude-opus-4.6-1m"));
-        assert_eq!(eng_3.agent.as_deref(), Some("claude"));
+        assert_eq!(eng_3.agent.as_deref(), Some("gemini"));
     }
 }
