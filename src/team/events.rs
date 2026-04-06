@@ -90,6 +90,8 @@ pub struct TeamEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub success: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub narration_ratio: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_frequency: Option<f64>,
@@ -135,6 +137,7 @@ impl TeamEvent {
             filename: None,
             content_hash: None,
             backend: None,
+            success: None,
             narration_ratio: None,
             commit_frequency: None,
             first_pass_test_rate: None,
@@ -534,6 +537,16 @@ impl TeamEvent {
             reason: Some(reason.into()),
             restart_count: Some(restart_count),
             ..Self::base("agent_restarted")
+        }
+    }
+
+    pub fn agent_handoff(role: &str, task: &str, reason: &str, success: bool) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            reason: Some(reason.into()),
+            success: Some(success),
+            ..Self::base("agent_handoff")
         }
     }
 

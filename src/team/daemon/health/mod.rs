@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use super::*;
 use anyhow::{Context, Result};
+use tracing::warn;
 
 mod checks;
 mod auto_doctor;
@@ -95,6 +96,66 @@ impl TeamDaemon {
             message.push_str(&format!("\nWorktree: {worktree_path}"));
         }
         message
+    }
+
+    pub(super) fn preserve_restart_context(
+        &mut self,
+        member_name: &str,
+        task: &crate::task::Task,
+        pane_id: Option<&str>,
+        work_dir: &std::path::Path,
+        reason: &str,
+    ) {
+        if self
+            .config
+            .team_config
+            .workflow_policy
+            .context_handoff_enabled
+        {
+            let recent_output = pane_id.and_then(|pane| self.capture_context_handoff_output(pane));
+            let handoff_success =
+                crate::shim::runtime::preserve_handoff(work_dir, task, recent_output.as_deref());
+            match handoff_success {
+                Ok(()) => self.record_agent_handoff(
+                    member_name,
+                    task.id.to_string(),
+                    reason,
+                    true,
+                ),
+                Err(error) => {
+                    warn!(
+                        member = %member_name,
+                        task_id = task.id,
+                        reason,
+                        error = %error,
+                        "failed to preserve restart handoff"
+                    );
+                    self.record_agent_handoff(
+                        member_name,
+                        task.id.to_string(),
+                        reason,
+                        false,
+                    );
+                }
+            }
+        }
+
+        let checkpoint = super::super::checkpoint::gather_checkpoint(
+            &self.config.project_root,
+            member_name,
+            task,
+        );
+        if let Err(error) =
+            super::super::checkpoint::write_checkpoint(&self.config.project_root, &checkpoint)
+        {
+            warn!(
+                member = %member_name,
+                task_id = task.id,
+                reason,
+                error = %error,
+                "failed to write progress checkpoint"
+            );
+        }
     }
 }
 
