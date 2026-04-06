@@ -10,6 +10,7 @@ use tracing::{debug, info, warn};
 
 use super::git_cmd;
 use super::retry::{RetryConfig, retry_sync};
+use super::test_results::{self, TestRunOutput};
 
 const SHARED_CARGO_CONFIG_MARKER: &str = "# Managed by Batty: shared cargo target";
 const WORKTREE_EXCLUDE_MARKER: &str = "# Managed by Batty worktree ignores";
@@ -55,7 +56,7 @@ pub(crate) fn next_unclaimed_task(board_dir: &Path) -> Result<Option<crate::task
 pub(crate) fn run_tests_in_worktree(
     worktree_dir: &Path,
     test_command: Option<&str>,
-) -> Result<(bool, String)> {
+) -> Result<TestRunOutput> {
     let command_text = test_command.unwrap_or("cargo test");
     let mut command = std::process::Command::new("sh");
     command
@@ -88,7 +89,12 @@ pub(crate) fn run_tests_in_worktree(
         combined
     };
 
-    Ok((output.status.success(), trimmed))
+    let passed = output.status.success();
+    Ok(TestRunOutput {
+        passed,
+        results: test_results::parse(command_text, &trimmed, passed),
+        output: trimmed,
+    })
 }
 
 pub(crate) fn shared_cargo_target_dir(project_root: &Path) -> PathBuf {
@@ -1491,18 +1497,21 @@ mod tests {
             "#[cfg(test)]\nmod tests {\n    #[test]\n    fn passes() {\n        assert_eq!(2 + 2, 4);\n    }\n}\n",
         )
         .unwrap();
-        let (passed, output) = run_tests_in_worktree(worktree, None).unwrap();
-        assert!(passed);
-        assert!(output.contains("test result: ok"));
+        let run = run_tests_in_worktree(worktree, None).unwrap();
+        assert!(run.passed);
+        assert!(run.output.contains("test result: ok"));
+        assert_eq!(run.results.framework, "cargo");
 
         std::fs::write(
             worktree.join("src").join("lib.rs"),
             "#[cfg(test)]\nmod tests {\n    #[test]\n    fn fails() {\n        assert_eq!(2 + 2, 5);\n    }\n}\n",
         )
         .unwrap();
-        let (passed, output) = run_tests_in_worktree(worktree, None).unwrap();
-        assert!(!passed);
-        assert!(output.contains("FAILED"));
+        let run = run_tests_in_worktree(worktree, None).unwrap();
+        assert!(!run.passed);
+        assert!(run.output.contains("FAILED"));
+        assert_eq!(run.results.failed, 1);
+        assert_eq!(run.results.failures[0].test_name, "tests::fails");
     }
 
     #[test]
@@ -1524,9 +1533,9 @@ mod tests {
             .unwrap();
         }
 
-        let (passed, output) = run_tests_in_worktree(worktree, Some("./check.sh")).unwrap();
-        assert!(passed);
-        assert!(output.contains("CONFIG_TEST_OK"));
+        let run = run_tests_in_worktree(worktree, Some("./check.sh")).unwrap();
+        assert!(run.passed);
+        assert!(run.output.contains("CONFIG_TEST_OK"));
     }
 
     #[test]
@@ -1552,9 +1561,12 @@ mod tests {
             .unwrap();
         }
 
-        let (passed, output) = run_tests_in_worktree(&worktree_dir, Some("./check.sh")).unwrap();
-        assert!(passed);
-        assert!(output.contains(shared_cargo_target_dir(&repo).to_string_lossy().as_ref()));
+        let run = run_tests_in_worktree(&worktree_dir, Some("./check.sh")).unwrap();
+        assert!(run.passed);
+        assert!(
+            run.output
+                .contains(shared_cargo_target_dir(&repo).to_string_lossy().as_ref())
+        );
     }
 
     #[test]

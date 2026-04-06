@@ -19,6 +19,8 @@ use crate::team::task_loop::{
     checkout_worktree_branch_from_main, current_worktree_branch, engineer_base_branch_name,
     read_task_title, run_tests_in_worktree,
 };
+use crate::team::telemetry_db;
+use crate::team::test_results::TestResults;
 
 use super::git_ops::{
     code_files_changed_from_main, commits_ahead_of_main, diff_stat_from_main,
@@ -264,7 +266,8 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     };
     let test_started = Instant::now();
     // For multi-repo, run tests from the engineer's worktree root (parent of sub-repos)
-    let (tests_passed, output_truncated) = run_tests_in_worktree(
+    let previous_results = load_previous_test_results(&board_dir, task_id)?;
+    let test_run = run_tests_in_worktree(
         &worktree_dir,
         daemon
             .config
@@ -274,7 +277,22 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
             .as_deref(),
     )?;
     let test_duration_ms = test_started.elapsed().as_millis() as u64;
-    if tests_passed {
+    let flaky_failures = if test_run.passed {
+        detect_flaky_failures(previous_results.as_ref(), &test_run.results)
+    } else {
+        Vec::new()
+    };
+    persist_test_results(&board_dir, task_id, &test_run.results)?;
+    if let Some(conn) = &daemon.telemetry_db {
+        telemetry_db::record_test_results(
+            conn,
+            task_id,
+            engineer,
+            &test_run.results,
+            &flaky_failures,
+        )?;
+    }
+    if test_run.passed {
         let task_title = read_task_title(&board_dir, task_id);
 
         // --- Confidence scoring (always runs for observability) ---
@@ -559,8 +577,10 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
 
     let attempt = daemon.increment_retry(engineer);
     if attempt <= 2 {
+        let failure_summary = test_run.results.failure_summary();
         let msg = format!(
-            "Tests failed (attempt {attempt}/2). Fix the failures and try again:\n{output_truncated}"
+            "Tests failed (attempt {attempt}/2). {failure_summary}\nFix the failures and try again.\nLast output:\n{}",
+            test_run.output
         );
         daemon.queue_message("batty", engineer, &msg)?;
         daemon.mark_member_working(engineer);
@@ -569,8 +589,10 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     }
 
     if let Some(ref manager_name) = manager_name {
+        let failure_summary = test_run.results.failure_summary();
         let msg = format!(
-            "[{engineer}] task #{task_id} failed tests after 2 retries. Escalating.\nLast output:\n{output_truncated}"
+            "[{engineer}] task #{task_id} failed tests after 2 retries. Escalating.\nSummary: {failure_summary}\nLast output:\n{}",
+            test_run.output
         );
         daemon.queue_message(engineer, manager_name, &msg)?;
         daemon.mark_member_working(manager_name);
@@ -605,6 +627,35 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     daemon.set_member_idle(engineer);
     info!(engineer, task_id, "escalated to manager after max retries");
     Ok(())
+}
+
+fn load_previous_test_results(board_dir: &Path, task_id: u32) -> Result<Option<TestResults>> {
+    let task_path = crate::team::task_cmd::find_task_path(board_dir, task_id)?;
+    let metadata = crate::team::board::read_workflow_metadata(&task_path)?;
+    Ok(metadata.test_results)
+}
+
+fn persist_test_results(board_dir: &Path, task_id: u32, test_results: &TestResults) -> Result<()> {
+    let task_path = crate::team::task_cmd::find_task_path(board_dir, task_id)?;
+    let mut metadata = crate::team::board::read_workflow_metadata(&task_path)?;
+    metadata.tests_run = Some(true);
+    metadata.tests_passed = Some(test_results.failed == 0);
+    metadata.test_results = Some(test_results.clone());
+    crate::team::board::write_workflow_metadata(&task_path, &metadata)?;
+    Ok(())
+}
+
+fn detect_flaky_failures(
+    previous_results: Option<&TestResults>,
+    current_results: &TestResults,
+) -> Vec<crate::team::test_results::TestFailure> {
+    let Some(previous) = previous_results else {
+        return Vec::new();
+    };
+    if previous.failed == 0 || current_results.failed != 0 {
+        return Vec::new();
+    }
+    previous.failures.clone()
 }
 
 /// Merge engineer branches across all sub-repos in a multi-repo project.
@@ -926,6 +977,26 @@ mod tests {
         std::fs::write(worktree_dir.join("note.txt"), "done\n").unwrap();
         git_ok(&worktree_dir, &["add", "note.txt"]);
         git_ok(&worktree_dir, &["commit", "-m", "add note"]);
+
+        (tmp, repo, worktree_dir)
+    }
+
+    fn setup_failing_test_repo(engineer: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-failing-test");
+        write_task_file(&repo, 42, "failing-test-task");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join(engineer);
+        setup_engineer_worktree(&repo, &worktree_dir, engineer, &team_config_dir).unwrap();
+
+        std::fs::write(
+            worktree_dir.join("src").join("lib.rs"),
+            "#[cfg(test)]\nmod tests {\n    #[test]\n    fn test_dispatch_wip_guard() {\n        assert_eq!(2, 3);\n    }\n}\n",
+        )
+        .unwrap();
+        git_ok(&worktree_dir, &["add", "src/lib.rs"]);
+        git_ok(&worktree_dir, &["commit", "-m", "add failing test"]);
 
         (tmp, repo, worktree_dir)
     }
@@ -1540,6 +1611,59 @@ mod tests {
         let timings = read_test_timing_log(&timing_log).unwrap();
         assert_eq!(timings.len(), 6);
         assert!(timings.last().unwrap().regression_detected);
+    }
+
+    #[test]
+    fn test_failure_retry_message_includes_structured_summary() {
+        let (_tmp, repo, _worktree_dir) = setup_failing_test_repo("eng-1");
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        let engineer_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
+        assert_eq!(engineer_messages.len(), 1);
+        assert!(
+            engineer_messages[0]
+                .body
+                .contains("1 tests failed: tests::test_dispatch_wip_guard")
+        );
+        assert!(engineer_messages[0].body.contains("src/lib.rs"));
+
+        let task_path = repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks")
+            .join("042-failing-test-task.md");
+        let metadata = crate::team::board::read_workflow_metadata(&task_path).unwrap();
+        assert_eq!(metadata.tests_run, Some(true));
+        assert_eq!(metadata.tests_passed, Some(false));
+        assert_eq!(
+            metadata.test_results.as_ref().map(|results| results.failed),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_failure_escalation_includes_structured_summary() {
+        let (_tmp, repo, _worktree_dir) = setup_failing_test_repo("eng-1");
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+        daemon.increment_retry("eng-1");
+        daemon.increment_retry("eng-1");
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        let manager_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
+        assert!(manager_messages.iter().any(|message| {
+            message.body.contains("Summary: 1 tests failed")
+                && message.body.contains("tests::test_dispatch_wip_guard")
+        }));
     }
 
     #[test]
