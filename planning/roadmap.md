@@ -105,6 +105,10 @@ All phases below are complete and merged. See git history for details.
 
 Deferred until stability is proven. Console TUI with chat, board, agent peek, dynamic scaling. See `planning/prd-goal-directed-tui.md` for spec.
 
+## Planned: OpenClaw Supervision Rollout
+
+OpenClaw supervision should ship incrementally as a backend + supervised decision path, not as a second runtime. See `planning/openclaw-supervision-rollout.md` for phased scope, migration guidance, rollout checklist, and success metrics.
+
 ---
 
 ## Tech Stack
