@@ -1130,7 +1130,7 @@ impl TeamDaemon {
         let message = inbox::InboxMessage::new_send(&sender, &architect, &body);
         inbox::deliver_to_inbox(&inbox_root, &message)?;
         self.record_message_routed(&sender, &architect);
-        self.record_planning_cycle_triggered(
+        self.record_tact_cycle_triggered(
             &architect,
             idle_engineer_count as u32,
             &board_summary,
@@ -1181,7 +1181,7 @@ impl TeamDaemon {
 
         match result {
             Ok(created) => {
-                self.record_planning_cycle_completed(
+                self.record_tact_tasks_created(
                     &architect,
                     created as u32,
                     latency_secs,
@@ -1196,7 +1196,7 @@ impl TeamDaemon {
                 Ok(created)
             }
             Err(error) => {
-                self.record_planning_cycle_completed(
+                self.record_tact_tasks_created(
                     &architect,
                     0,
                     latency_secs,
@@ -1882,12 +1882,12 @@ Second body.
         let events =
             crate::team::events::read_events(&crate::team::team_events_path(tmp.path())).unwrap();
         assert!(events.iter().any(|event| {
-            event.event == "planning_cycle_triggered"
+            event.event == "tact_cycle_triggered"
                 && event.role.as_deref() == Some("architect")
                 && event.working_members == Some(3)
         }));
         assert!(events.iter().any(|event| {
-            event.event == "planning_cycle_completed"
+            event.event == "tact_tasks_created"
                 && event.role.as_deref() == Some("architect")
                 && event.restart_count == Some(3)
                 && event.reason.as_deref() == Some("success")

@@ -1282,10 +1282,10 @@
             "type": "frser-sqlite-datasource",
             "uid": "batty-telemetry"
           },
-          "queryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS triggered FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='planning_cycle_triggered' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "queryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS triggered FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='tact_cycle_triggered' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
           "queryType": "table",
-          "rawQueryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS triggered FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='planning_cycle_triggered' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
-          "rawSql": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS triggered FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='planning_cycle_triggered' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "rawQueryText": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS triggered FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='tact_cycle_triggered' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "rawSql": "WITH RECURSIVE hours(h) AS ( SELECT COALESCE(MIN(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events UNION ALL SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events) ) SELECT h * 3600 AS time, COALESCE(e.cnt, 0) AS triggered FROM hours LEFT JOIN (SELECT timestamp / 3600 AS hr, COUNT(*) AS cnt FROM events WHERE event_type='tact_cycle_triggered' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
           "refId": "A",
           "timeColumns": [
             "time"
@@ -1316,10 +1316,10 @@
             "type": "frser-sqlite-datasource",
             "uid": "batty-telemetry"
           },
-          "queryText": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.restart_count') AS INTEGER), 0) AS tasks_created FROM events WHERE event_type='planning_cycle_completed' AND json_extract(payload, '$.reason')='success' ORDER BY time;",
+          "queryText": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.restart_count') AS INTEGER), 0) AS tasks_created FROM events WHERE event_type='tact_tasks_created' AND json_extract(payload, '$.reason')='success' ORDER BY time;",
           "queryType": "table",
-          "rawQueryText": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.restart_count') AS INTEGER), 0) AS tasks_created FROM events WHERE event_type='planning_cycle_completed' AND json_extract(payload, '$.reason')='success' ORDER BY time;",
-          "rawSql": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.restart_count') AS INTEGER), 0) AS tasks_created FROM events WHERE event_type='planning_cycle_completed' AND json_extract(payload, '$.reason')='success' ORDER BY time;",
+          "rawQueryText": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.restart_count') AS INTEGER), 0) AS tasks_created FROM events WHERE event_type='tact_tasks_created' AND json_extract(payload, '$.reason')='success' ORDER BY time;",
+          "rawSql": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.restart_count') AS INTEGER), 0) AS tasks_created FROM events WHERE event_type='tact_tasks_created' AND json_extract(payload, '$.reason')='success' ORDER BY time;",
           "refId": "A"
         }
       ],
@@ -1353,10 +1353,10 @@
             "type": "frser-sqlite-datasource",
             "uid": "batty-telemetry"
           },
-          "queryText": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.uptime_secs') AS INTEGER), 0) AS latency_secs FROM events WHERE event_type='planning_cycle_completed' ORDER BY time;",
+          "queryText": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.uptime_secs') AS INTEGER), 0) AS latency_secs FROM events WHERE event_type='tact_tasks_created' ORDER BY time;",
           "queryType": "table",
-          "rawQueryText": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.uptime_secs') AS INTEGER), 0) AS latency_secs FROM events WHERE event_type='planning_cycle_completed' ORDER BY time;",
-          "rawSql": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.uptime_secs') AS INTEGER), 0) AS latency_secs FROM events WHERE event_type='planning_cycle_completed' ORDER BY time;",
+          "rawQueryText": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.uptime_secs') AS INTEGER), 0) AS latency_secs FROM events WHERE event_type='tact_tasks_created' ORDER BY time;",
+          "rawSql": "SELECT timestamp AS time, COALESCE(CAST(json_extract(payload, '$.uptime_secs') AS INTEGER), 0) AS latency_secs FROM events WHERE event_type='tact_tasks_created' ORDER BY time;",
           "refId": "A",
           "timeColumns": [
             "time"
@@ -1387,10 +1387,10 @@
             "type": "frser-sqlite-datasource",
             "uid": "batty-telemetry"
           },
-          "queryText": "SELECT CASE COALESCE(json_extract(payload, '$.reason'), 'unknown') WHEN 'success' THEN 'success' WHEN 'failure' THEN 'failure' ELSE 'unknown' END AS metric, COUNT(*) AS value FROM events WHERE event_type='planning_cycle_completed' GROUP BY metric ORDER BY value DESC;",
+          "queryText": "SELECT CASE COALESCE(json_extract(payload, '$.reason'), 'unknown') WHEN 'success' THEN 'success' WHEN 'failure' THEN 'failure' ELSE 'unknown' END AS metric, COUNT(*) AS value FROM events WHERE event_type='tact_tasks_created' GROUP BY metric ORDER BY value DESC;",
           "queryType": "table",
-          "rawQueryText": "SELECT CASE COALESCE(json_extract(payload, '$.reason'), 'unknown') WHEN 'success' THEN 'success' WHEN 'failure' THEN 'failure' ELSE 'unknown' END AS metric, COUNT(*) AS value FROM events WHERE event_type='planning_cycle_completed' GROUP BY metric ORDER BY value DESC;",
-          "rawSql": "SELECT CASE COALESCE(json_extract(payload, '$.reason'), 'unknown') WHEN 'success' THEN 'success' WHEN 'failure' THEN 'failure' ELSE 'unknown' END AS metric, COUNT(*) AS value FROM events WHERE event_type='planning_cycle_completed' GROUP BY metric ORDER BY value DESC;",
+          "rawQueryText": "SELECT CASE COALESCE(json_extract(payload, '$.reason'), 'unknown') WHEN 'success' THEN 'success' WHEN 'failure' THEN 'failure' ELSE 'unknown' END AS metric, COUNT(*) AS value FROM events WHERE event_type='tact_tasks_created' GROUP BY metric ORDER BY value DESC;",
+          "rawSql": "SELECT CASE COALESCE(json_extract(payload, '$.reason'), 'unknown') WHEN 'success' THEN 'success' WHEN 'failure' THEN 'failure' ELSE 'unknown' END AS metric, COUNT(*) AS value FROM events WHERE event_type='tact_tasks_created' GROUP BY metric ORDER BY value DESC;",
           "refId": "A"
         }
       ],

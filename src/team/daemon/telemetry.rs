@@ -391,20 +391,20 @@ impl TeamDaemon {
         ));
     }
 
-    pub(super) fn record_planning_cycle_triggered(
+    pub(super) fn record_tact_cycle_triggered(
         &mut self,
         architect: &str,
         idle_engineers: u32,
         board_summary: &str,
     ) {
-        self.emit_event(TeamEvent::planning_cycle_triggered(
+        self.emit_event(TeamEvent::tact_cycle_triggered(
             architect,
             idle_engineers,
             board_summary,
         ));
     }
 
-    pub(super) fn record_planning_cycle_completed(
+    pub(super) fn record_tact_tasks_created(
         &mut self,
         architect: &str,
         tasks_created: u32,
@@ -412,7 +412,7 @@ impl TeamDaemon {
         success: bool,
         error: Option<&str>,
     ) {
-        self.emit_event(TeamEvent::planning_cycle_completed(
+        self.emit_event(TeamEvent::tact_tasks_created(
             architect,
             tasks_created,
             latency_secs,
