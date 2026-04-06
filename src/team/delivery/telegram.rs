@@ -267,6 +267,7 @@ mod tests {
             failed_deliveries: Vec::new(),
             review_first_seen: HashMap::new(),
             review_nudge_sent: HashSet::new(),
+            poll_cycle_count: 0,
             poll_interval: Duration::from_secs(5),
             is_git_repo: false,
             is_multi_repo: false,

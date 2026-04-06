@@ -331,6 +331,7 @@ mod tests {
     fn error_event(event: &str, role: &str, error: &str, ts: u64) -> TeamEvent {
         TeamEvent {
             event: event.to_string(),
+            action_type: None,
             role: Some(role.to_string()),
             task: None,
             recipient: None,
@@ -345,6 +346,7 @@ mod tests {
             reason: None,
             step: None,
             error: Some(error.to_string()),
+            details: None,
             uptime_secs: None,
             session_size_bytes: None,
             output_bytes: None,
@@ -369,6 +371,7 @@ mod tests {
     ) -> TeamEvent {
         TeamEvent {
             event: event.to_string(),
+            action_type: None,
             role: Some(role.to_string()),
             task: Some(task.to_string()),
             recipient: None,
@@ -383,6 +386,7 @@ mod tests {
             reason: None,
             step: None,
             error: error.map(str::to_string),
+            details: None,
             uptime_secs: None,
             session_size_bytes: None,
             output_bytes: None,

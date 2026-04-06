@@ -46,6 +46,8 @@ pub struct QualityMetricsInfo<'a> {
 pub struct TeamEvent {
     pub event: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
@@ -73,6 +75,8 @@ pub struct TeamEvent {
     pub step: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uptime_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,6 +113,7 @@ impl TeamEvent {
     fn base(event: &str) -> Self {
         Self {
             event: event.into(),
+            action_type: None,
             role: None,
             task: None,
             recipient: None,
@@ -123,6 +128,7 @@ impl TeamEvent {
             reason: None,
             step: None,
             error: None,
+            details: None,
             uptime_secs: None,
             session_size_bytes: None,
             output_bytes: None,
@@ -314,6 +320,21 @@ impl TeamEvent {
             role: role.map(str::to_string),
             task: Some(task.into()),
             ..Self::base("board_task_archived")
+        }
+    }
+
+    pub fn auto_doctor_action(
+        action_type: &str,
+        task_id: Option<u32>,
+        engineer: Option<&str>,
+        details: &str,
+    ) -> Self {
+        Self {
+            action_type: Some(action_type.into()),
+            task: task_id.map(|task_id| task_id.to_string()),
+            role: engineer.map(str::to_string),
+            details: Some(details.into()),
+            ..Self::base("auto_doctor_action")
         }
     }
 
