@@ -6,35 +6,51 @@
 //! individual subsystems fail.
 
 use anyhow::Result;
-use tracing::warn;
+use tracing::{error, warn};
 
 use super::*;
 
 impl TeamDaemon {
-    /// Run a critical subsystem step. Errors are logged but no consecutive-failure
-    /// tracking is applied — critical subsystems must not be silently degraded.
+    /// Run a critical subsystem step. Errors and panics are logged but no
+    /// consecutive-failure tracking is applied.
     pub(super) fn run_loop_step<F>(&mut self, step: &str, action: F)
     where
         F: FnOnce(&mut Self) -> Result<()>,
     {
-        if let Err(error) = action(self) {
-            self.record_loop_step_error(step, &error.to_string());
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(self))) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                error!(subsystem = step, error = %error, "daemon subsystem failed");
+                self.record_loop_step_error(step, &error.to_string());
+            }
+            Err(panic_payload) => {
+                let msg = panic_payload_to_string(&panic_payload);
+                error!(subsystem = step, panic = %msg, "daemon subsystem panicked");
+                self.record_loop_step_error(step, &format!("panic: {msg}"));
+            }
         }
     }
 
-    /// Run a recoverable subsystem step. Errors are logged, and consecutive
-    /// failures are tracked. After 3+ consecutive failures an escalation WARN
-    /// is emitted each cycle.
+    /// Run a recoverable subsystem step. Errors and panics are logged, and
+    /// consecutive failures are tracked. After 3+ consecutive failures an
+    /// escalation WARN is emitted each cycle.
     pub(super) fn run_recoverable_step<F>(&mut self, step: &str, action: F)
     where
         F: FnOnce(&mut Self) -> Result<()>,
     {
-        match action(self) {
-            Ok(()) => {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(self))) {
+            Ok(Ok(())) => {
                 self.subsystem_error_counts.remove(step);
             }
-            Err(error) => {
+            Ok(Err(error)) => {
+                error!(subsystem = step, error = %error, "daemon subsystem failed");
                 self.record_loop_step_error(step, &error.to_string());
+                self.increment_subsystem_error(step);
+            }
+            Err(panic_payload) => {
+                let msg = panic_payload_to_string(&panic_payload);
+                error!(subsystem = step, panic = %msg, "daemon subsystem panicked");
+                self.record_loop_step_error(step, &format!("panic: {msg}"));
                 self.increment_subsystem_error(step);
             }
         }
@@ -47,21 +63,7 @@ impl TeamDaemon {
     where
         F: FnOnce(&mut Self) -> Result<()>,
     {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(self)));
-        match result {
-            Ok(Ok(())) => {
-                self.subsystem_error_counts.remove(step);
-            }
-            Ok(Err(error)) => {
-                self.record_loop_step_error(step, &error.to_string());
-                self.increment_subsystem_error(step);
-            }
-            Err(panic_payload) => {
-                let msg = panic_payload_to_string(&panic_payload);
-                self.record_loop_step_error(step, &format!("panic: {msg}"));
-                self.increment_subsystem_error(step);
-            }
-        }
+        self.run_recoverable_step(step, action);
     }
 
     pub(super) fn increment_subsystem_error(&mut self, step: &str) {
@@ -222,6 +224,82 @@ mod tests {
         assert!(
             step_error.error.as_deref().unwrap_or("").contains("panic"),
             "error field should mention panic"
+        );
+    }
+
+    #[test]
+    fn recoverable_panicking_subsystem_does_not_crash_daemon() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = daemon_config_with_roles(tmp.path(), Vec::new());
+        let mut daemon = TeamDaemon::new(config).unwrap();
+
+        daemon.run_recoverable_step("poll_watchers", |_daemon| {
+            panic!("watcher crashed");
+        });
+
+        let mut continued = false;
+        daemon.run_recoverable_step("maybe_auto_dispatch", |_daemon| {
+            continued = true;
+            Ok(())
+        });
+
+        assert!(continued, "daemon should continue after recoverable panic");
+        assert_eq!(daemon.subsystem_error_counts.get("poll_watchers"), Some(&1));
+
+        let events_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let events = read_events(&events_path).unwrap();
+        let step_error = events
+            .iter()
+            .find(|event| event.event == "loop_step_error")
+            .expect("panic should be logged as loop_step_error");
+        assert!(
+            step_error
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("panic: watcher crashed")
+        );
+    }
+
+    #[test]
+    fn critical_panicking_subsystem_does_not_crash_daemon() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = daemon_config_with_roles(tmp.path(), Vec::new());
+        let mut daemon = TeamDaemon::new(config).unwrap();
+
+        daemon.run_loop_step("deliver_inbox_messages", |_daemon| {
+            panic!("message routing crashed");
+        });
+
+        let mut continued = false;
+        daemon.run_loop_step("maybe_auto_dispatch", |_daemon| {
+            continued = true;
+            Ok(())
+        });
+
+        assert!(continued, "daemon should continue after critical panic");
+        assert_eq!(daemon.subsystem_error_counts.get("deliver_inbox_messages"), None);
+
+        let events_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let events = read_events(&events_path).unwrap();
+        let step_error = events
+            .iter()
+            .find(|event| event.event == "loop_step_error")
+            .expect("panic should be logged as loop_step_error");
+        assert!(
+            step_error
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("panic: message routing crashed")
         );
     }
 
