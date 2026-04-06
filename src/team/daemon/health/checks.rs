@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use serde_json::Value;
 use tracing::{info, warn};
 
 use super::super::*;
@@ -49,6 +50,33 @@ fn abort_conflicted_git_operation(repo_dir: &Path, args: &[&str]) {
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .output();
+}
+
+fn claude_credentials_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from).map(|home| {
+        home.join(".claude")
+            .join(".credentials.json")
+    })
+}
+
+fn parse_claude_oauth_expiry_ms(credentials: &str) -> Option<i64> {
+    let json: Value = serde_json::from_str(credentials).ok()?;
+    json["claudeAiOauth"]["expiresAt"].as_i64()
+}
+
+fn claude_oauth_healthy(credentials_path: &Path) -> bool {
+    let contents = match std::fs::read_to_string(credentials_path) {
+        Ok(contents) => contents,
+        Err(_) => return false,
+    };
+    let Some(expires_at_ms) = parse_claude_oauth_expiry_ms(&contents) else {
+        return false;
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_millis() as i64;
+    expires_at_ms.saturating_sub(now_ms) > 300_000
 }
 
 impl TeamDaemon {
@@ -293,8 +321,14 @@ impl TeamDaemon {
             .collect();
 
         for (member_name, agent_name) in &checks {
-            let new_health =
+            let mut new_health =
                 agent::health_check_by_name(agent_name).unwrap_or(BackendHealth::Healthy);
+            if *agent_name == "claude"
+                && let Some(credentials_path) = claude_credentials_path()
+                && !claude_oauth_healthy(&credentials_path)
+            {
+                new_health = BackendHealth::Degraded;
+            }
             let prev_health = self
                 .backend_health
                 .get(member_name)
@@ -471,6 +505,7 @@ fn prune_legacy_worktree_target_dirs(project_root: &Path) -> Result<Vec<PathBuf>
 
 #[cfg(test)]
 mod tests {
+    use super::{claude_oauth_healthy, parse_claude_oauth_expiry_ms};
     use super::super::super::*;
     use crate::team::config::{RoleType, WorkflowPolicy};
     use crate::team::hierarchy::MemberInstance;
@@ -686,6 +721,42 @@ mod tests {
 
         daemon.check_backend_health().unwrap();
         assert!(daemon.backend_health.contains_key("architect"));
+    }
+
+    #[test]
+    fn parse_claude_oauth_expiry_ms_reads_nested_expiry() {
+        let creds = r#"{"claudeAiOauth":{"expiresAt":1234567890}}"#;
+        assert_eq!(parse_claude_oauth_expiry_ms(creds), Some(1_234_567_890));
+    }
+
+    #[test]
+    fn claude_oauth_healthy_requires_five_minutes_remaining() {
+        let tmp = tempfile::tempdir().unwrap();
+        let credentials = tmp.path().join(".credentials.json");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_millis() as i64;
+
+        std::fs::write(
+            &credentials,
+            format!(
+                "{{\"claudeAiOauth\":{{\"expiresAt\":{}}}}}",
+                now_ms + 600_000
+            ),
+        )
+        .unwrap();
+        assert!(claude_oauth_healthy(&credentials));
+
+        std::fs::write(
+            &credentials,
+            format!(
+                "{{\"claudeAiOauth\":{{\"expiresAt\":{}}}}}",
+                now_ms + 60_000
+            ),
+        )
+        .unwrap();
+        assert!(!claude_oauth_healthy(&credentials));
     }
 
     // ---- Worktree reconciliation tests ----
