@@ -89,6 +89,8 @@ impl TeamDaemon {
                 break;
             }
 
+            self.poll_cycle_count = self.poll_cycle_count.saturating_add(1);
+
             // -- Recoverable subsystems: log-and-skip with consecutive-failure tracking --
             self.run_recoverable_step("poll_shim_handles", |daemon| daemon.poll_shim_handles());
             self.run_recoverable_step("shim_health_check", |daemon| daemon.shim_health_check());
@@ -218,6 +220,9 @@ impl TeamDaemon {
             });
             self.run_recoverable_step("maybe_rotate_board", |daemon| daemon.maybe_rotate_board());
             self.run_recoverable_step("maybe_auto_archive", |daemon| daemon.maybe_auto_archive());
+            self.run_recoverable_step("run_auto_doctor", |daemon| {
+                daemon.run_auto_doctor().map(|_| ())
+            });
             self.run_recoverable_step_with_catch_unwind("maybe_generate_retrospective", |daemon| {
                 daemon.maybe_generate_retrospective()
             });
