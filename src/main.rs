@@ -359,6 +359,13 @@ fn main() -> Result<()> {
             team::team_status(&root, json)?;
         }
 
+        Command::Watchdog {
+            project_root,
+            resume,
+        } => {
+            team::run_watchdog(std::path::Path::new(&project_root), resume)?;
+        }
+
         Command::Send {
             from,
             role,

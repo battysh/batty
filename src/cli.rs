@@ -383,6 +383,17 @@ pub enum Command {
         #[arg(long)]
         resume: bool,
     },
+
+    /// Internal: run the daemon watchdog supervisor (spawned by `batty start`)
+    #[command(hide = true)]
+    Watchdog {
+        /// Project root directory
+        #[arg(long)]
+        project_root: String,
+        /// Resume agent sessions from a previous run
+        #[arg(long)]
+        resume: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2032,6 +2043,42 @@ mod tests {
                 assert!(resume);
             }
             other => panic!("expected daemon command with resume, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn watchdog_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "watchdog", "--project-root", "/tmp/project"]);
+        match cli.command {
+            Command::Watchdog {
+                project_root,
+                resume,
+            } => {
+                assert_eq!(project_root, "/tmp/project");
+                assert!(!resume);
+            }
+            other => panic!("expected watchdog command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn watchdog_subcommand_parses_resume_flag() {
+        let cli = Cli::parse_from([
+            "batty",
+            "watchdog",
+            "--project-root",
+            "/tmp/project",
+            "--resume",
+        ]);
+        match cli.command {
+            Command::Watchdog {
+                project_root,
+                resume,
+            } => {
+                assert_eq!(project_root, "/tmp/project");
+                assert!(resume);
+            }
+            other => panic!("expected watchdog command with resume, got {other:?}"),
         }
     }
 
