@@ -171,6 +171,8 @@ fn load_provider_overlay(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::team::config::RoleType;
+    use crate::team::hierarchy::MemberInstance;
 
     #[test]
     fn compose_prompt_appends_requested_layers() {
@@ -193,5 +195,58 @@ mod tests {
             Some("fast")
         );
         assert_eq!(infer_model_class(None, Some("codex")), Some("standard"));
+    }
+
+    #[test]
+    fn resolve_prompt_context_infers_model_class_and_provider_from_member() {
+        let member = MemberInstance {
+            name: "eng-1-1".to_string(),
+            role_name: "engineer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            model: Some("claude-opus-4-1".to_string()),
+            prompt: None,
+            posture: Some("deep_worker".to_string()),
+            model_class: None,
+            provider_overlay: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: true,
+        };
+
+        let context = resolve_prompt_context(&member);
+
+        assert_eq!(context.posture.as_deref(), Some("deep_worker"));
+        assert_eq!(context.model_class.as_deref(), Some("frontier"));
+        assert_eq!(context.provider_overlay.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn render_member_prompt_composes_layers_and_substitutes_variables() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("batty_engineer.md"),
+            "Hello {{member_name}} from {{role_name}} -> {{reports_to}}",
+        )
+        .unwrap();
+        let member = MemberInstance {
+            name: "eng-1-1".to_string(),
+            role_name: "engineer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            model: Some("gpt-5.4".to_string()),
+            prompt: Some("batty_engineer.md".to_string()),
+            posture: Some("deep_worker".to_string()),
+            model_class: None,
+            provider_overlay: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: true,
+        };
+
+        let prompt = render_member_prompt(&member, tmp.path(), &resolve_prompt_context(&member));
+
+        assert!(prompt.contains("Hello eng-1-1 from engineer -> manager"));
+        assert!(prompt.contains("## Posture: Deep Worker"));
+        assert!(prompt.contains("## Model Class: Standard"));
+        assert!(prompt.contains("## Provider: Codex"));
     }
 }

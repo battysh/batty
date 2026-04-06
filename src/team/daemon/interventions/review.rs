@@ -319,6 +319,7 @@ mod tests {
             prompt: None,
             reports_to: reports_to.map(str::to_string),
             use_worktrees: false,
+            ..Default::default()
         }
     }
 

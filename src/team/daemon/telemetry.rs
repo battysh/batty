@@ -785,6 +785,7 @@ mod tests {
                 owns: Vec::new(),
                 barrier_group: None,
                 use_worktrees: false,
+                ..Default::default()
             },
             RoleDef {
                 name: "manager".to_string(),
@@ -803,6 +804,7 @@ mod tests {
                 owns: Vec::new(),
                 barrier_group: None,
                 use_worktrees: false,
+                ..Default::default()
             },
         ];
         let mut config = daemon_config_with_roles(tmp.path(), roles);
@@ -815,6 +817,7 @@ mod tests {
                 prompt: None,
                 reports_to: Some("human".to_string()),
                 use_worktrees: false,
+                ..Default::default()
             },
             MemberInstance {
                 name: "manager".to_string(),
@@ -824,6 +827,7 @@ mod tests {
                 prompt: None,
                 reports_to: Some("architect".to_string()),
                 use_worktrees: false,
+                ..Default::default()
             },
         ];
 
@@ -1076,6 +1080,7 @@ mod tests {
             prompt: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
+            ..Default::default()
         };
         let events_path = tmp.path().join("events.jsonl");
         let mut daemon = TeamDaemon {
