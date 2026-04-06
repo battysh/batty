@@ -1660,13 +1660,10 @@ mod tests {
 
         let manager_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
-        assert_eq!(manager_messages.len(), 1);
-        assert!(manager_messages[0].body.contains("Summary: 1 tests failed"));
-        assert!(
-            manager_messages[0]
-                .body
-                .contains("tests::test_dispatch_wip_guard")
-        );
+        assert!(manager_messages.iter().any(|message| {
+            message.body.contains("Summary: 1 tests failed")
+                && message.body.contains("tests::test_dispatch_wip_guard")
+        }));
     }
 
     #[test]

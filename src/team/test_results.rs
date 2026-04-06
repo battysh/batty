@@ -104,7 +104,6 @@ pub fn parse_cargo_test(output: &str, passed: bool) -> TestResults {
     )
     .expect("valid regex");
     let block_header_re = Regex::new(r"^----\s+(.+?)\s+stdout\s+----$").expect("valid regex");
-    let panic_re = Regex::new(r"panicked at (.+?)(?::\s*(.+))?$").expect("valid regex");
 
     let mut passed_count = 0;
     let mut failed_count = if passed { 0 } else { 1 };
@@ -143,12 +142,10 @@ pub fn parse_cargo_test(output: &str, passed: bool) -> TestResults {
             continue;
         }
 
-        if let Some(captures) = panic_re.captures(trimmed) {
-            current_location = Some(captures[1].trim().to_string());
+        if let Some((location, message)) = parse_cargo_panic_line(trimmed) {
+            current_location = Some(location);
             if current_message.is_none() {
-                current_message = captures
-                    .get(2)
-                    .map(|match_| normalize_message(match_.as_str()));
+                current_message = message;
             }
             continue;
         }
@@ -180,6 +177,37 @@ pub fn parse_cargo_test(output: &str, passed: bool) -> TestResults {
         failures,
         summary,
     }
+}
+
+fn parse_cargo_panic_line(line: &str) -> Option<(String, Option<String>)> {
+    let panic_marker = "panicked at ";
+    let panic_start = line.find(panic_marker)?;
+    let rest = line[panic_start + panic_marker.len()..].trim();
+
+    if let Some((message, location)) = rest.rsplit_once(", ") {
+        let normalized_message = normalize_message(message.trim_matches('\''));
+        if !normalized_message.is_empty() && looks_like_location(location) {
+            return Some((location.trim().to_string(), Some(normalized_message)));
+        }
+    }
+
+    let location = rest.strip_suffix(':').unwrap_or(rest).trim();
+    if looks_like_location(location) {
+        return Some((location.to_string(), None));
+    }
+
+    None
+}
+
+fn looks_like_location(value: &str) -> bool {
+    let mut segments = value.rsplit(':');
+    let Some(column) = segments.next() else {
+        return false;
+    };
+    let Some(line) = segments.next() else {
+        return false;
+    };
+    column.chars().all(|c| c.is_ascii_digit()) && line.chars().all(|c| c.is_ascii_digit())
 }
 
 pub fn parse_pytest(output: &str, passed: bool) -> TestResults {
@@ -437,6 +465,34 @@ Tests:       1 failed, 2 passed, 3 total
         assert_eq!(
             results.failure_summary(),
             "2 tests failed: a::fails (expected 2, got 3 at src/a.rs:10); b::fails"
+        );
+    }
+
+    #[test]
+    fn parses_legacy_cargo_panic_message_and_location() {
+        let output = r#"
+running 1 test
+test tests::fails ... FAILED
+
+failures:
+
+---- tests::fails stdout ----
+thread 'tests::fails' panicked at 'assertion `left == right` failed', src/lib.rs:12:9
+
+failures:
+    tests::fails
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+"#;
+
+        let results = parse_cargo_test(output, false);
+        assert_eq!(
+            results.failures[0].message.as_deref(),
+            Some("assertion `left == right` failed")
+        );
+        assert_eq!(
+            results.failures[0].location.as_deref(),
+            Some("src/lib.rs:12:9")
         );
     }
 }
