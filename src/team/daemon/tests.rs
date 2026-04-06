@@ -2424,7 +2424,7 @@ fn spawn_all_agents_resume_reports_missing_sessions_across_primary_roles() {
         ),
     ]);
 
-    let daemon = TeamDaemon::new(DaemonConfig {
+    let mut daemon = TeamDaemon::new(DaemonConfig {
         project_root: tmp.path().to_path_buf(),
         team_config: TeamConfig {
             name: "test".to_string(),
@@ -2561,6 +2561,115 @@ fn spawn_all_agents_resume_reports_missing_sessions_across_primary_roles() {
     assert_eq!(architect_plan.identity.agent, "claude-code");
     assert_eq!(manager_plan.identity.agent, "claude-code");
     assert_eq!(engineer_plan.identity.agent, "codex-cli");
+}
+
+#[test]
+fn prepare_member_launch_injects_handoff_for_active_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    let task_dir = tmp
+        .path()
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    std::fs::create_dir_all(&task_dir).unwrap();
+    crate::team::test_support::write_owned_task_file(tmp.path(), 42, "resume-task", "in-progress", "eng-1");
+
+    let mut daemon = TeamDaemon::new(DaemonConfig {
+        project_root: tmp.path().to_path_buf(),
+        team_config: TeamConfig {
+            name: "test".to_string(),
+            agent: None,
+            workflow_mode: WorkflowMode::Hybrid,
+            board: BoardConfig::default(),
+            standup: StandupConfig::default(),
+            automation: AutomationConfig::default(),
+            automation_sender: None,
+            external_senders: Vec::new(),
+            orchestrator_pane: true,
+            orchestrator_position: OrchestratorPosition::Bottom,
+            layout: None,
+            workflow_policy: WorkflowPolicy::default(),
+            cost: Default::default(),
+            grafana: Default::default(),
+            use_shim: false,
+            use_sdk_mode: false,
+            auto_respawn_on_crash: false,
+            shim_health_check_interval_secs: 60,
+            shim_health_timeout_secs: 120,
+            shim_shutdown_timeout_secs: 30,
+            shim_working_state_timeout_secs: 1800,
+            pending_queue_max_age_secs: 600,
+            event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+            retro_min_duration_secs: 60,
+            roles: vec![RoleDef {
+                name: "engineer".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("codex".to_string()),
+                auth_mode: None,
+                auth_env: vec![],
+                instances: 1,
+                prompt: None,
+                talks_to: vec![],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                barrier_group: None,
+                use_worktrees: false,
+                ..Default::default()
+            }],
+        },
+        session: "test".to_string(),
+        members: vec![MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "engineer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+            ..Default::default()
+        }],
+        pane_map: HashMap::from([("eng-1".to_string(), "%903".to_string())]),
+    })
+    .unwrap();
+    daemon.active_tasks.insert("eng-1".to_string(), 42);
+
+    let handoff_path = tmp.path().join(crate::shim::runtime::HANDOFF_FILE_NAME);
+    std::fs::write(
+        &handoff_path,
+        "# Carry-Forward Summary\n## Progress Summary\nalready fixed parser edge cases\n",
+    )
+    .unwrap();
+
+    let previous_launch_state = HashMap::new();
+    let duplicate_claude_session_ids =
+        super::launcher::duplicate_claude_session_ids(&previous_launch_state);
+    let plan = daemon
+        .prepare_member_launch(
+            &MemberInstance {
+                name: "eng-1".to_string(),
+                role_name: "engineer".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("codex".to_string()),
+                prompt: None,
+                reports_to: None,
+                use_worktrees: false,
+                ..Default::default()
+            },
+            false,
+            &previous_launch_state,
+            &duplicate_claude_session_ids,
+        )
+        .unwrap();
+
+    assert!(plan.identity.prompt.contains("You are continuing work on Task #42."));
+    assert!(plan.identity.prompt.contains("already fixed parser edge cases"));
+    assert!(plan.identity.prompt.contains("Resume from where you left off"));
+    assert!(!handoff_path.exists(), "launch should consume the handoff file");
 }
 
 #[test]
