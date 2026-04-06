@@ -12,6 +12,7 @@ use crate::team::config::TeamConfig;
 use crate::team::config_diff;
 use crate::team::events::TeamEvent;
 use crate::team::hierarchy;
+use crate::team::reload;
 
 /// How often the daemon checks team.yaml for changes.
 pub(super) const CONFIG_RELOAD_CHECK_INTERVAL: Duration = Duration::from_secs(5);
@@ -98,6 +99,13 @@ impl TeamDaemon {
         if !monitor.should_check() {
             return Ok(());
         }
+        let forced = match reload::consume_topology_reload_request(&self.config.project_root) {
+            Ok(forced) => forced,
+            Err(e) => {
+                debug!(error = %e, "failed to consume topology reload marker");
+                false
+            }
+        };
         let changed = match monitor.has_changed() {
             Ok(changed) => changed,
             Err(e) => {
@@ -105,7 +113,7 @@ impl TeamDaemon {
                 return Ok(());
             }
         };
-        if !changed {
+        if !changed && !forced {
             return Ok(());
         }
 
@@ -115,7 +123,7 @@ impl TeamDaemon {
         }
 
         monitor.mark_reload_attempt();
-        info!("team.yaml changed — computing topology diff");
+        info!(forced, changed, "topology reload requested — computing topology diff");
 
         // Parse the new config
         let new_config = match TeamConfig::load(&monitor.config_path) {
@@ -142,7 +150,10 @@ impl TeamDaemon {
         // Compute diff
         let diff = config_diff::diff_members(&self.config.members, &new_members);
         if diff.is_empty() {
-            debug!("config file changed but topology is identical — no reconciliation needed");
+            debug!(
+                forced,
+                "topology reload found no membership change — no reconciliation needed"
+            );
             return Ok(());
         }
 

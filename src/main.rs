@@ -1066,6 +1066,11 @@ fn main() -> Result<()> {
             team::scale::run(&root, command)?;
         }
 
+        Command::Reload => {
+            team::reload::request_topology_reload(&root)?;
+            println!("Topology reload requested. The daemon will pick it up on the next poll.");
+        }
+
         Command::Doctor { fix, yes } => {
             print!("{}", team::doctor::run(&root, fix, yes)?);
         }
