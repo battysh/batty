@@ -426,7 +426,20 @@ impl TeamDaemon {
             assign_task_owners(&board_dir, task.id, Some(&entry.engineer), None)?;
 
             let assignment_message =
-                format!("Task #{}: {}\n\n{}", task.id, task.title, task.description);
+                match crate::team::learnings::augment_assignment_message(
+                    &self.config.project_root,
+                    &task,
+                ) {
+                    Ok(message) => message,
+                    Err(error) => {
+                        warn!(
+                            task_id = task.id,
+                            error = %error,
+                            "failed to augment assignment with learnings"
+                        );
+                        format!("Task #{}: {}\n\n{}", task.id, task.title, task.description)
+                    }
+                };
             match self.assign_task_with_task_id(&entry.engineer, &assignment_message, Some(task.id))
             {
                 Ok(_) => {
