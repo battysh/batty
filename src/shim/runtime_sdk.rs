@@ -784,4 +784,54 @@ mod tests {
         assert!(writer.lock().unwrap().is_empty());
         assert_eq!(state.lock().unwrap().state, ShimState::Idle);
     }
+
+    #[test]
+    fn keepalive_sends_message_after_interval() {
+        let state = Arc::new(Mutex::new(SdkState {
+            state: ShimState::Idle,
+            state_changed_at: Instant::now(),
+            started_at: Instant::now(),
+            session_id: "sess-1".into(),
+            accumulated_response: "stale output".into(),
+            pending_message_id: None,
+            message_queue: VecDeque::new(),
+            cumulative_output_bytes: 0,
+        }));
+        let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut last_keepalive =
+            Instant::now() - Duration::from_secs(SDK_KEEPALIVE_IDLE_SECS + 1);
+
+        maybe_send_keepalive(&state, &writer, &mut last_keepalive);
+
+        let output = String::from_utf8(writer.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("\"type\":\"user\""));
+        assert!(output.contains("\"session_id\":\"sess-1\""));
+        assert!(output.contains(SDK_KEEPALIVE_MESSAGE));
+
+        let st = state.lock().unwrap();
+        assert_eq!(st.state, ShimState::Working);
+        assert!(st.accumulated_response.is_empty());
+    }
+
+    #[test]
+    fn keepalive_is_skipped_without_session() {
+        let state = Arc::new(Mutex::new(SdkState {
+            state: ShimState::Idle,
+            state_changed_at: Instant::now(),
+            started_at: Instant::now(),
+            session_id: String::new(),
+            accumulated_response: String::new(),
+            pending_message_id: None,
+            message_queue: VecDeque::new(),
+            cumulative_output_bytes: 0,
+        }));
+        let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let mut last_keepalive =
+            Instant::now() - Duration::from_secs(SDK_KEEPALIVE_IDLE_SECS + 1);
+
+        maybe_send_keepalive(&state, &writer, &mut last_keepalive);
+
+        assert!(writer.lock().unwrap().is_empty());
+        assert_eq!(state.lock().unwrap().state, ShimState::Idle);
+    }
 }

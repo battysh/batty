@@ -505,6 +505,7 @@ fn prune_legacy_worktree_target_dirs(project_root: &Path) -> Result<Vec<PathBuf>
 
 #[cfg(test)]
 mod tests {
+    use super::{claude_oauth_healthy, parse_claude_oauth_expiry_ms};
     use super::super::super::*;
     use crate::team::config::{RoleType, WorkflowPolicy};
     use crate::team::hierarchy::MemberInstance;
