@@ -356,8 +356,8 @@ fn main() -> Result<()> {
             team::attach_team(&root)?;
         }
 
-        Command::Status { json } => {
-            team::team_status(&root, json)?;
+        Command::Status { json, detail } => {
+            team::team_status(&root, json, detail)?;
         }
 
         Command::Watchdog {
