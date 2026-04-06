@@ -51,6 +51,7 @@ pub mod merge;
 pub mod message;
 pub mod metrics;
 pub mod metrics_cmd;
+pub mod multi_provider;
 pub mod nudge;
 pub mod parity;
 pub mod policy;
