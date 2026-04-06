@@ -68,6 +68,8 @@ fn init_schema(conn: &Connection) -> Result<()> {
             retries          INTEGER NOT NULL DEFAULT 0,
             narration_rejections INTEGER NOT NULL DEFAULT 0,
             escalations      INTEGER NOT NULL DEFAULT 0,
+            context_restart_count INTEGER NOT NULL DEFAULT 0,
+            carry_forward_effective INTEGER,
             merge_time_secs  INTEGER,
             confidence_score REAL
         );
@@ -83,6 +85,14 @@ fn init_schema(conn: &Connection) -> Result<()> {
         ",
     )
     .context("failed to initialize telemetry schema")?;
+    let _ = conn.execute(
+        "ALTER TABLE task_metrics ADD COLUMN context_restart_count INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE task_metrics ADD COLUMN carry_forward_effective INTEGER",
+        [],
+    );
     Ok(())
 }
 
@@ -133,6 +143,16 @@ fn update_metrics_for_event(conn: &Connection, event: &TeamEvent) -> Result<()> 
                      ON CONFLICT(task_id) DO UPDATE SET completed_at = ?2",
                     params![task, event.ts as i64],
                 )?;
+                conn.execute(
+                    "UPDATE task_metrics
+                     SET carry_forward_effective = CASE
+                         WHEN context_restart_count = 0 THEN carry_forward_effective
+                         WHEN context_restart_count = 1 THEN 1
+                         ELSE 0
+                     END
+                     WHERE task_id = ?1",
+                    params![task],
+                )?;
             }
             // Fix #1: Increment tasks_completed on latest session.
             conn.execute(
@@ -176,6 +196,16 @@ fn update_metrics_for_event(conn: &Connection, event: &TeamEvent) -> Result<()> 
         "pane_respawned" | "agent_restarted" | "context_exhausted" => {
             if let Some(role) = &event.role {
                 upsert_agent_counter(conn, role, "restarts")?;
+            }
+            if event.event == "agent_restarted"
+                && event.reason.as_deref() == Some("context_exhausted")
+                && let Some(task) = &event.task
+            {
+                conn.execute(
+                    "INSERT INTO task_metrics (task_id, context_restart_count) VALUES (?1, 1)
+                     ON CONFLICT(task_id) DO UPDATE SET context_restart_count = context_restart_count + 1",
+                    params![task],
+                )?;
             }
         }
         "task_auto_merged" | "task_manual_merged" => {
@@ -341,13 +371,16 @@ pub struct TaskMetricsRow {
     pub retries: i64,
     pub narration_rejections: i64,
     pub escalations: i64,
+    pub context_restart_count: i64,
+    pub carry_forward_effective: Option<bool>,
     pub merge_time_secs: Option<i64>,
     pub confidence_score: Option<f64>,
 }
 
 pub fn query_task_metrics(conn: &Connection) -> Result<Vec<TaskMetricsRow>> {
     let mut stmt = conn.prepare(
-        "SELECT task_id, started_at, completed_at, retries, narration_rejections, escalations, merge_time_secs, confidence_score
+        "SELECT task_id, started_at, completed_at, retries, narration_rejections, escalations,
+                context_restart_count, carry_forward_effective, merge_time_secs, confidence_score
          FROM task_metrics ORDER BY started_at DESC NULLS LAST LIMIT 50",
     )?;
     let rows = stmt
@@ -359,8 +392,10 @@ pub fn query_task_metrics(conn: &Connection) -> Result<Vec<TaskMetricsRow>> {
                 retries: row.get(3)?,
                 narration_rejections: row.get(4)?,
                 escalations: row.get(5)?,
-                merge_time_secs: row.get(6)?,
-                confidence_score: row.get(7)?,
+                context_restart_count: row.get(6)?,
+                carry_forward_effective: row.get::<_, Option<i64>>(7)?.map(|value| value != 0),
+                merge_time_secs: row.get(8)?,
+                confidence_score: row.get(9)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -534,6 +569,62 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].task_id, "42");
         assert_eq!(tasks[0].narration_rejections, 2);
+    }
+
+    #[test]
+    fn context_exhausted_restart_increments_task_restart_count() {
+        let conn = open_in_memory().unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::agent_restarted("eng-1", "42", "context_exhausted", 1),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::agent_restarted("eng-1", "42", "context_exhausted", 2),
+        )
+        .unwrap();
+
+        let tasks = query_task_metrics(&conn).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, "42");
+        assert_eq!(tasks[0].context_restart_count, 2);
+        assert_eq!(tasks[0].carry_forward_effective, None);
+    }
+
+    #[test]
+    fn task_completion_marks_single_restart_carry_forward_effective() {
+        let conn = open_in_memory().unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::agent_restarted("eng-1", "42", "context_exhausted", 1),
+        )
+        .unwrap();
+        insert_event(&conn, &TeamEvent::task_completed("eng-1", Some("42"))).unwrap();
+
+        let tasks = query_task_metrics(&conn).unwrap();
+        assert_eq!(tasks[0].context_restart_count, 1);
+        assert_eq!(tasks[0].carry_forward_effective, Some(true));
+    }
+
+    #[test]
+    fn task_completion_marks_multi_restart_carry_forward_ineffective() {
+        let conn = open_in_memory().unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::agent_restarted("eng-1", "42", "context_exhausted", 1),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::agent_restarted("eng-1", "42", "context_exhausted", 2),
+        )
+        .unwrap();
+        insert_event(&conn, &TeamEvent::task_completed("eng-1", Some("42"))).unwrap();
+
+        let tasks = query_task_metrics(&conn).unwrap();
+        assert_eq!(tasks[0].context_restart_count, 2);
+        assert_eq!(tasks[0].carry_forward_effective, Some(false));
     }
 
     #[test]
