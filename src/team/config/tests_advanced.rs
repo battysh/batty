@@ -641,6 +641,7 @@ fn parse_auto_merge_policy_defaults() {
     assert_eq!(am.max_modules_touched, 2);
     assert_eq!(am.confidence_threshold, 0.8);
     assert!(am.require_tests_pass);
+    assert!(am.post_merge_verify);
     assert!(!am.sensitive_paths.is_empty());
 }
 
@@ -656,6 +657,7 @@ workflow_policy:
     max_modules_touched: 1
     confidence_threshold: 0.95
     require_tests_pass: false
+    post_merge_verify: false
     sensitive_paths: ["secrets.yaml"]
 roles:
   - name: worker
@@ -670,6 +672,7 @@ roles:
     assert_eq!(am.max_modules_touched, 1);
     assert_eq!(am.confidence_threshold, 0.95);
     assert!(!am.require_tests_pass);
+    assert!(!am.post_merge_verify);
     assert_eq!(am.sensitive_paths, vec!["secrets.yaml"]);
 }
 

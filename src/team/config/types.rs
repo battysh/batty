@@ -536,6 +536,8 @@ pub struct AutoMergePolicy {
     pub confidence_threshold: f64,
     #[serde(default = "default_require_tests_pass")]
     pub require_tests_pass: bool,
+    #[serde(default = "default_post_merge_verify")]
+    pub post_merge_verify: bool,
 }
 
 fn default_max_diff_lines() -> usize {
@@ -559,6 +561,9 @@ fn default_confidence_threshold() -> f64 {
 fn default_require_tests_pass() -> bool {
     true
 }
+fn default_post_merge_verify() -> bool {
+    true
+}
 
 impl Default for AutoMergePolicy {
     fn default() -> Self {
@@ -570,6 +575,7 @@ impl Default for AutoMergePolicy {
             sensitive_paths: default_sensitive_paths(),
             confidence_threshold: default_confidence_threshold(),
             require_tests_pass: default_require_tests_pass(),
+            post_merge_verify: default_post_merge_verify(),
         }
     }
 }

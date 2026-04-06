@@ -1,11 +1,13 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use super::TeamDaemon;
+use crate::team::daemon::verification::run_automatic_verification;
 use crate::team::merge::{MergeLock, MergeOutcome, merge_engineer_branch};
 use crate::team::task_loop::read_task_title;
 
@@ -167,9 +169,41 @@ impl TeamDaemon {
         let board_dir_str = board_dir.to_string_lossy().to_string();
         let manager_name = self.manager_name(&request.engineer);
         let task_title = read_task_title(&board_dir, request.task_id);
+        let pre_merge_head = git_head(self.project_root())?;
 
         match merge_engineer_branch(self.project_root(), &request.engineer)? {
             MergeOutcome::Success => {
+                if self.config.team_config.workflow_policy.auto_merge.post_merge_verify {
+                    let verification_policy = &self.config.team_config.workflow_policy.verification;
+                    let test_command = verification_policy.test_command.as_deref().or(
+                        self.config
+                            .team_config
+                            .workflow_policy
+                            .test_command
+                            .as_deref(),
+                    );
+                    let verification = run_automatic_verification(self.project_root(), test_command)
+                        .context("post-merge verification on main failed to execute")?;
+                    if !verification.passed {
+                        reset_main_to(self.project_root(), &pre_merge_head)?;
+                        let engineer_notice = format!(
+                            "Your task for #{} merged cleanly but failed post-merge verification on main, so Batty reverted it.\nLatest output:\n{}",
+                            request.task_id, verification.output
+                        );
+                        self.queue_message("daemon", &request.engineer, &engineer_notice)?;
+                        self.mark_member_working(&request.engineer);
+                        if let Some(ref manager_name) = manager_name {
+                            let manager_notice = format!(
+                                "[{}] Task #{} failed post-merge verification on main and was reverted.\nTitle: {}\nLatest output:\n{}",
+                                request.engineer, request.task_id, task_title, verification.output
+                            );
+                            self.queue_message("daemon", manager_name, &manager_notice)?;
+                            self.mark_member_working(manager_name);
+                        }
+                        return Ok(MergeQueueOutcome::Reverted);
+                    }
+                }
+
                 let board_update_ok =
                     move_task_to_done(self, &board_dir, &board_dir_str, request, manager_name.as_deref());
 
@@ -298,6 +332,49 @@ impl TeamDaemon {
             }
         }
     }
+}
+
+fn git_head(repo_dir: &std::path::Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_dir)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to capture pre-merge HEAD for post-merge verification in {}",
+                repo_dir.display()
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "failed to capture pre-merge HEAD in {}: {}",
+            repo_dir.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn reset_main_to(repo_dir: &std::path::Path, target: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["reset", "--hard", target])
+        .current_dir(repo_dir)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to run git reset --hard {target} in {} after post-merge verification failure",
+                repo_dir.display()
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "failed to reset {} back to {}: {}",
+            repo_dir.display(),
+            target,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 fn move_task_to_done(
@@ -471,5 +548,56 @@ mod tests {
         assert_eq!(task.status, "done");
         assert_eq!(daemon.active_task_id("eng-1"), None);
         assert_eq!(daemon.member_state_for_test("eng-1"), Some(MemberState::Idle));
+    }
+
+    #[test]
+    fn daemon_process_merge_queue_reverts_when_post_merge_verify_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-post-merge-verify-test");
+        write_task_file(&repo, 42, "post-merge-verify-task");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+        std::fs::write(worktree_dir.join("trigger.txt"), "fail main verify\n").unwrap();
+        git_ok(&worktree_dir, &["add", "trigger.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "trigger post-merge verify failure"]);
+
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ];
+        let mut daemon = make_test_daemon(&repo, members);
+        daemon.config.team_config.workflow_policy.test_command =
+            Some("sh -c 'test ! -f trigger.txt'".to_string());
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+        daemon.enqueue_merge_request(MergeRequest {
+            task_id: 42,
+            engineer: "eng-1".to_string(),
+            branch: "eng-1/task-42".to_string(),
+            worktree_dir: worktree_dir,
+            queued_at: Instant::now(),
+            test_passed: true,
+        });
+
+        daemon.process_merge_queue().unwrap();
+
+        assert!(!repo.join("trigger.txt").exists());
+        let task = crate::task::Task::from_file(
+            &repo
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("042-post-merge-verify-task.md"),
+        )
+        .unwrap();
+        assert_eq!(task.status, "in-progress");
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+        assert_eq!(
+            daemon.member_state_for_test("eng-1"),
+            Some(MemberState::Working)
+        );
     }
 }
