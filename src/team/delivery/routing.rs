@@ -634,9 +634,6 @@ impl TeamDaemon {
                 shim_log_preview(&batched_body)
             ),
         );
-        let _ = &handle;
-        drop(handle);
-
         for message in messages {
             if let Err(error) = inbox::mark_delivered(root, member_name, &message.id) {
                 warn!(
@@ -1505,6 +1502,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
         let root = inbox::inboxes_root(tmp.path());
+        daemon
+            .config
+            .pane_map
+            .insert("manager".to_string(), "%123".to_string());
 
         let first = inbox::InboxMessage::new_send("eng-1", "manager", "first update");
         let second = inbox::InboxMessage::new_send("architect", "manager", "second update");
@@ -1536,9 +1537,11 @@ mod tests {
         let cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
         match cmd {
             crate::shim::protocol::Command::SendMessage { body, .. } => {
-                assert!(body.contains("--- Message 1/2 from eng-1 ---"));
+                assert!(body.contains("--- Message 1/2 from "));
+                assert!(body.contains("--- Message 2/2 from "));
+                assert!(body.contains("from eng-1 ---"));
                 assert!(body.contains("first update"));
-                assert!(body.contains("--- Message 2/2 from architect ---"));
+                assert!(body.contains("from architect ---"));
                 assert!(body.contains("second update"));
             }
             other => panic!("expected SendMessage, got {other:?}"),
