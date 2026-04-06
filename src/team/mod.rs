@@ -69,6 +69,7 @@ pub mod telegram;
 pub mod telemetry_db;
 #[cfg(test)]
 pub mod test_helpers;
+pub mod test_results;
 #[cfg(test)]
 pub mod test_support;
 pub mod validation;
