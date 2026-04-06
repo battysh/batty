@@ -70,6 +70,28 @@ fn planning_prompt_context(project_root: &std::path::Path) -> (Vec<String>, Vec<
     (roadmap, goals)
 }
 
+fn claim_time_held_secs(task: &crate::task::Task, now: DateTime<Utc>) -> Option<u64> {
+    task.claimed_at
+        .as_deref()
+        .and_then(parse_rfc3339_utc)
+        .and_then(|claimed_at| {
+            let held_secs = now.signed_duration_since(claimed_at).num_seconds();
+            (held_secs >= 0).then_some(held_secs as u64)
+        })
+}
+
+fn reset_claimed_worktree_to_base(work_dir: &std::path::Path, base_branch: &str) -> Result<()> {
+    crate::team::git_cmd::run_git(work_dir, &["reset", "--hard"])
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    crate::team::git_cmd::run_git(work_dir, &["clean", "-fd"])
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    crate::team::git_cmd::checkout_new_branch(work_dir, base_branch, "main")
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    crate::team::git_cmd::run_git(work_dir, &["reset", "--hard", "main"])
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(())
+}
+
 impl TeamDaemon {
     pub(super) fn maybe_manage_task_claim_ttls(&mut self) -> Result<()> {
         let tasks_dir = self.board_dir().join("tasks");
@@ -100,11 +122,20 @@ impl TeamDaemon {
                 .members
                 .iter()
                 .find(|member| member.name == engineer)
+                .cloned()
             else {
                 continue;
             };
-
-            let work_dir = self.member_work_dir(member);
+            let use_worktrees = member.use_worktrees;
+            let work_dir = if use_worktrees {
+                self.config
+                    .project_root
+                    .join(".batty")
+                    .join("worktrees")
+                    .join(engineer)
+            } else {
+                self.member_work_dir(&member)
+            };
             let ttl_secs = self.claim_ttl_secs_for_priority(&task.priority);
             let current_output_bytes = self
                 .shim_handles
@@ -211,10 +242,27 @@ impl TeamDaemon {
                 continue;
             }
 
+            let time_held_secs = claim_time_held_secs(task, now);
             let _ = self.preserve_member_worktree(
                 engineer,
                 &format!("wip: auto-save before claim reclaim [{engineer}]"),
             );
+            if use_worktrees {
+                let base_branch = engineer_base_branch_name(engineer);
+                match reset_claimed_worktree_to_base(&work_dir, &base_branch) {
+                    Ok(()) => self.record_orchestrator_action(format!(
+                        "claim ttl: reset {} worktree to {} before reclaiming task #{}",
+                        engineer, base_branch, task.id
+                    )),
+                    Err(error) => warn!(
+                        engineer = %engineer,
+                        task_id = task.id,
+                        worktree = %work_dir.display(),
+                        error = %error,
+                        "claim ttl: failed to reset engineer worktree before reclaim"
+                    ),
+                }
+            }
             let branch = task
                 .branch
                 .clone()
@@ -236,7 +284,10 @@ impl TeamDaemon {
                 engineer,
                 &task.id.to_string(),
                 true,
+                time_held_secs,
             ));
+            self.recent_dispatches
+                .insert((task.id, engineer.to_string()), Instant::now());
             let manager = self.assignment_sender(engineer);
             let _ = self.queue_message(
                 "daemon",
@@ -1290,6 +1341,21 @@ fn latest_commit_timestamp(work_dir: &std::path::Path) -> Option<DateTime<Utc>> 
     parse_rfc3339_utc(stdout.trim())
 }
 
+fn has_claim_progress_worktree_changes(work_dir: &std::path::Path) -> bool {
+    crate::team::git_cmd::status_porcelain(work_dir)
+        .ok()
+        .map(|status| {
+            status.lines().any(|line| {
+                let path = line.get(3..).unwrap_or("").trim();
+                if path.starts_with(".batty/") || path.starts_with(".cargo/") {
+                    return false;
+                }
+                !path.starts_with(".batty/team_config/")
+            })
+        })
+        .unwrap_or(false)
+}
+
 fn task_claim_progress_type(
     task: &crate::task::Task,
     work_dir: &std::path::Path,
@@ -1302,7 +1368,7 @@ fn task_claim_progress_type(
     if latest_commit_timestamp(work_dir).is_some_and(|ts| ts > last_progress_at) {
         return Some("commit");
     }
-    if crate::team::git_cmd::has_user_changes(work_dir).unwrap_or(false) {
+    if has_claim_progress_worktree_changes(work_dir) {
         return Some("dirty_files");
     }
     if current_output_bytes > task.last_output_bytes.unwrap_or(0) {
@@ -1315,17 +1381,20 @@ fn task_claim_progress_type(
 mod tests {
     use super::super::*;
     use crate::team::config::RoleType;
-    use crate::team::config::{WorkflowMode, WorkflowPolicy};
+    use crate::team::config::{BoardConfig, WorkflowMode, WorkflowPolicy};
     use crate::team::events::TeamEvent;
     use crate::team::hierarchy::MemberInstance;
     use crate::team::task_cmd::{
         set_optional_string, set_optional_u64, update_task_frontmatter, yaml_key,
     };
-    use crate::team::task_loop::setup_engineer_worktree;
+    use crate::team::task_loop::{
+        current_worktree_branch, engineer_base_branch_name, setup_engineer_worktree,
+    };
     use crate::team::test_helpers::{make_test_daemon, write_event_log};
     use crate::team::test_support::{
         EnvVarGuard, PATH_LOCK, TestDaemonBuilder, architect_member, engineer_member, git_ok,
-        init_git_repo, manager_member, write_board_task_file, write_owned_task_file,
+        init_git_repo, manager_member, write_board_task_file, write_open_task_file,
+        write_owned_task_file,
     };
     use std::collections::HashMap;
 
@@ -2751,7 +2820,6 @@ Second body.
 
     #[test]
     fn escalate_stale_reviews_sends_nudge_then_escalation() {
-        use crate::team::config::WorkflowPolicy;
         use crate::team::test_support::TestDaemonBuilder;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3843,8 +3911,126 @@ Second body.
         let events =
             crate::team::events::read_events(&crate::team::team_events_path(&repo)).unwrap();
         assert!(events.iter().any(|event| {
-            event.event == "task_claim_expired" && event.task.as_deref() == Some("42")
+            event.event == "task_claim_expired"
+                && event.task.as_deref() == Some("42")
+                && event
+                    .reason
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("time_held_secs=")
         }));
+    }
+
+    #[test]
+    fn claim_ttl_reclaim_resets_engineer_worktree_to_base_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "claim-ttl-reset");
+        write_owned_task_file(&repo, 42, "ttl-reset", "in-progress", "eng-1");
+
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        git_ok(&worktree_dir, &["checkout", "-b", "eng-1/42"]);
+
+        let task_path = repo.join(".batty/team_config/board/tasks/042-ttl-reset.md");
+        let now = chrono::Utc::now();
+        let stale_time = (now - chrono::Duration::minutes(40)).to_rfc3339();
+        let recent_progress_time = now.to_rfc3339();
+        update_task_frontmatter(&task_path, |mapping| {
+            set_optional_string(mapping, "claimed_at", Some(&stale_time));
+            set_optional_u64(mapping, "claim_ttl_secs", Some(60));
+            set_optional_string(mapping, "claim_expires_at", Some(&stale_time));
+            set_optional_string(mapping, "last_progress_at", Some(&recent_progress_time));
+            set_optional_u64(mapping, "last_output_bytes", Some(0));
+            mapping.insert(
+                yaml_key("claim_extensions"),
+                serde_yaml::Value::Number(0.into()),
+            );
+        })
+        .unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), true),
+            ])
+            .build();
+        daemon.active_tasks.insert("eng-1".to_string(), 42);
+
+        daemon.maybe_manage_task_claim_ttls().unwrap();
+
+        let task = crate::task::Task::from_file(&task_path).unwrap();
+        assert_eq!(task.status, "todo");
+        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), base_branch);
+    }
+
+    #[test]
+    fn claim_ttl_reclaim_marks_same_engineer_as_recent_dispatch_and_prefers_alternative() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "claim-ttl-redispatch");
+        write_owned_task_file(&repo, 42, "ttl-redispatch", "in-progress", "eng-1");
+        write_open_task_file(&repo, 99, "background-done", "done");
+
+        let task_path = repo.join(".batty/team_config/board/tasks/042-ttl-redispatch.md");
+        let now = chrono::Utc::now();
+        let stale_time = (now - chrono::Duration::minutes(40)).to_rfc3339();
+        let recent_progress_time = now.to_rfc3339();
+        update_task_frontmatter(&task_path, |mapping| {
+            set_optional_string(mapping, "claimed_at", Some(&stale_time));
+            set_optional_u64(mapping, "claim_ttl_secs", Some(60));
+            set_optional_string(mapping, "claim_expires_at", Some(&stale_time));
+            set_optional_string(mapping, "last_progress_at", Some(&recent_progress_time));
+            set_optional_u64(mapping, "last_output_bytes", Some(0));
+            mapping.insert(
+                yaml_key("claim_extensions"),
+                serde_yaml::Value::Number(0.into()),
+            );
+        })
+        .unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), false),
+                engineer_member("eng-2", Some("manager"), false),
+            ])
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 0,
+                dispatch_dedup_window_secs: 60,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([
+                ("eng-1".to_string(), MemberState::Idle),
+                ("eng-2".to_string(), MemberState::Idle),
+            ]))
+            .build();
+        daemon.active_tasks.insert("eng-1".to_string(), 42);
+
+        daemon.maybe_manage_task_claim_ttls().unwrap();
+
+        assert!(
+            daemon
+                .recent_dispatches
+                .contains_key(&(42, "eng-1".to_string()))
+        );
+
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon.idle_started_at.insert(
+            "eng-1".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+        daemon.idle_started_at.insert(
+            "eng-2".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+
+        daemon.maybe_auto_dispatch().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].task_id, 42);
+        assert_eq!(daemon.dispatch_queue[0].engineer, "eng-2");
     }
 
     #[test]

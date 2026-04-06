@@ -282,11 +282,20 @@ impl TeamEvent {
         }
     }
 
-    pub fn task_claim_expired(role: &str, task: &str, reclaimed: bool) -> Self {
+    pub fn task_claim_expired(
+        role: &str,
+        task: &str,
+        reclaimed: bool,
+        time_held_secs: Option<u64>,
+    ) -> Self {
+        let mut reason = format!("reclaimed={reclaimed}");
+        if let Some(time_held_secs) = time_held_secs {
+            reason.push_str(&format!(" time_held_secs={time_held_secs}"));
+        }
         Self {
             role: Some(role.into()),
             task: Some(task.into()),
-            reason: Some(format!("reclaimed={reclaimed}")),
+            reason: Some(reason),
             ..Self::base("task_claim_expired")
         }
     }
