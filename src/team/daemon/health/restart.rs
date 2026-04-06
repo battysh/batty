@@ -14,7 +14,8 @@ impl TeamDaemon {
     /// previous session, if `context_handoff_enabled` is true and a handoff file
     /// exists.  The handoff file is deleted after injection.
     pub(in super::super) fn restart_assignment_with_handoff(
-        &self,
+        &mut self,
+        member_name: &str,
         task: &crate::task::Task,
         work_dir: &Path,
     ) -> String {
@@ -40,6 +41,7 @@ impl TeamDaemon {
                 "failed to remove restart handoff file after injection"
             );
         }
+        self.record_handoff_injected(member_name, task.id.to_string(), "restart");
 
         format!(
             "You are continuing work on Task #{}.\n\n{}\n\nResume from where you left off. Do not repeat already completed work.\n\n{}",
@@ -552,7 +554,7 @@ mod tests {
         use crate::team::test_support::TestDaemonBuilder;
 
         let tmp = tempfile::tempdir().unwrap();
-        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
         let task = crate::task::Task {
             id: 42,
             title: "resume widget".to_string(),
@@ -591,7 +593,7 @@ mod tests {
         )
         .unwrap();
 
-        let message = daemon.restart_assignment_with_handoff(&task, tmp.path());
+        let message = daemon.restart_assignment_with_handoff("eng-1", &task, tmp.path());
 
         assert!(message.contains("You are continuing work on Task #42."));
         assert!(message.contains("# Carry-Forward Summary"));
@@ -607,7 +609,7 @@ mod tests {
         use crate::team::test_support::TestDaemonBuilder;
 
         let tmp = tempfile::tempdir().unwrap();
-        let daemon = TestDaemonBuilder::new(tmp.path())
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
             .workflow_policy(WorkflowPolicy {
                 context_handoff_enabled: false,
                 ..WorkflowPolicy::default()
@@ -647,7 +649,7 @@ mod tests {
         let handoff_path = tmp.path().join(crate::shim::runtime::HANDOFF_FILE_NAME);
         std::fs::write(&handoff_path, "should stay on disk").unwrap();
 
-        let message = daemon.restart_assignment_with_handoff(&task, tmp.path());
+        let message = daemon.restart_assignment_with_handoff("eng-1", &task, tmp.path());
 
         assert!(!message.contains("Previous session progress:"));
         assert!(
@@ -661,7 +663,7 @@ mod tests {
         use crate::team::test_support::TestDaemonBuilder;
 
         let tmp = tempfile::tempdir().unwrap();
-        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
         let task = crate::task::Task {
             id: 99,
             title: "no file test".to_string(),
@@ -694,7 +696,7 @@ mod tests {
             source_path: tmp.path().join("task-99.md"),
         };
 
-        let message = daemon.restart_assignment_with_handoff(&task, tmp.path());
+        let message = daemon.restart_assignment_with_handoff("eng-1", &task, tmp.path());
 
         assert!(!message.contains("Previous session progress:"));
         assert!(message.contains("Continuing Task #99"));

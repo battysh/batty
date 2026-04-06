@@ -83,7 +83,7 @@ impl TeamDaemon {
         tmux::respawn_pane(&pane_id, "bash")?;
         std::thread::sleep(std::time::Duration::from_millis(200));
 
-        let assignment = self.restart_assignment_with_handoff(&task, &work_dir);
+        let assignment = self.restart_assignment_with_handoff(member_name, &task, &work_dir);
         let launch = self.launch_task_assignment(member_name, &assignment, Some(task.id), false)?;
         let mut restart_notice = format!(
             "Restarted after stall ({}s no output). Continue task #{} from the current worktree state.",

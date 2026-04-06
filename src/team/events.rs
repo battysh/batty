@@ -586,6 +586,16 @@ impl TeamEvent {
         }
     }
 
+    pub fn handoff_injected(role: &str, task: &str, reason: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            reason: Some(reason.into()),
+            success: Some(true),
+            ..Self::base("handoff_injected")
+        }
+    }
+
     pub fn task_resumed(role: &str, task: &str, reason: &str, restart_count: u32) -> Self {
         Self {
             role: Some(role.into()),

@@ -481,7 +481,7 @@ impl TeamDaemon {
         shim_agent_cmd_uses_resume(&handle.agent_cmd)
     }
 
-    fn cold_respawn_plan(&self, member_name: &str) -> Result<Option<ShimRespawnPlan>> {
+    fn cold_respawn_plan(&mut self, member_name: &str) -> Result<Option<ShimRespawnPlan>> {
         let Some(member) = self
             .config
             .members
@@ -494,12 +494,13 @@ impl TeamDaemon {
         let Some(handle) = self.shim_handles.get(member_name) else {
             return Ok(None);
         };
+        let existing_agent_type = handle.agent_type.clone();
 
         if let Some(task) = self.active_task(member_name)? {
             let team_config_dir = self.config.project_root.join(".batty").join("team_config");
             let role_context = strip_nudge_section(&self.load_prompt(&member, &team_config_dir));
             let work_dir = self.member_work_dir(&member);
-            let prompt = self.restart_assignment_with_handoff(&task, &work_dir);
+            let prompt = self.restart_assignment_with_handoff(member_name, &task, &work_dir);
             let role = self
                 .config
                 .team_config
@@ -526,7 +527,7 @@ impl TeamDaemon {
                 sdk_mode_task,
             )?;
             return Ok(Some(ShimRespawnPlan {
-                agent_type: handle.agent_type.clone(),
+                agent_type: existing_agent_type,
                 agent_cmd,
                 work_dir,
                 identity: Some(LaunchIdentity {
