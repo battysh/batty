@@ -18,6 +18,37 @@ pub enum ScreenVerdict {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Classification {
+    pub verdict: ScreenVerdict,
+    pub confidence: f32,
+}
+
+impl Classification {
+    const fn exact(verdict: ScreenVerdict) -> Self {
+        Self {
+            verdict,
+            confidence: 1.0,
+        }
+    }
+
+    const fn ambiguous(verdict: ScreenVerdict) -> Self {
+        Self {
+            verdict,
+            confidence: 0.45,
+        }
+    }
+
+    const fn unknown() -> Self {
+        Self {
+            verdict: ScreenVerdict::Unknown,
+            confidence: 0.0,
+        }
+    }
+}
+
+pub const MIN_CLASSIFIER_CONFIDENCE: f32 = 0.75;
+
 /// How a single output line should be treated by narration enforcement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NarrationLineKind {
@@ -69,14 +100,24 @@ impl std::fmt::Display for AgentType {
 
 /// Classify screen content based on agent type.
 pub fn classify(agent_type: AgentType, screen: &vt100::Screen) -> ScreenVerdict {
+    let result = classify_with_confidence(agent_type, screen);
+    if result.confidence >= MIN_CLASSIFIER_CONFIDENCE {
+        result.verdict
+    } else {
+        ScreenVerdict::Unknown
+    }
+}
+
+/// Classify screen content and return a confidence score for the match.
+pub fn classify_with_confidence(agent_type: AgentType, screen: &vt100::Screen) -> Classification {
     let content = screen.contents();
     if content.trim().is_empty() {
-        return ScreenVerdict::Unknown;
+        return Classification::unknown();
     }
 
     // Context exhaustion check (common across all types)
     if detect_context_exhausted(&content) {
-        return ScreenVerdict::ContextExhausted;
+        return Classification::exact(ScreenVerdict::ContextExhausted);
     }
 
     match agent_type {
@@ -319,7 +360,7 @@ const CLAUDE_SPINNER_CHARS: &[char] = &[
     '\u{273D}', // ✽
 ];
 
-fn classify_claude(content: &str) -> ScreenVerdict {
+fn classify_claude(content: &str) -> Classification {
     // Claude Code classification based on the status bar and tool execution indicators.
     //
     // Working signals (any of these = Working):
@@ -333,36 +374,40 @@ fn classify_claude(content: &str) -> ScreenVerdict {
     let lines: Vec<&str> = content.lines().collect();
     let bottom: Vec<&str> = lines.iter().rev().take(6).copied().collect();
 
-    let is_working = bottom.iter().any(|line| {
-        let lower = line.trim().to_lowercase();
-        // "esc to interrupt" — agent thinking/generating (+ truncated variants)
-        lower.contains("esc to interrupt")
-            || lower.contains("esc to inter")
-            || lower.contains("esc to in\u{2026}")
-            || lower.contains("esc to in...")
-            || lower.contains("esc t\u{2026}")
-            || (lower.contains("esc t") && lower.contains("bypass"))
-            // "ctrl+b to run in background" — tool/bash executing
-            || lower.contains("ctrl+b to run")
-            || lower.contains("ctrl+b to r")
-    });
+    let working_confidence = bottom
+        .iter()
+        .filter_map(|line| claude_working_confidence(line))
+        .max_by(f32::total_cmp);
 
-    if is_working {
-        return ScreenVerdict::AgentWorking;
+    if let Some(confidence) = working_confidence {
+        return if confidence >= MIN_CLASSIFIER_CONFIDENCE {
+            Classification {
+                verdict: ScreenVerdict::AgentWorking,
+                confidence,
+            }
+        } else {
+            Classification::ambiguous(ScreenVerdict::AgentWorking)
+        };
     }
 
-    let has_status_bar = bottom.iter().any(|line| {
-        let lower = line.trim().to_lowercase();
-        lower.contains("bypass permissions")
-            || lower.contains("shift+tab")
-            || lower.contains("ctrl+g to edit")
-    });
+    let idle_confidence = bottom
+        .iter()
+        .filter_map(|line| {
+            best_phrase_confidence(
+                line,
+                &["bypass permissions", "shift+tab", "ctrl+g to edit"],
+            )
+        })
+        .max_by(f32::total_cmp);
 
-    if has_status_bar {
-        return ScreenVerdict::AgentIdle;
+    if let Some(confidence) = idle_confidence {
+        return Classification {
+            verdict: ScreenVerdict::AgentIdle,
+            confidence,
+        };
     }
 
-    ScreenVerdict::Unknown
+    Classification::unknown()
 }
 
 // ---------------------------------------------------------------------------
@@ -411,7 +456,7 @@ fn looks_like_claude_spinner(line: &str) -> bool {
 // Codex classifier
 // ---------------------------------------------------------------------------
 
-fn classify_codex(content: &str) -> ScreenVerdict {
+fn classify_codex(content: &str) -> Classification {
     let lines: Vec<&str> = content.lines().collect();
     let recent_nonempty: Vec<&str> = lines
         .iter()
@@ -424,12 +469,18 @@ fn classify_codex(content: &str) -> ScreenVerdict {
     // Check for Codex working/loading indicators before idle check.
     // "esc to interrupt" means Codex is actively working or loading.
     for line in &recent_nonempty {
-        let lower = line.trim().to_lowercase();
-        if lower.contains("esc to interrupt")
-            || lower.contains("starting mcp")
-            || lower.contains("executing")
-        {
-            return ScreenVerdict::AgentWorking;
+        if let Some(confidence) = best_phrase_confidence(
+            line,
+            &["esc to interrupt", "starting mcp", "executing"],
+        ) {
+            return if confidence >= MIN_CLASSIFIER_CONFIDENCE {
+                Classification {
+                    verdict: ScreenVerdict::AgentWorking,
+                    confidence,
+                }
+            } else {
+                Classification::ambiguous(ScreenVerdict::AgentWorking)
+            };
         }
     }
 
@@ -440,18 +491,31 @@ fn classify_codex(content: &str) -> ScreenVerdict {
     for line in &recent_nonempty {
         let trimmed = line.trim();
         if trimmed.starts_with('\u{203A}') {
-            return ScreenVerdict::AgentIdle;
+            let confidence = if trimmed.chars().count() <= 1 || trimmed == "\u{203A}" {
+                1.0
+            } else if trimmed
+                .strip_prefix('\u{203A}')
+                .is_some_and(|rest| rest.trim().is_empty())
+            {
+                1.0
+            } else {
+                0.92
+            };
+            return Classification {
+                verdict: ScreenVerdict::AgentIdle,
+                confidence,
+            };
         }
     }
 
-    ScreenVerdict::Unknown
+    Classification::unknown()
 }
 
 // ---------------------------------------------------------------------------
 // Kiro classifier
 // ---------------------------------------------------------------------------
 
-fn classify_kiro(content: &str) -> ScreenVerdict {
+fn classify_kiro(content: &str) -> Classification {
     let lines: Vec<&str> = content.lines().collect();
     let recent_nonempty: Vec<&str> = lines
         .iter()
@@ -463,16 +527,22 @@ fn classify_kiro(content: &str) -> ScreenVerdict {
 
     // Check for working/loading indicators first
     for line in &recent_nonempty {
-        let lower = line.trim().to_lowercase();
         // Kiro-cli uses ● spinner during initialization and ⠉/⠋ braille
         // spinners during processing
-        if lower.contains("initializing")
-            || lower.contains("esc to interrupt")
-            || lower.contains("thinking")
-            || lower.contains("planning")
-            || lower.contains("applying")
-        {
-            return ScreenVerdict::AgentWorking;
+        if let Some(confidence) = best_phrase_confidence(
+            line,
+            &[
+                "initializing",
+                "esc to interrupt",
+                "thinking",
+                "planning",
+                "applying",
+            ],
+        ) {
+            return Classification {
+                verdict: ScreenVerdict::AgentWorking,
+                confidence,
+            };
         }
     }
 
@@ -480,7 +550,7 @@ fn classify_kiro(content: &str) -> ScreenVerdict {
     // This is the placeholder text shown when kiro-cli is idle.
     let lower_content = content.to_lowercase();
     if lower_content.contains("ask a question") || lower_content.contains("describe a task") {
-        return ScreenVerdict::AgentIdle;
+        return Classification::exact(ScreenVerdict::AgentIdle);
     }
 
     // Kiro prompts: Kiro>, kiro>, Kiro >, kiro >, or bare >
@@ -489,35 +559,35 @@ fn classify_kiro(content: &str) -> ScreenVerdict {
         let trimmed = line.trim();
         let lower = trimmed.to_lowercase();
         if trimmed == ">" || trimmed == "> " {
-            return ScreenVerdict::AgentIdle;
+            return Classification::exact(ScreenVerdict::AgentIdle);
         }
         if lower.starts_with("kiro>") {
             let after = &trimmed["kiro>".len()..];
             if after.trim().is_empty() {
-                return ScreenVerdict::AgentIdle;
+                return Classification::exact(ScreenVerdict::AgentIdle);
             }
         } else if lower.starts_with("kiro >") {
             let after = &trimmed["kiro >".len()..];
             if after.trim().is_empty() {
-                return ScreenVerdict::AgentIdle;
+                return Classification::exact(ScreenVerdict::AgentIdle);
             }
         }
         if trimmed.ends_with("> ") || trimmed.ends_with('>') {
             let before_gt = trimmed.trim_end_matches(['>', ' ']);
             if before_gt.len() < trimmed.len() {
-                return ScreenVerdict::AgentIdle;
+                return Classification::ambiguous(ScreenVerdict::AgentIdle);
             }
         }
     }
 
-    ScreenVerdict::Unknown
+    Classification::unknown()
 }
 
 // ---------------------------------------------------------------------------
 // Generic classifier (bash / shell / REPL)
 // ---------------------------------------------------------------------------
 
-fn classify_generic(content: &str) -> ScreenVerdict {
+fn classify_generic(content: &str) -> Classification {
     let lines: Vec<&str> = content.lines().collect();
     let recent_nonempty: Vec<&str> = lines
         .iter()
@@ -534,14 +604,127 @@ fn classify_generic(content: &str) -> ScreenVerdict {
             || trimmed.ends_with('$')
             || trimmed.ends_with("% ")
             || trimmed.ends_with('%')
-            || trimmed.ends_with("> ")
-            || trimmed.ends_with('>')
+            || (trimmed.ends_with("> ") && trimmed.len() > 1)
+            || (trimmed.ends_with('>') && trimmed.len() > 1)
         {
-            return ScreenVerdict::AgentIdle;
+            return Classification::exact(ScreenVerdict::AgentIdle);
+        }
+        if trimmed == ">" || trimmed == "> " {
+            return Classification::ambiguous(ScreenVerdict::AgentIdle);
         }
     }
 
-    ScreenVerdict::Unknown
+    Classification::unknown()
+}
+
+fn best_phrase_confidence(line: &str, phrases: &[&str]) -> Option<f32> {
+    phrases
+        .iter()
+        .filter_map(|phrase| phrase_match_confidence(line, phrase))
+        .max_by(f32::total_cmp)
+}
+
+fn phrase_match_confidence(line: &str, phrase: &str) -> Option<f32> {
+    let normalized_line = normalize_match_text(line);
+    let normalized_phrase = normalize_match_text(phrase);
+    if normalized_line.is_empty() || normalized_phrase.is_empty() {
+        return None;
+    }
+
+    if normalized_line.contains(&normalized_phrase) {
+        return Some(1.0);
+    }
+
+    let line_tokens = normalized_line.split_whitespace().collect::<Vec<_>>();
+    let phrase_tokens = normalized_phrase.split_whitespace().collect::<Vec<_>>();
+    if line_tokens.is_empty() || phrase_tokens.is_empty() {
+        return None;
+    }
+
+    let max_start = line_tokens.len().saturating_sub(1);
+    for start in 0..=max_start {
+        let score = token_prefix_score(&line_tokens[start..], &phrase_tokens);
+        if score > 0.0 {
+            return Some(score);
+        }
+    }
+
+    None
+}
+
+fn claude_working_confidence(line: &str) -> Option<f32> {
+    let lower = normalize_match_text(line);
+    if lower.contains("esc to interrupt")
+        || lower.contains("ctrl+b to run in background")
+        || lower.contains("waiting")
+        || lower.contains("running")
+    {
+        return Some(1.0);
+    }
+
+    if lower.contains("esc to inter")
+        || lower.contains("esc to in...")
+        || lower.contains("esc t...")
+        || lower.contains("ctrl+b to run")
+        || lower.contains("ctrl+b to r")
+        || (lower.contains("esc t")
+            && (lower.contains("bypass") || lower.contains("shift+tab") || lower.contains("ctrl+g")))
+    {
+        return Some(0.84);
+    }
+
+    None
+}
+
+fn token_prefix_score(line_tokens: &[&str], phrase_tokens: &[&str]) -> f32 {
+    let mut matched = 0usize;
+    let mut consumed_chars = 0usize;
+    let mut used_prefix = false;
+
+    for (line_token, phrase_token) in line_tokens.iter().zip(phrase_tokens.iter()) {
+        if *line_token == *phrase_token {
+            matched += 1;
+            consumed_chars += phrase_token.len();
+            continue;
+        }
+        if phrase_token.starts_with(*line_token) && line_token.len() >= 1 {
+            matched += 1;
+            consumed_chars += line_token.len();
+            used_prefix = true;
+            break;
+        }
+        return 0.0;
+    }
+
+    if matched == 0 {
+        return 0.0;
+    }
+
+    let phrase_chars = phrase_tokens.iter().map(|token| token.len()).sum::<usize>();
+    let coverage = consumed_chars as f32 / phrase_chars as f32;
+
+    if matched == phrase_tokens.len() && !used_prefix {
+        return 1.0;
+    }
+
+    if matched >= 2 && coverage >= 0.45 {
+        return 0.84;
+    }
+
+    if matched == 1 && coverage >= 0.25 {
+        return 0.45;
+    }
+
+    0.0
+}
+
+fn normalize_match_text(value: &str) -> String {
+    value.to_ascii_lowercase()
+        .replace('\u{2026}', "...")
+        .replace("…", "...")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ---------------------------------------------------------------------------
@@ -556,6 +739,11 @@ mod tests {
         let mut parser = vt100::Parser::new(24, 80, 0);
         parser.process(content.as_bytes());
         parser
+    }
+
+    fn classify_result(agent_type: AgentType, content: &str) -> Classification {
+        let parser = make_screen(content);
+        classify_with_confidence(agent_type, parser.screen())
     }
 
     // -- Claude --
@@ -632,6 +820,45 @@ mod tests {
     }
 
     #[test]
+    fn claude_exact_match_has_full_confidence() {
+        let result = classify_result(
+            AgentType::Claude,
+            "Some output\n\u{276F}\n  bypass permissions on (shift+tab to cycle)",
+        );
+        assert_eq!(result.verdict, ScreenVerdict::AgentIdle);
+        assert_eq!(result.confidence, 1.0);
+    }
+
+    #[test]
+    fn claude_fuzzy_match_detects_truncated_footer() {
+        let result = classify_result(
+            AgentType::Claude,
+            "output\n  bypass permissions on · esc to inter",
+        );
+        assert_eq!(result.verdict, ScreenVerdict::AgentWorking);
+        assert!(result.confidence >= MIN_CLASSIFIER_CONFIDENCE);
+        assert!(result.confidence < 1.0);
+    }
+
+    #[test]
+    fn claude_truncated_idle_status_bar_matches_fuzzily() {
+        let result = classify_result(AgentType::Claude, "output\n  bypass permiss");
+        assert_eq!(result.verdict, ScreenVerdict::AgentIdle);
+        assert!(result.confidence >= MIN_CLASSIFIER_CONFIDENCE);
+        assert!(result.confidence < 1.0);
+    }
+
+    #[test]
+    fn claude_ambiguous_status_returns_low_confidence() {
+        let result = classify_result(AgentType::Claude, "output\n  shift");
+        assert_eq!(result.verdict, ScreenVerdict::AgentIdle);
+        assert!(result.confidence < MIN_CLASSIFIER_CONFIDENCE);
+
+        let parser = make_screen("output\n  shift");
+        assert_eq!(classify(AgentType::Claude, parser.screen()), ScreenVerdict::Unknown);
+    }
+
+    #[test]
     fn claude_context_exhausted() {
         let parser = make_screen("Error: context window is full\n\u{276F} ");
         assert_eq!(
@@ -678,6 +905,14 @@ mod tests {
             ScreenVerdict::AgentIdle,
             "placeholder text after › should be Idle"
         );
+    }
+
+    #[test]
+    fn codex_truncated_interrupt_footer_matches_fuzzily() {
+        let result = classify_result(AgentType::Codex, "loading\nesc to inter");
+        assert_eq!(result.verdict, ScreenVerdict::AgentWorking);
+        assert!(result.confidence >= MIN_CLASSIFIER_CONFIDENCE);
+        assert!(result.confidence < 1.0);
     }
 
     #[test]
@@ -787,12 +1022,26 @@ mod tests {
     }
 
     #[test]
+    fn generic_bare_gt_prompt_is_ambiguous_at_low_confidence() {
+        let result = classify_result(AgentType::Generic, ">");
+        assert_eq!(result.verdict, ScreenVerdict::AgentIdle);
+        assert!(result.confidence < MIN_CLASSIFIER_CONFIDENCE);
+    }
+
+    #[test]
     fn generic_empty_unknown() {
         let parser = make_screen("");
         assert_eq!(
             classify(AgentType::Generic, parser.screen()),
             ScreenVerdict::Unknown
         );
+    }
+
+    #[test]
+    fn unknown_pattern_returns_unknown_with_zero_confidence() {
+        let result = classify_result(AgentType::Codex, "plain output with no known prompt");
+        assert_eq!(result.verdict, ScreenVerdict::Unknown);
+        assert_eq!(result.confidence, 0.0);
     }
 
     // -- Shared --
