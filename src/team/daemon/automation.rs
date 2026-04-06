@@ -682,6 +682,11 @@ impl TeamDaemon {
         let message = inbox::InboxMessage::new_send(&sender, &architect, &body);
         inbox::deliver_to_inbox(&inbox_root, &message)?;
         self.record_message_routed(&sender, &architect);
+        self.record_planning_cycle_triggered(
+            &architect,
+            idle_engineer_count as u32,
+            &board_summary,
+        );
 
         self.planning_cycle_last_fired = Some(Instant::now());
         self.planning_cycle_active = true;
@@ -698,6 +703,17 @@ impl TeamDaemon {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn handle_planning_response(&mut self, response: &str) -> Result<usize> {
+        let architect = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.role_type == RoleType::Architect)
+            .map(|member| member.name.clone())
+            .unwrap_or_else(|| "architect".to_string());
+        let latency_secs = self
+            .planning_cycle_last_fired
+            .map(|instant| instant.elapsed().as_secs())
+            .unwrap_or(0);
         let specs = crate::team::tact::parser::parse_planning_response(response);
         let board_dir = self.board_dir();
         let result = crate::team::tact::create_board_tasks(&specs, &board_dir)
@@ -707,6 +723,13 @@ impl TeamDaemon {
 
         match result {
             Ok(created) => {
+                self.record_planning_cycle_completed(
+                    &architect,
+                    created as u32,
+                    latency_secs,
+                    true,
+                    None,
+                );
                 info!(created, "applied planning cycle response");
                 self.record_orchestrator_action(format!(
                     "planning: applied planning response and created {} tasks",
@@ -714,7 +737,16 @@ impl TeamDaemon {
                 ));
                 Ok(created)
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                self.record_planning_cycle_completed(
+                    &architect,
+                    0,
+                    latency_secs,
+                    false,
+                    Some(&error.to_string()),
+                );
+                Err(error)
+            }
         }
     }
 
@@ -931,6 +963,9 @@ impl TeamDaemon {
 
         let summary = board::archive_tasks(&board_dir, &old_done, false)?;
         if summary.archived_count > 0 {
+            for task in &old_done {
+                self.record_board_task_archived(task.id, task.claimed_by.as_deref());
+            }
             info!(
                 archived = summary.archived_count,
                 threshold_secs, "auto-archived done tasks"
@@ -1207,6 +1242,20 @@ Second body.
         assert!(
             orchestrator_log.contains("planning: applied planning response and created 3 tasks")
         );
+
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(tmp.path())).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "planning_cycle_triggered"
+                && event.role.as_deref() == Some("architect")
+                && event.working_members == Some(3)
+        }));
+        assert!(events.iter().any(|event| {
+            event.event == "planning_cycle_completed"
+                && event.role.as_deref() == Some("architect")
+                && event.restart_count == Some(3)
+                && event.reason.as_deref() == Some("success")
+        }));
     }
 
     #[test]
@@ -2911,6 +2960,12 @@ Second body.
             .join("board")
             .join("archive");
         assert!(archive_dir.join("001-old-done.md").exists());
+
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(tmp.path())).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "board_task_archived" && event.task.as_deref() == Some("1")
+        }));
     }
 
     #[test]
