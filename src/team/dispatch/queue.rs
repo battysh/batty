@@ -10,6 +10,8 @@ use super::super::super::policy::check_wip_limit;
 use super::super::super::task_loop::engineer_worktree_ready_for_dispatch;
 use super::super::task_cmd::{assign_task_owners, transition_task};
 use super::super::*;
+use crate::team::allocation::{EngineerProfile, load_engineer_profiles, rank_engineers_for_task};
+use crate::team::config::AllocationStrategy;
 
 /// Parse task IDs from "Blocked on:" or "Depends on:" lines in the task body.
 /// Returns None if no dependency line found, Some(vec) of referenced task IDs.
@@ -92,6 +94,7 @@ impl TeamDaemon {
 
     pub(in super::super) fn enqueue_dispatch_candidates(&mut self) -> Result<()> {
         let board_dir = self.board_dir();
+        let board_tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
         let dedup_window =
             Duration::from_secs(self.config.team_config.board.dispatch_dedup_window_secs);
 
@@ -104,7 +107,7 @@ impl TeamDaemon {
             .iter()
             .map(|entry| entry.task_id)
             .collect();
-        let queued_engineers: HashSet<String> = self
+        let mut queued_engineers: HashSet<String> = self
             .dispatch_queue
             .iter()
             .map(|entry| entry.engineer.clone())
@@ -113,37 +116,31 @@ impl TeamDaemon {
         let manual_cooldown =
             Duration::from_secs(self.config.team_config.board.dispatch_manual_cooldown_secs);
 
-        let mut engineers = self.idle_engineer_names();
-        engineers.sort();
-        for engineer_name in engineers {
-            if queued_engineers.contains(&engineer_name) {
-                continue;
-            }
-            if let Some(assigned_at) = self.manual_assign_cooldowns.get(&engineer_name) {
-                if assigned_at.elapsed() < manual_cooldown {
-                    debug!(
-                        engineer = %engineer_name,
-                        "skipping dispatch — within manual assignment cooldown"
-                    );
-                    continue;
-                }
-            }
+        let all_engineers: Vec<String> = self
+            .config
+            .members
+            .iter()
+            .filter(|member| member.role_type == RoleType::Engineer)
+            .map(|member| member.name.clone())
+            .collect();
+        let profiles = load_engineer_profiles(self.project_root(), &all_engineers, &board_tasks)?;
+
+        loop {
             let Some(task) = self.next_dispatch_task(&board_dir, &queued_task_ids)? else {
                 break;
             };
-
-            // Skip if this (task_id, engineer) pair was dispatched within the dedup window.
-            let dedup_key = (task.id, engineer_name.clone());
-            if self.recent_dispatches.contains_key(&dedup_key) {
-                debug!(
-                    task_id = task.id,
-                    engineer = %engineer_name,
-                    "skipping dispatch — within dedup window"
-                );
-                continue;
-            }
+            let ranked_engineers =
+                self.rank_dispatch_engineers(&task, &queued_engineers, manual_cooldown, &profiles);
+            let Some(engineer_name) = ranked_engineers.into_iter().find(|engineer_name| {
+                !self
+                    .recent_dispatches
+                    .contains_key(&(task.id, engineer_name.clone()))
+            }) else {
+                break;
+            };
 
             queued_task_ids.insert(task.id);
+            queued_engineers.insert(engineer_name.clone());
             self.dispatch_queue.push(DispatchQueueEntry {
                 engineer: engineer_name,
                 task_id: task.id,
@@ -475,6 +472,47 @@ impl TeamDaemon {
 
         self.dispatch_queue = retained;
         Ok(())
+    }
+
+    fn rank_dispatch_engineers(
+        &self,
+        task: &crate::task::Task,
+        queued_engineers: &HashSet<String>,
+        manual_cooldown: Duration,
+        profiles: &HashMap<String, EngineerProfile>,
+    ) -> Vec<String> {
+        let mut eligible: Vec<String> = self
+            .idle_engineer_names()
+            .into_iter()
+            .filter(|engineer_name| !queued_engineers.contains(engineer_name))
+            .filter(|engineer_name| {
+                let Some(assigned_at) = self.manual_assign_cooldowns.get(engineer_name) else {
+                    return true;
+                };
+                if assigned_at.elapsed() < manual_cooldown {
+                    debug!(
+                        engineer = %engineer_name,
+                        "skipping dispatch — within manual assignment cooldown"
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        eligible.sort();
+
+        if self.config.team_config.workflow_policy.allocation.strategy
+            == AllocationStrategy::RoundRobin
+        {
+            return eligible;
+        }
+        rank_engineers_for_task(
+            &eligible,
+            profiles,
+            task,
+            &self.config.team_config.workflow_policy.allocation,
+        )
     }
 }
 

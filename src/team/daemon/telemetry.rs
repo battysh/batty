@@ -239,6 +239,73 @@ impl TeamDaemon {
         ));
     }
 
+    pub(crate) fn record_task_claim_created(
+        &mut self,
+        engineer: &str,
+        task_id: u32,
+        ttl_secs: u64,
+        expires_at: &str,
+    ) {
+        self.emit_event(TeamEvent::task_claim_created(
+            engineer,
+            &task_id.to_string(),
+            ttl_secs,
+            expires_at,
+        ));
+    }
+
+    pub(crate) fn record_task_claim_progress(
+        &mut self,
+        engineer: &str,
+        task_id: u32,
+        progress_type: &str,
+    ) {
+        self.emit_event(TeamEvent::task_claim_progress(
+            engineer,
+            &task_id.to_string(),
+            progress_type,
+        ));
+    }
+
+    pub(crate) fn record_task_claim_warning(
+        &mut self,
+        engineer: &str,
+        task_id: u32,
+        expires_in_secs: u64,
+    ) {
+        self.emit_event(TeamEvent::task_claim_warning(
+            engineer,
+            &task_id.to_string(),
+            expires_in_secs,
+        ));
+    }
+
+    pub(crate) fn record_task_claim_expired(
+        &mut self,
+        engineer: &str,
+        task_id: u32,
+        reclaimed: bool,
+    ) {
+        self.emit_event(TeamEvent::task_claim_expired(
+            engineer,
+            &task_id.to_string(),
+            reclaimed,
+        ));
+    }
+
+    pub(crate) fn record_task_claim_extended(
+        &mut self,
+        engineer: &str,
+        task_id: u32,
+        new_expires_at: &str,
+    ) {
+        self.emit_event(TeamEvent::task_claim_extended(
+            engineer,
+            &task_id.to_string(),
+            new_expires_at,
+        ));
+    }
+
     pub(super) fn record_planning_cycle_triggered(
         &mut self,
         architect: &str,

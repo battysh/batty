@@ -270,7 +270,7 @@ fn run_with_injector(options: &StressTestOptions, injector: &dyn FaultInjector) 
     let virtual_duration_secs = if options.compact {
         COMPACT_DURATION_SECS
     } else {
-        options.duration_hours.max(1) * 3600
+        options.duration_hours.max(1).saturating_mul(3600)
     };
     let faults = build_schedule(options.compact, virtual_duration_secs, options.seed)
         .into_iter()
