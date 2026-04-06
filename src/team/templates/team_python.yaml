@@ -20,9 +20,9 @@ engineer_prompt: |
 
 # Default configuration for the Python agent
 config:
-  test_command: "pytest"
+  test_command: "uv run pytest"
   test_pattern: "**/test_*.py"
-  ignored_directories:
+  ignored_directories
     - "__pycache__"
     - ".pytest_cache"
     - "venv"
@@ -34,6 +34,6 @@ config:
 
 # Example of a structured task specific to Python
 initial_task: |
-  - Initialize a virtual environment: `python -m venv venv`
-  - Install dependencies: `pip install -r requirements.txt` or `pip install pytest`
-  - Run the test suite: `pytest`
+  - Initialize a virtual environment: `uv venv`
+  - Install dependencies: `uv pip install -r requirements.txt` or `uv pip install pytest`
+  - Run the test suite: `uv pytest`
