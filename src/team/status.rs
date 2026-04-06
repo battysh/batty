@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -11,13 +11,14 @@ use crate::task;
 
 use super::config::{self, RoleType};
 use super::daemon::NudgeSchedule;
+use super::daemon_mgmt::{watchdog_state_path, PersistedWatchdogState};
 use super::events;
 use super::hierarchy::MemberInstance;
 use super::inbox;
 use super::standup::MemberState;
 use super::{
-    TRIAGE_RESULT_FRESHNESS_SECONDS, daemon_state_path, now_unix, pause_marker_path,
-    team_config_dir, team_config_path, team_events_path,
+    daemon_state_path, now_unix, pause_marker_path, team_config_dir, team_config_path,
+    team_events_path, TRIAGE_RESULT_FRESHNESS_SECONDS,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -121,12 +122,21 @@ pub(crate) struct TeamStatusHealth {
     pub(crate) unhealthy_members: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct WatchdogStatus {
+    pub(crate) state: String,
+    pub(crate) restart_count: u32,
+    pub(crate) current_backoff_secs: Option<u64>,
+    pub(crate) last_exit_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct TeamStatusJsonReport {
     pub(crate) team: String,
     pub(crate) session: String,
     pub(crate) running: bool,
     pub(crate) paused: bool,
+    pub(crate) watchdog: WatchdogStatus,
     pub(crate) health: TeamStatusHealth,
     pub(crate) workflow_metrics: Option<WorkflowMetrics>,
     pub(crate) active_tasks: Vec<StatusTaskEntry>,
@@ -455,6 +465,57 @@ fn load_persisted_daemon_health_state(path: &Path) -> Result<Option<PersistedDae
     let state = serde_json::from_str::<PersistedDaemonHealthState>(&content)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(Some(state))
+}
+
+pub(crate) fn load_watchdog_status(project_root: &Path, session_running: bool) -> WatchdogStatus {
+    let path = watchdog_state_path(project_root);
+    let persisted = if !path.exists() {
+        PersistedWatchdogState::default()
+    } else {
+        match std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))
+            .and_then(|content| {
+                serde_json::from_str::<PersistedWatchdogState>(&content)
+                    .with_context(|| format!("failed to parse {}", path.display()))
+            }) {
+            Ok(state) => state,
+            Err(error) => {
+                warn!(error = %error, "failed to load watchdog state");
+                PersistedWatchdogState::default()
+            }
+        }
+    };
+
+    let state = if !session_running {
+        "stopped".to_string()
+    } else if persisted.circuit_breaker_tripped {
+        "circuit-open".to_string()
+    } else if persisted.current_backoff_secs.is_some() {
+        "restarting".to_string()
+    } else {
+        "running".to_string()
+    };
+
+    WatchdogStatus {
+        state,
+        restart_count: persisted.restart_count,
+        current_backoff_secs: persisted.current_backoff_secs,
+        last_exit_reason: persisted.last_exit_reason,
+    }
+}
+
+pub(crate) fn format_watchdog_summary(watchdog: &WatchdogStatus) -> String {
+    let mut parts = vec![
+        watchdog.state.clone(),
+        format!("r{}", watchdog.restart_count),
+    ];
+    if let Some(backoff_secs) = watchdog.current_backoff_secs {
+        parts.push(format!("backoff={}s", backoff_secs));
+    }
+    if let Some(reason) = &watchdog.last_exit_reason {
+        parts.push(reason.clone());
+    }
+    parts.join(" | ")
 }
 
 fn parse_assigned_task_id(task: &str) -> Option<u32> {
@@ -864,6 +925,7 @@ pub(crate) struct TeamStatusJsonReportInput {
     pub(crate) session: String,
     pub(crate) session_running: bool,
     pub(crate) paused: bool,
+    pub(crate) watchdog: WatchdogStatus,
     pub(crate) workflow_metrics: Option<WorkflowMetrics>,
     pub(crate) active_tasks: Vec<StatusTaskEntry>,
     pub(crate) review_queue: Vec<StatusTaskEntry>,
@@ -878,6 +940,7 @@ pub(crate) fn build_team_status_json_report(
         session,
         session_running,
         paused,
+        watchdog,
         workflow_metrics,
         active_tasks,
         review_queue,
@@ -889,6 +952,7 @@ pub(crate) fn build_team_status_json_report(
         session,
         running: session_running,
         paused,
+        watchdog,
         health,
         workflow_metrics,
         active_tasks,
@@ -1966,6 +2030,12 @@ mod tests {
             session: "batty-test".to_string(),
             session_running: true,
             paused: false,
+            watchdog: WatchdogStatus {
+                state: "running".to_string(),
+                restart_count: 2,
+                current_backoff_secs: None,
+                last_exit_reason: Some("daemon exited with status 101".to_string()),
+            },
             workflow_metrics: Some(WorkflowMetrics {
                 runnable_count: 1,
                 ..WorkflowMetrics::default()
@@ -1994,6 +2064,7 @@ mod tests {
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["team"], "test");
         assert_eq!(json["running"], true);
+        assert_eq!(json["watchdog"]["restart_count"], 2);
         assert_eq!(json["health"]["member_count"], 1);
         assert_eq!(json["workflow_metrics"]["runnable_count"], 1);
         assert!(json["members"].is_array());
@@ -2135,12 +2206,10 @@ mod tests {
             active_tasks[0].worktree_path.as_deref(),
             Some(".batty/worktrees/eng-1")
         );
-        assert!(
-            active_tasks[0]
-                .branch
-                .as_deref()
-                .is_some_and(|branch| branch.contains("eng-1"))
-        );
+        assert!(active_tasks[0]
+            .branch
+            .as_deref()
+            .is_some_and(|branch| branch.contains("eng-1")));
         assert!(active_tasks[0].commit.as_deref().is_some());
     }
 
@@ -2151,6 +2220,12 @@ mod tests {
             session: "batty-test".to_string(),
             session_running: true,
             paused: true,
+            watchdog: WatchdogStatus {
+                state: "restarting".to_string(),
+                restart_count: 1,
+                current_backoff_secs: Some(4),
+                last_exit_reason: Some("daemon exited with status 101".to_string()),
+            },
             workflow_metrics: Some(WorkflowMetrics {
                 runnable_count: 2,
                 blocked_count: 1,
@@ -2232,6 +2307,7 @@ mod tests {
         });
 
         assert_eq!(report.team, "test");
+        assert_eq!(report.watchdog.restart_count, 1);
         assert_eq!(report.active_tasks.len(), 1);
         assert_eq!(report.review_queue.len(), 1);
         assert!(report.paused);
@@ -2241,6 +2317,46 @@ mod tests {
         assert_eq!(report.health.triage_backlog_count, 2);
         assert_eq!(report.health.unhealthy_members, vec!["eng-1".to_string()]);
         assert_eq!(report.workflow_metrics.unwrap().runnable_count, 2);
+    }
+
+    #[test]
+    fn load_watchdog_status_marks_circuit_breaker_and_restarts() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+        std::fs::write(
+            watchdog_state_path(tmp.path()),
+            serde_json::json!({
+                "restart_count": 5,
+                "circuit_breaker_tripped": true,
+                "last_exit_reason": "daemon exited with status 101"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let watchdog = load_watchdog_status(tmp.path(), true);
+
+        assert_eq!(watchdog.state, "circuit-open");
+        assert_eq!(watchdog.restart_count, 5);
+        assert_eq!(
+            watchdog.last_exit_reason.as_deref(),
+            Some("daemon exited with status 101")
+        );
+    }
+
+    #[test]
+    fn format_watchdog_summary_includes_backoff_and_reason() {
+        let summary = format_watchdog_summary(&WatchdogStatus {
+            state: "restarting".to_string(),
+            restart_count: 2,
+            current_backoff_secs: Some(4),
+            last_exit_reason: Some("daemon exited with status 101".to_string()),
+        });
+
+        assert!(summary.contains("restarting"));
+        assert!(summary.contains("r2"));
+        assert!(summary.contains("backoff=4s"));
+        assert!(summary.contains("daemon exited with status 101"));
     }
 
     #[test]
