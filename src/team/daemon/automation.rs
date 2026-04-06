@@ -1555,7 +1555,11 @@ Second body.
 
         let messages = planning_inbox_messages(&tmp);
         assert_eq!(messages.len(), 2);
-        let planning_prompt = &messages[1].body;
+        let planning_prompt = messages
+            .iter()
+            .find(|message| message.body.contains("Expected response format:"))
+            .map(|message| message.body.as_str())
+            .expect("expected planning prompt in architect inbox");
         assert!(planning_prompt.contains("Phase 2: Productionize tact planning."));
         assert!(planning_prompt.contains("Auto-dispatch new tact tasks."));
         assert!(planning_prompt.contains("Goal: Keep idle engineers fed with executable work."));
