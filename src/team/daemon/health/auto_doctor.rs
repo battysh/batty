@@ -41,15 +41,17 @@ impl TeamDaemon {
         let tasks = self.load_board_tasks()?;
         let mut actions = Vec::new();
 
-        for task in tasks.into_iter().filter(|task| task.status == "in-progress") {
+        for task in tasks
+            .into_iter()
+            .filter(|task| task.status == "in-progress")
+        {
             let Some(engineer) = task.claimed_by.as_deref() else {
                 continue;
             };
-            let is_engineer = self
-                .config
-                .members
-                .iter()
-                .any(|member| member.name == engineer && member.role_type == RoleType::Engineer);
+            let is_engineer =
+                self.config.members.iter().any(|member| {
+                    member.name == engineer && member.role_type == RoleType::Engineer
+                });
             let has_matching_assignment = self.active_task_id(engineer) == Some(task.id);
             if is_engineer && has_matching_assignment {
                 continue;
@@ -91,11 +93,15 @@ impl TeamDaemon {
         let now = Utc::now();
         let mut actions = Vec::new();
 
-        for task in tasks.into_iter().filter(|task| task.status == "in-progress") {
+        for task in tasks
+            .into_iter()
+            .filter(|task| task.status == "in-progress")
+        {
             let Some(engineer) = task.claimed_by.as_deref() else {
                 continue;
             };
-            let Some(expires_at) = task_claim_expiry(&task, self.claim_ttl_secs_for_priority(&task.priority))
+            let Some(expires_at) =
+                task_claim_expiry(&task, self.claim_ttl_secs_for_priority(&task.priority))
             else {
                 continue;
             };
@@ -160,7 +166,10 @@ impl TeamDaemon {
         let team_config_dir = self.config.project_root.join(".batty").join("team_config");
         let mut actions = Vec::new();
 
-        for task in tasks.into_iter().filter(|task| task.status == "in-progress") {
+        for task in tasks
+            .into_iter()
+            .filter(|task| task.status == "in-progress")
+        {
             let Some(engineer) = task.claimed_by.as_deref() else {
                 continue;
             };
@@ -214,7 +223,13 @@ impl TeamDaemon {
         );
         warn!("{details}");
         let mut actions = Vec::new();
-        self.log_auto_doctor_action("dependency_cycle_detected", None, None, details, &mut actions);
+        self.log_auto_doctor_action(
+            "dependency_cycle_detected",
+            None,
+            None,
+            details,
+            &mut actions,
+        );
         Ok(actions)
     }
 
@@ -288,11 +303,7 @@ fn parse_rfc3339_utc(value: &str) -> Option<DateTime<Utc>> {
 }
 
 fn task_claim_expiry(task: &crate::task::Task, default_ttl_secs: u64) -> Option<DateTime<Utc>> {
-    if let Some(expires_at) = task
-        .claim_expires_at
-        .as_deref()
-        .and_then(parse_rfc3339_utc)
-    {
+    if let Some(expires_at) = task.claim_expires_at.as_deref().and_then(parse_rfc3339_utc) {
         return Some(expires_at);
     }
 
@@ -315,10 +326,7 @@ fn latest_commit_timestamp(work_dir: &std::path::Path) -> Option<DateTime<Utc>> 
 }
 
 fn task_has_claim_progress(task: &crate::task::Task, work_dir: &std::path::Path) -> bool {
-    let Some(last_progress_at) = task
-        .last_progress_at
-        .as_deref()
-        .and_then(parse_rfc3339_utc)
+    let Some(last_progress_at) = task.last_progress_at.as_deref().and_then(parse_rfc3339_utc)
     else {
         return false;
     };
@@ -338,8 +346,8 @@ mod tests {
     use crate::team::events::read_events;
     use crate::team::task_cmd::{set_optional_string, set_optional_u64, update_task_frontmatter};
     use crate::team::test_support::{
-        TestDaemonBuilder, engineer_member, init_git_repo, manager_member,
-        write_board_task_file, write_owned_task_file,
+        TestDaemonBuilder, engineer_member, init_git_repo, manager_member, write_board_task_file,
+        write_owned_task_file,
     };
 
     fn auto_doctor_daemon(repo: &std::path::Path, use_worktrees: bool) -> TeamDaemon {
@@ -372,9 +380,12 @@ mod tests {
         let task = tasks.into_iter().find(|task| task.id == 17).unwrap();
         assert_eq!(task.status, "todo");
         assert_eq!(task.claimed_by, None);
-        assert!(actions
-            .iter()
-            .any(|action| action.action_type == "orphaned_in_progress_reset" && action.task_id == Some(17)));
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.action_type == "orphaned_in_progress_reset"
+                    && action.task_id == Some(17))
+        );
     }
 
     #[test]
@@ -406,9 +417,12 @@ mod tests {
         .unwrap();
         assert_eq!(task.status, "todo");
         assert_eq!(task.claimed_by, None);
-        assert!(actions
-            .iter()
-            .any(|action| action.action_type == "stale_claim_reclaimed" && action.task_id == Some(23)));
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.action_type == "stale_claim_reclaimed"
+                    && action.task_id == Some(23))
+        );
     }
 
     #[test]
@@ -432,11 +446,26 @@ mod tests {
         set_cycle_ready(&mut daemon);
         let actions = daemon.run_auto_doctor().unwrap();
 
-        assert!(!daemon.board_dir().join("tasks").join("031-done-old.md").exists());
-        assert!(daemon.board_dir().join("archive").join("031-done-old.md").exists());
-        assert!(actions
-            .iter()
-            .any(|action| action.action_type == "done_task_archived" && action.task_id == Some(31)));
+        assert!(
+            !daemon
+                .board_dir()
+                .join("tasks")
+                .join("031-done-old.md")
+                .exists()
+        );
+        assert!(
+            daemon
+                .board_dir()
+                .join("archive")
+                .join("031-done-old.md")
+                .exists()
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.action_type == "done_task_archived"
+                    && action.task_id == Some(31))
+        );
     }
 
     #[test]
@@ -460,10 +489,19 @@ mod tests {
         set_cycle_ready(&mut daemon);
         let actions = daemon.run_auto_doctor().unwrap();
 
-        assert!(daemon.board_dir().join("tasks").join("032-done-recent.md").exists());
-        assert!(actions
-            .iter()
-            .all(|action| action.task_id != Some(32) || action.action_type != "done_task_archived"));
+        assert!(
+            daemon
+                .board_dir()
+                .join("tasks")
+                .join("032-done-recent.md")
+                .exists()
+        );
+        assert!(
+            actions
+                .iter()
+                .all(|action| action.task_id != Some(32)
+                    || action.action_type != "done_task_archived")
+        );
     }
 
     #[test]
@@ -498,9 +536,11 @@ mod tests {
         let actions = daemon.run_auto_doctor().unwrap();
 
         let events = read_events(&crate::team::team_events_path(&repo)).unwrap();
-        assert!(actions
-            .iter()
-            .any(|action| action.action_type == "dependency_cycle_detected"));
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.action_type == "dependency_cycle_detected")
+        );
         assert!(events.iter().any(|event| {
             event.event == "auto_doctor_action"
                 && event.action_type.as_deref() == Some("dependency_cycle_detected")
@@ -517,8 +557,10 @@ mod tests {
 
         let actions = daemon.run_auto_doctor().unwrap();
 
-        let task = crate::task::Task::from_file(&daemon.board_dir().join("tasks").join("061-skip-task.md"))
-            .unwrap();
+        let task = crate::task::Task::from_file(
+            &daemon.board_dir().join("tasks").join("061-skip-task.md"),
+        )
+        .unwrap();
         assert!(actions.is_empty());
         assert_eq!(task.status, "in-progress");
     }
@@ -534,8 +576,9 @@ mod tests {
         let actions = daemon.run_auto_doctor().unwrap();
 
         assert!(!actions.is_empty());
-        let task = crate::task::Task::from_file(&daemon.board_dir().join("tasks").join("062-run-task.md"))
-            .unwrap();
+        let task =
+            crate::task::Task::from_file(&daemon.board_dir().join("tasks").join("062-run-task.md"))
+                .unwrap();
         assert_eq!(task.status, "todo");
     }
 }

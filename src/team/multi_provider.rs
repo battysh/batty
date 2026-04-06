@@ -32,7 +32,10 @@ mod tests {
             "gemini",
             "gemini-cli",
         ] {
-            assert!(is_known_instance_override_backend(name), "{name} should be valid");
+            assert!(
+                is_known_instance_override_backend(name),
+                "{name} should be valid"
+            );
         }
     }
 

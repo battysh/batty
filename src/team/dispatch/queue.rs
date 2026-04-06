@@ -92,8 +92,7 @@ impl TeamDaemon {
             if active_task.id == candidate.id {
                 continue;
             }
-            let overlaps =
-                overlapping_task_paths(self.project_root(), candidate, active_task)?;
+            let overlaps = overlapping_task_paths(self.project_root(), candidate, active_task)?;
             if overlaps.is_empty() {
                 continue;
             }
@@ -515,21 +514,20 @@ impl TeamDaemon {
             }
             assign_task_owners(&board_dir, task.id, Some(&entry.engineer), None)?;
 
-            let assignment_message =
-                match crate::team::learnings::augment_assignment_message(
-                    &self.config.project_root,
-                    &task,
-                ) {
-                    Ok(message) => message,
-                    Err(error) => {
-                        warn!(
-                            task_id = task.id,
-                            error = %error,
-                            "failed to augment assignment with learnings"
-                        );
-                        format!("Task #{}: {}\n\n{}", task.id, task.title, task.description)
-                    }
-                };
+            let assignment_message = match crate::team::learnings::augment_assignment_message(
+                &self.config.project_root,
+                &task,
+            ) {
+                Ok(message) => message,
+                Err(error) => {
+                    warn!(
+                        task_id = task.id,
+                        error = %error,
+                        "failed to augment assignment with learnings"
+                    );
+                    format!("Task #{}: {}\n\n{}", task.id, task.title, task.description)
+                }
+            };
             match self.assign_task_with_task_id(&entry.engineer, &assignment_message, Some(task.id))
             {
                 Ok(_) => {
@@ -1020,15 +1018,16 @@ mod tests {
         .unwrap();
         assert_eq!(task.depends_on, vec![10]);
 
-        let events = crate::team::events::read_events(&crate::team::team_events_path(tmp.path()))
-            .unwrap();
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(tmp.path())).unwrap();
         assert!(events.iter().any(|event| {
             event.event == "dispatch_overlap_prevented" && event.task.as_deref() == Some("11")
         }));
     }
 
     #[test]
-    fn enqueue_dispatch_candidates_leaves_serialized_task_unqueued_when_no_safe_alternative_exists() {
+    fn enqueue_dispatch_candidates_leaves_serialized_task_unqueued_when_no_safe_alternative_exists()
+    {
         let tmp = tempfile::tempdir().unwrap();
         write_task_with_body(
             tmp.path(),

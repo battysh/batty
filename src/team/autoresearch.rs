@@ -97,7 +97,8 @@ impl ResearchLedger {
             });
         }
 
-        let file = fs::File::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
+        let file =
+            fs::File::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
         let reader = BufReader::new(file);
         let mut entries = Vec::new();
         for line in reader.lines() {
@@ -139,7 +140,12 @@ impl ResearchLedger {
         self.entries
             .iter()
             .rev()
-            .find(|entry| matches!(entry.decision, ResearchDecision::Baseline | ResearchDecision::Keep))
+            .find(|entry| {
+                matches!(
+                    entry.decision,
+                    ResearchDecision::Baseline | ResearchDecision::Keep
+                )
+            })
             .map(|entry| entry.commit.as_str())
     }
 
@@ -158,9 +164,15 @@ pub struct StartResearchOptions {
     pub worktree_dir: PathBuf,
 }
 
-pub fn start_research(project_root: &Path, options: StartResearchOptions) -> Result<ResearchMission> {
+pub fn start_research(
+    project_root: &Path,
+    options: StartResearchOptions,
+) -> Result<ResearchMission> {
     if !options.worktree_dir.exists() {
-        bail!("research worktree does not exist: {}", options.worktree_dir.display());
+        bail!(
+            "research worktree does not exist: {}",
+            options.worktree_dir.display()
+        );
     }
 
     let mission_id = mission_id(&options.hypothesis);
@@ -179,7 +191,11 @@ pub fn start_research(project_root: &Path, options: StartResearchOptions) -> Res
         baseline: None,
     };
 
-    let baseline = run_evaluator(&mission.evaluator_command, &mission.worktree_dir, &mission.evaluator_format)?;
+    let baseline = run_evaluator(
+        &mission.evaluator_command,
+        &mission.worktree_dir,
+        &mission.evaluator_format,
+    )?;
     mission.baseline = Some(baseline.clone());
     let mut ledger = ResearchLedger::load(ledger_path(project_root, &mission.id))?;
     ledger.record(LedgerEntry {
@@ -282,7 +298,10 @@ pub fn read_current_ledger(project_root: &Path) -> Result<Option<ResearchLedger>
     let Some(mission) = load_current_mission(project_root)? else {
         return Ok(None);
     };
-    Ok(Some(ResearchLedger::load(ledger_path(project_root, &mission.id))?))
+    Ok(Some(ResearchLedger::load(ledger_path(
+        project_root,
+        &mission.id,
+    ))?))
 }
 
 pub fn stop_current_research(project_root: &Path) -> Result<Option<ResearchMission>> {
@@ -302,7 +321,10 @@ pub fn print_status(project_root: &Path) -> Result<()> {
     println!("Mission: {}", status.mission.id);
     println!("Hypothesis: {}", status.mission.hypothesis);
     println!("Worktree: {}", status.mission.worktree_dir.display());
-    println!("Keep policy: {}", keep_policy_name(&status.mission.keep_policy));
+    println!(
+        "Keep policy: {}",
+        keep_policy_name(&status.mission.keep_policy)
+    );
     println!(
         "Baseline: {}",
         status
@@ -368,13 +390,22 @@ fn summary_line(result: &EvaluationResult) -> String {
     )
 }
 
-fn run_evaluator(command: &str, worktree_dir: &Path, format: &EvaluatorFormat) -> Result<EvaluationResult> {
+fn run_evaluator(
+    command: &str,
+    worktree_dir: &Path,
+    format: &EvaluatorFormat,
+) -> Result<EvaluationResult> {
     let started = Instant::now();
     let output = std::process::Command::new("sh")
         .args(["-lc", command])
         .current_dir(worktree_dir)
         .output()
-        .with_context(|| format!("failed to execute evaluator `{command}` in {}", worktree_dir.display()))?;
+        .with_context(|| {
+            format!(
+                "failed to execute evaluator `{command}` in {}",
+                worktree_dir.display()
+            )
+        })?;
     let duration_secs = started.elapsed().as_secs_f64();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -394,7 +425,9 @@ fn run_evaluator(command: &str, worktree_dir: &Path, format: &EvaluatorFormat) -
             Ok(EvaluationResult {
                 pass: parsed.pass.unwrap_or(output.status.success()),
                 score: parsed.score,
-                parity_pct: parsed.parity_pct.or_else(|| current_parity_pct(worktree_dir)),
+                parity_pct: parsed
+                    .parity_pct
+                    .or_else(|| current_parity_pct(worktree_dir)),
                 exit_code,
                 stdout,
                 stderr,
@@ -465,7 +498,10 @@ fn git_reset_hard(worktree_dir: &Path, target: &str) -> Result<()> {
 }
 
 fn mission_dir(project_root: &Path, mission_id: &str) -> PathBuf {
-    project_root.join(".batty").join(RESEARCH_DIR).join(mission_id)
+    project_root
+        .join(".batty")
+        .join(RESEARCH_DIR)
+        .join(mission_id)
 }
 
 fn ledger_path(project_root: &Path, mission_id: &str) -> PathBuf {
@@ -506,7 +542,8 @@ fn load_current_mission(project_root: &Path) -> Result<Option<ResearchMission>> 
     .with_context(|| format!("failed to parse {}", current.display()))?;
     let state_path = mission_state_path(project_root, &pointer.mission_id);
     let mission = serde_json::from_slice(
-        &fs::read(&state_path).with_context(|| format!("failed to read {}", state_path.display()))?,
+        &fs::read(&state_path)
+            .with_context(|| format!("failed to read {}", state_path.display()))?,
     )
     .with_context(|| format!("failed to parse {}", state_path.display()))?;
     Ok(Some(mission))
@@ -590,7 +627,11 @@ mod tests {
         tmp
     }
 
-    fn baseline_result(score: Option<f64>, parity_pct: Option<u32>, pass: bool) -> EvaluationResult {
+    fn baseline_result(
+        score: Option<f64>,
+        parity_pct: Option<u32>,
+        pass: bool,
+    ) -> EvaluationResult {
         EvaluationResult {
             pass,
             score,
@@ -693,7 +734,10 @@ mod tests {
 
         let decision = run_research_iteration(&mut mission, &mut ledger).unwrap();
         assert_eq!(decision, ResearchDecision::Keep);
-        assert_eq!(mission.baseline.as_ref().and_then(|result| result.score), Some(2.0));
+        assert_eq!(
+            mission.baseline.as_ref().and_then(|result| result.score),
+            Some(2.0)
+        );
         assert_eq!(ledger.entries.len(), 2);
     }
 
@@ -725,7 +769,10 @@ mod tests {
 
         let decision = run_research_iteration(&mut mission, &mut ledger).unwrap();
         assert_eq!(decision, ResearchDecision::Discard);
-        assert_eq!(fs::read_to_string(tmp.path().join("note.txt")).unwrap(), "baseline\n");
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("note.txt")).unwrap(),
+            "baseline\n"
+        );
         assert_eq!(git_head(tmp.path()).unwrap(), baseline_commit);
     }
 

@@ -607,7 +607,10 @@ pub fn query_engineer_performance_profiles(
     for row in ctx_rows {
         let (task_id, _) = row?;
         if let Some((role, _)) = task_durations.get(&task_id) {
-            by_role.entry(role.clone()).or_default().context_exhausted_tasks += 1;
+            by_role
+                .entry(role.clone())
+                .or_default()
+                .context_exhausted_tasks += 1;
         }
     }
 
@@ -926,8 +929,16 @@ mod tests {
             &TeamEvent::agent_restarted("eng-1", "42", "context_exhausted", 1),
         )
         .unwrap();
-        insert_event(&conn, &TeamEvent::task_auto_merged("eng-1", "41", 0.9, 2, 90)).unwrap();
-        insert_event(&conn, &TeamEvent::task_auto_merged("eng-1", "42", 0.9, 2, 30)).unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::task_auto_merged("eng-1", "41", 0.9, 2, 90),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::task_auto_merged("eng-1", "42", 0.9, 2, 30),
+        )
+        .unwrap();
 
         let rows = query_engineer_performance_profiles(&conn).unwrap();
         assert_eq!(rows.len(), 1);

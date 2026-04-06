@@ -17,8 +17,8 @@ use super::*;
 use anyhow::{Context, Result};
 use tracing::warn;
 
-mod checks;
 mod auto_doctor;
+mod checks;
 pub mod context;
 mod context_exhaustion;
 pub mod narration;
