@@ -74,12 +74,8 @@ impl TeamDaemon {
         self.run_recoverable_step(step, action);
     }
 
-    pub(super) fn run_optional_subsystem_step<F>(
-        &mut self,
-        step: &str,
-        subsystem: &str,
-        action: F,
-    ) where
+    pub(super) fn run_optional_subsystem_step<F>(&mut self, step: &str, subsystem: &str, action: F)
+    where
         F: FnOnce(&mut Self) -> Result<()>,
     {
         if !self.optional_subsystem_ready(subsystem) {
@@ -186,7 +182,9 @@ impl TeamDaemon {
         ));
     }
 
-    pub(super) fn snapshot_optional_subsystem_backoff(&self) -> std::collections::HashMap<String, u32> {
+    pub(super) fn snapshot_optional_subsystem_backoff(
+        &self,
+    ) -> std::collections::HashMap<String, u32> {
         optional_subsystem_names()
             .iter()
             .filter_map(|subsystem| {
@@ -238,10 +236,7 @@ impl TeamDaemon {
                     .filter(|event| {
                         event.event == "loop_step_error"
                             && event.ts >= cutoff
-                            && event
-                                .step
-                                .as_deref()
-                                .and_then(optional_subsystem_for_step)
+                            && event.step.as_deref().and_then(optional_subsystem_for_step)
                                 == Some(subsystem)
                     })
                     .count()
@@ -471,7 +466,10 @@ mod tests {
         });
 
         assert!(continued, "daemon should continue after critical panic");
-        assert_eq!(daemon.subsystem_error_counts.get("deliver_inbox_messages"), None);
+        assert_eq!(
+            daemon.subsystem_error_counts.get("deliver_inbox_messages"),
+            None
+        );
 
         let events_path = tmp
             .path()
@@ -678,6 +676,9 @@ mod tests {
             ran_after_backoff = true;
             Ok(())
         });
-        assert!(ran_after_backoff, "subsystem should run after backoff expires");
+        assert!(
+            ran_after_backoff,
+            "subsystem should run after backoff expires"
+        );
     }
 }
