@@ -2667,19 +2667,24 @@ mod tests {
     }
 
     /// run_tests_in_worktree should return a clean error when cargo is not
-    /// found or the directory is invalid, not panic.
+    /// found, and should surface an invalid worktree as a failed test run
+    /// instead of panicking.
     #[test]
     fn test_gating_missing_dir_returns_error() {
-        let fake_dir = Path::new("/tmp/batty-nonexistent-worktree-test-311");
-        let result = run_tests_in_worktree(fake_dir, None);
-        // Should propagate an error via context, not panic
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_dir = tmp.path().join("missing-worktree");
+        assert!(!fake_dir.exists(), "test requires a nonexistent directory");
+        let result = run_tests_in_worktree(&fake_dir, None);
+        let output = result.expect("missing worktree should surface as a failed test run");
         assert!(
-            result.is_err(),
-            "run_tests_in_worktree on missing dir should return Err"
+            !output.passed,
+            "run_tests_in_worktree on missing dir should fail cleanly"
         );
-        let err_msg = format!("{:#}", result.unwrap_err());
+        let err_msg = output.output;
         assert!(
-            err_msg.contains("cargo test") || err_msg.contains("failed"),
+            err_msg.contains("No such file")
+                || err_msg.contains("failed")
+                || err_msg.contains("could not find"),
             "error should describe the failed test operation, got: {err_msg}"
         );
     }
