@@ -15,6 +15,20 @@ use super::test_results::{self, TestRunOutput};
 const SHARED_CARGO_CONFIG_MARKER: &str = "# Managed by Batty: shared cargo target";
 const WORKTREE_EXCLUDE_MARKER: &str = "# Managed by Batty worktree ignores";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorktreeRefreshAction {
+    Unchanged,
+    SkippedDirty,
+    Rebased,
+    Reset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorktreeRefreshOutcome {
+    pub(crate) action: WorktreeRefreshAction,
+    pub(crate) behind_main: Option<u32>,
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 fn priority_rank(p: &str) -> u32 {
     match p {
@@ -294,6 +308,43 @@ pub(crate) fn prepare_multi_repo_assignment_worktree(
     Ok(worktree_dir.to_path_buf())
 }
 
+pub(crate) fn worktree_commits_behind_main(worktree_dir: &Path) -> Result<u32> {
+    map_git_error(
+        retry_git(|| git_cmd::rev_list_count(worktree_dir, "HEAD..main")),
+        "failed to measure worktree staleness against main",
+    )
+}
+
+pub(crate) fn refresh_engineer_worktree_if_stale(
+    project_root: &Path,
+    worktree_dir: &Path,
+    branch_name: &str,
+    team_config_dir: &Path,
+    stale_threshold: u32,
+) -> Result<WorktreeRefreshOutcome> {
+    if !worktree_dir.exists() {
+        return Ok(WorktreeRefreshOutcome {
+            action: WorktreeRefreshAction::Unchanged,
+            behind_main: None,
+        });
+    }
+
+    let behind_main = Some(worktree_commits_behind_main(worktree_dir)?);
+    if behind_main.is_none_or(|count| count <= stale_threshold) {
+        return Ok(WorktreeRefreshOutcome {
+            action: WorktreeRefreshAction::Unchanged,
+            behind_main,
+        });
+    }
+
+    let action =
+        refresh_engineer_worktree(project_root, worktree_dir, branch_name, team_config_dir)?;
+    Ok(WorktreeRefreshOutcome {
+        action,
+        behind_main,
+    })
+}
+
 fn ensure_engineer_worktree_health(
     project_root: &Path,
     worktree_dir: &Path,
@@ -319,9 +370,9 @@ pub(crate) fn refresh_engineer_worktree(
     worktree_dir: &Path,
     branch_name: &str,
     team_config_dir: &Path,
-) -> Result<()> {
+) -> Result<WorktreeRefreshAction> {
     if !worktree_dir.exists() {
-        return Ok(());
+        return Ok(WorktreeRefreshAction::Unchanged);
     }
 
     if worktree_has_user_changes(worktree_dir)? {
@@ -330,14 +381,14 @@ pub(crate) fn refresh_engineer_worktree(
             branch = branch_name,
             "skipping worktree refresh because worktree is dirty"
         );
-        return Ok(());
+        return Ok(WorktreeRefreshAction::SkippedDirty);
     }
 
     if map_git_error(
         retry_git(|| git_cmd::merge_base_is_ancestor(project_root, "main", branch_name)),
         "failed to compare worktree branch with main",
     )? {
-        return Ok(());
+        return Ok(WorktreeRefreshAction::Unchanged);
     }
 
     let rebase_result = retry_git(|| git_cmd::rebase(worktree_dir, "main"));
@@ -347,7 +398,7 @@ pub(crate) fn refresh_engineer_worktree(
             branch = branch_name,
             "refreshed engineer worktree"
         );
-        return Ok(());
+        return Ok(WorktreeRefreshAction::Rebased);
     }
 
     let stderr = match rebase_result {
@@ -386,7 +437,7 @@ pub(crate) fn refresh_engineer_worktree(
         "recreating engineer worktree after rebase conflict"
     );
     setup_engineer_worktree(project_root, worktree_dir, branch_name, team_config_dir)?;
-    Ok(())
+    Ok(WorktreeRefreshAction::Reset)
 }
 
 pub(crate) fn engineer_base_branch_name(engineer_name: &str) -> String {

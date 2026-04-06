@@ -314,6 +314,7 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
     let pending_inbox_counts = status::pending_inbox_counts(project_root, &members);
     let triage_backlog_counts = status::triage_backlog_counts(project_root, &members);
     let owned_task_buckets = status::owned_task_buckets(project_root, &members);
+    let worktree_staleness = status::worktree_staleness_by_member(project_root, &members);
     let agent_health = status::agent_health_by_member(project_root, &members);
     let paused = pause_marker_path(project_root).exists();
     let mut rows = status::build_team_status_rows(
@@ -323,6 +324,7 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
         &pending_inbox_counts,
         &triage_backlog_counts,
         &owned_task_buckets,
+        &worktree_staleness,
         &agent_health,
     );
 
@@ -385,13 +387,14 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
         println!("Watchdog: {}", status::format_watchdog_summary(&watchdog));
         println!();
         println!(
-            "{:<20} {:<12} {:<10} {:<12} {:>5} {:>6} {:<14} {:<14} {:<16} {:<18} {:<24} {:<20}",
+            "{:<20} {:<12} {:<10} {:<12} {:>5} {:>6} {:>7} {:<14} {:<14} {:<16} {:<18} {:<24} {:<20}",
             "MEMBER",
             "ROLE",
             "AGENT",
             "STATE",
             "INBOX",
             "TRIAGE",
+            "STALE",
             "ACTIVE",
             "REVIEW",
             "ETA",
@@ -399,16 +402,19 @@ pub fn team_status(project_root: &Path, json: bool) -> Result<()> {
             "SIGNAL",
             "REPORTS TO"
         );
-        println!("{}", "-".repeat(195));
+        println!("{}", "-".repeat(203));
         for row in &rows {
             println!(
-                "{:<20} {:<12} {:<10} {:<12} {:>5} {:>6} {:<14} {:<14} {:<16} {:<18} {:<24} {:<20}",
+                "{:<20} {:<12} {:<10} {:<12} {:>5} {:>6} {:>7} {:<14} {:<14} {:<16} {:<18} {:<24} {:<20}",
                 row.name,
                 row.role,
                 row.agent.as_deref().unwrap_or("-"),
                 row.state,
                 row.pending_inbox,
                 row.triage_backlog,
+                row.worktree_staleness
+                    .map(|count| count.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
                 status::format_owned_tasks_summary(&row.active_owned_tasks),
                 status::format_owned_tasks_summary(&row.review_owned_tasks),
                 row.eta,
@@ -786,6 +792,7 @@ roles:
             &triage,
             &owned,
             &Default::default(),
+            &Default::default(),
         );
         assert_eq!(rows[0].state, "stopped");
         assert_eq!(rows[0].pending_inbox, 3);
@@ -814,6 +821,7 @@ roles:
             &pending,
             &triage,
             &owned,
+            &Default::default(),
             &Default::default(),
         );
         assert_eq!(rows[0].state, "reviewing");
