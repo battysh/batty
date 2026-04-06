@@ -14,6 +14,12 @@ use super::test_results::{self, TestRunOutput};
 
 const SHARED_CARGO_CONFIG_MARKER: &str = "# Managed by Batty: shared cargo target";
 const WORKTREE_EXCLUDE_MARKER: &str = "# Managed by Batty worktree ignores";
+const REVIEW_READY_SCOPE_FENCE: &[&str] = &[
+    "src/team/task_loop.rs",
+    "src/team/completion.rs",
+    "src/team/review.rs",
+];
+const MIN_REVIEW_READY_PRODUCTION_ADDITIONS: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorktreeRefreshAction {
@@ -27,6 +33,18 @@ pub(crate) enum WorktreeRefreshAction {
 pub(crate) struct WorktreeRefreshOutcome {
     pub(crate) action: WorktreeRefreshAction,
     pub(crate) behind_main: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiffStatEntry {
+    pub(crate) path: String,
+    pub(crate) additions: usize,
+    pub(crate) deletions: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommitValidationGate {
+    pub(crate) blockers: Vec<String>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -126,6 +144,79 @@ pub(crate) fn run_tests_in_worktree(
 
 pub(crate) fn shared_cargo_target_dir(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("shared-target")
+}
+
+pub(crate) fn validate_review_ready_worktree(worktree_dir: &Path) -> Result<Vec<String>> {
+    let diff = map_git_error(
+        retry_git(|| git_cmd::run_git(worktree_dir, &["diff", "--stat", "main..HEAD"])),
+        "failed to inspect engineer branch diff",
+    )?;
+    Ok(validate_review_ready_diff_stat(&diff.stdout).blockers)
+}
+
+pub(crate) fn validate_review_ready_diff_stat(diff_stat: &str) -> CommitValidationGate {
+    let entries = parse_diff_stat_entries(diff_stat);
+    let mut blockers = Vec::new();
+
+    if entries.is_empty() {
+        blockers.push("engineer branch has no diff against main".to_string());
+        return CommitValidationGate { blockers };
+    }
+
+    let out_of_scope = entries
+        .iter()
+        .filter(|entry| !REVIEW_READY_SCOPE_FENCE.contains(&entry.path.as_str()))
+        .map(|entry| entry.path.clone())
+        .collect::<Vec<_>>();
+    if !out_of_scope.is_empty() {
+        blockers.push(format!(
+            "changes outside task scope fence: {}",
+            out_of_scope.join(", ")
+        ));
+    }
+
+    let production_entries = entries
+        .iter()
+        .filter(|entry| {
+            REVIEW_READY_SCOPE_FENCE.contains(&entry.path.as_str()) && entry.path.ends_with(".rs")
+        })
+        .collect::<Vec<_>>();
+    let production_additions: usize = production_entries.iter().map(|entry| entry.additions).sum();
+    let production_deletions: usize = production_entries.iter().map(|entry| entry.deletions).sum();
+
+    if production_additions < MIN_REVIEW_READY_PRODUCTION_ADDITIONS {
+        blockers.push(format!(
+            "need at least {MIN_REVIEW_READY_PRODUCTION_ADDITIONS} lines of production Rust added; found {production_additions}"
+        ));
+    }
+    if production_deletions > production_additions {
+        blockers.push(format!(
+            "production Rust diff is net-destructive ({production_additions} additions, {production_deletions} deletions)"
+        ));
+    }
+
+    CommitValidationGate { blockers }
+}
+
+fn parse_diff_stat_entries(diff_stat: &str) -> Vec<DiffStatEntry> {
+    diff_stat
+        .lines()
+        .filter_map(|line| {
+            let (path, summary) = line.split_once('|')?;
+            let path = path.trim();
+            if path.is_empty() {
+                return None;
+            }
+
+            let additions = summary.chars().filter(|ch| *ch == '+').count();
+            let deletions = summary.chars().filter(|ch| *ch == '-').count();
+            Some(DiffStatEntry {
+                path: path.to_string(),
+                additions,
+                deletions,
+            })
+        })
+        .collect()
 }
 
 fn retry_git<T, F>(operation: F) -> std::result::Result<T, git_cmd::GitError>
@@ -1671,6 +1762,64 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let title = read_task_title(tmp.path(), 99);
         assert_eq!(title, "Task #99");
+    }
+
+    #[test]
+    fn review_ready_gate_accepts_valid_commit_diff() {
+        let gate = validate_review_ready_diff_stat(
+            " src/team/completion.rs | 12 ++++++++++++\n 1 file changed, 12 insertions(+)\n",
+        );
+        assert!(gate.blockers.is_empty());
+    }
+
+    #[test]
+    fn review_ready_gate_rejects_zero_commit_diff() {
+        let gate = validate_review_ready_diff_stat("");
+        assert!(
+            gate.blockers
+                .contains(&"engineer branch has no diff against main".to_string())
+        );
+    }
+
+    #[test]
+    fn review_ready_gate_rejects_config_only_diff() {
+        let gate = validate_review_ready_diff_stat(
+            " Cargo.toml | 14 ++++++++++++++\n docs/notes.md | 6 ++++++\n 2 files changed, 20 insertions(+)\n",
+        );
+        assert!(
+            gate.blockers
+                .iter()
+                .any(|blocker| blocker.contains("changes outside task scope fence"))
+        );
+        assert!(
+            gate.blockers
+                .iter()
+                .any(|blocker| blocker.contains("need at least 10 lines of production Rust added"))
+        );
+    }
+
+    #[test]
+    fn review_ready_gate_rejects_destructive_net_deletion_diff() {
+        let gate = validate_review_ready_diff_stat(
+            " src/team/review.rs | 12 ++++--------\n 1 file changed, 4 insertions(+), 8 deletions(-)\n",
+        );
+        assert!(
+            gate.blockers
+                .iter()
+                .any(|blocker| blocker.contains("net-destructive"))
+        );
+    }
+
+    #[test]
+    fn review_ready_gate_rejects_out_of_scope_diff() {
+        let gate = validate_review_ready_diff_stat(
+            " src/team/daemon.rs | 15 +++++++++++++++\n 1 file changed, 15 insertions(+)\n",
+        );
+        assert!(
+            gate.blockers
+                .iter()
+                .any(|blocker| blocker.contains("changes outside task scope fence"))
+        );
     }
 
     #[test]
