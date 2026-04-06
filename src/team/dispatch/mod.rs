@@ -17,8 +17,11 @@ mod wip;
 mod tests;
 
 use super::super::events::TeamEvent;
+use super::super::task_loop::engineer_base_branch_name;
 use super::super::task_loop::prepare_engineer_assignment_worktree;
 use super::super::task_loop::prepare_multi_repo_assignment_worktree;
+use super::super::task_loop::refresh_engineer_worktree_if_stale;
+use super::super::task_loop::{WorktreeRefreshAction, WorktreeRefreshOutcome};
 use super::helpers::describe_command_failure;
 use super::launcher::{
     agent_supports_sdk_mode, canonical_agent_name, new_member_session_id, strip_nudge_section,
@@ -62,6 +65,62 @@ pub(crate) struct AssignmentLaunch {
 }
 
 impl TeamDaemon {
+    fn maybe_refresh_assignment_worktree(
+        &mut self,
+        engineer: &str,
+        project_root: &Path,
+        worktree_dir: &Path,
+        base_branch: &str,
+        team_config_dir: &Path,
+        repo_label: Option<&str>,
+    ) -> Result<()> {
+        let threshold = self.config.team_config.board.worktree_stale_rebase_threshold;
+        let outcome = refresh_engineer_worktree_if_stale(
+            project_root,
+            worktree_dir,
+            base_branch,
+            team_config_dir,
+            threshold,
+        )?;
+        self.record_worktree_refresh(engineer, worktree_dir, repo_label, threshold, &outcome);
+        Ok(())
+    }
+
+    fn record_worktree_refresh(
+        &mut self,
+        engineer: &str,
+        worktree_dir: &Path,
+        repo_label: Option<&str>,
+        threshold: u32,
+        outcome: &WorktreeRefreshOutcome,
+    ) {
+        let Some(behind_main) = outcome.behind_main else {
+            return;
+        };
+        if behind_main <= threshold {
+            return;
+        }
+
+        let scope = repo_label
+            .map(|label| format!("repo={label} path={}", worktree_dir.display()))
+            .unwrap_or_else(|| format!("path={}", worktree_dir.display()));
+        match outcome.action {
+            WorktreeRefreshAction::Unchanged | WorktreeRefreshAction::SkippedDirty => {}
+            WorktreeRefreshAction::Rebased => self.emit_event(TeamEvent::worktree_refreshed(
+                engineer,
+                &format!(
+                    "rebased stale worktree ({behind_main} behind, threshold {threshold}; {scope})"
+                ),
+            )),
+            WorktreeRefreshAction::Reset => self.emit_event(TeamEvent::worktree_refreshed(
+                engineer,
+                &format!(
+                    "reset stale worktree after rebase failed ({behind_main} behind, threshold {threshold}; {scope})"
+                ),
+            )),
+        }
+    }
+
     pub(in crate::team) fn assignment_sender(&self, engineer: &str) -> String {
         self.config
             .members
@@ -109,7 +168,20 @@ impl TeamDaemon {
                 .join(".batty")
                 .join("worktrees")
                 .join(engineer);
+            let base_branch = engineer_base_branch_name(engineer);
             if self.is_multi_repo {
+                for repo_name in &self.sub_repo_names {
+                    let repo_root = self.config.project_root.join(repo_name);
+                    let sub_wt = work_dir.join(repo_name);
+                    self.maybe_refresh_assignment_worktree(
+                        engineer,
+                        &repo_root,
+                        &sub_wt,
+                        &base_branch,
+                        &team_config_dir,
+                        Some(repo_name),
+                    )?;
+                }
                 prepare_multi_repo_assignment_worktree(
                     &self.config.project_root,
                     &work_dir,
@@ -119,6 +191,14 @@ impl TeamDaemon {
                     &self.sub_repo_names,
                 )?
             } else {
+                self.maybe_refresh_assignment_worktree(
+                    engineer,
+                    &self.config.project_root,
+                    &work_dir,
+                    &base_branch,
+                    &team_config_dir,
+                    None,
+                )?;
                 prepare_engineer_assignment_worktree(
                     &self.config.project_root,
                     &work_dir,

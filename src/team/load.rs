@@ -102,6 +102,7 @@ fn capture_team_load(project_root: &Path) -> Result<TeamLoadSnapshot> {
         &triage_backlog_counts,
         &owned_task_buckets,
         &Default::default(),
+        &Default::default(),
     );
     let mut total_members = 0usize;
     let mut working_members = 0usize;
@@ -260,6 +261,7 @@ mod tests {
             review_owned_tasks: vec![193],
             signal: Some("needs triage (2)".to_string()),
             runtime_label: Some("idle".to_string()),
+            worktree_staleness: None,
             health: status::AgentHealthSummary::default(),
             health_summary: "-".to_string(),
             eta: "-".to_string(),
