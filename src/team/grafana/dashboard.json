@@ -933,17 +933,17 @@
             "type": "frser-sqlite-datasource",
             "uid": "batty-telemetry"
           },
-          "queryText": "WITH RECURSIVE hours(h) AS (\n  SELECT MIN(timestamp) / 3600 FROM events\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT MAX(timestamp) / 3600 FROM events)\n) SELECT h * 3600 as time, ROUND(100.0 * (1.0 - CAST(COALESCE(f.fails, 0) AS REAL) / MAX(1, COALESCE(e.total, 0))), 1) as success_rate FROM hours LEFT JOIN (SELECT timestamp / 3600 as hr, COUNT(*) as total FROM events WHERE event_type='message_routed' GROUP BY hr) e ON hours.h = e.hr LEFT JOIN (SELECT timestamp / 3600 as hr, COUNT(*) as fails FROM events WHERE event_type='delivery_failed' GROUP BY hr) f ON hours.h = f.hr ORDER BY time;",
+          "queryText": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE((SELECT MIN(completed_at) / 3600 FROM task_cycle_times), strftime('%s', 'now') / 3600)\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < COALESCE((SELECT MAX(completed_at) / 3600 FROM task_cycle_times), strftime('%s', 'now') / 3600)\n) SELECT h * 3600 as time, ROUND(metrics.avg_cycle_time_mins, 1) as cycle_time_minutes, ROUND(metrics.avg_lead_time_mins, 1) as lead_time_minutes FROM hours LEFT JOIN (SELECT (completed_at / 3600) * 3600 as hour_start, AVG(cycle_time_mins) as avg_cycle_time_mins, AVG(lead_time_mins) as avg_lead_time_mins FROM task_cycle_times GROUP BY 1) metrics ON metrics.hour_start = h * 3600 ORDER BY time;",
           "queryType": "table",
-          "rawQueryText": "WITH RECURSIVE hours(h) AS (\n  SELECT MIN(timestamp) / 3600 FROM events\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT MAX(timestamp) / 3600 FROM events)\n) SELECT h * 3600 as time, ROUND(100.0 * (1.0 - CAST(COALESCE(f.fails, 0) AS REAL) / MAX(1, COALESCE(e.total, 0))), 1) as success_rate FROM hours LEFT JOIN (SELECT timestamp / 3600 as hr, COUNT(*) as total FROM events WHERE event_type='message_routed' GROUP BY hr) e ON hours.h = e.hr LEFT JOIN (SELECT timestamp / 3600 as hr, COUNT(*) as fails FROM events WHERE event_type='delivery_failed' GROUP BY hr) f ON hours.h = f.hr ORDER BY time;",
-          "rawSql": "WITH RECURSIVE hours(h) AS (\n  SELECT MIN(timestamp) / 3600 FROM events\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT MAX(timestamp) / 3600 FROM events)\n) SELECT h * 3600 as time, ROUND(100.0 * (1.0 - CAST(COALESCE(f.fails, 0) AS REAL) / MAX(1, COALESCE(e.total, 0))), 1) as success_rate FROM hours LEFT JOIN (SELECT timestamp / 3600 as hr, COUNT(*) as total FROM events WHERE event_type='message_routed' GROUP BY hr) e ON hours.h = e.hr LEFT JOIN (SELECT timestamp / 3600 as hr, COUNT(*) as fails FROM events WHERE event_type='delivery_failed' GROUP BY hr) f ON hours.h = f.hr ORDER BY time;",
+          "rawQueryText": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE((SELECT MIN(completed_at) / 3600 FROM task_cycle_times), strftime('%s', 'now') / 3600)\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < COALESCE((SELECT MAX(completed_at) / 3600 FROM task_cycle_times), strftime('%s', 'now') / 3600)\n) SELECT h * 3600 as time, ROUND(metrics.avg_cycle_time_mins, 1) as cycle_time_minutes, ROUND(metrics.avg_lead_time_mins, 1) as lead_time_minutes FROM hours LEFT JOIN (SELECT (completed_at / 3600) * 3600 as hour_start, AVG(cycle_time_mins) as avg_cycle_time_mins, AVG(lead_time_mins) as avg_lead_time_mins FROM task_cycle_times GROUP BY 1) metrics ON metrics.hour_start = h * 3600 ORDER BY time;",
+          "rawSql": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE((SELECT MIN(completed_at) / 3600 FROM task_cycle_times), strftime('%s', 'now') / 3600)\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < COALESCE((SELECT MAX(completed_at) / 3600 FROM task_cycle_times), strftime('%s', 'now') / 3600)\n) SELECT h * 3600 as time, ROUND(metrics.avg_cycle_time_mins, 1) as cycle_time_minutes, ROUND(metrics.avg_lead_time_mins, 1) as lead_time_minutes FROM hours LEFT JOIN (SELECT (completed_at / 3600) * 3600 as hour_start, AVG(cycle_time_mins) as avg_cycle_time_mins, AVG(lead_time_mins) as avg_lead_time_mins FROM task_cycle_times GROUP BY 1) metrics ON metrics.hour_start = h * 3600 ORDER BY time;",
           "refId": "A",
           "timeColumns": [
             "time"
           ]
         }
       ],
-      "title": "Delivery Success Rate Per Hour (%)",
+      "title": "Average Cycle and Lead Time Per Hour",
       "type": "timeseries"
     },
     {
@@ -972,31 +972,17 @@
             "type": "frser-sqlite-datasource",
             "uid": "batty-telemetry"
           },
-          "queryText": "WITH RECURSIVE hours(h) AS (\n  SELECT MIN(timestamp) / 3600 FROM events\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT MAX(timestamp) / 3600 FROM events)\n) SELECT h * 3600 as time, COALESCE(e.cnt, 0) as assigned FROM hours LEFT JOIN (SELECT timestamp / 3600 as hr, COUNT(*) as cnt FROM events WHERE event_type='task_assigned' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "queryText": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE((SELECT MIN(completed_at) / 3600 FROM task_cycle_times), strftime('%s', 'now') / 3600)\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < COALESCE((SELECT MAX(completed_at) / 3600 FROM task_cycle_times), strftime('%s', 'now') / 3600)\n) SELECT h * 3600 as time, COALESCE(counts.completed, 0) as completed FROM hours LEFT JOIN (SELECT (completed_at / 3600) * 3600 as hour_start, COUNT(*) as completed FROM task_cycle_times GROUP BY 1) counts ON counts.hour_start = h * 3600 ORDER BY time;",
           "queryType": "table",
-          "rawQueryText": "WITH RECURSIVE hours(h) AS (\n  SELECT MIN(timestamp) / 3600 FROM events\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT MAX(timestamp) / 3600 FROM events)\n) SELECT h * 3600 as time, COALESCE(e.cnt, 0) as assigned FROM hours LEFT JOIN (SELECT timestamp / 3600 as hr, COUNT(*) as cnt FROM events WHERE event_type='task_assigned' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
-          "rawSql": "WITH RECURSIVE hours(h) AS (\n  SELECT MIN(timestamp) / 3600 FROM events\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT MAX(timestamp) / 3600 FROM events)\n) SELECT h * 3600 as time, COALESCE(e.cnt, 0) as assigned FROM hours LEFT JOIN (SELECT timestamp / 3600 as hr, COUNT(*) as cnt FROM events WHERE event_type='task_assigned' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
+          "rawQueryText": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE((SELECT MIN(completed_at) / 3600 FROM task_cycle_times), strftime('%s', 'now') / 3600)\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < COALESCE((SELECT MAX(completed_at) / 3600 FROM task_cycle_times), strftime('%s', 'now') / 3600)\n) SELECT h * 3600 as time, COALESCE(counts.completed, 0) as completed FROM hours LEFT JOIN (SELECT (completed_at / 3600) * 3600 as hour_start, COUNT(*) as completed FROM task_cycle_times GROUP BY 1) counts ON counts.hour_start = h * 3600 ORDER BY time;",
+          "rawSql": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE((SELECT MIN(completed_at) / 3600 FROM task_cycle_times), strftime('%s', 'now') / 3600)\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < COALESCE((SELECT MAX(completed_at) / 3600 FROM task_cycle_times), strftime('%s', 'now') / 3600)\n) SELECT h * 3600 as time, COALESCE(counts.completed, 0) as completed FROM hours LEFT JOIN (SELECT (completed_at / 3600) * 3600 as hour_start, COUNT(*) as completed FROM task_cycle_times GROUP BY 1) counts ON counts.hour_start = h * 3600 ORDER BY time;",
           "refId": "A",
-          "timeColumns": [
-            "time"
-          ]
-        },
-        {
-          "datasource": {
-            "type": "frser-sqlite-datasource",
-            "uid": "batty-telemetry"
-          },
-          "queryText": "WITH RECURSIVE hours(h) AS (\n  SELECT MIN(timestamp) / 3600 FROM events\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT MAX(timestamp) / 3600 FROM events)\n) SELECT h * 3600 as time, COALESCE(e.cnt, 0) as completed FROM hours LEFT JOIN (SELECT timestamp / 3600 as hr, COUNT(*) as cnt FROM events WHERE event_type='task_completed' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
-          "queryType": "table",
-          "rawQueryText": "WITH RECURSIVE hours(h) AS (\n  SELECT MIN(timestamp) / 3600 FROM events\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT MAX(timestamp) / 3600 FROM events)\n) SELECT h * 3600 as time, COALESCE(e.cnt, 0) as completed FROM hours LEFT JOIN (SELECT timestamp / 3600 as hr, COUNT(*) as cnt FROM events WHERE event_type='task_completed' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
-          "rawSql": "WITH RECURSIVE hours(h) AS (\n  SELECT MIN(timestamp) / 3600 FROM events\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT MAX(timestamp) / 3600 FROM events)\n) SELECT h * 3600 as time, COALESCE(e.cnt, 0) as completed FROM hours LEFT JOIN (SELECT timestamp / 3600 as hr, COUNT(*) as cnt FROM events WHERE event_type='task_completed' GROUP BY hr) e ON hours.h = e.hr ORDER BY time;",
-          "refId": "B",
           "timeColumns": [
             "time"
           ]
         }
       ],
-      "title": "Tasks Created vs Completed Per Hour",
+      "title": "Tasks Completed Per Hour",
       "type": "timeseries"
     },
     {
@@ -1026,10 +1012,10 @@
             "type": "frser-sqlite-datasource",
             "uid": "batty-telemetry"
           },
-          "queryText": "WITH RECURSIVE hours(h) AS (\n  SELECT MIN(timestamp) / 3600 FROM events\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT MAX(timestamp) / 3600 FROM events)\n) SELECT h * 3600 as time, (SELECT COUNT(*) FROM events e2 WHERE e2.event_type='task_completed' AND e2.timestamp <= (h + 1) * 3600) as total_completed FROM hours ORDER BY time;",
+          "queryText": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE((SELECT MIN(completed_at) / 3600 FROM task_cycle_times), strftime('%s', 'now') / 3600)\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < COALESCE((SELECT MAX(completed_at) / 3600 FROM task_cycle_times), strftime('%s', 'now') / 3600)\n) SELECT h * 3600 as time, (SELECT COUNT(*) FROM task_cycle_times t2 WHERE t2.completed_at <= (h + 1) * 3600) as total_completed FROM hours ORDER BY time;",
           "queryType": "table",
-          "rawQueryText": "WITH RECURSIVE hours(h) AS (\n  SELECT MIN(timestamp) / 3600 FROM events\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT MAX(timestamp) / 3600 FROM events)\n) SELECT h * 3600 as time, (SELECT COUNT(*) FROM events e2 WHERE e2.event_type='task_completed' AND e2.timestamp <= (h + 1) * 3600) as total_completed FROM hours ORDER BY time;",
-          "rawSql": "WITH RECURSIVE hours(h) AS (\n  SELECT MIN(timestamp) / 3600 FROM events\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT MAX(timestamp) / 3600 FROM events)\n) SELECT h * 3600 as time, (SELECT COUNT(*) FROM events e2 WHERE e2.event_type='task_completed' AND e2.timestamp <= (h + 1) * 3600) as total_completed FROM hours ORDER BY time;",
+          "rawQueryText": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE((SELECT MIN(completed_at) / 3600 FROM task_cycle_times), strftime('%s', 'now') / 3600)\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < COALESCE((SELECT MAX(completed_at) / 3600 FROM task_cycle_times), strftime('%s', 'now') / 3600)\n) SELECT h * 3600 as time, (SELECT COUNT(*) FROM task_cycle_times t2 WHERE t2.completed_at <= (h + 1) * 3600) as total_completed FROM hours ORDER BY time;",
+          "rawSql": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE((SELECT MIN(completed_at) / 3600 FROM task_cycle_times), strftime('%s', 'now') / 3600)\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < COALESCE((SELECT MAX(completed_at) / 3600 FROM task_cycle_times), strftime('%s', 'now') / 3600)\n) SELECT h * 3600 as time, (SELECT COUNT(*) FROM task_cycle_times t2 WHERE t2.completed_at <= (h + 1) * 3600) as total_completed FROM hours ORDER BY time;",
           "refId": "A",
           "timeColumns": [
             "time"

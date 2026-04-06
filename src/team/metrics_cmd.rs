@@ -7,9 +7,10 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use rusqlite::Connection;
 
-use super::telemetry_db;
+use super::{metrics, telemetry_db};
 
 /// Aggregated dashboard metrics produced by [`query_dashboard`].
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -40,6 +41,12 @@ pub struct DashboardMetrics {
 
     // Per-agent breakdown
     pub agent_rows: Vec<AgentRow>,
+
+    // Task cycle time tracking
+    pub cycle_time_by_priority: Vec<telemetry_db::PriorityCycleTimeRow>,
+    pub engineer_throughput: Vec<telemetry_db::EngineerThroughputRow>,
+    pub tasks_completed_per_hour: Vec<telemetry_db::HourlyThroughputRow>,
+    pub longest_running_tasks: Vec<metrics::InProgressTaskSummary>,
 }
 
 /// Per-agent row in the dashboard.
@@ -128,7 +135,14 @@ pub fn query_dashboard(conn: &Connection) -> Result<DashboardMetrics> {
     }
     let total_reviewed = total_merge + m.rework_count;
     if total_reviewed > 0 {
-        m.rework_rate = Some(m.rework_count as f64 / total_reviewed as f64 * 100.0);
+    m.rework_rate = Some(m.rework_count as f64 / total_reviewed as f64 * 100.0);
+    }
+
+    m.cycle_time_by_priority = telemetry_db::query_average_cycle_time_by_priority(conn)?;
+    m.engineer_throughput = telemetry_db::query_engineer_throughput(conn)?;
+    if !telemetry_db::query_task_cycle_times(conn)?.is_empty() {
+        let last_24h = Utc::now().timestamp() - (24 * 3600);
+        m.tasks_completed_per_hour = telemetry_db::query_hourly_throughput(conn, last_24h)?;
     }
 
     Ok(m)
@@ -233,6 +247,70 @@ pub fn format_dashboard(m: &DashboardMetrics) -> String {
     out.push_str(&format!("  Rework Rate:     {}\n", rr));
     out.push_str(&format!("  Avg Review Latency: {}\n", latency));
 
+    if !m.cycle_time_by_priority.is_empty() {
+        out.push_str("\nAverage Cycle Time By Priority\n");
+        out.push_str(&"-".repeat(50));
+        out.push('\n');
+        for row in &m.cycle_time_by_priority {
+            out.push_str(&format!(
+                "  {:<10} {:>8.1} min ({:>2} tasks)\n",
+                row.priority, row.average_cycle_time_mins, row.completed_tasks
+            ));
+        }
+    }
+
+    if !m.tasks_completed_per_hour.is_empty() {
+        out.push_str("\nTasks Completed Per Hour (Last 24h)\n");
+        out.push_str(&"-".repeat(50));
+        out.push('\n');
+        for row in &m.tasks_completed_per_hour {
+            let label = chrono::DateTime::<Utc>::from_timestamp(row.hour_start, 0)
+                .map(|ts| ts.format("%m-%d %H:00").to_string())
+                .unwrap_or_else(|| row.hour_start.to_string());
+            out.push_str(&format!("  {}  {:>2}\n", label, row.completed_tasks));
+        }
+    }
+
+    if !m.engineer_throughput.is_empty() {
+        out.push_str("\nEngineer Throughput Ranking\n");
+        out.push_str(&"-".repeat(60));
+        out.push('\n');
+        for (index, row) in m.engineer_throughput.iter().enumerate() {
+            let avg_cycle = row
+                .average_cycle_time_mins
+                .map(|value| format!("{value:.1}m"))
+                .unwrap_or_else(|| "n/a".to_string());
+            let avg_lead = row
+                .average_lead_time_mins
+                .map(|value| format!("{value:.1}m"))
+                .unwrap_or_else(|| "n/a".to_string());
+            out.push_str(&format!(
+                "  {}. {}  completed={}  avg_cycle={}  avg_lead={}\n",
+                index + 1,
+                row.engineer,
+                row.completed_tasks,
+                avg_cycle,
+                avg_lead
+            ));
+        }
+    }
+
+    if !m.longest_running_tasks.is_empty() {
+        out.push_str("\nLongest-Running In-Progress Tasks\n");
+        out.push_str(&"-".repeat(60));
+        out.push('\n');
+        for row in &m.longest_running_tasks {
+            out.push_str(&format!(
+                "  #{} {} [{}] owner={} age={}m\n",
+                row.task_id,
+                row.title,
+                row.priority,
+                row.engineer.as_deref().unwrap_or("unassigned"),
+                row.minutes_in_progress
+            ));
+        }
+    }
+
     // Per-agent table
     if !m.agent_rows.is_empty() {
         out.push_str("\nPer-Agent Breakdown\n");
@@ -270,8 +348,13 @@ pub fn run(project_root: &Path) -> Result<()> {
     }
 
     let conn = telemetry_db::open(project_root).context("failed to open telemetry database")?;
+    let board_dir = project_root.join(".batty").join("team_config").join("board");
+    let records = metrics::collect_task_cycle_time_records(&board_dir).unwrap_or_default();
+    telemetry_db::replace_task_cycle_times(&conn, &records)?;
 
-    let metrics = query_dashboard(&conn)?;
+    let mut metrics = query_dashboard(&conn)?;
+    metrics.longest_running_tasks =
+        metrics::longest_running_in_progress_tasks(&records, Utc::now(), 5);
     print!("{}", format_dashboard(&metrics));
     Ok(())
 }
@@ -448,6 +531,28 @@ mod tests {
             rework_count: 1,
             rework_rate: Some(11.0),
             avg_review_latency_secs: Some(120.0),
+            cycle_time_by_priority: vec![telemetry_db::PriorityCycleTimeRow {
+                priority: "high".to_string(),
+                average_cycle_time_mins: 42.0,
+                completed_tasks: 3,
+            }],
+            engineer_throughput: vec![telemetry_db::EngineerThroughputRow {
+                engineer: "eng-1".to_string(),
+                completed_tasks: 5,
+                average_cycle_time_mins: Some(42.0),
+                average_lead_time_mins: Some(60.0),
+            }],
+            tasks_completed_per_hour: vec![telemetry_db::HourlyThroughputRow {
+                hour_start: 1_744_000_000,
+                completed_tasks: 2,
+            }],
+            longest_running_tasks: vec![metrics::InProgressTaskSummary {
+                task_id: 473,
+                title: "Track cycle time".to_string(),
+                engineer: Some("eng-1".to_string()),
+                priority: "high".to_string(),
+                minutes_in_progress: 95,
+            }],
             agent_rows: vec![AgentRow {
                 role: "eng-1".to_string(),
                 completions: 5,
@@ -479,6 +584,10 @@ mod tests {
         assert!(text.contains("Review Pipeline"));
         assert!(text.contains("Auto-merge Rate: 75%"));
         assert!(text.contains("Rework Rate:     11%"));
+
+        assert!(text.contains("Average Cycle Time By Priority"));
+        assert!(text.contains("Engineer Throughput Ranking"));
+        assert!(text.contains("Longest-Running In-Progress Tasks"));
 
         assert!(text.contains("Per-Agent Breakdown"));
         assert!(text.contains("eng-1"));

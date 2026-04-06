@@ -236,6 +236,41 @@ pub(crate) fn write_workflow_metadata(task_path: &Path, metadata: &WorkflowMetad
     Ok(())
 }
 
+/// Lifecycle timestamps stored in task frontmatter.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TaskLifecycleTimestamps {
+    pub created: Option<DateTime<FixedOffset>>,
+    pub started: Option<DateTime<FixedOffset>>,
+    pub completed: Option<DateTime<FixedOffset>>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct TaskLifecycleFrontmatter {
+    #[serde(default)]
+    created: Option<String>,
+    #[serde(default)]
+    started: Option<String>,
+    #[serde(default)]
+    completed: Option<String>,
+}
+
+pub(crate) fn read_task_lifecycle_timestamps(task_path: &Path) -> Result<TaskLifecycleTimestamps> {
+    let content = std::fs::read_to_string(task_path)
+        .with_context(|| format!("failed to read {}", task_path.display()))?;
+    let (frontmatter, _) = split_task_frontmatter(&content)?;
+    let parsed: TaskLifecycleFrontmatter =
+        serde_yaml::from_str(frontmatter).context("failed to parse task frontmatter")?;
+
+    Ok(TaskLifecycleTimestamps {
+        created: parsed.created.as_deref().and_then(parse_frontmatter_timestamp),
+        started: parsed.started.as_deref().and_then(parse_frontmatter_timestamp),
+        completed: parsed
+            .completed
+            .as_deref()
+            .and_then(parse_frontmatter_timestamp),
+    })
+}
+
 /// Summary returned by [`archive_tasks`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveSummary {
@@ -437,6 +472,10 @@ fn parse_cutoff_date(date_str: &str) -> Result<DateTime<FixedOffset>> {
 
 fn parse_completed_date(completed_str: &str) -> Option<DateTime<FixedOffset>> {
     DateTime::parse_from_rfc3339(completed_str).ok()
+}
+
+fn parse_frontmatter_timestamp(value: &str) -> Option<DateTime<FixedOffset>> {
+    DateTime::parse_from_rfc3339(value).ok()
 }
 
 /// Update the `status` field in a task file's YAML frontmatter.
@@ -751,6 +790,50 @@ mod tests {
         let (before, items, _) = split_done_section(content);
         assert_eq!(before, content);
         assert!(items.is_empty());
+    }
+
+    #[test]
+    fn read_task_lifecycle_timestamps_parses_all_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let task_path = tmp.path().join("001-lifecycle.md");
+        std::fs::write(
+            &task_path,
+            "---\nid: 1\ntitle: lifecycle\nstatus: done\npriority: high\ncreated: 2026-04-05T10:00:00-04:00\nstarted: 2026-04-05T11:00:00-04:00\ncompleted: 2026-04-05T12:30:00-04:00\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        let timestamps = read_task_lifecycle_timestamps(&task_path).unwrap();
+        assert_eq!(
+            timestamps.created.unwrap().to_rfc3339(),
+            "2026-04-05T10:00:00-04:00"
+        );
+        assert_eq!(
+            timestamps.started.unwrap().to_rfc3339(),
+            "2026-04-05T11:00:00-04:00"
+        );
+        assert_eq!(
+            timestamps.completed.unwrap().to_rfc3339(),
+            "2026-04-05T12:30:00-04:00"
+        );
+    }
+
+    #[test]
+    fn read_task_lifecycle_timestamps_ignores_invalid_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let task_path = tmp.path().join("002-invalid.md");
+        std::fs::write(
+            &task_path,
+            "---\nid: 2\ntitle: lifecycle\nstatus: in-progress\npriority: medium\ncreated: not-a-timestamp\nstarted: 2026-04-05T11:00:00-04:00\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        let timestamps = read_task_lifecycle_timestamps(&task_path).unwrap();
+        assert!(timestamps.created.is_none());
+        assert_eq!(
+            timestamps.started.unwrap().to_rfc3339(),
+            "2026-04-05T11:00:00-04:00"
+        );
+        assert!(timestamps.completed.is_none());
     }
 
     #[test]

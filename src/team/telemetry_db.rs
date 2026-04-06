@@ -11,6 +11,7 @@ use rusqlite::{Connection, params};
 use serde::Serialize;
 
 use super::events::TeamEvent;
+use super::metrics::TaskCycleTimeRecord;
 use super::test_results::{TestFailure, TestResults};
 
 /// Database file name under `.batty/`.
@@ -97,6 +98,15 @@ fn init_schema(conn: &Connection) -> Result<()> {
             last_seen_at    INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (framework, test_name)
         );
+
+        CREATE TABLE IF NOT EXISTS task_cycle_times (
+            task_id          TEXT PRIMARY KEY,
+            engineer         TEXT,
+            priority         TEXT NOT NULL,
+            cycle_time_mins  INTEGER,
+            lead_time_mins   INTEGER,
+            completed_at     INTEGER NOT NULL
+        );
         ",
     )
     .context("failed to initialize telemetry schema")?;
@@ -117,6 +127,37 @@ fn init_schema(conn: &Connection) -> Result<()> {
         [],
     );
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskCycleTimeRow {
+    pub task_id: String,
+    pub engineer: Option<String>,
+    pub priority: String,
+    pub cycle_time_mins: Option<i64>,
+    pub lead_time_mins: Option<i64>,
+    pub completed_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PriorityCycleTimeRow {
+    pub priority: String,
+    pub average_cycle_time_mins: f64,
+    pub completed_tasks: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineerThroughputRow {
+    pub engineer: String,
+    pub completed_tasks: i64,
+    pub average_cycle_time_mins: Option<f64>,
+    pub average_lead_time_mins: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HourlyThroughputRow {
+    pub hour_start: i64,
+    pub completed_tasks: i64,
 }
 
 pub fn record_test_results(
@@ -489,6 +530,140 @@ pub fn query_task_metrics(conn: &Connection) -> Result<Vec<TaskMetricsRow>> {
                 carry_forward_effective: row.get::<_, Option<i64>>(9)?.map(|value| value != 0),
                 merge_time_secs: row.get(10)?,
                 confidence_score: row.get(11)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn replace_task_cycle_times(conn: &Connection, rows: &[TaskCycleTimeRecord]) -> Result<()> {
+    conn.execute("DELETE FROM task_cycle_times", [])?;
+
+    let mut insert = conn.prepare(
+        "INSERT INTO task_cycle_times
+         (task_id, engineer, priority, cycle_time_mins, lead_time_mins, completed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?;
+
+    for row in rows {
+        let Some(completed_at) = row.completed_at else {
+            continue;
+        };
+        insert.execute(params![
+            row.task_id.to_string(),
+            row.engineer.as_deref(),
+            row.priority.as_str(),
+            row.cycle_time_minutes,
+            row.lead_time_minutes,
+            completed_at,
+        ])?;
+    }
+
+    Ok(())
+}
+
+pub fn query_task_cycle_times(conn: &Connection) -> Result<Vec<TaskCycleTimeRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT task_id, engineer, priority, cycle_time_mins, lead_time_mins, completed_at
+         FROM task_cycle_times
+         ORDER BY completed_at DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(TaskCycleTimeRow {
+                task_id: row.get(0)?,
+                engineer: row.get(1)?,
+                priority: row.get(2)?,
+                cycle_time_mins: row.get(3)?,
+                lead_time_mins: row.get(4)?,
+                completed_at: row.get(5)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn query_average_cycle_time_by_priority(conn: &Connection) -> Result<Vec<PriorityCycleTimeRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT priority,
+                AVG(cycle_time_mins) AS avg_cycle_time_mins,
+                COUNT(*) AS completed_tasks
+         FROM task_cycle_times
+         WHERE cycle_time_mins IS NOT NULL
+         GROUP BY priority
+         ORDER BY CASE priority
+             WHEN 'critical' THEN 0
+             WHEN 'high' THEN 1
+             WHEN 'medium' THEN 2
+             WHEN 'low' THEN 3
+             ELSE 4
+         END, priority",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(PriorityCycleTimeRow {
+                priority: row.get(0)?,
+                average_cycle_time_mins: row.get(1)?,
+                completed_tasks: row.get(2)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn query_engineer_throughput(conn: &Connection) -> Result<Vec<EngineerThroughputRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT engineer,
+                COUNT(*) AS completed_tasks,
+                AVG(cycle_time_mins) AS avg_cycle_time_mins,
+                AVG(lead_time_mins) AS avg_lead_time_mins
+         FROM task_cycle_times
+         WHERE engineer IS NOT NULL
+         GROUP BY engineer
+         ORDER BY completed_tasks DESC, engineer ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(EngineerThroughputRow {
+                engineer: row.get(0)?,
+                completed_tasks: row.get(1)?,
+                average_cycle_time_mins: row.get(2)?,
+                average_lead_time_mins: row.get(3)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn query_hourly_throughput(
+    conn: &Connection,
+    window_start: i64,
+) -> Result<Vec<HourlyThroughputRow>> {
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE hours(hour_start) AS (
+            SELECT (?1 / 3600) * 3600
+            UNION ALL
+            SELECT hour_start + 3600
+            FROM hours
+            WHERE hour_start + 3600 <= (strftime('%s', 'now', 'localtime') / 3600) * 3600
+         )
+         SELECT hours.hour_start,
+                COALESCE(counts.completed_tasks, 0) AS completed_tasks
+         FROM hours
+         LEFT JOIN (
+            SELECT (completed_at / 3600) * 3600 AS hour_start,
+                   COUNT(*) AS completed_tasks
+            FROM task_cycle_times
+            WHERE completed_at >= ?1
+            GROUP BY 1
+         ) counts ON counts.hour_start = hours.hour_start
+         ORDER BY hours.hour_start",
+    )?;
+    let rows = stmt
+        .query_map(params![window_start], |row| {
+            Ok(HourlyThroughputRow {
+                hour_start: row.get(0)?,
+                completed_tasks: row.get(1)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1138,6 +1313,101 @@ mod tests {
         // avg = (100 + 300) / 2 = 200
         let avg = row.avg_review_latency_secs.unwrap();
         assert!((avg - 200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn task_cycle_time_rows_replace_existing_snapshot() {
+        let conn = open_in_memory().unwrap();
+        let rows = vec![
+            TaskCycleTimeRecord {
+                task_id: 1,
+                title: "One".to_string(),
+                engineer: Some("eng-1".to_string()),
+                priority: "high".to_string(),
+                status: "done".to_string(),
+                created_at: Some(100),
+                started_at: Some(160),
+                completed_at: Some(460),
+                cycle_time_minutes: Some(5),
+                lead_time_minutes: Some(6),
+            },
+            TaskCycleTimeRecord {
+                task_id: 2,
+                title: "Two".to_string(),
+                engineer: Some("eng-2".to_string()),
+                priority: "low".to_string(),
+                status: "done".to_string(),
+                created_at: Some(200),
+                started_at: Some(260),
+                completed_at: Some(560),
+                cycle_time_minutes: Some(5),
+                lead_time_minutes: Some(6),
+            },
+        ];
+
+        replace_task_cycle_times(&conn, &rows).unwrap();
+        let stored = query_task_cycle_times(&conn).unwrap();
+        assert_eq!(stored.len(), 2);
+
+        replace_task_cycle_times(&conn, &rows[..1]).unwrap();
+        let stored = query_task_cycle_times(&conn).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].task_id, "1");
+    }
+
+    #[test]
+    fn task_cycle_time_queries_aggregate_priority_and_engineer() {
+        let conn = open_in_memory().unwrap();
+        replace_task_cycle_times(
+            &conn,
+            &[
+                TaskCycleTimeRecord {
+                    task_id: 1,
+                    title: "One".to_string(),
+                    engineer: Some("eng-1".to_string()),
+                    priority: "high".to_string(),
+                    status: "done".to_string(),
+                    created_at: Some(100),
+                    started_at: Some(160),
+                    completed_at: Some(460),
+                    cycle_time_minutes: Some(5),
+                    lead_time_minutes: Some(6),
+                },
+                TaskCycleTimeRecord {
+                    task_id: 2,
+                    title: "Two".to_string(),
+                    engineer: Some("eng-1".to_string()),
+                    priority: "high".to_string(),
+                    status: "done".to_string(),
+                    created_at: Some(200),
+                    started_at: Some(260),
+                    completed_at: Some(860),
+                    cycle_time_minutes: Some(10),
+                    lead_time_minutes: Some(11),
+                },
+                TaskCycleTimeRecord {
+                    task_id: 3,
+                    title: "Three".to_string(),
+                    engineer: Some("eng-2".to_string()),
+                    priority: "medium".to_string(),
+                    status: "done".to_string(),
+                    created_at: Some(300),
+                    started_at: Some(360),
+                    completed_at: Some(660),
+                    cycle_time_minutes: Some(5),
+                    lead_time_minutes: Some(6),
+                },
+            ],
+        )
+        .unwrap();
+
+        let by_priority = query_average_cycle_time_by_priority(&conn).unwrap();
+        assert_eq!(by_priority[0].priority, "high");
+        assert!((by_priority[0].average_cycle_time_mins - 7.5).abs() < f64::EPSILON);
+
+        let by_engineer = query_engineer_throughput(&conn).unwrap();
+        assert_eq!(by_engineer[0].engineer, "eng-1");
+        assert_eq!(by_engineer[0].completed_tasks, 2);
     }
 
     #[test]
