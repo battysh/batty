@@ -149,6 +149,11 @@ pub(in crate::team) fn spawn_shim(
         );
     }
 
+    // Remove stale API key so Claude Code falls through to OAuth credentials.
+    // The env var takes precedence over ~/.claude/.credentials.json and an
+    // expired key silently blocks OAuth login.
+    cmd.env_remove("ANTHROPIC_API_KEY");
+
     // Set BATTY_MEMBER so detect_sender() works in SDK mode subprocesses
     cmd.env("BATTY_MEMBER", member_name);
     cmd.env(

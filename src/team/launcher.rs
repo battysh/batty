@@ -656,7 +656,7 @@ pub(super) fn write_launch_script(
     set_executable(&batty_wrapper);
 
     let script = format!(
-        "#!/bin/bash\nexport PATH='{}':\"$PATH\"\nexport BATTY_MEMBER='{member_name}'\ncd '{launch_dir_str}'\n{agent_cmd}\n",
+        "#!/bin/bash\nunset ANTHROPIC_API_KEY\nexport PATH='{}':\"$PATH\"\nexport BATTY_MEMBER='{member_name}'\ncd '{launch_dir_str}'\n{agent_cmd}\n",
         wrapper_dir.to_string_lossy()
     );
     std::fs::write(&script_path, &script)
