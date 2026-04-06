@@ -5,11 +5,13 @@ use anyhow::{Context, Result};
 
 use crate::task::{Task, load_tasks_from_dir};
 use crate::team::task_loop::run_tests_in_worktree;
+use crate::team::test_results::TestResults;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerificationRunResult {
     pub passed: bool,
     pub output: String,
+    pub results: TestResults,
     pub failures: Vec<String>,
     pub file_paths: Vec<String>,
 }
@@ -30,10 +32,11 @@ pub(crate) fn run_automatic_verification(
     }
 
     let test_run = run_tests_in_worktree(worktree_dir, test_command)?;
-    let (failures, file_paths) = parse_test_output(&test_run.output);
+    let (failures, file_paths) = parse_test_output(&test_run.output, &test_run.results);
     Ok(VerificationRunResult {
         passed: test_run.passed,
         output: test_run.output,
+        results: test_run.results,
         failures,
         file_paths,
     })
@@ -124,6 +127,15 @@ fn scope_validation_failure(worktree_dir: &Path) -> Result<Option<VerificationRu
     Ok(Some(VerificationRunResult {
         passed: false,
         output: message.clone(),
+        results: TestResults {
+            framework: "scope-fence".to_string(),
+            total: None,
+            passed: 0,
+            failed: 1,
+            ignored: 0,
+            failures: Vec::new(),
+            summary: Some(message.clone()),
+        },
         failures: vec![message],
         file_paths: scope.out_of_scope_files,
     }))
@@ -188,9 +200,31 @@ fn resolve_worktree_path(project_root: &Path, worktree_path: &str) -> PathBuf {
     }
 }
 
-fn parse_test_output(output: &str) -> (Vec<String>, Vec<String>) {
+fn parse_test_output(output: &str, results: &TestResults) -> (Vec<String>, Vec<String>) {
     let mut failures = Vec::new();
     let mut file_paths = BTreeSet::new();
+
+    for failure in &results.failures {
+        let mut detail = failure.test_name.clone();
+        if let Some(message) = failure.message.as_deref().filter(|message| !message.is_empty()) {
+            detail.push_str(": ");
+            detail.push_str(message);
+        }
+        if let Some(location) = failure
+            .location
+            .as_deref()
+            .filter(|location| !location.is_empty())
+        {
+            detail.push_str(" @ ");
+            detail.push_str(location);
+
+            let normalized = normalize_path_token(location);
+            if looks_like_path(normalized) {
+                file_paths.insert(normalized.to_string());
+            }
+        }
+        failures.push(detail);
+    }
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -198,9 +232,9 @@ fn parse_test_output(output: &str) -> (Vec<String>, Vec<String>) {
             continue;
         }
 
-        if trimmed.starts_with("test ") && trimmed.ends_with("FAILED") {
+        if failures.is_empty() && trimmed.starts_with("test ") && trimmed.ends_with("FAILED") {
             failures.push(trimmed.to_string());
-        } else if trimmed.starts_with("error:") || trimmed.contains("panicked at") {
+        } else if failures.is_empty() && (trimmed.starts_with("error:") || trimmed.contains("panicked at")) {
             failures.push(trimmed.to_string());
         }
 
@@ -255,9 +289,12 @@ fn path_within_scope(path: &str, scope_entries: &[String]) -> bool {
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use crate::team::test_results::{TestFailure, TestResults};
+
     use super::{
-        ScopeValidationResult, engineer_worktree_context, find_claimed_task_for_worktree,
-        parse_scope_fence, parse_test_output, scope_validation_failure, validate_declared_scope,
+        ScopeValidationResult, changed_paths_from_git, engineer_worktree_context,
+        find_claimed_task_for_worktree, parse_scope_fence, parse_test_output,
+        scope_validation_failure, validate_declared_scope,
     };
 
     #[test]
@@ -266,9 +303,22 @@ mod tests {
 test parser::it_works ... FAILED\n\
 error: could not compile crate due to previous error\n\
 src/parser.rs:12: failure here\n";
-        let (failures, paths) = parse_test_output(output);
-        assert!(failures.iter().any(|line| line.contains("FAILED")));
-        assert!(failures.iter().any(|line| line.starts_with("error:")));
+        let results = TestResults {
+            framework: "cargo".to_string(),
+            total: Some(1),
+            passed: 0,
+            failed: 1,
+            ignored: 0,
+            failures: vec![TestFailure {
+                test_name: "parser::it_works".to_string(),
+                message: Some("assertion failed".to_string()),
+                location: Some("src/parser.rs:12:5".to_string()),
+            }],
+            summary: Some("test result: FAILED. 0 passed; 1 failed; 0 ignored;".to_string()),
+        };
+        let (failures, paths) = parse_test_output(output, &results);
+        assert!(failures.iter().any(|line| line.contains("parser::it_works")));
+        assert!(failures.iter().any(|line| line.contains("assertion failed")));
         assert!(paths.iter().any(|path| path == "src/parser.rs"));
     }
 

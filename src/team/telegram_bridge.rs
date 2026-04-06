@@ -789,9 +789,15 @@ fn summarize_status_entries(entries: &[crate::team::status::StatusTaskEntry]) ->
     entries
         .iter()
         .take(3)
-        .map(|entry| match entry.claimed_by.as_deref() {
-            Some(owner) => format!("#{} {} ({owner})", entry.id, preview_text(&entry.title, 32)),
-            None => format!("#{} {}", entry.id, preview_text(&entry.title, 32)),
+        .map(|entry| {
+            let base = match entry.claimed_by.as_deref() {
+                Some(owner) => format!("#{} {} ({owner})", entry.id, preview_text(&entry.title, 32)),
+                None => format!("#{} {}", entry.id, preview_text(&entry.title, 32)),
+            };
+            match entry.test_summary.as_deref() {
+                Some(summary) => format!("{base} [{summary}]"),
+                None => base,
+            }
         })
         .collect::<Vec<_>>()
         .join("; ")
