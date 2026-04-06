@@ -269,6 +269,23 @@ impl TeamDaemon {
                 self.update_automation_timers_for_state(member_name, MemberState::Idle);
                 self.maybe_persist_member_session_id(member_name);
 
+                let is_architect = self
+                    .config
+                    .members
+                    .iter()
+                    .find(|member| member.name == member_name)
+                    .is_some_and(|member| member.role_type == RoleType::Architect);
+                if is_architect && self.planning_cycle_active {
+                    if let Err(error) = self.handle_planning_response(&response) {
+                        warn!(
+                            member = member_name,
+                            error = %error,
+                            "planning response handling failed"
+                        );
+                    }
+                    return Ok(());
+                }
+
                 // Trigger engineer completion flow if there's an active task
                 if self.active_task_id(member_name).is_some() {
                     if let Err(error) = merge::handle_engineer_completion(self, member_name) {

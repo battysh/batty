@@ -122,12 +122,8 @@ impl TeamDaemon {
             TelegramCommand::Assign { engineer, task } => {
                 self.execute_telegram_assign_command(&engineer, &task)
             }
-            TelegramCommand::Merge { task_id } => {
-                self.execute_telegram_merge_command(task_id)
-            }
-            TelegramCommand::Kick { member } => {
-                self.execute_telegram_kick_command(&member)
-            }
+            TelegramCommand::Merge { task_id } => self.execute_telegram_merge_command(task_id),
+            TelegramCommand::Kick { member } => self.execute_telegram_kick_command(&member),
             TelegramCommand::Pause => {
                 crate::team::pause_team(&self.config.project_root)?;
                 Ok("Automation paused.".to_string())
@@ -283,7 +279,8 @@ impl TeamDaemon {
                 preview_text(&task_record.title, 120)
             ))
         } else {
-            let id = crate::team::messaging::assign_task(&self.config.project_root, engineer, task)?;
+            let id =
+                crate::team::messaging::assign_task(&self.config.project_root, engineer, task)?;
             Ok(format!("Assigned {engineer}: {task}\nInbox id: {id}"))
         }
     }
@@ -299,10 +296,12 @@ impl TeamDaemon {
         let engineer = engineer_for_merge_task(&self.config.project_root, task_id)?;
         let worktree_dir = self.worktree_dir(&engineer);
         let verification_policy = &self.config.team_config.workflow_policy.verification;
-        let test_command = verification_policy
+        let test_command = verification_policy.test_command.as_deref().or(self
+            .config
+            .team_config
+            .workflow_policy
             .test_command
-            .as_deref()
-            .or(self.config.team_config.workflow_policy.test_command.as_deref());
+            .as_deref());
         let test_run = crate::team::task_loop::run_tests_in_worktree(&worktree_dir, test_command)?;
         if !test_run.passed {
             bail!(
@@ -312,12 +311,15 @@ impl TeamDaemon {
         }
 
         crate::team::messaging::merge_worktree(&self.config.project_root, &engineer)?;
-        crate::team::task_cmd::cmd_review_structured(&board_dir, task_id, "approve", None, "telegram")?;
-        let test_summary = test_run
-            .results
-            .summary
-            .clone()
-            .unwrap_or_else(|| format!("{} passed, {} failed", test_run.results.passed, test_run.results.failed));
+        crate::team::task_cmd::cmd_review_structured(
+            &board_dir, task_id, "approve", None, "telegram",
+        )?;
+        let test_summary = test_run.results.summary.clone().unwrap_or_else(|| {
+            format!(
+                "{} passed, {} failed",
+                test_run.results.passed, test_run.results.failed
+            )
+        });
         Ok(format!(
             "Merged Task #{task_id} from {engineer}. Tests: {test_summary}"
         ))
@@ -489,7 +491,9 @@ fn parse_telegram_command(text: &str) -> Result<Option<TelegramCommand>> {
             }
         }
         "/assign" => {
-            let mut parts = rest.splitn(2, char::is_whitespace).filter(|part| !part.is_empty());
+            let mut parts = rest
+                .splitn(2, char::is_whitespace)
+                .filter(|part| !part.is_empty());
             let engineer = parts
                 .next()
                 .ok_or_else(|| anyhow!("Usage: /assign <engineer> <task>"))?;
@@ -541,7 +545,9 @@ fn parse_telegram_command(text: &str) -> Result<Option<TelegramCommand>> {
             }))
         }
         "/block" => {
-            let mut parts = rest.splitn(2, char::is_whitespace).filter(|part| !part.is_empty());
+            let mut parts = rest
+                .splitn(2, char::is_whitespace)
+                .filter(|part| !part.is_empty());
             let task_id = parts
                 .next()
                 .ok_or_else(|| anyhow!("Usage: /block <task> <reason>"))?
@@ -585,7 +591,9 @@ fn parse_telegram_command(text: &str) -> Result<Option<TelegramCommand>> {
             }
         }
         "/send" => {
-            let mut parts = rest.splitn(2, char::is_whitespace).filter(|part| !part.is_empty());
+            let mut parts = rest
+                .splitn(2, char::is_whitespace)
+                .filter(|part| !part.is_empty());
             let role = parts
                 .next()
                 .ok_or_else(|| anyhow!("Usage: /send <role> <message>"))?;
@@ -677,7 +685,10 @@ fn render_telegram_health_summary(
     members: &[crate::team::hierarchy::MemberInstance],
 ) -> Result<String> {
     let summary = crate::team::compute_session_summary(project_root);
-    let board_dir = project_root.join(".batty").join("team_config").join("board");
+    let board_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board");
     let metrics = crate::team::status::compute_metrics(&board_dir, members).unwrap_or_default();
     let lock_count = count_lock_files(project_root);
     Ok(format!(
@@ -723,7 +734,10 @@ fn write_telegram_goal(project_root: &std::path::Path, text: &str) -> Result<()>
 }
 
 fn create_telegram_task(project_root: &std::path::Path, title: &str) -> Result<String> {
-    let board_dir = project_root.join(".batty").join("team_config").join("board");
+    let board_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board");
     let task_id = crate::team::board_cmd::create_task(
         &board_dir,
         title,
@@ -733,11 +747,21 @@ fn create_telegram_task(project_root: &std::path::Path, title: &str) -> Result<S
         None,
     )
     .map_err(anyhow::Error::from)?;
-    Ok(format!("Created task #{task_id}: {}", preview_text(title, 120)))
+    Ok(format!(
+        "Created task #{task_id}: {}",
+        preview_text(title, 120)
+    ))
 }
 
-fn block_telegram_task(project_root: &std::path::Path, task_id: u32, reason: &str) -> Result<String> {
-    let board_dir = project_root.join(".batty").join("team_config").join("board");
+fn block_telegram_task(
+    project_root: &std::path::Path,
+    task_id: u32,
+    reason: &str,
+) -> Result<String> {
+    let board_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board");
     let mut fields = std::collections::HashMap::new();
     fields.insert("blocked_on".to_string(), reason.to_string());
     crate::team::task_cmd::cmd_update(&board_dir, task_id, fields)?;
@@ -859,7 +883,11 @@ mod tests {
     }
 
     fn git_ok(repo: &std::path::Path, args: &[&str]) {
-        let output = Command::new("git").args(args).current_dir(repo).output().unwrap();
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
         assert!(
             output.status.success(),
             "git {:?} failed: {}",
@@ -2154,7 +2182,9 @@ mod tests {
             ..Default::default()
         }];
         let mut daemon = TeamDaemon::new(config).unwrap();
-        daemon.states.insert("eng".to_string(), MemberState::Working);
+        daemon
+            .states
+            .insert("eng".to_string(), MemberState::Working);
 
         let error = daemon
             .execute_telegram_command(TelegramCommand::Assign {
