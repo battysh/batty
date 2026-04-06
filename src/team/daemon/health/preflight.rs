@@ -4,7 +4,9 @@ use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use super::super::helpers::{
-    board_dir, ensure_board_initialized, ensure_kanban_available, ensure_tmux_session_ready,
+    board_dir, ensure_agent_binaries_available, ensure_board_initialized, ensure_git_ready,
+    ensure_kanban_available, ensure_telemetry_writable, ensure_tmux_session_ready,
+    ensure_worktree_operations,
 };
 use super::super::*;
 use super::STARTUP_PREFLIGHT_RESPAWN_DELAY;
@@ -12,6 +14,10 @@ use super::STARTUP_PREFLIGHT_RESPAWN_DELAY;
 impl TeamDaemon {
     pub(in super::super) fn run_startup_preflight(&mut self) -> Result<()> {
         ensure_tmux_session_ready(&self.config.session)?;
+        ensure_git_ready(&self.config.project_root)?;
+        ensure_worktree_operations(&self.config.project_root)?;
+        ensure_telemetry_writable(&self.config.project_root)?;
+        ensure_agent_binaries_available(&self.config.members)?;
         self.ensure_member_panes_ready()?;
         ensure_kanban_available()?;
         if ensure_board_initialized(&self.config.project_root)? {
@@ -89,7 +95,10 @@ impl TeamDaemon {
 #[cfg(test)]
 mod tests {
     use super::super::super::*;
-    use super::super::helpers::{board_dir, ensure_board_initialized, ensure_kanban_available};
+    use super::super::helpers::{
+        board_dir, ensure_agent_binaries_available, ensure_board_initialized, ensure_git_ready,
+        ensure_kanban_available, ensure_telemetry_writable, ensure_worktree_operations,
+    };
     use super::super::test_helpers::{EnvVarGuard, PATH_LOCK, setup_fake_kanban, test_team_config};
     use crate::team::config::{
         AutomationConfig, BoardConfig, OrchestratorPosition, RoleType, StandupConfig, TeamConfig,
@@ -109,7 +118,7 @@ mod tests {
 
     #[test]
     fn startup_preflight_reports_missing_kanban_binary() {
-        let _path_guard = PATH_LOCK.lock().unwrap();
+        let _path_guard = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let empty_bin = tmp.path().join("empty-bin");
         std::fs::create_dir_all(&empty_bin).unwrap();
@@ -122,7 +131,7 @@ mod tests {
 
     #[test]
     fn startup_preflight_initializes_missing_board_directory() {
-        let _path_guard = PATH_LOCK.lock().unwrap();
+        let _path_guard = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "startup_board_init");
         let fake_bin = setup_fake_kanban(&tmp, "startup-board-init");
@@ -138,6 +147,94 @@ mod tests {
         assert!(ensure_board_initialized(&repo).unwrap());
         assert!(board_path.join("tasks").is_dir());
         assert!(!ensure_board_initialized(&repo).unwrap());
+    }
+
+    #[test]
+    fn startup_preflight_reports_missing_git_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "startup_git_identity");
+        Command::new("git")
+            .args(["config", "--unset", "user.email"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        let isolated_home = tmp.path().join("isolated-home");
+        let isolated_config = tmp.path().join("isolated-xdg");
+        let isolated_global = tmp.path().join("isolated-gitconfig");
+        std::fs::create_dir_all(&isolated_home).unwrap();
+        std::fs::create_dir_all(&isolated_config).unwrap();
+        std::fs::write(&isolated_global, "").unwrap();
+        let _home = EnvVarGuard::set("HOME", isolated_home.to_string_lossy().as_ref());
+        let _xdg = EnvVarGuard::set(
+            "XDG_CONFIG_HOME",
+            isolated_config.to_string_lossy().as_ref(),
+        );
+        let _git_global = EnvVarGuard::set(
+            "GIT_CONFIG_GLOBAL",
+            isolated_global.to_string_lossy().as_ref(),
+        );
+        let _git_system = EnvVarGuard::set("GIT_CONFIG_NOSYSTEM", "1");
+
+        let error = ensure_git_ready(&repo).unwrap_err();
+
+        assert!(format!("{error:#}").contains("user.email"));
+    }
+
+    #[test]
+    fn startup_preflight_verifies_worktree_operations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "startup_worktree_probe");
+
+        ensure_worktree_operations(&repo).unwrap();
+    }
+
+    #[test]
+    fn startup_preflight_verifies_telemetry_db_writable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "startup_telemetry_probe");
+
+        ensure_telemetry_writable(&repo).unwrap();
+        assert!(repo.join(".batty").join("telemetry.db").exists());
+    }
+
+    #[test]
+    fn startup_preflight_reports_missing_agent_binary() {
+        let _path_guard = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let empty_bin = tmp.path().join("empty-bin");
+        std::fs::create_dir_all(&empty_bin).unwrap();
+        let _path = EnvVarGuard::set("PATH", empty_bin.to_string_lossy().as_ref());
+
+        let members = vec![engineer_member("eng-1", Some("manager"), false)];
+        let error = ensure_agent_binaries_available(&members).unwrap_err();
+
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("eng-1"));
+        assert!(rendered.contains("unreachable"));
+    }
+
+    #[test]
+    fn startup_preflight_accepts_available_agent_binaries() {
+        let _path_guard = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let (fake_claude_bin, _fake_claude_log) = setup_fake_claude(&tmp, "eng-1");
+        let (fake_codex_bin, _fake_codex_log) =
+            setup_fake_backend(&tmp, "codex", "eng-1-fake-codex.log");
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let _path = EnvVarGuard::set(
+            "PATH",
+            &format!(
+                "{}:{}:{original_path}",
+                fake_claude_bin.to_string_lossy(),
+                fake_codex_bin.to_string_lossy()
+            ),
+        );
+
+        let mut codex_member = engineer_member("eng-1", Some("manager"), false);
+        codex_member.agent = Some("codex".to_string());
+        let members = vec![architect_member("architect"), codex_member];
+
+        ensure_agent_binaries_available(&members).unwrap();
     }
 
     #[test]
