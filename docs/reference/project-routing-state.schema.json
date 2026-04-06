@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://batty.sh/schemas/project-routing-state.schema.json",
+  "title": "Batty Project Routing State",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "schemaVersion", "selections"],
+  "properties": {
+    "kind": {
+      "const": "batty.projectRoutingState"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "selections": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/selection"
+      }
+    }
+  },
+  "$defs": {
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectId", "scope", "updatedAt"],
+      "properties": {
+        "projectId": {
+          "type": "string",
+          "pattern": "^[a-z0-9._-]+$"
+        },
+        "scope": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind"],
+              "properties": {
+                "kind": {
+                  "const": "global"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "channel", "binding"],
+              "properties": {
+                "kind": {
+                  "const": "channel"
+                },
+                "channel": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "binding": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "channel", "binding", "threadBinding"],
+              "properties": {
+                "kind": {
+                  "const": "thread"
+                },
+                "channel": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "binding": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "threadBinding": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          ]
+        },
+        "updatedAt": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

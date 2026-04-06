@@ -388,6 +388,7 @@ fn main() -> Result<()> {
             ProjectCommand::Register {
                 project_id,
                 name,
+                aliases,
                 project_root,
                 board_dir,
                 team_name,
@@ -395,20 +396,28 @@ fn main() -> Result<()> {
                 owner,
                 tags,
                 channel_bindings,
+                thread_bindings,
                 allow_openclaw_supervision,
                 allow_cross_project_routing,
                 allow_shared_service_routing,
                 archived,
                 json,
             } => {
-                let channel_bindings = channel_bindings
+                let mut channel_bindings = channel_bindings
                     .iter()
                     .map(|binding| project_registry::parse_channel_binding(binding))
                     .collect::<Result<Vec<_>>>()?;
+                channel_bindings.extend(
+                    thread_bindings
+                        .iter()
+                        .map(|binding| project_registry::parse_thread_binding(binding))
+                        .collect::<Result<Vec<_>>>()?,
+                );
                 let project =
                     project_registry::register_project(project_registry::ProjectRegistration {
                         project_id,
                         name,
+                        aliases,
                         project_root,
                         board_dir,
                         team_name,
@@ -487,6 +496,73 @@ fn main() -> Result<()> {
                             project.tags.join(", ")
                         }
                     );
+                    println!(
+                        "Aliases: {}",
+                        if project.aliases.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            project.aliases.join(", ")
+                        }
+                    );
+                }
+            }
+            ProjectCommand::SetActive {
+                project_id,
+                channel,
+                binding,
+                thread_binding,
+                json,
+            } => {
+                let scope = match (channel, binding, thread_binding) {
+                    (None, None, None) => project_registry::ActiveProjectScope::Global,
+                    (Some(channel), Some(binding), None) => {
+                        project_registry::ActiveProjectScope::Channel { channel, binding }
+                    }
+                    (Some(channel), Some(binding), Some(thread_binding)) => {
+                        project_registry::ActiveProjectScope::Thread {
+                            channel,
+                            binding,
+                            thread_binding,
+                        }
+                    }
+                    _ => bail!(
+                        "set-active requires either no scope, --channel with --binding, or --channel with --binding and --thread-binding"
+                    ),
+                };
+                let selection = project_registry::set_active_project(&project_id, scope)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&selection)?);
+                } else {
+                    println!("Active project set to {}", selection.project_id);
+                }
+            }
+            ProjectCommand::Resolve {
+                message,
+                channel,
+                binding,
+                thread_binding,
+                json,
+            } => {
+                let decision =
+                    project_registry::resolve_project_for_message(&project_registry::ProjectRoutingRequest {
+                        message,
+                        channel,
+                        binding,
+                        thread_binding,
+                    })?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&decision)?);
+                } else {
+                    println!(
+                        "Selected: {}",
+                        decision
+                            .selected_project_id
+                            .as_deref()
+                            .unwrap_or("(clarification required)")
+                    );
+                    println!("Confidence: {:?}", decision.confidence);
+                    println!("Requires confirmation: {}", decision.requires_confirmation);
+                    println!("Reason: {}", decision.reason);
                 }
             }
         },
