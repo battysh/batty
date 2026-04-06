@@ -242,6 +242,29 @@ pub enum Command {
     /// Show consolidated telemetry dashboard (tasks, cycle time, rates, agents)
     Metrics,
 
+    /// Run a synthetic long-session stress harness with fault injection
+    StressTest {
+        /// Run the full fault matrix on an accelerated compact timeline for CI
+        #[arg(long, default_value_t = false)]
+        compact: bool,
+
+        /// Virtual session duration in hours when not using compact mode
+        #[arg(long, default_value_t = 8)]
+        duration_hours: u64,
+
+        /// Deterministic seed for fault scheduling and synthetic recovery timings
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+
+        /// Override the JSON report output path
+        #[arg(long)]
+        json_out: Option<PathBuf>,
+
+        /// Override the Markdown report output path
+        #[arg(long)]
+        markdown_out: Option<PathBuf>,
+    },
+
     /// Query the telemetry database for agent and task metrics
     Telemetry {
         #[command(subcommand)]
