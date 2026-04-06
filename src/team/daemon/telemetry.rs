@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use anyhow::Result;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::super::events::{QualityMetricsInfo, TeamEvent, VerificationPhaseChangeInfo};
 use super::*;
@@ -17,10 +17,23 @@ impl TeamDaemon {
         self.failure_tracker.push(&event);
 
         // Dual-write to SQLite telemetry database (best-effort).
-        if let Some(conn) = &self.telemetry_db {
-            if let Err(error) = crate::team::telemetry_db::insert_event(conn, &event) {
-                debug!(error = %error, "failed to write telemetry event to SQLite; continuing");
+        if self.optional_subsystem_ready("telemetry") {
+            if let Some(conn) = &self.telemetry_db {
+                if let Err(error) = crate::team::telemetry_db::insert_event(conn, &event) {
+                    debug!(error = %error, "failed to write telemetry event to SQLite; continuing");
+                    if let Err(emit_error) = self.event_sink.emit(TeamEvent::loop_step_error(
+                        "telemetry_emit_event",
+                        &error.to_string(),
+                    )) {
+                        warn!(error = %emit_error, "failed to write telemetry budget event");
+                    }
+                    self.record_optional_subsystem_failure("telemetry", &error.to_string());
+                } else {
+                    self.record_optional_subsystem_success("telemetry");
+                }
             }
+        } else {
+            debug!("telemetry subsystem disabled by error budget; skipping SQLite write");
         }
 
         if let Err(error) = self.event_sink.emit(event) {

@@ -5,10 +5,18 @@
 //! loop uses to execute each subsystem while keeping the daemon alive when
 //! individual subsystems fail.
 
+use std::time::{Duration, Instant};
+
 use anyhow::Result;
 use tracing::{error, warn};
 
 use super::*;
+
+const OPTIONAL_SUBSYSTEM_ERROR_WINDOW_SECS: u64 = 600;
+const OPTIONAL_SUBSYSTEM_ERROR_BUDGET: usize = 5;
+const OPTIONAL_SUBSYSTEM_BACKOFF_SECS: [u64; 3] = [60, 300, 1_800];
+const OPTIONAL_SUBSYSTEM_BACKOFF_KEY_PREFIX: &str = "__optional_subsystem_backoff:";
+const OPTIONAL_SUBSYSTEM_DISABLE_KEY_PREFIX: &str = "__optional_subsystem_disabled:";
 
 impl TeamDaemon {
     /// Run a critical subsystem step. Errors and panics are logged but no
@@ -66,6 +74,39 @@ impl TeamDaemon {
         self.run_recoverable_step(step, action);
     }
 
+    pub(super) fn run_optional_subsystem_step<F>(
+        &mut self,
+        step: &str,
+        subsystem: &str,
+        action: F,
+    ) where
+        F: FnOnce(&mut Self) -> Result<()>,
+    {
+        if !self.optional_subsystem_ready(subsystem) {
+            return;
+        }
+
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| action(self))) {
+            Ok(Ok(())) => {
+                self.subsystem_error_counts.remove(step);
+                self.record_optional_subsystem_success(subsystem);
+            }
+            Ok(Err(error)) => {
+                error!(subsystem = step, error = %error, "daemon subsystem failed");
+                self.record_loop_step_error(step, &error.to_string());
+                self.increment_subsystem_error(step);
+                self.record_optional_subsystem_failure(subsystem, &error.to_string());
+            }
+            Err(panic_payload) => {
+                let msg = panic_payload_to_string(&panic_payload);
+                error!(subsystem = step, panic = %msg, "daemon subsystem panicked");
+                self.record_loop_step_error(step, &format!("panic: {msg}"));
+                self.increment_subsystem_error(step);
+                self.record_optional_subsystem_failure(subsystem, &format!("panic: {msg}"));
+            }
+        }
+    }
+
     pub(super) fn increment_subsystem_error(&mut self, step: &str) {
         let count = self
             .subsystem_error_counts
@@ -80,6 +121,154 @@ impl TeamDaemon {
             );
         }
     }
+
+    pub(super) fn optional_subsystem_ready(&mut self, subsystem: &str) -> bool {
+        let disable_key = optional_subsystem_disable_key(subsystem);
+        let Some(disabled_until) = self.intervention_cooldowns.get(&disable_key).copied() else {
+            return true;
+        };
+
+        if Instant::now() < disabled_until {
+            return false;
+        }
+
+        self.intervention_cooldowns.remove(&disable_key);
+        tracing::info!(subsystem, "optional subsystem re-enabled after backoff");
+        self.record_orchestrator_action(format!(
+            "health: re-enabled optional subsystem {subsystem} after backoff"
+        ));
+        true
+    }
+
+    pub(super) fn record_optional_subsystem_success(&mut self, subsystem: &str) {
+        let backoff_key = optional_subsystem_backoff_key(subsystem);
+        if self.recent_optional_subsystem_error_count(subsystem) == 0 {
+            self.subsystem_error_counts.remove(&backoff_key);
+        }
+    }
+
+    pub(super) fn record_optional_subsystem_failure(&mut self, subsystem: &str, error: &str) {
+        let recent_errors = self.recent_optional_subsystem_error_count(subsystem);
+        if recent_errors <= OPTIONAL_SUBSYSTEM_ERROR_BUDGET {
+            return;
+        }
+
+        let disable_key = optional_subsystem_disable_key(subsystem);
+        if self.intervention_cooldowns.contains_key(&disable_key) {
+            return;
+        }
+
+        let backoff_key = optional_subsystem_backoff_key(subsystem);
+        let backoff_index = self
+            .subsystem_error_counts
+            .get(&backoff_key)
+            .copied()
+            .unwrap_or(0)
+            .min((OPTIONAL_SUBSYSTEM_BACKOFF_SECS.len() - 1) as u32);
+        let backoff_secs = OPTIONAL_SUBSYSTEM_BACKOFF_SECS[backoff_index as usize];
+        self.intervention_cooldowns.insert(
+            disable_key,
+            Instant::now() + Duration::from_secs(backoff_secs),
+        );
+        self.subsystem_error_counts.insert(
+            backoff_key,
+            (backoff_index + 1).min((OPTIONAL_SUBSYSTEM_BACKOFF_SECS.len() - 1) as u32),
+        );
+        warn!(
+            subsystem,
+            recent_errors,
+            backoff_secs,
+            error,
+            "optional subsystem disabled after exceeding error budget"
+        );
+        self.record_orchestrator_action(format!(
+            "health: disabled optional subsystem {subsystem} after {recent_errors} errors in 10m; retry in {backoff_secs}s ({error})"
+        ));
+    }
+
+    pub(super) fn snapshot_optional_subsystem_backoff(&self) -> std::collections::HashMap<String, u32> {
+        optional_subsystem_names()
+            .iter()
+            .filter_map(|subsystem| {
+                self.subsystem_error_counts
+                    .get(&optional_subsystem_backoff_key(subsystem))
+                    .copied()
+                    .map(|value| ((*subsystem).to_string(), value))
+            })
+            .collect()
+    }
+
+    pub(super) fn snapshot_optional_subsystem_disabled_remaining_secs(
+        &self,
+    ) -> std::collections::HashMap<String, u64> {
+        optional_subsystem_names()
+            .iter()
+            .filter_map(|subsystem| {
+                self.intervention_cooldowns
+                    .get(&optional_subsystem_disable_key(subsystem))
+                    .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+                    .map(|remaining| ((*subsystem).to_string(), remaining.as_secs()))
+            })
+            .collect()
+    }
+
+    pub(super) fn restore_optional_subsystem_budget_state(
+        &mut self,
+        backoff: &std::collections::HashMap<String, u32>,
+        disabled_remaining_secs: &std::collections::HashMap<String, u64>,
+    ) {
+        for (subsystem, value) in backoff {
+            self.subsystem_error_counts
+                .insert(optional_subsystem_backoff_key(subsystem), *value);
+        }
+        for (subsystem, remaining_secs) in disabled_remaining_secs {
+            self.intervention_cooldowns.insert(
+                optional_subsystem_disable_key(subsystem),
+                Instant::now() + Duration::from_secs(*remaining_secs),
+            );
+        }
+    }
+
+    fn recent_optional_subsystem_error_count(&self, subsystem: &str) -> usize {
+        let cutoff = now_unix().saturating_sub(OPTIONAL_SUBSYSTEM_ERROR_WINDOW_SECS);
+        crate::team::events::read_events(&crate::team::team_events_path(&self.config.project_root))
+            .map(|events| {
+                events
+                    .into_iter()
+                    .filter(|event| {
+                        event.event == "loop_step_error"
+                            && event.ts >= cutoff
+                            && event
+                                .step
+                                .as_deref()
+                                .and_then(optional_subsystem_for_step)
+                                == Some(subsystem)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+}
+
+pub(crate) fn optional_subsystem_for_step(step: &str) -> Option<&'static str> {
+    match step {
+        "telemetry_emit_event" => Some("telemetry"),
+        "process_telegram_queue" => Some("telegram"),
+        "maybe_generate_standup" => Some("standup"),
+        _ => None,
+    }
+}
+
+pub(crate) fn optional_subsystem_names() -> [&'static str; 4] {
+    ["telemetry", "telegram", "grafana", "standup"]
+}
+
+fn optional_subsystem_backoff_key(subsystem: &str) -> String {
+    format!("{OPTIONAL_SUBSYSTEM_BACKOFF_KEY_PREFIX}{subsystem}")
+}
+
+fn optional_subsystem_disable_key(subsystem: &str) -> String {
+    format!("{OPTIONAL_SUBSYSTEM_DISABLE_KEY_PREFIX}{subsystem}")
 }
 
 fn panic_payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
@@ -453,5 +642,42 @@ mod tests {
             Some(&1),
             "catch_unwind steps should track panics as failures"
         );
+    }
+
+    #[test]
+    fn optional_subsystem_disables_after_budget_and_recovers_after_backoff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = daemon_config_with_roles(tmp.path(), Vec::new());
+        let mut daemon = TeamDaemon::new(config).unwrap();
+
+        for i in 0..=OPTIONAL_SUBSYSTEM_ERROR_BUDGET {
+            daemon.run_optional_subsystem_step("process_telegram_queue", "telegram", |_daemon| {
+                anyhow::bail!("telegram failure #{i}")
+            });
+        }
+
+        let disable_key = optional_subsystem_disable_key("telegram");
+        assert!(
+            daemon.intervention_cooldowns.contains_key(&disable_key),
+            "telegram should be disabled after exceeding the error budget"
+        );
+
+        let mut ran_while_disabled = false;
+        daemon.run_optional_subsystem_step("process_telegram_queue", "telegram", |_daemon| {
+            ran_while_disabled = true;
+            Ok(())
+        });
+        assert!(!ran_while_disabled, "disabled subsystem should be skipped");
+
+        daemon
+            .intervention_cooldowns
+            .insert(disable_key, Instant::now() - Duration::from_secs(1));
+
+        let mut ran_after_backoff = false;
+        daemon.run_optional_subsystem_step("process_telegram_queue", "telegram", |_daemon| {
+            ran_after_backoff = true;
+            Ok(())
+        });
+        assert!(ran_after_backoff, "subsystem should run after backoff expires");
     }
 }

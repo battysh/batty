@@ -75,6 +75,23 @@ struct PersistedDaemonHealthState {
     active_tasks: HashMap<String, u32>,
     #[serde(default)]
     retry_counts: HashMap<String, u32>,
+    #[serde(default)]
+    optional_subsystem_backoff: HashMap<String, u32>,
+    #[serde(default)]
+    optional_subsystem_disabled_remaining_secs: HashMap<String, u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct OptionalSubsystemStatus {
+    pub(crate) name: String,
+    pub(crate) state: String,
+    pub(crate) recent_errors: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) disabled_remaining_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) backoff_stage: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
@@ -146,6 +163,8 @@ pub(crate) struct TeamStatusJsonReport {
     pub(crate) workflow_metrics: Option<WorkflowMetrics>,
     pub(crate) active_tasks: Vec<StatusTaskEntry>,
     pub(crate) review_queue: Vec<StatusTaskEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) optional_subsystems: Option<Vec<OptionalSubsystemStatus>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) engineer_profiles:
         Option<Vec<crate::team::telemetry_db::EngineerPerformanceProfileRow>>,
@@ -506,6 +525,109 @@ fn load_persisted_daemon_health_state(path: &Path) -> Result<Option<PersistedDae
     let state = serde_json::from_str::<PersistedDaemonHealthState>(&content)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(Some(state))
+}
+
+pub(crate) fn load_optional_subsystem_statuses(project_root: &Path) -> Vec<OptionalSubsystemStatus> {
+    let daemon_state = load_persisted_daemon_health_state(&daemon_state_path(project_root))
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let recent_errors = recent_optional_subsystem_errors(project_root);
+
+    crate::team::daemon::optional_subsystem_names()
+        .into_iter()
+        .map(|name| {
+            let disabled_remaining_secs = daemon_state
+                .optional_subsystem_disabled_remaining_secs
+                .get(name)
+                .copied()
+                .filter(|secs| *secs > 0);
+            let recent_errors = recent_errors.get(name).copied().unwrap_or(0);
+            let state = if disabled_remaining_secs.is_some() {
+                "disabled"
+            } else if recent_errors > 0 {
+                "degraded"
+            } else {
+                "healthy"
+            };
+            OptionalSubsystemStatus {
+                name: name.to_string(),
+                state: state.to_string(),
+                recent_errors,
+                disabled_remaining_secs,
+                backoff_stage: daemon_state.optional_subsystem_backoff.get(name).copied(),
+                last_error: latest_optional_subsystem_error(project_root, name),
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn format_optional_subsystem_statuses(statuses: &[OptionalSubsystemStatus]) -> String {
+    let mut lines = vec![
+        "Optional Subsystems".to_string(),
+        format!(
+            "{:<12} {:<10} {:<12} {:<12} {}",
+            "NAME", "STATE", "ERRORS/10M", "RETRY", "LAST ERROR"
+        ),
+    ];
+
+    for status in statuses {
+        let retry = status
+            .disabled_remaining_secs
+            .map(format_health_duration)
+            .unwrap_or_else(|| "-".to_string());
+        let last_error = status.last_error.as_deref().unwrap_or("-");
+        lines.push(format!(
+            "{:<12} {:<10} {:<12} {:<12} {}",
+            status.name,
+            status.state,
+            status.recent_errors,
+            retry,
+            last_error
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn recent_optional_subsystem_errors(project_root: &Path) -> HashMap<&'static str, usize> {
+    let cutoff = now_unix().saturating_sub(600);
+    let mut counts = HashMap::new();
+    let Ok(events) = events::read_events(&team_events_path(project_root)) else {
+        return counts;
+    };
+
+    for event in events {
+        if event.event != "loop_step_error" || event.ts < cutoff {
+            continue;
+        }
+        let Some(subsystem) = event
+            .step
+            .as_deref()
+            .and_then(crate::team::daemon::optional_subsystem_for_step)
+        else {
+            continue;
+        };
+        *counts.entry(subsystem).or_insert(0) += 1;
+    }
+
+    counts
+}
+
+fn latest_optional_subsystem_error(project_root: &Path, subsystem: &str) -> Option<String> {
+    events::read_events(&team_events_path(project_root))
+        .ok()?
+        .into_iter()
+        .rev()
+        .find(|event| {
+            event.event == "loop_step_error"
+                && event
+                    .step
+                    .as_deref()
+                    .and_then(crate::team::daemon::optional_subsystem_for_step)
+                    == Some(subsystem)
+        })
+        .and_then(|event| event.error)
 }
 
 pub(crate) fn load_watchdog_status(project_root: &Path, session_running: bool) -> WatchdogStatus {
@@ -976,6 +1098,7 @@ pub(crate) struct TeamStatusJsonReportInput {
     pub(crate) workflow_metrics: Option<WorkflowMetrics>,
     pub(crate) active_tasks: Vec<StatusTaskEntry>,
     pub(crate) review_queue: Vec<StatusTaskEntry>,
+    pub(crate) optional_subsystems: Option<Vec<OptionalSubsystemStatus>>,
     pub(crate) engineer_profiles:
         Option<Vec<crate::team::telemetry_db::EngineerPerformanceProfileRow>>,
     pub(crate) members: Vec<TeamStatusRow>,
@@ -993,6 +1116,7 @@ pub(crate) fn build_team_status_json_report(
         workflow_metrics,
         active_tasks,
         review_queue,
+        optional_subsystems,
         engineer_profiles,
         members,
     } = input;
@@ -1007,6 +1131,7 @@ pub(crate) fn build_team_status_json_report(
         workflow_metrics,
         active_tasks,
         review_queue,
+        optional_subsystems,
         engineer_profiles,
         members,
     }
@@ -2230,6 +2355,7 @@ mod tests {
             }),
             active_tasks: Vec::new(),
             review_queue: Vec::new(),
+            optional_subsystems: None,
             engineer_profiles: Some(vec![
                 crate::team::telemetry_db::EngineerPerformanceProfileRow {
                     role: "eng-1".to_string(),
@@ -2494,6 +2620,7 @@ mod tests {
                 next_action: Some("review now".to_string()),
                 test_summary: None,
             }],
+            optional_subsystems: None,
             engineer_profiles: None,
             members: vec![
                 TeamStatusRow {
@@ -2749,6 +2876,40 @@ mod tests {
             ..AgentHealthSummary::default()
         });
         assert_eq!(summary, "B:degraded r1");
+    }
+
+    #[test]
+    fn load_optional_subsystem_statuses_reads_budget_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events_path = team_events_path(tmp.path());
+        let mut sink = EventSink::new(&events_path).unwrap();
+        for _ in 0..6 {
+            let mut event = TeamEvent::loop_step_error("process_telegram_queue", "telegram down");
+            event.ts = now_unix();
+            sink.emit(event).unwrap();
+        }
+
+        let daemon_state = serde_json::json!({
+            "optional_subsystem_backoff": {"telegram": 2},
+            "optional_subsystem_disabled_remaining_secs": {"telegram": 45}
+        });
+        fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+        fs::write(
+            daemon_state_path(tmp.path()),
+            serde_json::to_vec_pretty(&daemon_state).unwrap(),
+        )
+        .unwrap();
+
+        let statuses = load_optional_subsystem_statuses(tmp.path());
+        let telegram = statuses
+            .iter()
+            .find(|status| status.name == "telegram")
+            .expect("telegram status should exist");
+        assert_eq!(telegram.state, "disabled");
+        assert_eq!(telegram.recent_errors, 6);
+        assert_eq!(telegram.disabled_remaining_secs, Some(45));
+        assert_eq!(telegram.backoff_stage, Some(2));
+        assert_eq!(telegram.last_error.as_deref(), Some("telegram down"));
     }
 
     #[test]
