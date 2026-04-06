@@ -50,6 +50,7 @@ use super::task_loop::{
     engineer_base_branch_name, is_worktree_safe_to_mutate, preserve_worktree_with_commit,
     setup_engineer_worktree,
 };
+use super::verification::VerificationState;
 use super::watcher::{SessionWatcher, WatcherState};
 use super::{AssignmentDeliveryResult, AssignmentResultStatus, now_unix, store_assignment_result};
 use crate::agent::{self, BackendHealth};
@@ -92,6 +93,8 @@ mod state;
 mod telegram_bridge;
 #[path = "daemon/telemetry.rs"]
 mod telemetry;
+#[path = "daemon/verification.rs"]
+pub(crate) mod verification;
 
 #[cfg(test)]
 use self::dispatch::normalized_assignment_dir;
@@ -204,9 +207,8 @@ pub struct TeamDaemon {
     pub(super) last_uncommitted_warn: HashMap<String, Instant>,
     /// Last time the daemon checked for stale per-worktree cargo targets to prune.
     pub(super) last_shared_target_cleanup: Instant,
-    /// Tracks consecutive "no commits ahead of main" rejections per engineer.
-    /// Used to detect and auto-recover from branches that never diverged.
-    pub(super) completion_rejection_counts: HashMap<String, u32>,
+    /// Per-engineer completion verification loop state.
+    pub(super) verification_states: HashMap<String, VerificationState>,
     /// Tracks consecutive narration-only rejections per task (commits exist
     /// but the branch still has no file diff). After threshold, escalates.
     pub(super) narration_rejection_counts: HashMap<u32, u32>,
@@ -460,7 +462,7 @@ impl TeamDaemon {
             last_health_check: Instant::now() - Duration::from_secs(3600),
             last_uncommitted_warn: HashMap::new(),
             last_shared_target_cleanup: Instant::now() - Duration::from_secs(3600),
-            completion_rejection_counts: HashMap::new(),
+            verification_states: HashMap::new(),
             narration_rejection_counts: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
             shim_handles: HashMap::new(),
@@ -984,6 +986,7 @@ impl TeamDaemon {
             self.narration_rejection_counts.remove(&task_id);
         }
         self.retry_counts.remove(engineer);
+        self.verification_states.remove(engineer);
         // Clean up any progress checkpoint left from a prior restart.
         super::checkpoint::remove_checkpoint(&self.config.project_root, engineer);
     }
