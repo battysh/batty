@@ -1059,6 +1059,14 @@ fn main() -> Result<()> {
             }
         }
 
+        Command::Dispatch { explain, task } => {
+            if !explain {
+                println!("Use `batty dispatch --explain` to inspect the current routing decision.");
+            } else {
+                team::allocation::print_dispatch_explanation(&root, task)?;
+            }
+        }
+
         Command::Cost => {
             team::cost::show_cost(&root)?;
         }
