@@ -439,6 +439,22 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool) -> Result<()> 
             println!();
             println!("{formatted}");
         }
+        let failed_test_tasks = active_tasks
+            .iter()
+            .chain(review_queue.iter())
+            .filter_map(|task| {
+                task.test_summary.as_ref().map(|summary| {
+                    format!("#{} {}: {}", task.id, task.title, summary)
+                })
+            })
+            .collect::<Vec<_>>();
+        if !failed_test_tasks.is_empty() {
+            println!();
+            println!("Failed Tests");
+            for line in failed_test_tasks {
+                println!("- {line}");
+            }
+        }
         if detail {
             if let Some(profiles) = engineer_profiles {
                 println!();
