@@ -9,7 +9,7 @@ use std::path::Path;
 use anyhow::Result;
 use tracing::{info, warn};
 
-use super::super::events::{TeamEvent, VerificationPhaseChangeInfo};
+use super::super::events::{QualityMetricsInfo, TeamEvent, VerificationPhaseChangeInfo};
 use super::*;
 
 impl TeamDaemon {
@@ -147,10 +147,67 @@ impl TeamDaemon {
     }
 
     pub(crate) fn record_task_completed(&mut self, role: &str, task_id: Option<u32>) {
+        if let Some(task_id) = task_id {
+            self.record_quality_metrics(role, task_id);
+        }
         self.emit_event(TeamEvent::task_completed(
             role,
             task_id.map(|id| id.to_string()).as_deref(),
         ));
+    }
+
+    pub(crate) fn record_quality_metrics(&mut self, role: &str, task_id: u32) {
+        let Some(backend) = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == role)
+            .and_then(|member| member.agent.as_deref())
+        else {
+            return;
+        };
+
+        let started_at = crate::team::events::read_events(&crate::team::team_events_path(
+            &self.config.project_root,
+        ))
+        .ok()
+        .and_then(|events| {
+            crate::team::quality_metrics::assignment_started_at(&events, role, task_id)
+        });
+        let output = self
+            .watchers
+            .get(role)
+            .map(|watcher| watcher.last_lines(200))
+            .unwrap_or_default();
+        let retries_before_success = self.retry_counts.get(role).copied().unwrap_or(0);
+        let commits = crate::team::git_cmd::run_git(
+            &self.worktree_dir(role),
+            &["rev-list", "--count", "main..HEAD"],
+        )
+        .ok()
+        .and_then(|output| output.stdout.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+
+        let metrics = crate::team::quality_metrics::build_completion_quality_metrics(
+            backend,
+            role,
+            task_id,
+            &output,
+            commits,
+            retries_before_success,
+            started_at,
+            crate::team::now_unix(),
+        );
+        self.emit_event(TeamEvent::quality_metrics_recorded(&QualityMetricsInfo {
+            backend: &metrics.backend,
+            role: &metrics.role,
+            task: &metrics.task_id,
+            narration_ratio: metrics.narration_ratio,
+            commit_frequency: metrics.commit_frequency,
+            first_pass_test_rate: metrics.first_pass_test_rate,
+            retry_rate: metrics.retry_rate,
+            time_to_completion_secs: metrics.time_to_completion_secs,
+        }));
     }
 
     pub(crate) fn record_task_auto_merged(
