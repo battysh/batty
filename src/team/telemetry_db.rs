@@ -246,7 +246,7 @@ fn update_metrics_for_event(conn: &Connection, event: &TeamEvent) -> Result<()> 
                 )?;
             }
         }
-        "task_escalated" | "meta_conversation_escalated" => {
+        "task_escalated" | "narration_restart" => {
             if let Some(task) = &event.task {
                 conn.execute(
                     "INSERT INTO task_metrics (task_id, escalations) VALUES (?1, 1)
@@ -794,12 +794,12 @@ mod tests {
         let conn = open_in_memory().unwrap();
         insert_event(
             &conn,
-            &TeamEvent::meta_conversation_escalated("eng-1", Some(42)),
+            &TeamEvent::narration_restart("eng-1", Some(42)),
         )
         .unwrap();
         insert_event(
             &conn,
-            &TeamEvent::meta_conversation_escalated("eng-1", Some(42)),
+            &TeamEvent::narration_restart("eng-1", Some(42)),
         )
         .unwrap();
 

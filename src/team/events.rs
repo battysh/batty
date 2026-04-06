@@ -439,43 +439,27 @@ impl TeamEvent {
         }
     }
 
-    pub fn narration_loop_detected(role: &str, task: Option<u32>) -> Self {
+    pub fn narration_detected(role: &str, task: Option<u32>) -> Self {
         Self {
             role: Some(role.into()),
             task: task.map(|id| id.to_string()),
-            ..Self::base("narration_loop_detected")
+            ..Self::base("narration_detected")
         }
     }
 
-    pub fn meta_conversation_nudged(role: &str, task: Option<u32>) -> Self {
+    pub fn narration_nudged(role: &str, task: Option<u32>) -> Self {
         Self {
             role: Some(role.into()),
             task: task.map(|id| id.to_string()),
-            ..Self::base("meta_conversation_nudged")
+            ..Self::base("narration_nudged")
         }
     }
 
-    pub fn meta_conversation_detected(role: &str, task: Option<u32>) -> Self {
+    pub fn narration_restart(role: &str, task: Option<u32>) -> Self {
         Self {
             role: Some(role.into()),
             task: task.map(|id| id.to_string()),
-            ..Self::base("meta_conversation_detected")
-        }
-    }
-
-    pub fn meta_conversation_escalated(role: &str, task: Option<u32>) -> Self {
-        Self {
-            role: Some(role.into()),
-            task: task.map(|id| id.to_string()),
-            ..Self::base("meta_conversation_escalated")
-        }
-    }
-
-    pub fn meta_conversation_recovered(role: &str, task: Option<u32>) -> Self {
-        Self {
-            role: Some(role.into()),
-            task: task.map(|id| id.to_string()),
-            ..Self::base("meta_conversation_recovered")
+            ..Self::base("narration_restart")
         }
     }
 
@@ -1897,26 +1881,21 @@ mod tests {
     }
 
     #[test]
-    fn meta_conversation_events_have_correct_fields() {
-        let detected = TeamEvent::narration_loop_detected("eng-1-4", Some(415));
-        assert_eq!(detected.event, "narration_loop_detected");
+    fn narration_events_have_correct_fields() {
+        let detected = TeamEvent::narration_detected("eng-1-4", Some(415));
+        assert_eq!(detected.event, "narration_detected");
         assert_eq!(detected.role.as_deref(), Some("eng-1-4"));
         assert_eq!(detected.task.as_deref(), Some("415"));
 
-        let nudged = TeamEvent::meta_conversation_nudged("eng-1-4", Some(415));
-        assert_eq!(nudged.event, "meta_conversation_nudged");
+        let nudged = TeamEvent::narration_nudged("eng-1-4", Some(415));
+        assert_eq!(nudged.event, "narration_nudged");
         assert_eq!(nudged.role.as_deref(), Some("eng-1-4"));
         assert_eq!(nudged.task.as_deref(), Some("415"));
 
-        let escalated = TeamEvent::meta_conversation_escalated("eng-1-4", Some(415));
-        assert_eq!(escalated.event, "meta_conversation_escalated");
-        assert_eq!(escalated.role.as_deref(), Some("eng-1-4"));
-        assert_eq!(escalated.task.as_deref(), Some("415"));
-
-        let recovered = TeamEvent::meta_conversation_recovered("eng-1-4", Some(415));
-        assert_eq!(recovered.event, "meta_conversation_recovered");
-        assert_eq!(recovered.role.as_deref(), Some("eng-1-4"));
-        assert_eq!(recovered.task.as_deref(), Some("415"));
+        let restarted = TeamEvent::narration_restart("eng-1-4", Some(415));
+        assert_eq!(restarted.event, "narration_restart");
+        assert_eq!(restarted.role.as_deref(), Some("eng-1-4"));
+        assert_eq!(restarted.task.as_deref(), Some("415"));
     }
 
     #[test]
