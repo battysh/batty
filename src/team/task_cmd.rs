@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde_yaml::{Mapping, Value};
 
 use crate::task::{Task, load_tasks_from_dir};
@@ -62,6 +63,10 @@ pub(crate) fn assign_task_owners(
     update_task_frontmatter(&task_path, |mapping| {
         if let Some(owner) = exec_owner {
             set_optional_string(mapping, "claimed_by", normalize_optional(owner));
+            if normalize_optional(owner).is_some() {
+                let now = Utc::now();
+                set_optional_string(mapping, "claimed_at", Some(&now.to_rfc3339()));
+            }
         }
         if let Some(owner) = review_owner {
             set_optional_string(mapping, "review_owner", normalize_optional(owner));
@@ -77,6 +82,84 @@ pub(crate) fn unclaim_task(board_dir: &Path, task_id: u32) -> Result<()> {
         set_optional_string(mapping, "claimed_by", None);
         set_optional_string(mapping, "review_owner", None);
         set_optional_string(mapping, "claimed_at", None);
+        set_optional_u64(mapping, "claim_ttl_secs", None);
+        set_optional_string(mapping, "claim_expires_at", None);
+        set_optional_string(mapping, "last_progress_at", None);
+        set_optional_string(mapping, "claim_warning_sent_at", None);
+        set_optional_u32(mapping, "claim_extensions", None);
+        set_optional_u64(mapping, "last_output_bytes", None);
+    })?;
+    Ok(())
+}
+
+pub(crate) fn initialize_task_claim(
+    board_dir: &Path,
+    task_id: u32,
+    ttl_secs: u64,
+    now: DateTime<Utc>,
+    output_bytes: u64,
+) -> Result<()> {
+    let task_path = find_task_path(board_dir, task_id)?;
+    let expires_at = now + ChronoDuration::seconds(ttl_secs as i64);
+    update_task_frontmatter(&task_path, |mapping| {
+        set_optional_string(mapping, "claimed_at", Some(&now.to_rfc3339()));
+        set_optional_u64(mapping, "claim_ttl_secs", Some(ttl_secs));
+        set_optional_string(mapping, "claim_expires_at", Some(&expires_at.to_rfc3339()));
+        set_optional_string(mapping, "last_progress_at", Some(&now.to_rfc3339()));
+        set_optional_string(mapping, "claim_warning_sent_at", None);
+        set_optional_u32(mapping, "claim_extensions", Some(0));
+        set_optional_u64(mapping, "last_output_bytes", Some(output_bytes));
+    })?;
+    Ok(())
+}
+
+pub(crate) fn refresh_task_claim_progress(
+    board_dir: &Path,
+    task_id: u32,
+    ttl_secs: u64,
+    now: DateTime<Utc>,
+    output_bytes: u64,
+    extensions: u32,
+) -> Result<()> {
+    let task_path = find_task_path(board_dir, task_id)?;
+    let expires_at = now + ChronoDuration::seconds(ttl_secs as i64);
+    update_task_frontmatter(&task_path, |mapping| {
+        set_optional_u64(mapping, "claim_ttl_secs", Some(ttl_secs));
+        set_optional_string(mapping, "claim_expires_at", Some(&expires_at.to_rfc3339()));
+        set_optional_string(mapping, "last_progress_at", Some(&now.to_rfc3339()));
+        set_optional_string(mapping, "claim_warning_sent_at", None);
+        set_optional_u32(mapping, "claim_extensions", Some(extensions));
+        set_optional_u64(mapping, "last_output_bytes", Some(output_bytes));
+    })?;
+    Ok(())
+}
+
+pub(crate) fn mark_task_claim_warning(
+    board_dir: &Path,
+    task_id: u32,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let task_path = find_task_path(board_dir, task_id)?;
+    update_task_frontmatter(&task_path, |mapping| {
+        set_optional_string(mapping, "claim_warning_sent_at", Some(&now.to_rfc3339()));
+    })?;
+    Ok(())
+}
+
+pub(crate) fn reclaim_task_claim(board_dir: &Path, task_id: u32, next_action: &str) -> Result<()> {
+    let task_path = find_task_path(board_dir, task_id)?;
+    update_task_frontmatter(&task_path, |mapping| {
+        set_optional_string(mapping, "claimed_by", None);
+        set_optional_string(mapping, "review_owner", None);
+        set_optional_string(mapping, "claimed_at", None);
+        set_optional_u64(mapping, "claim_ttl_secs", None);
+        set_optional_string(mapping, "claim_expires_at", None);
+        set_optional_string(mapping, "last_progress_at", None);
+        set_optional_string(mapping, "claim_warning_sent_at", None);
+        set_optional_u32(mapping, "claim_extensions", None);
+        set_optional_u64(mapping, "last_output_bytes", None);
+        set_optional_string(mapping, "next_action", Some(next_action));
+        set_status(mapping, TaskState::Todo);
     })?;
     Ok(())
 }
@@ -457,6 +540,22 @@ pub(crate) fn set_optional_string(mapping: &mut Mapping, key: &str, value: Optio
             mapping.remove(key);
         }
     }
+}
+
+pub(crate) fn set_optional_u64(mapping: &mut Mapping, key: &str, value: Option<u64>) {
+    let key = yaml_key(key);
+    match value {
+        Some(value) => {
+            mapping.insert(key, Value::Number(value.into()));
+        }
+        None => {
+            mapping.remove(key);
+        }
+    }
+}
+
+pub(crate) fn set_optional_u32(mapping: &mut Mapping, key: &str, value: Option<u32>) {
+    set_optional_u64(mapping, key, value.map(u64::from));
 }
 
 pub(crate) fn yaml_key(name: &str) -> Value {
