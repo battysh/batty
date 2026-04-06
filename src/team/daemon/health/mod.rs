@@ -46,7 +46,7 @@ impl TeamDaemon {
         self.restart_member(member_name)
     }
 
-    fn active_task(&self, member_name: &str) -> Result<Option<crate::task::Task>> {
+    pub(super) fn active_task(&self, member_name: &str) -> Result<Option<crate::task::Task>> {
         let Some(task_id) = self.active_task_id(member_name) else {
             return Ok(None);
         };

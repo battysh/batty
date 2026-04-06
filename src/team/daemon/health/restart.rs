@@ -10,28 +10,25 @@ use tracing::warn;
 use super::super::*;
 
 impl TeamDaemon {
-    /// Build a restart assignment message that includes handoff context from the
-    /// previous session, if `context_handoff_enabled` is true and a handoff file
-    /// exists.  The handoff file is deleted after injection.
-    pub(in super::super) fn restart_assignment_with_handoff(
+    pub(in super::super) fn consume_restart_handoff(
         &mut self,
         member_name: &str,
         task: &crate::task::Task,
         work_dir: &Path,
-    ) -> String {
-        let assignment = Self::restart_assignment_message(task);
+        reason: &str,
+    ) -> Option<String> {
         if !self
             .config
             .team_config
             .workflow_policy
             .context_handoff_enabled
         {
-            return assignment;
+            return None;
         }
 
         let handoff_path = work_dir.join(crate::shim::runtime::HANDOFF_FILE_NAME);
         let Ok(handoff) = fs::read_to_string(&handoff_path) else {
-            return assignment;
+            return None;
         };
         if let Err(error) = fs::remove_file(&handoff_path) {
             warn!(
@@ -41,7 +38,25 @@ impl TeamDaemon {
                 "failed to remove restart handoff file after injection"
             );
         }
-        self.record_handoff_injected(member_name, task.id.to_string(), "restart");
+        self.record_handoff_injected(member_name, task.id.to_string(), reason);
+
+        Some(handoff)
+    }
+
+    /// Build a restart assignment message that includes handoff context from the
+    /// previous session, if `context_handoff_enabled` is true and a handoff file
+    /// exists. The handoff file is deleted after injection.
+    pub(in super::super) fn restart_assignment_with_handoff(
+        &mut self,
+        member_name: &str,
+        task: &crate::task::Task,
+        work_dir: &Path,
+    ) -> String {
+        let assignment = Self::restart_assignment_message(task);
+        let Some(handoff) = self.consume_restart_handoff(member_name, task, work_dir, "restart")
+        else {
+            return assignment;
+        };
 
         format!(
             "You are continuing work on Task #{}.\n\n{}\n\nResume from where you left off. Do not repeat already completed work.\n\n{}",

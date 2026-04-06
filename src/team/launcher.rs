@@ -119,7 +119,7 @@ impl TeamDaemon {
     }
 
     pub(super) fn prepare_member_launch(
-        &self,
+        &mut self,
         member: &MemberInstance,
         resume: bool,
         previous_launch_state: &HashMap<String, LaunchIdentity>,
@@ -128,14 +128,26 @@ impl TeamDaemon {
         let team_config_dir = self.config.project_root.join(".batty").join("team_config");
         let work_dir = self.member_work_dir(member);
         self.validate_member_work_dir(&member.name, &work_dir)?;
+
+        let agent_name = member.agent.as_deref().unwrap_or("claude");
+        let role_prompt = strip_nudge_section(&self.load_prompt(member, &team_config_dir));
+        let mut prompt_text = role_prompt.clone();
+        if let Some(task) = self.active_task(&member.name)?
+            && let Some(handoff) =
+                self.consume_restart_handoff(&member.name, &task, &work_dir, "launch")
+        {
+            prompt_text = format!(
+                "You are continuing work on Task #{}.\n\n{}\n\n{}\n\nResume from where you left off. Do not repeat already completed work.",
+                task.id,
+                handoff.trim_end(),
+                Self::restart_assignment_message(&task),
+            );
+        }
         let role = self
             .config
             .team_config
             .role_def(&member.role_name)
             .with_context(|| format!("missing role definition for member '{}'", member.name))?;
-
-        let agent_name = member.agent.as_deref().unwrap_or("claude");
-        let prompt_text = strip_nudge_section(&self.load_prompt(member, &team_config_dir));
         let claude_auth = self.config.team_config.resolve_claude_auth(role);
         let idle = role_starts_idle();
         let normalized_agent = canonical_agent_name(agent_name);
@@ -190,7 +202,7 @@ impl TeamDaemon {
             agent_name,
             &claude_auth,
             &prompt_text,
-            Some(&prompt_text),
+            Some(&role_prompt),
             &work_dir,
             &self.config.project_root,
             idle,
