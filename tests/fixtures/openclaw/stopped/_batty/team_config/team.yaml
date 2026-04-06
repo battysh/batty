@@ -1,0 +1,17 @@
+name: fixture-team
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+    instances: 1
+    talks_to: [manager]
+  - name: manager
+    role_type: manager
+    agent: claude
+    instances: 1
+    talks_to: [architect, engineer]
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 1
+    talks_to: [manager]

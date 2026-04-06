@@ -1,0 +1,29 @@
+version: 1
+project_name: fixture-degraded
+batty_root: .
+status:
+  recent_events: 6
+instruction:
+  sender: daemon
+  allowed_roles:
+    - architect
+    - manager
+follow_ups:
+  - name: review-queue-reminder
+    cron: "*/30 * * * *"
+    role: manager
+    message: Review queue still has pending work. Check `batty openclaw status` and move the lane forward.
+    summary: Review queue follow-up
+    when: review_queue_non_empty
+  - name: degraded-team-escalation
+    cron: "*/30 * * * *"
+    role: architect
+    message: Unhealthy members are present. Review the team and intervene if recovery stalls.
+    summary: Unhealthy member escalation
+    when: unhealthy_members_present
+  - name: triage-backlog-reminder
+    cron: "*/30 * * * *"
+    role: manager
+    message: Triage backlog is building. Review new direct-report updates.
+    summary: Triage backlog follow-up
+    when: triage_backlog_present

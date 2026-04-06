@@ -82,7 +82,7 @@ pub enum OpenClawFollowUpCondition {
     TriageBacklogPresent,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenClawStatusSummary {
     pub project: String,
     pub team: String,
@@ -96,14 +96,14 @@ pub struct OpenClawStatusSummary {
     pub recent_events: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FollowUpDispatch {
     pub name: String,
     pub role: String,
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FollowUpRunSummary {
     pub dispatched: Vec<FollowUpDispatch>,
 }
@@ -192,7 +192,7 @@ pub fn register_project(project_root: &Path, force: bool) -> Result<PathBuf> {
 }
 
 pub fn openclaw_status(project_root: &Path, json: bool) -> Result<()> {
-    let summary = build_status_summary(project_root, &BattySupervisorAdapter)?;
+    let summary = openclaw_status_summary(project_root)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&summary)?);
     } else {
@@ -214,11 +214,7 @@ pub fn send_openclaw_instruction(project_root: &Path, role: &str, message: &str)
 }
 
 pub fn run_follow_ups(project_root: &Path, json: bool) -> Result<()> {
-    let summary = run_follow_ups_with_adapter(
-        project_root,
-        &BattySupervisorAdapter,
-        Utc::now(),
-    )?;
+    let summary = openclaw_follow_up_summary(project_root)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&summary)?);
     } else if summary.dispatched.is_empty() {
@@ -233,6 +229,14 @@ pub fn run_follow_ups(project_root: &Path, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn openclaw_status_summary(project_root: &Path) -> Result<OpenClawStatusSummary> {
+    build_status_summary(project_root, &BattySupervisorAdapter)
+}
+
+pub fn openclaw_follow_up_summary(project_root: &Path) -> Result<FollowUpRunSummary> {
+    run_follow_ups_with_adapter(project_root, &BattySupervisorAdapter, Utc::now())
 }
 
 fn load_project_config(project_root: &Path) -> Result<OpenClawProjectConfig> {
