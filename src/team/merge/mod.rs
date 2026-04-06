@@ -16,5 +16,5 @@ mod lock;
 mod operations;
 
 pub(crate) use completion::handle_engineer_completion;
-pub(crate) use lock::MergeOutcome;
+pub(crate) use lock::{MergeLock, MergeOutcome};
 pub(crate) use operations::merge_engineer_branch;

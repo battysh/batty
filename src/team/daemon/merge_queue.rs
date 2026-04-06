@@ -2,9 +2,12 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
+use tracing::{info, warn};
 
 use super::TeamDaemon;
+use crate::team::merge::{MergeLock, MergeOutcome, merge_engineer_branch};
+use crate::team::task_loop::read_task_title;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MergeRequest {
@@ -140,9 +143,12 @@ impl MergeQueue {
 
 impl TeamDaemon {
     pub(super) fn process_merge_queue(&mut self) -> Result<()> {
-        if let Some(status) = self.merge_queue.take_status_update() {
+        let mut merge_queue = std::mem::take(&mut self.merge_queue);
+        let _ = merge_queue.process_next(|request| self.execute_queued_merge(request))?;
+        if let Some(status) = merge_queue.take_status_update() {
             self.record_orchestrator_action(status);
         }
+        self.merge_queue = merge_queue;
         Ok(())
     }
 
@@ -150,11 +156,192 @@ impl TeamDaemon {
     pub(crate) fn enqueue_merge_request(&mut self, request: MergeRequest) {
         self.merge_queue.enqueue(request);
     }
+
+    fn execute_queued_merge(&mut self, request: &MergeRequest) -> Result<MergeQueueOutcome> {
+        if self.is_multi_repo {
+            bail!("merge queue execution is not yet implemented for multi-repo projects");
+        }
+
+        let _lock = MergeLock::acquire(self.project_root()).context("failed to acquire merge lock")?;
+        let board_dir = self.board_dir();
+        let board_dir_str = board_dir.to_string_lossy().to_string();
+        let manager_name = self.manager_name(&request.engineer);
+        let task_title = read_task_title(&board_dir, request.task_id);
+
+        match merge_engineer_branch(self.project_root(), &request.engineer)? {
+            MergeOutcome::Success => {
+                let board_update_ok =
+                    move_task_to_done(self, &board_dir, &board_dir_str, request, manager_name.as_deref());
+
+                if let Some(ref manager_name) = manager_name {
+                    let msg = format!(
+                        "[{}] Task #{} completed from merge queue.\nTitle: {}\nTests: passed\nMerge: success{}",
+                        request.engineer,
+                        request.task_id,
+                        task_title,
+                        if board_update_ok {
+                            ""
+                        } else {
+                            "\nBoard: update failed; decide next board action manually."
+                        }
+                    );
+                    self.queue_message(&request.engineer, manager_name, &msg)?;
+                    self.mark_member_working(manager_name);
+                    let rollup = format!(
+                        "Rollup: Task #{} completed by {} from the merge queue. Tests passed, merged to main.{}",
+                        request.task_id,
+                        request.engineer,
+                        if board_update_ok {
+                            ""
+                        } else {
+                            " Board automation failed; decide manually."
+                        }
+                    );
+                    self.notify_reports_to(manager_name, &rollup)?;
+                }
+
+                self.clear_active_task(&request.engineer);
+                self.record_task_completed(&request.engineer, Some(request.task_id));
+                self.set_member_idle(&request.engineer);
+                info!(
+                    engineer = request.engineer,
+                    task_id = request.task_id,
+                    "merge queue processed request successfully"
+                );
+                Ok(MergeQueueOutcome::Success)
+            }
+            MergeOutcome::RebaseConflict(conflict_info) => {
+                let attempt = self.increment_retry(&request.engineer);
+                if attempt <= 2 {
+                    let msg = format!(
+                        "Merge conflict during rebase onto main (attempt {attempt}/2). Fix the conflicts in your worktree and try again:\n{conflict_info}"
+                    );
+                    self.queue_message("batty", &request.engineer, &msg)?;
+                    self.mark_member_working(&request.engineer);
+                } else {
+                    if let Some(ref manager_name) = manager_name {
+                        let msg = format!(
+                            "[{}] task #{} has unresolvable merge conflicts after 2 retries. Escalating.\n{}",
+                            request.engineer, request.task_id, conflict_info
+                        );
+                        self.queue_message(&request.engineer, manager_name, &msg)?;
+                        self.mark_member_working(manager_name);
+                        let escalation = format!(
+                            "ESCALATION: Task #{} assigned to {} has unresolvable merge conflicts. Task blocked on board.",
+                            request.task_id, request.engineer
+                        );
+                        self.notify_reports_to(manager_name, &escalation)?;
+                    }
+
+                    self.record_task_escalated(
+                        &request.engineer,
+                        request.task_id.to_string(),
+                        Some("merge_conflict"),
+                    );
+                    self.run_kanban_md_nonfatal(
+                        &[
+                            "edit",
+                            &request.task_id.to_string(),
+                            "--block",
+                            "merge conflicts after 2 retries",
+                            "--dir",
+                            &board_dir_str,
+                        ],
+                        &format!("block task #{} after merge conflict retries", request.task_id),
+                        manager_name
+                            .as_deref()
+                            .into_iter()
+                            .chain(std::iter::once(request.engineer.as_str())),
+                    );
+                    self.clear_active_task(&request.engineer);
+                    self.set_member_idle(&request.engineer);
+                }
+
+                warn!(
+                    engineer = request.engineer,
+                    task_id = request.task_id,
+                    "merge queue encountered a rebase conflict"
+                );
+                Ok(MergeQueueOutcome::Conflict)
+            }
+            MergeOutcome::MergeFailure(merge_info) => {
+                let manager_notice = format!(
+                    "Task #{} from {} passed tests but could not be merged to main.\n{}\nDecide whether to clean the main worktree, retry the merge, or redirect the engineer.",
+                    request.task_id, request.engineer, merge_info
+                );
+                if let Some(ref manager_name) = manager_name {
+                    self.queue_message("daemon", manager_name, &manager_notice)?;
+                    self.mark_member_working(manager_name);
+                    self.notify_reports_to(manager_name, &manager_notice)?;
+                }
+
+                let engineer_notice = format!(
+                    "Your task passed tests, but Batty could not merge it into main.\n{}\nWait for lead direction before making more changes.",
+                    merge_info
+                );
+                self.queue_message("daemon", &request.engineer, &engineer_notice)?;
+
+                self.record_task_escalated(
+                    &request.engineer,
+                    request.task_id.to_string(),
+                    Some("merge_failure"),
+                );
+                self.clear_active_task(&request.engineer);
+                self.set_member_idle(&request.engineer);
+                warn!(
+                    engineer = request.engineer,
+                    task_id = request.task_id,
+                    error = %merge_info,
+                    "merge queue failed to merge request"
+                );
+                Ok(MergeQueueOutcome::Failed)
+            }
+        }
+    }
+}
+
+fn move_task_to_done(
+    daemon: &mut TeamDaemon,
+    board_dir: &std::path::Path,
+    board_dir_str: &str,
+    request: &MergeRequest,
+    manager_name: Option<&str>,
+) -> bool {
+    if crate::team::task_cmd::transition_task(board_dir, request.task_id, "done").is_ok() {
+        return true;
+    }
+
+    if crate::team::task_cmd::transition_task(board_dir, request.task_id, "review").is_ok()
+        && crate::team::task_cmd::cmd_review(board_dir, request.task_id, "approved", None).is_ok()
+    {
+        return true;
+    }
+
+    daemon.run_kanban_md_nonfatal(
+        &[
+            "move",
+            &request.task_id.to_string(),
+            "done",
+            "--claim",
+            &request.engineer,
+            "--dir",
+            board_dir_str,
+        ],
+        &format!("move task #{} to done", request.task_id),
+        manager_name
+            .into_iter()
+            .chain(std::iter::once(request.engineer.as_str())),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::team::standup::MemberState;
+    use crate::team::task_loop::setup_engineer_worktree;
+    use crate::team::test_helpers::make_test_daemon;
+    use crate::team::test_support::{engineer_member, git_ok, init_git_repo, manager_member};
+    use std::path::Path;
 
     fn request(task_id: u32) -> MergeRequest {
         MergeRequest {
@@ -222,5 +409,67 @@ mod tests {
         assert!(error.to_string().contains("merge execution failed"));
         assert_eq!(queue.active_task_id(), None);
         assert_eq!(queue.queued_len(), 0);
+    }
+
+    fn write_task_file(project_root: &Path, id: u32, title: &str) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join(format!("{id:03}-{title}.md")),
+            format!(
+                "---\nid: {id}\ntitle: {title}\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\n---\n\nTask description.\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn daemon_process_merge_queue_merges_and_completes_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-queue-test");
+        write_task_file(&repo, 42, "merge-queue-task");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+        std::fs::write(worktree_dir.join("note.txt"), "queued merge\n").unwrap();
+        git_ok(&worktree_dir, &["add", "note.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "queue merge"]);
+
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ];
+        let mut daemon = make_test_daemon(&repo, members);
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+        daemon.enqueue_merge_request(MergeRequest {
+            task_id: 42,
+            engineer: "eng-1".to_string(),
+            branch: "eng-1/task-42".to_string(),
+            worktree_dir: worktree_dir.clone(),
+            queued_at: Instant::now(),
+            test_passed: true,
+        });
+
+        daemon.process_merge_queue().unwrap();
+
+        assert_eq!(std::fs::read_to_string(repo.join("note.txt")).unwrap(), "queued merge\n");
+        let task = crate::task::Task::from_file(
+            &repo
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("042-merge-queue-task.md"),
+        )
+        .unwrap();
+        assert_eq!(task.status, "done");
+        assert_eq!(daemon.active_task_id("eng-1"), None);
+        assert_eq!(daemon.member_state_for_test("eng-1"), Some(MemberState::Idle));
     }
 }
