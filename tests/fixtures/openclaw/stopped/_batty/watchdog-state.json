@@ -1,0 +1,8 @@
+{
+  "restart_count": 2,
+  "crash_timestamps": [1712400900, 1712400950],
+  "circuit_breaker_tripped": false,
+  "child_pid": null,
+  "current_backoff_secs": 8,
+  "last_exit_reason": "watchdog timeout"
+}

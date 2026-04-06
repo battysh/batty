@@ -1,0 +1,4 @@
+{"event":"daemon_started","ts":1712402000}
+{"event":"health_changed","role":"eng-1-1","reason":"healthy→degraded","ts":1712402030}
+{"event":"task_escalated","role":"eng-1-1","task":"449","reason":"wording drift in the internal escalation note should not break the contract","ts":1712402060}
+{"event":"task_completed","role":"eng-1-1","task":"448","ts":1712402120}
