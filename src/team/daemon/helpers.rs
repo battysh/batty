@@ -1,11 +1,14 @@
 //! Free helper functions used by the daemon module.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
+use crate::agent::BackendHealth;
 use crate::team::board_cmd;
 use crate::team::config::RoleType;
+use crate::team::hierarchy::MemberInstance;
 use crate::tmux;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,7 +106,7 @@ pub(super) fn ensure_tmux_session_ready(session: &str) -> Result<()> {
 }
 
 pub(super) fn ensure_kanban_available() -> Result<()> {
-    let output = std::process::Command::new("kanban-md")
+    let output = Command::new("kanban-md")
         .arg("--help")
         .output()
         .context(
@@ -144,4 +147,132 @@ pub(super) fn ensure_board_initialized(project_root: &Path) -> Result<bool> {
     Ok(true)
 }
 
-use anyhow::Context;
+pub(super) fn ensure_git_ready(project_root: &Path) -> Result<()> {
+    let repo_check = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(project_root)
+        .output()
+        .context(
+            "daemon startup pre-flight failed while verifying git repository: could not execute `git rev-parse --is-inside-work-tree`",
+        )?;
+    if !repo_check.status.success() || String::from_utf8_lossy(&repo_check.stdout).trim() != "true"
+    {
+        bail!("daemon startup pre-flight failed: project root is not a git repository");
+    }
+
+    for key in ["user.name", "user.email"] {
+        let output = Command::new("git")
+            .args(["config", "--get", key])
+            .current_dir(project_root)
+            .output()
+            .with_context(|| {
+                format!(
+                    "daemon startup pre-flight failed while verifying git config: could not execute `git config --get {key}`"
+                )
+            })?;
+        if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim().is_empty() {
+            bail!("daemon startup pre-flight failed: git config '{key}' is missing");
+        }
+    }
+
+    Ok(())
+}
+
+pub(super) fn ensure_worktree_operations(project_root: &Path) -> Result<()> {
+    let probe_root = project_root.join(".batty").join("startup-preflight");
+    std::fs::create_dir_all(&probe_root).with_context(|| {
+        format!(
+            "daemon startup pre-flight failed: unable to create startup preflight directory '{}'",
+            probe_root.display()
+        )
+    })?;
+    let worktree_dir = probe_root.join(format!(
+        "worktree-probe-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let worktree_path = worktree_dir.to_string_lossy().to_string();
+
+    let add_output = Command::new("git")
+        .args(["worktree", "add", "--detach", &worktree_path, "HEAD"])
+        .current_dir(project_root)
+        .output()
+        .context(
+            "daemon startup pre-flight failed while verifying git worktree support: could not execute `git worktree add`",
+        )?;
+    if !add_output.status.success() {
+        let detail = describe_command_failure(
+            "git",
+            &["worktree", "add", "--detach", &worktree_path, "HEAD"],
+            &add_output,
+        );
+        bail!("daemon startup pre-flight failed: {detail}");
+    }
+
+    let remove_output = Command::new("git")
+        .args(["worktree", "remove", "--force", &worktree_path])
+        .current_dir(project_root)
+        .output()
+        .context(
+            "daemon startup pre-flight failed while verifying git worktree cleanup: could not execute `git worktree remove`",
+        )?;
+    if !remove_output.status.success() {
+        let detail = describe_command_failure(
+            "git",
+            &["worktree", "remove", "--force", &worktree_path],
+            &remove_output,
+        );
+        let _ = std::fs::remove_dir_all(&worktree_dir);
+        bail!("daemon startup pre-flight failed: {detail}");
+    }
+
+    if worktree_dir.exists() {
+        let _ = std::fs::remove_dir_all(&worktree_dir);
+        bail!(
+            "daemon startup pre-flight failed: temporary worktree '{}' was not removed",
+            worktree_dir.display()
+        );
+    }
+
+    Ok(())
+}
+
+pub(super) fn ensure_telemetry_writable(project_root: &Path) -> Result<()> {
+    let conn = crate::team::telemetry_db::open(project_root)
+        .context("daemon startup pre-flight failed: telemetry.db is not writable")?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS __batty_preflight_probe (id INTEGER)",
+        [],
+    )
+    .context("daemon startup pre-flight failed: telemetry.db probe write failed")?;
+    Ok(())
+}
+
+pub(super) fn ensure_agent_binaries_available(members: &[MemberInstance]) -> Result<()> {
+    for member in members {
+        if member.role_type == RoleType::User {
+            continue;
+        }
+
+        let agent_name = member.agent.as_deref().unwrap_or("claude");
+        let Some(health) = crate::agent::health_check_by_name(agent_name) else {
+            bail!(
+                "daemon startup pre-flight failed: unknown agent backend '{}' for member '{}'",
+                agent_name,
+                member.name
+            );
+        };
+        if health != BackendHealth::Healthy {
+            bail!(
+                "daemon startup pre-flight failed: backend '{}' for member '{}' is {}",
+                agent_name,
+                member.name,
+                health.as_str()
+            );
+        }
+    }
+
+    Ok(())
+}
