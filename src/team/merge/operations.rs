@@ -62,6 +62,13 @@ pub(crate) fn merge_engineer_branch(
         }
     }
 
+    // Fetch latest main into the worktree so rebase sees current state.
+    let _ = run_git_with_context(
+        &worktree_dir,
+        &["fetch", ".", "main:main"],
+        "fetch main into worktree before rebase",
+    );
+
     let rebase = run_git_with_context(
         &worktree_dir,
         &["rebase", "main"],
@@ -71,21 +78,27 @@ pub(crate) fn merge_engineer_branch(
     )?;
 
     if !rebase.status.success() {
-        let stderr = String::from_utf8_lossy(&rebase.stderr).trim().to_string();
-        let _ = run_git_with_context(
-            &worktree_dir,
-            &["rebase", "--abort"],
-            &format!("abort rebase for engineer branch '{branch}' after conflict"),
-        );
-        warn!(engineer = engineer_name, branch = %branch, "rebase conflict during merge");
-        return Ok(MergeOutcome::RebaseConflict(describe_git_failure(
-            &worktree_dir,
-            &["rebase", "main"],
-            &format!(
-                "rebase engineer branch '{branch}' onto main before merging for '{engineer_name}'"
-            ),
-            &stderr,
-        )));
+        // Try to auto-resolve: for auto-generated files (.cargo/config.toml),
+        // accept the main version and continue the rebase.
+        let resolved = try_auto_resolve_rebase(&worktree_dir);
+        if !resolved {
+            let stderr = String::from_utf8_lossy(&rebase.stderr).trim().to_string();
+            let _ = run_git_with_context(
+                &worktree_dir,
+                &["rebase", "--abort"],
+                &format!("abort rebase for engineer branch '{branch}' after conflict"),
+            );
+            warn!(engineer = engineer_name, branch = %branch, "rebase conflict during merge");
+            return Ok(MergeOutcome::RebaseConflict(describe_git_failure(
+                &worktree_dir,
+                &["rebase", "main"],
+                &format!(
+                    "rebase engineer branch '{branch}' onto main before merging for '{engineer_name}'"
+                ),
+                &stderr,
+            )));
+        }
+        info!(engineer = engineer_name, branch = %branch, "auto-resolved rebase conflicts");
     }
 
     let verification =
@@ -136,6 +149,105 @@ pub(crate) fn merge_engineer_branch(
     }
 
     Ok(MergeOutcome::Success)
+}
+
+/// Try to auto-resolve rebase conflicts for files that batty manages.
+/// Returns true if all conflicts were resolved and the rebase completed.
+fn try_auto_resolve_rebase(worktree_dir: &Path) -> bool {
+    // List conflicted files
+    let status = match run_git_with_context(
+        worktree_dir,
+        &["diff", "--name-only", "--diff-filter=U"],
+        "list rebase conflicts",
+    ) {
+        Ok(out) => out,
+        Err(_) => return false,
+    };
+    let raw = String::from_utf8_lossy(&status.stdout).trim().to_string();
+    let conflicts: Vec<&str> = raw.lines().collect();
+
+    if conflicts.is_empty() {
+        return false;
+    }
+
+    // Auto-resolvable patterns: batty-managed configs and generated files
+    let auto_resolvable = |path: &str| -> bool {
+        path == ".cargo/config.toml"
+            || path.ends_with(".cargo/config.toml")
+            || path.starts_with("src/team/templates/batty_")
+    };
+
+    for conflict in &conflicts {
+        if auto_resolvable(conflict) {
+            // Accept main's version for managed files
+            let _ = run_git_with_context(
+                worktree_dir,
+                &["checkout", "--theirs", conflict],
+                &format!("auto-resolve conflict in {conflict} (accept main)"),
+            );
+            let _ = run_git_with_context(
+                worktree_dir,
+                &["add", conflict],
+                &format!("stage auto-resolved {conflict}"),
+            );
+        } else {
+            // Non-auto-resolvable conflict — bail
+            info!(
+                file = conflict,
+                "rebase conflict in non-managed file, cannot auto-resolve"
+            );
+            return false;
+        }
+    }
+
+    // Continue the rebase — may need multiple rounds if there are stacked conflicts
+    for _ in 0..20 {
+        let cont = run_git_with_context(
+            worktree_dir,
+            &["rebase", "--continue"],
+            "continue rebase after auto-resolve",
+        );
+        match cont {
+            Ok(output) if output.status.success() => return true,
+            Ok(_) => {
+                // Another conflict — try to auto-resolve again
+                let status = run_git_with_context(
+                    worktree_dir,
+                    &["diff", "--name-only", "--diff-filter=U"],
+                    "list remaining rebase conflicts",
+                );
+                let remaining: Vec<String> = match status {
+                    Ok(out) => String::from_utf8_lossy(&out.stdout)
+                        .trim()
+                        .lines()
+                        .map(String::from)
+                        .collect(),
+                    Err(_) => return false,
+                };
+                if remaining.is_empty() {
+                    continue; // no conflicts, just needs --continue again
+                }
+                for r in &remaining {
+                    if auto_resolvable(r) {
+                        let _ = run_git_with_context(
+                            worktree_dir,
+                            &["checkout", "--theirs", r],
+                            &format!("auto-resolve {r}"),
+                        );
+                        let _ = run_git_with_context(
+                            worktree_dir,
+                            &["add", r],
+                            &format!("stage {r}"),
+                        );
+                    } else {
+                        return false;
+                    }
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    false
 }
 
 pub(crate) fn reset_engineer_worktree(project_root: &Path, engineer_name: &str) -> Result<()> {
