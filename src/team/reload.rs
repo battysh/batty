@@ -25,7 +25,10 @@ pub fn request_topology_reload(project_root: &Path) -> Result<()> {
     let team_dir = team_config_dir(project_root);
     let config_path = team_dir.join(TEAM_CONFIG_FILE);
     if !config_path.exists() {
-        bail!("no team config found at {}; run `batty init` first", config_path.display());
+        bail!(
+            "no team config found at {}; run `batty init` first",
+            config_path.display()
+        );
     }
 
     std::fs::create_dir_all(&team_dir)?;
