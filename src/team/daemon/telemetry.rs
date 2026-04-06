@@ -296,6 +296,7 @@ impl TeamDaemon {
         ));
     }
 
+    #[allow(dead_code)]
     pub(crate) fn record_task_claim_created(
         &mut self,
         engineer: &str,
@@ -311,6 +312,7 @@ impl TeamDaemon {
         ));
     }
 
+    #[allow(dead_code)]
     pub(crate) fn record_task_claim_progress(
         &mut self,
         engineer: &str,
@@ -324,6 +326,7 @@ impl TeamDaemon {
         ));
     }
 
+    #[allow(dead_code)]
     pub(crate) fn record_task_claim_warning(
         &mut self,
         engineer: &str,
@@ -337,6 +340,7 @@ impl TeamDaemon {
         ));
     }
 
+    #[allow(dead_code)]
     pub(crate) fn record_task_claim_expired(
         &mut self,
         engineer: &str,
@@ -350,6 +354,7 @@ impl TeamDaemon {
         ));
     }
 
+    #[allow(dead_code)]
     pub(crate) fn record_task_claim_extended(
         &mut self,
         engineer: &str,
