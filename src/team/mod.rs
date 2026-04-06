@@ -61,6 +61,7 @@ pub mod scale;
 pub mod spec_gen;
 pub mod standup;
 pub mod status;
+pub mod stress;
 pub mod tact;
 pub mod task_cmd;
 pub mod task_loop;

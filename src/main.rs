@@ -680,6 +680,32 @@ fn main() -> Result<()> {
             team::metrics_cmd::run(&root)?;
         }
 
+        Command::StressTest {
+            compact,
+            duration_hours,
+            seed,
+            json_out,
+            markdown_out,
+        } => {
+            let report = team::stress::run(
+                &root,
+                team::stress::StressTestOptions {
+                    compact,
+                    duration_hours,
+                    seed,
+                    json_out,
+                    markdown_out,
+                },
+            )?;
+            println!(
+                "Stress test complete: {} faults, {} failed SLA. JSON: {} Markdown: {}",
+                report.summary.total_faults,
+                report.summary.failed_faults,
+                report.json_report_path.display(),
+                report.markdown_report_path.display()
+            );
+        }
+
         Command::Telemetry { command } => {
             let conn =
                 team::telemetry_db::open(&root).context("failed to open telemetry database")?;
