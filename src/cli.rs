@@ -534,6 +534,38 @@ pub enum ProjectCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    /// Start one registered project by projectId
+    Start {
+        /// Stable unique project identifier
+        project_id: String,
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Stop one registered project by projectId
+    Stop {
+        /// Stable unique project identifier
+        project_id: String,
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Restart one registered project by projectId
+    Restart {
+        /// Stable unique project identifier
+        project_id: String,
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Show lifecycle and health status for one registered project
+    Status {
+        /// Stable unique project identifier
+        project_id: String,
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Set the active project used for implicit routing
     SetActive {
         /// Stable unique project identifier
@@ -1729,6 +1761,53 @@ mod tests {
             }
             other => panic!("expected project get command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn project_lifecycle_subcommands_parse() {
+        let start = Cli::parse_from(["batty", "project", "start", "batty-core", "--json"]);
+        assert!(matches!(
+            start.command,
+            Command::Project {
+                command: ProjectCommand::Start {
+                    project_id,
+                    json: true
+                }
+            } if project_id == "batty-core"
+        ));
+
+        let stop = Cli::parse_from(["batty", "project", "stop", "batty-core"]);
+        assert!(matches!(
+            stop.command,
+            Command::Project {
+                command: ProjectCommand::Stop {
+                    project_id,
+                    json: false
+                }
+            } if project_id == "batty-core"
+        ));
+
+        let restart = Cli::parse_from(["batty", "project", "restart", "batty-core"]);
+        assert!(matches!(
+            restart.command,
+            Command::Project {
+                command: ProjectCommand::Restart {
+                    project_id,
+                    json: false
+                }
+            } if project_id == "batty-core"
+        ));
+
+        let status = Cli::parse_from(["batty", "project", "status", "batty-core"]);
+        assert!(matches!(
+            status.command,
+            Command::Project {
+                command: ProjectCommand::Status {
+                    project_id,
+                    json: false
+                }
+            } if project_id == "batty-core"
+        ));
     }
 
     #[test]
