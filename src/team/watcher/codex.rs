@@ -198,6 +198,7 @@ pub(super) fn update_codex_quality_signals(
     if let Some(text) = codex_assistant_output_text(entry) {
         let normalized = normalize_codex_response_text(&text);
         let response_chars = normalized.chars().count();
+        quality.assistant_message_count += 1;
         let previous_len = quality.last_response_chars;
         if let Some(previous_len) = previous_len {
             if response_chars < previous_len {
@@ -220,6 +221,13 @@ pub(super) fn update_codex_quality_signals(
         quality.repeated_identical_outputs = quality.repeated_output_streak >= 3;
         *last_response_hash = Some(response_hash);
         quality.last_response_chars = Some(response_chars);
+    }
+
+    if let Some(tool_name) = codex_tool_name(entry) {
+        quality.tool_call_count += 1;
+        if !quality.unique_tool_names.iter().any(|name| name == &tool_name) {
+            quality.unique_tool_names.push(tool_name);
+        }
     }
 
     if let Some(tool_failure_message) = codex_tool_failure_message(entry) {
@@ -270,6 +278,20 @@ fn codex_tool_failure_message(entry: &Value) -> Option<String> {
     }
 
     Some(first_non_empty_line(output).unwrap_or(output).to_string())
+}
+
+fn codex_tool_name(entry: &Value) -> Option<String> {
+    if entry.get("type").and_then(Value::as_str) != Some("response_item") {
+        return None;
+    }
+    let payload = entry.get("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("function_call") {
+        return None;
+    }
+    payload
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn normalize_codex_response_text(text: &str) -> String {
@@ -620,6 +642,40 @@ mod tests {
         assert_eq!(
             quality.tool_failure_message.as_deref(),
             Some("exec_command failed: SandboxDenied { message: \"operation not permitted\" }")
+        );
+    }
+
+    #[test]
+    fn codex_session_quality_tracks_tool_use_diversity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_file = tmp.path().join("session.jsonl");
+        std::fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"apply_patch\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Applied the patch and will run tests.\"}]}}\n",
+            ),
+        )
+        .unwrap();
+
+        let mut offset = 0;
+        let mut quality = CodexQualitySignals::default();
+        let mut last_response_hash = None;
+        poll_codex_session_file(
+            &session_file,
+            &mut offset,
+            &mut quality,
+            &mut last_response_hash,
+        )
+        .unwrap();
+
+        assert_eq!(quality.assistant_message_count, 1);
+        assert_eq!(quality.tool_call_count, 3);
+        assert_eq!(
+            quality.unique_tool_names,
+            vec!["exec_command".to_string(), "apply_patch".to_string()]
         );
     }
 }

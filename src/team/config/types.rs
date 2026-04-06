@@ -253,6 +253,8 @@ pub struct WorkflowPolicy {
     pub planning_cycle_cooldown_secs: u64,
     #[serde(default = "default_narration_detection_threshold")]
     pub narration_detection_threshold: usize,
+    #[serde(default = "default_context_pressure_threshold")]
+    pub context_pressure_threshold: u64,
     #[serde(default = "default_context_pressure_threshold_bytes")]
     pub context_pressure_threshold_bytes: u64,
     #[serde(default = "default_context_pressure_restart_delay_secs")]
@@ -279,6 +281,34 @@ pub struct WorkflowPolicy {
     /// Number of PTY screen pages to include in the handoff summary.
     #[serde(default = "default_handoff_screen_history")]
     pub handoff_screen_history: usize,
+    #[serde(default)]
+    pub claim_ttl: ClaimTtlPolicy,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClaimTtlPolicy {
+    #[serde(default = "default_claim_ttl_default_secs")]
+    pub default_secs: u64,
+    #[serde(default = "default_claim_ttl_critical_secs")]
+    pub critical_secs: u64,
+    #[serde(default = "default_claim_ttl_max_extensions")]
+    pub max_extensions: u32,
+    #[serde(default = "default_claim_ttl_progress_check_interval_secs")]
+    pub progress_check_interval_secs: u64,
+    #[serde(default = "default_claim_ttl_warning_secs")]
+    pub warning_secs: u64,
+}
+
+impl Default for ClaimTtlPolicy {
+    fn default() -> Self {
+        Self {
+            default_secs: default_claim_ttl_default_secs(),
+            critical_secs: default_claim_ttl_critical_secs(),
+            max_extensions: default_claim_ttl_max_extensions(),
+            progress_check_interval_secs: default_claim_ttl_progress_check_interval_secs(),
+            warning_secs: default_claim_ttl_warning_secs(),
+        }
+    }
 }
 
 /// Per-priority override for review timeout thresholds.
@@ -312,6 +342,7 @@ impl Default for WorkflowPolicy {
             health_check_interval_secs: default_health_check_interval_secs(),
             planning_cycle_cooldown_secs: default_planning_cycle_cooldown_secs(),
             narration_detection_threshold: default_narration_detection_threshold(),
+            context_pressure_threshold: default_context_pressure_threshold(),
             context_pressure_threshold_bytes: default_context_pressure_threshold_bytes(),
             context_pressure_restart_delay_secs: default_context_pressure_restart_delay_secs(),
             graceful_shutdown_timeout_secs: default_graceful_shutdown_timeout_secs(),
@@ -322,6 +353,7 @@ impl Default for WorkflowPolicy {
             auto_merge: AutoMergePolicy::default(),
             context_handoff_enabled: default_context_handoff_enabled(),
             handoff_screen_history: default_handoff_screen_history(),
+            claim_ttl: ClaimTtlPolicy::default(),
         }
     }
 }
@@ -381,8 +413,32 @@ fn default_handoff_directory() -> String {
     ".batty/handoff".to_string()
 }
 
+fn default_claim_ttl_default_secs() -> u64 {
+    1800
+}
+
+fn default_claim_ttl_critical_secs() -> u64 {
+    900
+}
+
+fn default_claim_ttl_max_extensions() -> u32 {
+    2
+}
+
+fn default_claim_ttl_progress_check_interval_secs() -> u64 {
+    120
+}
+
+fn default_claim_ttl_warning_secs() -> u64 {
+    300
+}
+
 fn default_planning_cycle_cooldown_secs() -> u64 {
     300
+}
+
+fn default_context_pressure_threshold() -> u64 {
+    100
 }
 
 fn default_context_pressure_threshold_bytes() -> u64 {

@@ -226,6 +226,51 @@ impl TeamEvent {
         }
     }
 
+    pub fn task_claim_created(role: &str, task: &str, ttl_secs: u64, expires_at: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            reason: Some(format!("ttl_secs={ttl_secs} expires_at={expires_at}")),
+            ..Self::base("task_claim_created")
+        }
+    }
+
+    pub fn task_claim_progress(role: &str, task: &str, progress_type: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            reason: Some(progress_type.into()),
+            ..Self::base("task_claim_progress")
+        }
+    }
+
+    pub fn task_claim_warning(role: &str, task: &str, expires_in_secs: u64) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            reason: Some(format!("expires_in_secs={expires_in_secs}")),
+            ..Self::base("task_claim_warning")
+        }
+    }
+
+    pub fn task_claim_expired(role: &str, task: &str, reclaimed: bool) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            reason: Some(format!("reclaimed={reclaimed}")),
+            ..Self::base("task_claim_expired")
+        }
+    }
+
+    pub fn task_claim_extended(role: &str, task: &str, new_expires_at: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            reason: Some(format!("new_expires_at={new_expires_at}")),
+            ..Self::base("task_claim_extended")
+        }
+    }
+
     pub fn board_task_archived(task: &str, role: Option<&str>) -> Self {
         Self {
             role: role.map(str::to_string),
@@ -360,14 +405,16 @@ impl TeamEvent {
     pub fn context_pressure_warning(
         role: &str,
         task: Option<u32>,
+        pressure_score: u64,
+        threshold: u64,
         output_bytes: u64,
-        threshold_bytes: u64,
     ) -> Self {
         Self {
             role: Some(role.into()),
             task: task.map(|id| id.to_string()),
+            load: Some(pressure_score as f64),
             output_bytes: Some(output_bytes),
-            reason: Some(format!("threshold_bytes={threshold_bytes}")),
+            reason: Some(format!("threshold={threshold}")),
             ..Self::base("context_pressure_warning")
         }
     }
@@ -871,7 +918,7 @@ mod tests {
             ("pane_respawned", TeamEvent::pane_respawned("eng-1")),
             (
                 "context_pressure_warning",
-                TeamEvent::context_pressure_warning("eng-1", Some(42), 400_000, 512_000),
+                TeamEvent::context_pressure_warning("eng-1", Some(42), 88, 100, 400_000),
             ),
             (
                 "planning_cycle_triggered",
@@ -1091,7 +1138,7 @@ mod tests {
 
     #[test]
     fn context_pressure_warning_includes_threshold_and_output_bytes() {
-        let event = TeamEvent::context_pressure_warning("eng-1-2", Some(67), 420_000, 512_000);
+        let event = TeamEvent::context_pressure_warning("eng-1-2", Some(67), 91, 100, 420_000);
         let json = serde_json::to_string(&event).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
@@ -1101,8 +1148,9 @@ mod tests {
         );
         assert_eq!(parsed["role"].as_str().unwrap(), "eng-1-2");
         assert_eq!(parsed["task"].as_str().unwrap(), "67");
+        assert_eq!(parsed["load"].as_f64().unwrap(), 91.0);
         assert_eq!(parsed["output_bytes"].as_u64().unwrap(), 420_000);
-        assert_eq!(parsed["reason"].as_str().unwrap(), "threshold_bytes=512000");
+        assert_eq!(parsed["reason"].as_str().unwrap(), "threshold=100");
     }
 
     #[test]

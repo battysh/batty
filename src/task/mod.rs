@@ -12,6 +12,13 @@ pub struct Task {
     pub status: String,
     pub priority: String,
     pub claimed_by: Option<String>,
+    pub claimed_at: Option<String>,
+    pub claim_ttl_secs: Option<u64>,
+    pub claim_expires_at: Option<String>,
+    pub last_progress_at: Option<String>,
+    pub claim_warning_sent_at: Option<String>,
+    pub claim_extensions: Option<u32>,
+    pub last_output_bytes: Option<u64>,
     pub blocked: Option<String>,
     pub tags: Vec<String>,
     pub depends_on: Vec<u32>,
@@ -51,6 +58,20 @@ struct Frontmatter {
     priority: String,
     #[serde(default)]
     claimed_by: Option<String>,
+    #[serde(default)]
+    claimed_at: Option<String>,
+    #[serde(default)]
+    claim_ttl_secs: Option<u64>,
+    #[serde(default)]
+    claim_expires_at: Option<String>,
+    #[serde(default)]
+    last_progress_at: Option<String>,
+    #[serde(default)]
+    claim_warning_sent_at: Option<String>,
+    #[serde(default)]
+    claim_extensions: Option<u32>,
+    #[serde(default)]
+    last_output_bytes: Option<u64>,
     #[serde(default)]
     blocked: Option<String>,
     #[serde(default)]
@@ -118,6 +139,13 @@ impl Task {
             status: fm.status,
             priority: fm.priority,
             claimed_by: fm.claimed_by,
+            claimed_at: fm.claimed_at,
+            claim_ttl_secs: fm.claim_ttl_secs,
+            claim_expires_at: fm.claim_expires_at,
+            last_progress_at: fm.last_progress_at,
+            claim_warning_sent_at: fm.claim_warning_sent_at,
+            claim_extensions: fm.claim_extensions,
+            last_output_bytes: fm.last_output_bytes,
             blocked: fm.blocked,
             tags: fm.tags,
             depends_on: fm.depends_on,
