@@ -102,6 +102,15 @@ At 05:28 EDT on April 7, 2026, the next architect loop re-checked both the repo 
 - board state was idle but not empty: no `in-progress` or `review` tasks, with nine existing `todo` tasks before the loop and a new critical `todo` task `#544` added for the supervisory shim disconnect path
 - `.batty/daemon.log` showed architect/manager stale-Pong recovery escalating into `auto-restarting stale Claude shim`, followed by multiple shim-side `orchestrator disconnected` / `Broken pipe` lines, indicating the supervisory restart path can still collapse control-plane delivery instead of recovering cleanly
 
+At 05:36 EDT on April 7, 2026, the next architect loop verified that the earlier compile-time break has cleared, but `main` is still red on runtime regressions:
+
+- `cargo fmt --check` still passed
+- `cargo test` ran to completion and failed 34 tests in 45.08s; the nested-`tmux` failures still look environment-coupled, but the non-`tmux` failures now center on supervisory restart state, idle/review nudge behavior, and completion rejection bookkeeping
+- a targeted rerun of `team::daemon::health::poll_shim::tests::check_working_state_timeouts_restarts_stale_claude_management_agents` still failed because the restarted management agent stayed `Working` when the test expects `Starting`, so supervisory restart-state recovery remains an active lane under task `#544`
+- a targeted rerun of `team::merge::completion::tests::narration_only_completion_retries_then_escalates_after_two_rejections` failed with rejection count `left: 2` vs `right: 1` and emitted `Task #42 metadata updated.`, revealing a completion-bookkeeping and test-isolation regression now tracked in task `#545`
+- the clean-room disassembly test `team::daemon::tests::clean_room_ghidra_disassembly_supports_multiple_non_z80_targets` passed in isolation, suggesting the clean-room and many later `tmux` fallouts are collateral once earlier panics poison shared test state rather than independent root causes
+- a new critical task `#546` now tracks the idle/review nudge regression cluster; board state remained healthy with no `in-progress` or `review` tasks and twelve active `todo` items after the replenishment pass
+
 ### Known Failure Modes (Fixed)
 
 These were all discovered and fixed during the nether_earth stabilization session:
@@ -133,7 +142,7 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 
 | Issue | Status | Priority |
 | --- | --- | --- |
-| Default verification regained a clean baseline, but April 7, 2026 follow-up verification found `main` red again due to partial delivery integration plus a broken supervisory-health contract across `poll_shim`, `status`, and `openclaw_contract` | Active validation | Critical |
+| The earlier April 7, 2026 compile drift is cleared, but `main` is still red on runtime regressions across supervisory restart state, idle/review nudges, and completion rejection bookkeeping (`#544`, `#545`, `#546`) | Active validation | Critical |
 | Architect and manager stalls are less visible than engineer stalls | Needs broader non-engineer stall heuristics | Critical |
 | Manager inbox noise still buries the most actionable review and dispatch items | Needs batching and signal-first routing | Critical |
 | Claim ownership, `active_tasks`, and worktree branch state can still drift after recovery, allowing a worker to appear on multiple in-progress tasks while its worktree stays on an old branch | Needs stronger reconciliation hardening | Critical |
