@@ -4321,6 +4321,7 @@ Second body.
     #[test]
     #[serial_test::serial]
     fn reconcile_stale_worktrees_rebases_clean_base_worktree_after_main_advances() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "worktree-auto-rebase");
         let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
@@ -4363,6 +4364,7 @@ Second body.
 
     #[test]
     fn reconcile_stale_worktrees_skips_base_worktree_when_engineer_has_active_task() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "worktree-auto-rebase-active");
         let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
