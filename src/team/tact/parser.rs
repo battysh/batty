@@ -137,50 +137,8 @@ fn normalize_generated_body(body: &str) -> String {
     normalize_generated_text(body)
 }
 
-fn normalize_reopen_title(title: &str) -> String {
-    let mut normalized = String::with_capacity(title.len());
-    let mut last_was_space = false;
-
-    for ch in title.chars().flat_map(char::to_lowercase) {
-        let mapped = match ch {
-            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
-            | '\u{2212}' => '-',
-            _ => ch,
-        };
-        if mapped.is_whitespace() {
-            if !last_was_space {
-                normalized.push(' ');
-                last_was_space = true;
-            }
-        } else {
-            normalized.push(mapped);
-            last_was_space = false;
-        }
-    }
-
-    normalized.trim().to_string()
-}
-
-fn is_reopen_title(title: &str) -> bool {
-    normalize_reopen_title(title).starts_with("reopen ")
-}
-
 fn is_open_task_status(status: &str) -> bool {
     !matches!(status, "done" | "archived")
-}
-
-fn existing_open_reopen_titles(board_dir: &Path) -> std::collections::HashSet<String> {
-    let tasks_dir = board_dir.join("tasks");
-    if !tasks_dir.is_dir() {
-        return std::collections::HashSet::new();
-    }
-
-    load_tasks_from_dir(&tasks_dir)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|task| is_open_task_status(&task.status) && is_reopen_title(&task.title))
-        .map(|task| normalize_reopen_title(&task.title))
-        .collect()
 }
 
 fn generated_task_equivalence_key(task: &GeneratedTask) -> String {
@@ -235,53 +193,6 @@ fn looks_like_raw_test_log(body: &str) -> bool {
     (has_running_header && has_failure_marker && test_line_count >= 1)
         || (has_running_header && test_line_count >= 3)
         || (test_line_count >= 5 && has_failure_marker)
-}
-
-fn summarize_reopen_body(body: &str) -> String {
-    let mut seen = std::collections::HashSet::new();
-    let mut highlights = Vec::new();
-
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with("running ")
-            || trimmed.ends_with("... ok")
-            || trimmed.starts_with("test result: ok")
-        {
-            continue;
-        }
-
-        let keep = trimmed.ends_with("FAILED")
-            || trimmed.starts_with("error:")
-            || trimmed.starts_with("failures:")
-            || trimmed.contains("panicked at")
-            || trimmed.contains("No such file or directory")
-            || trimmed.starts_with("called `Result::unwrap()`");
-        if !keep {
-            continue;
-        }
-
-        let normalized = trimmed.to_string();
-        if seen.insert(normalized.clone()) {
-            highlights.push(normalized);
-        }
-        if highlights.len() == 6 {
-            break;
-        }
-    }
-
-    let mut summary = String::from("Automatic reopen after failed verification.\n\nSummary:\n");
-    if highlights.is_empty() {
-        summary.push_str("- `cargo test` failed in the default verification environment.\n");
-        return summary;
-    }
-
-    for line in highlights {
-        summary.push_str("- ");
-        summary.push_str(&line);
-        summary.push('\n');
-    }
-    summary
 }
 
 fn sanitize_generated_task(spec: &GeneratedTask) -> Option<GeneratedTask> {
