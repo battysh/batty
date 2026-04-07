@@ -568,6 +568,37 @@ impl TeamEvent {
         }
     }
 
+    pub fn inbox_message_expired(target: &str, from: &str, message_age_secs: u64) -> Self {
+        Self {
+            recipient: Some(target.into()),
+            from: Some(from.into()),
+            uptime_secs: Some(message_age_secs),
+            ..Self::base("inbox_message_expired")
+        }
+    }
+
+    pub fn inbox_message_deduplicated(target: &str, from: &str, signature: u64) -> Self {
+        Self {
+            recipient: Some(target.into()),
+            from: Some(from.into()),
+            content_hash: Some(format!("{signature:016x}")),
+            ..Self::base("inbox_message_deduplicated")
+        }
+    }
+
+    pub fn inbox_batch_delivered(
+        target: &str,
+        message_count: usize,
+        escalation_count: usize,
+    ) -> Self {
+        Self {
+            recipient: Some(target.into()),
+            restart_count: Some(message_count as u32),
+            reason: Some(format!("escalation_count={escalation_count}")),
+            ..Self::base("inbox_batch_delivered")
+        }
+    }
+
     pub fn agent_spawned(role: &str) -> Self {
         Self {
             role: Some(role.into()),

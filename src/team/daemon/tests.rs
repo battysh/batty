@@ -1280,6 +1280,18 @@ fn triage_intervention_respects_cooldown() {
     for p in pending {
         inbox::mark_delivered(&root, "lead", &p.id).unwrap();
     }
+    for (mut message, delivered) in inbox::all_messages(&root, "lead").unwrap() {
+        if message.from != "architect" {
+            continue;
+        }
+        inbox::delete_message(&root, "lead", &message.id).unwrap();
+        message.id.clear();
+        message.timestamp = crate::team::now_unix().saturating_sub(301);
+        let new_id = inbox::deliver_to_inbox(&root, &message).unwrap();
+        if delivered {
+            inbox::mark_delivered(&root, "lead", &new_id).unwrap();
+        }
+    }
 
     // Advance epoch (Working → Idle transition).
     daemon.update_automation_timers_for_state("lead", MemberState::Working);

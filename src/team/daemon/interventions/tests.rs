@@ -73,6 +73,23 @@ fn mark_pending_delivered(harness: &TestHarness, member: &str) {
     }
 }
 
+fn age_inbox_messages_from(harness: &TestHarness, member: &str, from: &str, age_secs: u64) {
+    let root = harness.inbox_root();
+    let messages = inbox::all_messages(&root, member).unwrap();
+    for (mut message, delivered) in messages {
+        if message.from != from {
+            continue;
+        }
+        inbox::delete_message(&root, member, &message.id).unwrap();
+        message.id.clear();
+        message.timestamp = super::super::now_unix().saturating_sub(age_secs);
+        let new_id = inbox::deliver_to_inbox(&root, &message).unwrap();
+        if delivered {
+            inbox::mark_delivered(&root, member, &new_id).unwrap();
+        }
+    }
+}
+
 fn write_prompt_nudge(project_root: &std::path::Path, filename: &str, body: &str) {
     std::fs::write(
         crate::team::team_config_dir(project_root).join(filename),
@@ -280,6 +297,7 @@ fn maybe_intervene_triage_backlog_refires_after_cooldown_expires() {
     enter_idle_epoch(&mut daemon, "lead");
     daemon.maybe_intervene_triage_backlog().unwrap();
     mark_pending_delivered(&harness, "lead");
+    age_inbox_messages_from(&harness, "lead", "architect", 301);
 
     enter_idle_epoch(&mut daemon, "lead");
     expire_triage_cooldown(&mut daemon, "lead");
@@ -622,6 +640,7 @@ fn maybe_intervene_manager_dispatch_gap_respects_cooldown_until_signature_refire
     enter_idle_epoch(&mut daemon, "lead");
     daemon.maybe_intervene_manager_dispatch_gap().unwrap();
     mark_pending_delivered(&harness, "lead");
+    age_inbox_messages_from(&harness, "lead", "architect", 301);
 
     std::fs::write(
         harness.board_tasks_dir().join("193-open-task.md"),
@@ -713,6 +732,7 @@ fn maybe_intervene_architect_utilization_respects_cooldown_until_signature_refir
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_architect_utilization().unwrap();
     mark_pending_delivered(&harness, "architect");
+    age_inbox_messages_from(&harness, "architect", "daemon", 301);
 
     // Add a new task to change the signature
     std::fs::write(
@@ -1137,6 +1157,8 @@ fn multi_intervention_cycle_exact_owned_cooldown_boundary_still_allows_parallel_
     mark_pending_delivered(&harness, "lead");
     mark_pending_delivered(&harness, "lead-review");
     mark_pending_delivered(&harness, "eng-1");
+    age_inbox_messages_from(&harness, "lead", "architect", 301);
+    age_inbox_messages_from(&harness, "eng-1", "lead", 301);
 
     std::fs::write(
         harness.board_tasks_dir().join("193-second-task.md"),
