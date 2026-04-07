@@ -194,19 +194,50 @@ batty grafana status
 - `batty doctor` is the first stop when the team looks stuck.
 - `batty telemetry` and `batty metrics` show throughput and review health.
 
-## 9. Optional: Telegram Control Plane
+## 9. Optional: Discord Control Surface (Recommended)
 
-If your config includes a `user` role, run:
+Discord gives you three dedicated channels for monitoring your team from your phone:
+
+1. Add a `channel: discord` user role to `team.yaml`:
+
+```yaml
+roles:
+  - name: human
+    role_type: user
+    channel: discord
+    channel_config:
+      bot_token: "${BATTY_DISCORD_TOKEN}"
+      commands_channel_id: "your-commands-channel-id"
+      events_channel_id: "your-events-channel-id"
+      agents_channel_id: "your-agents-channel-id"
+      allowed_user_ids: ["your-discord-user-id"]
+```
+
+2. Create a Discord bot at https://discord.com/developers/applications and invite it to your server with Send Messages permission.
+
+3. Create three channels: `#batty-commands`, `#batty-events`, `#batty-agents`.
+
+4. Start batty and use Discord:
+   - Type `$go` to launch the full team
+   - Type `$status` for a board overview
+   - Type `$board` to see todo tasks
+   - Type plain text to send directives to the architect
+   - Watch `#batty-events` for task progress and merges
+   - Watch `#batty-agents` for agent health
+
+## 10. Optional: Telegram Control Plane
+
+If you prefer Telegram over Discord, or want both:
 
 ```sh
 batty telegram
 ```
 
 The setup flow validates the bot configuration and writes the resulting channel
-settings into `team.yaml` unless you prefer to keep the token in
-`BATTY_TELEGRAM_BOT_TOKEN`.
+settings into `team.yaml`. All `$` commands from Discord also work in Telegram
+in single-channel mode.
 
-## 10. Stop And Resume
+## 11. Stop And Resume
 
 Stop the daemon and tmux session:
 

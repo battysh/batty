@@ -61,59 +61,68 @@ For the step-by-step setup flow, see [docs/getting-started.md](docs/getting-star
 
 ## What v0.10.0 Adds
 
-Batty v0.10.0 is built around an unattended default:
+Batty v0.10.0 closes the autonomous development loop. Type `$go` in Discord,
+go to sleep, wake up to merged features.
 
-- Hierarchical agent teams: architect -> manager -> engineers
-- Auto-dispatch and auto-merge for the happy path
-- Multi-provider teams with Claude, Codex, Gemini, Kiro, and similar CLIs
-- Clean-room re-implementation workflow with parity verification surfaces
-- Telegram as a remote human endpoint
-- Stable per-engineer worktrees with shared build isolation
-- Stall detection, retry logic, and self-healing restart behavior
+- **Discord control surface** — three-channel bot (`#commands`, `#events`,
+  `#agents`) with `$go`/`$stop`/`$status`/`$board` commands and rich embeds
+- **Closed verification loop** — daemon auto-tests completions, retries on
+  failure, merges on green. No agent in the merge path.
+- **Notification isolation** — daemon chatter stays in the orchestrator log,
+  not in agent PTY context. Agents stay focused on code.
+- **Supervisory stall detection** — architect and manager roles get the same
+  health monitoring as engineers. No more silent 30-minute stalls.
+- **Manager inbox signal shaping** — 200 raw messages/session batched into
+  prioritized digests. Manager sees what matters.
+- **Hashline-style edit validation** — content-hash checks prevent stale-file
+  corruption when multiple agents edit concurrently.
+- **3,080+ tests**, up from 2,854 in v0.9.0.
 
 ## Architecture
 
 ```text
-User (Telegram / CLI)
+User (Discord / Telegram / CLI)
         |
         v
-Architect (Claude)
+Architect (Claude) ──> Roadmap ──> Board Tasks
         |
         v
-Manager (Claude)
+Manager (Claude) ──> Review + Merge
         |
         v
-Engineers (Codex x3)
+Engineers (Codex x3) ──> Worktrees ──> Code + Tests
         |
         v
-Worktree -> Tests -> Auto-merge -> main
+Daemon ──> Verify ──> Auto-merge ──> main
+        |
+        v
+Discord (#events, #agents, #commands)
 ```
 
-Batty keeps the whole team visible in tmux, but tmux is now the display surface,
-not the control plane. The daemon owns routing, board state, health checks,
-verification retries, and merge policy. In SDK mode, each agent uses a typed
-protocol instead of terminal scraping:
-
-- Claude Code: stream-json NDJSON
-- Codex CLI: JSONL event stream
-- Kiro CLI: ACP JSON-RPC 2.0
-
-When SDK mode is disabled, Batty falls back to the shim-owned PTY runtime.
+The daemon is the control plane. tmux is the display surface. Each agent uses a
+typed SDK protocol (Claude: stream-json NDJSON, Codex: JSONL event stream,
+Kiro: ACP JSON-RPC 2.0) or falls back to the shim-owned PTY runtime.
 
 ## Features
 
 - **Hierarchical supervision**: architect-level planning, manager-level dispatch,
   and bounded engineer execution.
 - **Daemon-owned workflow loop**: auto-dispatch, review routing, claim TTLs,
-  merge queueing, and board reconciliation.
+  merge queueing, verification retries, and board reconciliation.
+- **Discord + Telegram**: three-channel Discord with rich embeds and commands,
+  single-channel Telegram with the same command surface. Monitor from your phone.
 - **Multi-provider support**: mix Claude, Codex, Kiro, and other supported agent
   CLIs per role.
 - **Per-worktree isolation**: each engineer gets a stable git worktree and fresh
   task branches without stomping on other engineers.
-- **Self-healing runtime**: crash respawn, stall detection, delivery retries,
-  timeout nudges, and context handoffs.
+- **Self-healing runtime**: crash respawn, stall detection (all roles), delivery
+  retries, context exhaustion handoffs, and auto-restart.
+- **Closed verification loop**: engineer completions are auto-tested, retried on
+  failure, and merged on green without human review in the path.
 - **Observability**: `batty status`, `batty metrics`, SQLite telemetry,
   Grafana dashboards, daemon logs, and board health views.
+- **OpenClaw integration**: supervisor contract, DTOs, and multi-project event
+  streams for external orchestration.
 - **Clean-room workflow**: optional barrier groups, verification commands, and
   parity artifacts for re-implementation work.
 
