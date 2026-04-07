@@ -313,8 +313,7 @@ fn friendly_event_description(event: &TeamEvent) -> String {
         }
         "agent_spawned" => {
             let role = event.role.as_deref().unwrap_or("?");
-            let backend = event.backend.as_deref().unwrap_or("?");
-            format!("**{role}** launched on **{backend}**")
+            format!("**{role}** is online and ready for work")
         }
         "daemon_started" => {
             let uptime = event
