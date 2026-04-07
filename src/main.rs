@@ -861,6 +861,7 @@ fn main() -> Result<()> {
             member,
             limit,
             all,
+            raw,
         } => match command {
             Some(InboxCommand::Purge {
                 role,
@@ -899,7 +900,7 @@ fn main() -> Result<()> {
                 let member =
                     member.context("member is required unless using `batty inbox purge`")?;
                 let limit = if all { None } else { Some(limit) };
-                team::list_inbox(&root, &member, limit)?;
+                team::list_inbox(&root, &member, limit, raw)?;
             }
         },
 

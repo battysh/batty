@@ -193,12 +193,96 @@ pub fn assign_task(project_root: &Path, engineer: &str, task: &str) -> Result<St
 }
 
 /// List inbox messages for a member.
-pub fn list_inbox(project_root: &Path, member: &str, limit: Option<usize>) -> Result<()> {
+///
+/// When `raw` is false (default), messages are digested: nudges are
+/// collapsed per sender, status updates per task show latest only, and
+/// results are priority-sorted (escalations first, nudges last).
+/// When `raw` is true, all messages are shown in chronological order.
+pub fn list_inbox(
+    project_root: &Path,
+    member: &str,
+    limit: Option<usize>,
+    raw: bool,
+) -> Result<()> {
     let member = resolve_member_name(project_root, member)?;
     let root = inbox::inboxes_root(project_root);
     let messages = inbox::all_messages(&root, &member)?;
-    print!("{}", format_inbox_listing(&member, &messages, limit));
+    if raw {
+        print!("{}", format_inbox_listing(&member, &messages, limit));
+    } else {
+        print!("{}", format_inbox_digest(&member, &messages, limit));
+    }
     Ok(())
+}
+
+fn format_inbox_digest(
+    member: &str,
+    messages: &[(inbox::InboxMessage, bool)],
+    limit: Option<usize>,
+) -> String {
+    if messages.is_empty() {
+        return format!("No messages for {member}.\n");
+    }
+
+    let (entries, raw_count) = inbox::digest_messages(messages);
+    let digest_count = entries.len();
+
+    let start = match limit {
+        Some(0) => entries.len(),
+        Some(n) => entries.len().saturating_sub(n),
+        None => 0,
+    };
+    let shown = &entries[start..];
+
+    let mut out = String::new();
+
+    // Header showing compression ratio
+    let collapsed = raw_count.saturating_sub(digest_count);
+    if collapsed > 0 {
+        out.push_str(&format!(
+            "Digest: {digest_count} entries from {raw_count} messages ({collapsed} collapsed). Use `--raw` for raw view.\n",
+        ));
+    }
+
+    if shown.len() < entries.len() {
+        out.push_str(&format!(
+            "Showing {} of {} entries. Use `-n <N>` or `--all` to see more.\n",
+            shown.len(),
+            entries.len()
+        ));
+    }
+
+    out.push_str(&format!(
+        "{:<12} {:<10} {:<12} {:<6} BODY\n",
+        "CATEGORY", "STATUS", "FROM", "COUNT"
+    ));
+    out.push_str(&format!("{}\n", "-".repeat(96)));
+
+    for entry in shown {
+        let cat_label = match entry.category {
+            inbox::MessageCategory::Escalation => "ESCALATION",
+            inbox::MessageCategory::ReviewRequest => "REVIEW",
+            inbox::MessageCategory::Blocker => "BLOCKER",
+            inbox::MessageCategory::Status => "status",
+            inbox::MessageCategory::Nudge => "nudge",
+        };
+        let status = if entry.delivered {
+            "delivered"
+        } else {
+            "pending"
+        };
+        let count_str = if entry.collapsed_count > 1 {
+            format!("x{}", entry.collapsed_count)
+        } else {
+            String::new()
+        };
+        let body_short = truncate_chars(&entry.message.body, INBOX_BODY_PREVIEW_CHARS);
+        out.push_str(&format!(
+            "{:<12} {:<10} {:<12} {:<6} {}\n",
+            cat_label, status, entry.message.from, count_str, body_short,
+        ));
+    }
+    out
 }
 
 fn format_inbox_listing(
@@ -822,5 +906,119 @@ roles:
             resolve_inbox_message_indices(&messages, "1773930725-2"),
             vec![1]
         );
+    }
+
+    #[test]
+    fn format_inbox_digest_empty_inbox() {
+        let rendered = format_inbox_digest("manager", &[], None);
+        assert_eq!(rendered, "No messages for manager.\n");
+    }
+
+    #[test]
+    fn format_inbox_digest_shows_category_column() {
+        let messages = vec![(
+            inbox::InboxMessage {
+                id: "msg1".to_string(),
+                from: "eng-1".to_string(),
+                to: "manager".to_string(),
+                body: "Task #42 escalated: critical".to_string(),
+                msg_type: inbox::MessageType::Send,
+                timestamp: 100,
+            },
+            false,
+        )];
+        let rendered = format_inbox_digest("manager", &messages, None);
+        assert!(rendered.contains("CATEGORY"));
+        assert!(rendered.contains("ESCALATION"));
+    }
+
+    #[test]
+    fn format_inbox_digest_shows_collapsed_count() {
+        let messages: Vec<_> = (0..3)
+            .map(|i| {
+                (
+                    inbox::InboxMessage {
+                        id: format!("msg{i}"),
+                        from: "daemon".to_string(),
+                        to: "eng-1".to_string(),
+                        body: "Idle nudge: move forward".to_string(),
+                        msg_type: inbox::MessageType::Send,
+                        timestamp: 100 + i as u64,
+                    },
+                    true,
+                )
+            })
+            .collect();
+
+        let rendered = format_inbox_digest("eng-1", &messages, None);
+        assert!(rendered.contains("x3"), "should show collapsed count x3");
+        assert!(rendered.contains("nudge"));
+    }
+
+    #[test]
+    fn format_inbox_digest_shows_compression_header() {
+        let messages: Vec<_> = (0..5)
+            .map(|i| {
+                (
+                    inbox::InboxMessage {
+                        id: format!("msg{i}"),
+                        from: "daemon".to_string(),
+                        to: "eng-1".to_string(),
+                        body: "Idle nudge: move forward".to_string(),
+                        msg_type: inbox::MessageType::Send,
+                        timestamp: 100 + i as u64,
+                    },
+                    true,
+                )
+            })
+            .collect();
+
+        let rendered = format_inbox_digest("eng-1", &messages, None);
+        assert!(rendered.contains("Digest: 1 entries from 5 messages"));
+        assert!(rendered.contains("4 collapsed"));
+        assert!(rendered.contains("--raw"));
+    }
+
+    #[test]
+    fn format_inbox_digest_respects_limit() {
+        let messages: Vec<_> = vec![
+            (
+                inbox::InboxMessage {
+                    id: "msg1".to_string(),
+                    from: "eng-1".to_string(),
+                    to: "manager".to_string(),
+                    body: "Task #42 escalated: critical".to_string(),
+                    msg_type: inbox::MessageType::Send,
+                    timestamp: 100,
+                },
+                false,
+            ),
+            (
+                inbox::InboxMessage {
+                    id: "msg2".to_string(),
+                    from: "eng-1".to_string(),
+                    to: "manager".to_string(),
+                    body: "Task #42 ready for review".to_string(),
+                    msg_type: inbox::MessageType::Send,
+                    timestamp: 200,
+                },
+                true,
+            ),
+            (
+                inbox::InboxMessage {
+                    id: "msg3".to_string(),
+                    from: "daemon".to_string(),
+                    to: "manager".to_string(),
+                    body: "Idle nudge: move forward".to_string(),
+                    msg_type: inbox::MessageType::Send,
+                    timestamp: 300,
+                },
+                true,
+            ),
+        ];
+
+        let rendered = format_inbox_digest("manager", &messages, Some(2));
+        // 3 distinct entries (all different categories), limit 2 shows last 2
+        assert!(rendered.contains("Showing 2 of 3 entries"));
     }
 }
