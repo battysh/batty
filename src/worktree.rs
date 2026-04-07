@@ -617,6 +617,34 @@ pub fn branch_fully_merged(repo_root: &Path, branch: &str, base: &str) -> Result
     Ok(true)
 }
 
+/// Count commits on the current branch that are ahead of `base` (e.g. "main").
+/// Returns 0 if the branch is at or behind base.
+pub fn commits_ahead(worktree_path: &Path, base: &str) -> Result<usize> {
+    let output = run_git(worktree_path, ["rev-list", &format!("{base}..HEAD")])?;
+    if !output.status.success() {
+        bail!(
+            "git rev-list failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count())
+}
+
+/// Check if a worktree has uncommitted changes (staged or unstaged).
+pub fn has_uncommitted_changes(worktree_path: &Path) -> Result<bool> {
+    let output = run_git(worktree_path, ["status", "--porcelain"])?;
+    if !output.status.success() {
+        bail!(
+            "git status failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+}
+
 /// Get the current branch name for a repository/worktree path.
 pub fn git_current_branch(path: &Path) -> Result<String> {
     let output = run_git(path, ["branch", "--show-current"])?;
