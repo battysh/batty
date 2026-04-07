@@ -12,12 +12,19 @@ mod tests {
     };
     use crate::team::completion::{CompletionPacket, parse_completion, validate_completion};
     use crate::team::config::{AutoMergePolicy, RoleType, WorkflowPolicy};
+    use crate::team::merge::handle_engineer_completion;
+    use crate::team::messaging::send_message_as;
     use crate::team::policy::{
         check_wip_limit, is_review_nudge_due, is_review_stale, should_escalate,
     };
     use crate::team::resolver::{ResolutionStatus, resolve_board, runnable_tasks};
     use crate::team::review::{MergeDisposition, apply_review};
-    use crate::team::test_support::{engineer_member, manager_member, write_board_task_file};
+    use crate::team::standup::MemberState;
+    use crate::team::task_loop::setup_engineer_worktree;
+    use crate::team::test_helpers::make_test_daemon;
+    use crate::team::test_support::{
+        engineer_member, git_ok, init_git_repo, manager_member, write_board_task_file,
+    };
     use crate::team::workflow::{TaskState, WorkflowMeta, can_transition};
 
     // -----------------------------------------------------------------------
@@ -235,6 +242,82 @@ mod tests {
         // Reviewer approves
         apply_review(&mut meta, MergeDisposition::MergeReady, "mgr").unwrap();
         assert_eq!(meta.state, TaskState::Done);
+    }
+
+    #[test]
+    fn completion_packet_ingestion_closes_the_verification_retry_loop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-behavioral-completion-loop");
+        write_board_task_file(
+            &repo,
+            42,
+            "behavioral-completion-loop",
+            "in-progress",
+            Some("eng-1"),
+            &[],
+            None,
+        );
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        std::fs::write(
+            worktree_dir.join("src").join("lib.rs"),
+            "pub fn smoke() -> bool { false }\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn smoke_test() {\n        assert!(smoke());\n    }\n}\n",
+        )
+        .unwrap();
+        git_ok(&worktree_dir, &["add", "src/lib.rs"]);
+        git_ok(
+            &worktree_dir,
+            &["commit", "-m", "add failing behavioral test"],
+        );
+
+        send_message_as(
+            &repo,
+            Some("eng-1"),
+            "manager",
+            r#"Done.
+
+## Completion Packet
+
+```json
+{"task_id":42,"branch":"eng-1/task-42","worktree_path":".batty/worktrees/eng-1","commit":"abc1234","changed_paths":["src/lib.rs"],"tests_run":true,"tests_passed":true,"artifacts":[],"outcome":"ready_for_review"}
+```"#,
+        )
+        .unwrap();
+
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ];
+        let mut daemon = make_test_daemon(&repo, members);
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        let task_path = repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks")
+            .join("042-behavioral-completion-loop.md");
+        let metadata = crate::team::board::read_workflow_metadata(&task_path).unwrap();
+        assert_eq!(metadata.branch.as_deref(), Some("eng-1/task-42"));
+        assert_eq!(metadata.commit.as_deref(), Some("abc1234"));
+        assert_eq!(metadata.tests_run, Some(true));
+        assert_eq!(metadata.tests_passed, Some(false));
+        assert_eq!(
+            metadata.outcome.as_deref(),
+            Some("verification_retry_required")
+        );
+        assert!(
+            metadata
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.ends_with("task-042-eng-1-attempt-1.json"))
+        );
     }
 
     // -----------------------------------------------------------------------
