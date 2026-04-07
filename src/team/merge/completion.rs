@@ -11,9 +11,9 @@ use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use crate::task::load_tasks_from_dir;
-use crate::team::artifact::append_test_timing_record;
 #[cfg(test)]
 use crate::team::artifact::read_test_timing_log;
+use crate::team::artifact::{append_test_timing_record, track_artifact};
 use crate::team::auto_merge::{self, AutoMergeDecision};
 use crate::team::daemon::verification::run_automatic_verification;
 use crate::team::daemon::{MergeRequest, TeamDaemon};
@@ -85,7 +85,8 @@ fn verification_fix_message(
 ) -> String {
     let mut body = format!(
         "{headline}\nFix attempt {}/{}.\n",
-        state.iteration, state.max_iterations
+        state.iteration,
+        verification_retry_budget(state.max_iterations)
     );
     if !failures.is_empty() {
         body.push_str("Failures:\n");
@@ -107,6 +108,72 @@ fn verification_fix_message(
     body.push_str(output.trim());
     body.push_str("\n```\nFix these failures, then report completion again.");
     body
+}
+
+fn verification_retry_budget(max_iterations: u32) -> u32 {
+    max_iterations.max(1).min(3)
+}
+
+fn verification_outcome_label(phase: &VerificationPhase) -> &'static str {
+    match phase {
+        VerificationPhase::Fixing => "verification_retry_required",
+        VerificationPhase::Complete => "verification_passed",
+        VerificationPhase::Failed => "verification_escalated",
+        VerificationPhase::Executing | VerificationPhase::Verifying => "verification_pending",
+    }
+}
+
+fn persist_verification_snapshot(
+    project_root: &Path,
+    board_dir: &Path,
+    task_id: u32,
+    engineer: &str,
+    state: &VerificationState,
+    verification_run: &crate::team::daemon::verification::VerificationRunResult,
+) -> Result<String> {
+    let attempt = state.iteration.max(1);
+    let relative_path = Path::new(".batty")
+        .join("reports")
+        .join("verification")
+        .join("completion")
+        .join(format!(
+            "task-{task_id:03}-{engineer}-attempt-{attempt}.json"
+        ));
+    let absolute_path = project_root.join(&relative_path);
+    if let Some(parent) = absolute_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let snapshot = serde_json::json!({
+        "task_id": task_id,
+        "engineer": engineer,
+        "phase": format!("{:?}", state.phase).to_ascii_lowercase(),
+        "attempt": attempt,
+        "max_attempts": state.max_iterations,
+        "outcome": verification_outcome_label(&state.phase),
+        "passed": verification_run.passed,
+        "results": verification_run.results,
+        "failures": verification_run.failures,
+        "file_paths": verification_run.file_paths,
+        "evidence": state.evidence,
+        "output": verification_run.output,
+    });
+    let serialized =
+        serde_json::to_string_pretty(&snapshot).context("failed to serialize verification data")?;
+    std::fs::write(&absolute_path, serialized)
+        .with_context(|| format!("failed to write {}", absolute_path.display()))?;
+
+    let task_path = crate::team::task_cmd::find_task_path(board_dir, task_id)?;
+    let mut metadata = crate::team::board::read_workflow_metadata(&task_path)?;
+    metadata.tests_run = Some(true);
+    metadata.tests_passed = Some(verification_run.passed);
+    metadata.test_results = Some(verification_run.results.clone());
+    metadata.outcome = Some(verification_outcome_label(&state.phase).to_string());
+    track_artifact(&mut metadata, &relative_path.to_string_lossy());
+    crate::team::board::write_workflow_metadata(&task_path, &metadata)?;
+
+    Ok(relative_path.to_string_lossy().into_owned())
 }
 
 fn structured_failure_details(results: &TestResults) -> Vec<String> {
@@ -278,7 +345,8 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         .verification_states
         .remove(engineer)
         .unwrap_or_else(|| VerificationState::new(verification_policy.max_iterations));
-    verification_state.max_iterations = verification_policy.max_iterations.max(1);
+    verification_state.max_iterations =
+        verification_retry_budget(verification_policy.max_iterations);
     verification_state.clear_evidence();
 
     transition_verification_phase(
@@ -394,17 +462,10 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
 
     if !has_required_evidence || !verification_run.passed {
         let verification_results = verification_run.results.clone();
-        if !verification_run.passed {
-            persist_test_results(&board_dir, task_id, &verification_results)?;
-            if let Some(conn) = &daemon.telemetry_db {
-                telemetry_db::record_test_results(
-                    conn,
-                    task_id,
-                    engineer,
-                    &verification_results,
-                    &[],
-                )?;
-            }
+        if !verification_run.passed
+            && let Some(conn) = &daemon.telemetry_db
+        {
+            telemetry_db::record_test_results(conn, task_id, engineer, &verification_results, &[])?;
         }
         let is_zero_commit = !has_required_evidence && total_commits == 0;
         let is_narration_only = !has_required_evidence && code_files_changed == 0;
@@ -422,18 +483,12 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         } else {
             0
         };
-        let retry_attempt = if !verification_run.passed {
-            Some(daemon.increment_retry(engineer))
-        } else {
-            None
-        };
         let should_escalate = if is_narration_only {
             narration_count >= 2
         } else if is_zero_commit {
             false
         } else if !verification_run.passed {
             verification_state.reached_max_iterations()
-                || retry_attempt.is_some_and(|attempt| attempt > 2)
         } else {
             verification_state.reached_max_iterations()
         };
@@ -449,6 +504,14 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
             &mut verification_state,
             next_phase,
         );
+        persist_verification_snapshot(
+            daemon.project_root(),
+            &board_dir,
+            task_id,
+            engineer,
+            &verification_state,
+            &verification_run,
+        )?;
 
         let headline = if !has_required_evidence {
             if total_commits == 0 {
@@ -556,6 +619,41 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
             daemon.queue_message("daemon", manager_name, &manager_message)?;
         }
 
+        if should_escalate {
+            let block_reason = if !has_required_evidence && code_files_changed == 0 {
+                format!(
+                    "verification escalation after {} attempts: narration-only completion",
+                    verification_state.iteration
+                )
+            } else if has_required_evidence {
+                format!(
+                    "verification escalation after {} attempts: {}",
+                    verification_state.iteration,
+                    verification_results.failure_summary()
+                )
+            } else {
+                format!(
+                    "verification escalation after {} attempts: insufficient task evidence",
+                    verification_state.iteration
+                )
+            };
+            daemon.record_task_escalated(
+                engineer,
+                task_id.to_string(),
+                Some("verification_failed"),
+            );
+            crate::team::task_cmd::transition_task(&board_dir, task_id, "blocked")?;
+            let mut blocked_fields = std::collections::HashMap::new();
+            blocked_fields.insert("blocked_on".to_string(), block_reason);
+            crate::team::task_cmd::cmd_update(&board_dir, task_id, blocked_fields)?;
+            daemon.retry_counts.remove(engineer);
+            daemon.verification_states.remove(engineer);
+            daemon.clear_active_task(engineer);
+            daemon.set_member_idle(engineer);
+            daemon.narration_rejection_counts.remove(&task_id);
+            return Ok(());
+        }
+
         daemon
             .verification_states
             .insert(engineer.to_string(), verification_state);
@@ -570,6 +668,14 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         &mut verification_state,
         VerificationPhase::Complete,
     );
+    persist_verification_snapshot(
+        daemon.project_root(),
+        &board_dir,
+        task_id,
+        engineer,
+        &verification_state,
+        &verification_run,
+    )?;
     daemon.verification_states.remove(engineer);
 
     let task_branch = if daemon.is_multi_repo {
@@ -588,7 +694,6 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     } else {
         Vec::new()
     };
-    persist_test_results(&board_dir, task_id, &test_run.results)?;
     if let Some(conn) = &daemon.telemetry_db {
         telemetry_db::record_test_results(
             conn,
@@ -982,16 +1087,6 @@ fn load_previous_test_results(board_dir: &Path, task_id: u32) -> Result<Option<T
     Ok(metadata.test_results)
 }
 
-fn persist_test_results(board_dir: &Path, task_id: u32, test_results: &TestResults) -> Result<()> {
-    let task_path = crate::team::task_cmd::find_task_path(board_dir, task_id)?;
-    let mut metadata = crate::team::board::read_workflow_metadata(&task_path)?;
-    metadata.tests_run = Some(true);
-    metadata.tests_passed = Some(test_results.failed == 0);
-    metadata.test_results = Some(test_results.clone());
-    crate::team::board::write_workflow_metadata(&task_path, &metadata)?;
-    Ok(())
-}
-
 fn detect_flaky_failures(
     previous_results: Option<&TestResults>,
     current_results: &TestResults,
@@ -1257,6 +1352,21 @@ mod tests {
     use crate::team::test_support::{engineer_member, git_ok, init_git_repo, manager_member};
     use std::path::{Path, PathBuf};
 
+    fn verification_snapshot_path(
+        repo: &Path,
+        task_id: u32,
+        engineer: &str,
+        attempt: u32,
+    ) -> PathBuf {
+        repo.join(".batty")
+            .join("reports")
+            .join("verification")
+            .join("completion")
+            .join(format!(
+                "task-{task_id:03}-{engineer}-attempt-{attempt}.json"
+            ))
+    }
+
     fn write_task_file(project_root: &Path, id: u32, title: &str) {
         let tasks_dir = project_root
             .join(".batty")
@@ -1468,6 +1578,27 @@ mod tests {
         assert_eq!(timings[0].engineer, "eng-1");
         assert_eq!(timings[0].branch, "eng-1");
         assert!(!timings[0].regression_detected);
+
+        let task_path = repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks")
+            .join("042-commit-gate-success.md");
+        let metadata = crate::team::board::read_workflow_metadata(&task_path).unwrap();
+        assert_eq!(metadata.tests_run, Some(true));
+        assert_eq!(metadata.tests_passed, Some(true));
+        assert_eq!(metadata.outcome.as_deref(), Some("verification_passed"));
+        let snapshot_path = verification_snapshot_path(&repo, 42, "eng-1", 1);
+        assert!(
+            metadata
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.ends_with("task-042-eng-1-attempt-1.json"))
+        );
+        let snapshot = std::fs::read_to_string(snapshot_path).unwrap();
+        assert!(snapshot.contains("\"phase\": \"complete\""));
+        assert!(snapshot.contains("\"passed\": true"));
     }
 
     #[test]
@@ -1607,7 +1738,7 @@ mod tests {
         let engineer_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
         assert_eq!(engineer_messages.len(), 1);
-        assert!(engineer_messages[0].body.contains("Fix attempt 1/5"));
+        assert!(engineer_messages[0].body.contains("Fix attempt 1/3"));
         assert!(
             engineer_messages[0]
                 .body
@@ -1635,10 +1766,27 @@ mod tests {
             event.event == "verification_evidence_collected"
                 && event.step.as_deref() == Some("tests_failed")
         }));
+
+        let task_path = repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks")
+            .join("042-verification-fixing.md");
+        let metadata = crate::team::board::read_workflow_metadata(&task_path).unwrap();
+        assert_eq!(
+            metadata.outcome.as_deref(),
+            Some("verification_retry_required")
+        );
+        assert_eq!(metadata.tests_passed, Some(false));
+        let snapshot_path = verification_snapshot_path(&repo, 42, "eng-1", 1);
+        let snapshot = std::fs::read_to_string(snapshot_path).unwrap();
+        assert!(snapshot.contains("\"phase\": \"fixing\""));
+        assert!(snapshot.contains("smoke_test"));
     }
 
     #[test]
-    fn verification_max_iterations_escalates_to_manager_without_reset() {
+    fn verification_max_iterations_blocks_task_and_escalates_manager() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "batty-merge-test");
         write_task_file(&repo, 42, "verification-failed");
@@ -1667,31 +1815,54 @@ mod tests {
 
         handle_engineer_completion(&mut daemon, "eng-1").unwrap();
 
-        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+        assert_eq!(daemon.active_task_id("eng-1"), None);
         assert_eq!(
             daemon.member_state_for_test("eng-1"),
-            Some(MemberState::Working)
+            Some(MemberState::Idle)
         );
-
-        let verification_state = daemon.verification_states.get("eng-1").unwrap();
-        assert_eq!(verification_state.phase, VerificationPhase::Failed);
-        assert_eq!(verification_state.iteration, 1);
-        assert_eq!(verification_state.max_iterations, 1);
+        assert!(daemon.verification_states.get("eng-1").is_none());
 
         let engineer_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
-        assert_eq!(engineer_messages.len(), 1);
-        assert!(engineer_messages[0].body.contains("Fix attempt 1/1"));
+        assert!(
+            engineer_messages
+                .iter()
+                .any(|message| message.body.contains("Fix attempt 1/1"))
+        );
 
         let manager_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
-        assert_eq!(manager_messages.len(), 1);
-        assert!(
-            manager_messages[0]
+        assert!(manager_messages.iter().any(|message| {
+            message
                 .body
                 .contains("hit verification max iterations on task #42")
+        }));
+        assert!(
+            manager_messages
+                .iter()
+                .any(|message| message.body.contains("Latest phase: failed"))
         );
-        assert!(manager_messages[0].body.contains("Latest phase: failed"));
+
+        let task_path = repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks")
+            .join("042-verification-failed.md");
+        let task = crate::task::Task::from_file(&task_path).unwrap();
+        assert_eq!(task.status, "blocked");
+        assert!(
+            task.blocked_on
+                .as_deref()
+                .is_some_and(|reason| reason.contains("verification escalation after 1 attempts"))
+        );
+
+        let metadata = crate::team::board::read_workflow_metadata(&task_path).unwrap();
+        assert_eq!(metadata.outcome.as_deref(), Some("verification_escalated"));
+        let snapshot_path = verification_snapshot_path(&repo, 42, "eng-1", 1);
+        let snapshot = std::fs::read_to_string(snapshot_path).unwrap();
+        assert!(snapshot.contains("\"phase\": \"failed\""));
+        assert!(snapshot.contains("\"passed\": false"));
 
         let events =
             read_events(&repo.join(".batty").join("team_config").join("events.jsonl")).unwrap();
@@ -1705,6 +1876,11 @@ mod tests {
                 && event.task.as_deref() == Some("42")
                 && event.role.as_deref() == Some("eng-1")
                 && event.recipient.as_deref() == Some("manager")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event == "task_escalated"
+                && event.task.as_deref() == Some("42")
+                && event.reason.as_deref() == Some("verification_failed")
         }));
     }
 
@@ -2248,8 +2424,18 @@ mod tests {
         assert_eq!(metadata.tests_run, Some(true));
         assert_eq!(metadata.tests_passed, Some(false));
         assert_eq!(
+            metadata.outcome.as_deref(),
+            Some("verification_retry_required")
+        );
+        assert_eq!(
             metadata.test_results.as_ref().map(|results| results.failed),
             Some(1)
+        );
+        assert!(
+            metadata
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.ends_with("task-042-eng-1-attempt-1.json"))
         );
     }
 
@@ -2257,10 +2443,14 @@ mod tests {
     fn test_failure_escalation_includes_structured_summary() {
         let (_tmp, repo, _worktree_dir) = setup_failing_test_repo("eng-1");
         let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon
+            .config
+            .team_config
+            .workflow_policy
+            .verification
+            .max_iterations = 1;
         daemon.set_active_task_for_test("eng-1", 42);
         daemon.set_member_state_for_test("eng-1", MemberState::Working);
-        daemon.increment_retry("eng-1");
-        daemon.increment_retry("eng-1");
 
         handle_engineer_completion(&mut daemon, "eng-1").unwrap();
 
@@ -2276,10 +2466,14 @@ mod tests {
     fn test_failure_escalation_is_suppressed_when_recently_sent() {
         let (_tmp, repo, _worktree_dir) = setup_failing_test_repo("eng-1");
         let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon
+            .config
+            .team_config
+            .workflow_policy
+            .verification
+            .max_iterations = 1;
         daemon.set_active_task_for_test("eng-1", 42);
         daemon.set_member_state_for_test("eng-1", MemberState::Working);
-        daemon.increment_retry("eng-1");
-        daemon.increment_retry("eng-1");
         daemon
             .recent_escalations
             .insert("tests_failed_42_eng-1".to_string(), Instant::now());
