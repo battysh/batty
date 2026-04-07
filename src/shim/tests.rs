@@ -234,7 +234,11 @@ fn shim_echo_hello() {
         );
     }
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 }
 
 #[test]
@@ -284,7 +288,11 @@ fn shim_capture_screen() {
         assert!(!content.is_empty(), "screen capture should not be empty");
     }
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 }
 
 #[test]
@@ -310,7 +318,11 @@ fn shim_resize_no_error() {
         "shim should still be responsive after resize"
     );
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 }
 
 #[test]
@@ -325,7 +337,11 @@ fn shim_ping_pong() {
     });
     assert!(evt.is_some(), "did not receive Pong event");
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 }
 
 #[test]
@@ -343,7 +359,11 @@ fn shim_get_state() {
         assert_eq!(state, ShimState::Idle, "state should be Idle after ready");
     }
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 }
 
 #[test]
@@ -390,7 +410,11 @@ fn shim_send_while_working_returns_error() {
 
     // Wait for the original command to complete
     let _ = wait_for_completion(&mut ch, Duration::from_secs(10));
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 }
 
 #[test]
@@ -474,7 +498,11 @@ fn shim_sleep_shows_working_then_idle() {
     let completion = wait_for_completion(&mut ch, Duration::from_secs(15));
     assert!(completion.is_some(), "should get completion after sleep");
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 }
 
 // -----------------------------------------------------------------------
@@ -623,9 +651,21 @@ fn shim_multiple_agents_concurrent() {
     }
 
     // Clean shutdown
-    ch1.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
-    ch2.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
-    ch3.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    ch1.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
+    ch2.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
+    ch3.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 }
 
 // -- Test: Crash recovery (kill child process) --
@@ -724,7 +764,11 @@ fn shim_screen_capture_full() {
         assert!(cursor_col < 80, "cursor_col out of bounds: {cursor_col}");
     }
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 }
 
 // -- Test: Graceful shutdown --
@@ -747,7 +791,11 @@ fn shim_graceful_shutdown() {
     let _ = wait_for_completion(&mut ch, Duration::from_secs(5));
 
     // Now request graceful shutdown
-    ch.send(&Command::Shutdown { timeout_secs: 5 }).unwrap();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 5,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 
     // After shutdown, the channel should close (recv returns None or Died)
     let events = collect_events(&mut ch, Duration::from_secs(10));
@@ -806,7 +854,11 @@ fn shim_pty_log_writing() {
         &log_content[..log_content.len().min(200)]
     );
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 }
 
 // -- Test: Message ID roundtrip --
@@ -835,7 +887,11 @@ fn shim_message_id_roundtrip() {
         );
     }
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 }
 
 // -- Test: Kill command --
@@ -917,7 +973,11 @@ fn shim_full_state_cycle() {
         assert!(since_secs < 30, "state should be recent");
     }
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 }
 
 // -- Test: Multiple sequential commands --
@@ -958,7 +1018,11 @@ fn shim_sequential_commands() {
         }
     }
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 }
 
 // -- Test: Channel-based lifecycle (simulates AgentHandle pattern) --
@@ -1068,7 +1132,11 @@ fn shim_channel_lifecycle_e2e() {
     assert!(pong.is_some(), "should receive Pong");
 
     // Phase 4: Graceful shutdown
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 }
 
 // -- Test: Session state JSON roundtrip --
@@ -1146,5 +1214,9 @@ fn shim_multiple_pings() {
         assert!(evt.is_some(), "should receive Pong #{i}");
     }
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 }

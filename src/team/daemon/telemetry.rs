@@ -95,6 +95,16 @@ impl TeamDaemon {
         ));
     }
 
+    pub(super) fn record_shim_disconnect_event(
+        &mut self,
+        role: &str,
+        reason: &str,
+        details: &str,
+        expected: bool,
+    ) {
+        self.emit_event(TeamEvent::shim_disconnect(role, reason, details, expected));
+    }
+
     pub(super) fn record_agent_handoff(
         &mut self,
         role: &str,

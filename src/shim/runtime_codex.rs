@@ -285,8 +285,11 @@ pub fn run_codex_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                 cmd_channel.send(&Event::Pong)?;
             }
 
-            ShimCommand::Shutdown { .. } => {
-                eprintln!("[shim-codex {shim_id}] shutdown requested");
+            ShimCommand::Shutdown { reason, .. } => {
+                eprintln!(
+                    "[shim-codex {shim_id}] shutdown requested ({})",
+                    reason.label()
+                );
                 if let Err(error) = super::runtime::preserve_work_before_kill(&args.cwd) {
                     eprintln!(
                         "[shim-codex {shim_id}] failed to preserve work before shutdown: {error:#}"

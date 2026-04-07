@@ -30,9 +30,34 @@ pub enum Command {
     },
     Shutdown {
         timeout_secs: u32,
+        #[serde(default)]
+        reason: ShutdownReason,
     },
     Kill,
     Ping,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ShutdownReason {
+    #[default]
+    Requested,
+    RestartHandoff,
+    ContextExhausted,
+    TopologyChange,
+    DaemonStop,
+}
+
+impl ShutdownReason {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Requested => "requested",
+            Self::RestartHandoff => "restart_handoff",
+            Self::ContextExhausted => "context_exhausted",
+            Self::TopologyChange => "topology_change",
+            Self::DaemonStop => "daemon_stop",
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -294,13 +319,31 @@ mod tests {
         let mut sender = Channel::new(a);
         let mut receiver = Channel::new(b);
 
-        let cmd = Command::Shutdown { timeout_secs: 30 };
+        let cmd = Command::Shutdown {
+            timeout_secs: 30,
+            reason: ShutdownReason::Requested,
+        };
         sender.send(&cmd).unwrap();
         let received: Command = receiver.recv::<Command>().unwrap().unwrap();
         match received {
-            Command::Shutdown { timeout_secs } => assert_eq!(timeout_secs, 30),
+            Command::Shutdown {
+                timeout_secs,
+                reason,
+            } => {
+                assert_eq!(timeout_secs, 30);
+                assert_eq!(reason, ShutdownReason::Requested);
+            }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn shutdown_reason_labels_restart_handoff_explicitly() {
+        assert_eq!(ShutdownReason::RestartHandoff.label(), "restart_handoff");
+        assert_ne!(
+            ShutdownReason::RestartHandoff.label(),
+            "orchestrator disconnected"
+        );
     }
 
     #[test]

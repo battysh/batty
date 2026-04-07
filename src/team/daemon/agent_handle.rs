@@ -8,7 +8,13 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::shim::protocol::{Channel, Command, Event, ShimState};
+use crate::shim::protocol::{Channel, Command, Event, ShimState, ShutdownReason};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::team) struct InFlightMessage {
+    pub from: String,
+    pub body: String,
+}
 
 /// Per-agent handle for a shim subprocess.
 pub(in crate::team) struct AgentHandle {
@@ -40,6 +46,8 @@ pub(in crate::team) struct AgentHandle {
     pub input_bytes: u64,
     /// When the shim last reported activity.
     pub last_activity_at: Option<Instant>,
+    /// Most recent message delivered into the shim and still awaiting completion.
+    pub in_flight_message: Option<InFlightMessage>,
 }
 
 impl AgentHandle {
@@ -67,6 +75,7 @@ impl AgentHandle {
             output_bytes: 0,
             input_bytes: 0,
             last_activity_at: None,
+            in_flight_message: None,
         }
     }
 
@@ -99,6 +108,10 @@ impl AgentHandle {
             .input_bytes
             .saturating_add(from.len() as u64 + body.len() as u64);
         self.record_activity();
+        self.in_flight_message = Some(InFlightMessage {
+            from: from.to_string(),
+            body: body.to_string(),
+        });
         self.channel.send(&Command::SendMessage {
             from: from.to_string(),
             body: body.to_string(),
@@ -108,7 +121,19 @@ impl AgentHandle {
 
     /// Send a shutdown command to the shim.
     pub fn send_shutdown(&mut self, timeout_secs: u32) -> anyhow::Result<()> {
-        self.channel.send(&Command::Shutdown { timeout_secs })
+        self.send_shutdown_with_reason(timeout_secs, ShutdownReason::Requested)
+    }
+
+    /// Send a shutdown command to the shim with an explicit disconnect reason.
+    pub fn send_shutdown_with_reason(
+        &mut self,
+        timeout_secs: u32,
+        reason: ShutdownReason,
+    ) -> anyhow::Result<()> {
+        self.channel.send(&Command::Shutdown {
+            timeout_secs,
+            reason,
+        })
     }
 
     /// Send a kill command to the shim.
@@ -135,6 +160,14 @@ impl AgentHandle {
 
     pub fn record_activity(&mut self) {
         self.last_activity_at = Some(Instant::now());
+    }
+
+    pub fn clear_in_flight_message(&mut self) {
+        self.in_flight_message = None;
+    }
+
+    pub fn take_in_flight_message(&mut self) -> Option<InFlightMessage> {
+        self.in_flight_message.take()
     }
 
     /// Seconds since last Pong, or None if no Pong received yet.
@@ -210,6 +243,7 @@ mod tests {
         assert!(!handle.is_terminal());
         assert!(handle.last_pong_at.is_none());
         assert!(handle.last_activity_at.is_none());
+        assert!(handle.in_flight_message.is_none());
         assert_eq!(handle.agent_type, "claude");
         assert_eq!(handle.agent_cmd, "claude");
         assert_eq!(handle.work_dir, PathBuf::from("/tmp/test"));
@@ -269,7 +303,13 @@ mod tests {
 
         let cmd: Command = child.recv().unwrap().unwrap();
         match cmd {
-            Command::Shutdown { timeout_secs } => assert_eq!(timeout_secs, 30),
+            Command::Shutdown {
+                timeout_secs,
+                reason,
+            } => {
+                assert_eq!(timeout_secs, 30);
+                assert_eq!(reason, ShutdownReason::Requested);
+            }
             _ => panic!("expected Shutdown"),
         }
     }
@@ -371,6 +411,10 @@ mod tests {
 
         let cmd: Command = child.recv().unwrap().unwrap();
         assert!(matches!(cmd, Command::SendMessage { .. }));
+        let tracked = handle.take_in_flight_message().unwrap();
+        assert_eq!(tracked.from, "manager");
+        assert_eq!(tracked.body, "do the thing");
+        assert!(handle.in_flight_message.is_none());
     }
 
     #[test]

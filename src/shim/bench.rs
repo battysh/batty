@@ -101,7 +101,11 @@ mod tests {
             );
             let ms = elapsed.unwrap().as_millis() as u64;
             samples.push(ms);
-            ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+            ch.send(&Command::Shutdown {
+                timeout_secs: 2,
+                reason: crate::shim::protocol::ShutdownReason::Requested,
+            })
+            .unwrap();
             // Small delay between iterations for cleanup
             std::thread::sleep(Duration::from_millis(200));
         }
@@ -206,7 +210,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(150));
         }
 
-        ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+        ch.send(&Command::Shutdown {
+            timeout_secs: 2,
+            reason: crate::shim::protocol::ShutdownReason::Requested,
+        })
+        .unwrap();
 
         let (min, max, avg) = stats(&samples);
 
@@ -296,7 +304,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(150));
         }
 
-        ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+        ch.send(&Command::Shutdown {
+            timeout_secs: 2,
+            reason: crate::shim::protocol::ShutdownReason::Requested,
+        })
+        .unwrap();
 
         let (min, max, avg) = stats(&samples);
 
@@ -348,7 +360,11 @@ mod tests {
             if let Some(elapsed) = wait_for_ready(&mut ch, Duration::from_secs(30)) {
                 ready_samples.push(elapsed.as_millis() as u64);
             }
-            ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+            ch.send(&Command::Shutdown {
+                timeout_secs: 2,
+                reason: crate::shim::protocol::ShutdownReason::Requested,
+            })
+            .unwrap();
             std::thread::sleep(Duration::from_millis(200));
         }
 
@@ -420,7 +436,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(150));
         }
 
-        ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+        ch.send(&Command::Shutdown {
+            timeout_secs: 2,
+            reason: crate::shim::protocol::ShutdownReason::Requested,
+        })
+        .unwrap();
 
         // --- Generate report ---
         let (r_min, r_max, r_avg) = stats(&ready_samples);

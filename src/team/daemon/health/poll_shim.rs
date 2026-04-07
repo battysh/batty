@@ -3,6 +3,7 @@
 //! pane death, health monitoring, and stale detection).
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 use tracing::{debug, info, warn};
@@ -13,7 +14,7 @@ use super::super::launcher::{
 };
 use super::super::*;
 use super::CONTEXT_RESTART_COOLDOWN;
-use crate::shim::protocol::{Event, ShimState};
+use crate::shim::protocol::{Event, ShimState, ShutdownReason};
 use crate::team::watcher::{SessionTrackerConfig, discover_claude_session_file};
 use crate::team::{append_shim_event_log, shim_log_path};
 
@@ -27,6 +28,69 @@ struct ShimRespawnPlan {
     work_dir: PathBuf,
     identity: Option<LaunchIdentity>,
     mode: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShimDisconnectDisposition {
+    RestartHandoff,
+    CrashRespawn,
+    ContextExhausted,
+}
+
+impl ShimDisconnectDisposition {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::RestartHandoff => "restart_handoff",
+            Self::CrashRespawn => "crash_respawn",
+            Self::ContextExhausted => "context_exhausted",
+        }
+    }
+
+    fn expected(self) -> bool {
+        true
+    }
+
+    fn shutdown_reason(self) -> ShutdownReason {
+        match self {
+            Self::RestartHandoff => ShutdownReason::RestartHandoff,
+            Self::CrashRespawn => ShutdownReason::Requested,
+            Self::ContextExhausted => ShutdownReason::ContextExhausted,
+        }
+    }
+}
+
+fn wait_for_expected_disconnect_handoff(
+    member_name: String,
+    mut handle: crate::team::daemon::agent_handle::AgentHandle,
+    timeout: Duration,
+) {
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let alive = unsafe { libc::kill(handle.child_pid as i32, 0) } == 0;
+            if !alive {
+                debug!(
+                    member = member_name.as_str(),
+                    pid = handle.child_pid,
+                    "retired shim exited after disconnect handoff"
+                );
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                warn!(
+                    member = member_name.as_str(),
+                    pid = handle.child_pid,
+                    "retired shim exceeded disconnect handoff timeout; forcing kill"
+                );
+                let _ = handle.send_kill();
+                unsafe {
+                    libc::kill(handle.child_pid as i32, libc::SIGKILL);
+                }
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
 }
 
 impl TeamDaemon {
@@ -178,6 +242,7 @@ impl TeamDaemon {
                 } else {
                     if let Some(handle) = self.shim_handles.get_mut(member_name) {
                         handle.apply_state_change(ShimState::Idle);
+                        handle.clear_in_flight_message();
                     }
                     self.states
                         .insert(member_name.to_string(), MemberState::Idle);
@@ -283,6 +348,7 @@ impl TeamDaemon {
 
                 if let Some(handle) = self.shim_handles.get_mut(member_name) {
                     handle.apply_state_change(ShimState::Idle);
+                    handle.clear_in_flight_message();
                 }
                 self.states
                     .insert(member_name.to_string(), MemberState::Idle);
@@ -389,7 +455,9 @@ impl TeamDaemon {
                 // Send Shutdown to the exhausted shim before respawning
                 if let Some(handle) = self.shim_handles.get_mut(member_name) {
                     handle.apply_state_change(ShimState::ContextExhausted);
-                    if let Err(error) = handle.send_shutdown(5) {
+                    if let Err(error) =
+                        handle.send_shutdown_with_reason(5, ShutdownReason::ContextExhausted)
+                    {
                         debug!(
                             member = member_name,
                             error = %error,
@@ -621,6 +689,184 @@ impl TeamDaemon {
         }))
     }
 
+    fn classify_shim_disconnect(
+        &self,
+        member_name: &str,
+        reason: &str,
+    ) -> ShimDisconnectDisposition {
+        if reason == "shim_context_exhaustion" || reason == "context_exhaustion" {
+            return ShimDisconnectDisposition::ContextExhausted;
+        }
+        if self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+            .is_some_and(|member| {
+                matches!(member.role_type, RoleType::Architect | RoleType::Manager)
+            })
+        {
+            return ShimDisconnectDisposition::RestartHandoff;
+        }
+        ShimDisconnectDisposition::CrashRespawn
+    }
+
+    fn replay_or_requeue_pending_messages_after_respawn(
+        &mut self,
+        member_name: &str,
+        previous_handle: &mut crate::team::daemon::agent_handle::AgentHandle,
+        disposition: ShimDisconnectDisposition,
+    ) -> Result<bool> {
+        if disposition != ShimDisconnectDisposition::RestartHandoff
+            || !self
+                .config
+                .members
+                .iter()
+                .find(|member| member.name == member_name)
+                .is_some_and(|member| {
+                    matches!(member.role_type, RoleType::Architect | RoleType::Manager)
+                })
+        {
+            return Ok(false);
+        }
+
+        let Some(in_flight) = previous_handle.take_in_flight_message() else {
+            return Ok(false);
+        };
+
+        let queue = self
+            .pending_delivery_queue
+            .entry(member_name.to_string())
+            .or_default();
+        queue.insert(
+            0,
+            PendingMessage {
+                from: in_flight.from.clone(),
+                body: in_flight.body.clone(),
+                queued_at: std::time::Instant::now(),
+            },
+        );
+
+        let preview = in_flight
+            .body
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(160)
+            .collect::<String>();
+        let details = format!(
+            "requeued in-flight supervisory message during restart handoff: from={} preview={preview}",
+            in_flight.from
+        );
+        let _ = append_shim_event_log(
+            &self.config.project_root,
+            member_name,
+            &format!("<- replay pending after respawn: {details}"),
+        );
+        self.record_orchestrator_action(format!(
+            "delivery: requeued supervisory in-flight message for {member_name} during restart handoff"
+        ));
+        Ok(true)
+    }
+
+    fn restart_shim_with_disconnect_handoff(
+        &mut self,
+        member_name: &str,
+        plan: &ShimRespawnPlan,
+        log_path: Option<&std::path::Path>,
+        reason: &str,
+        disposition: ShimDisconnectDisposition,
+    ) -> Result<()> {
+        let sdk_mode =
+            agent_supports_sdk_mode(&plan.agent_type) && self.config.team_config.use_sdk_mode;
+        let new_handle = super::super::shim_spawn::spawn_shim(
+            member_name,
+            &plan.agent_type,
+            &plan.agent_cmd,
+            &plan.work_dir,
+            log_path,
+            self.config
+                .team_config
+                .workflow_policy
+                .graceful_shutdown_timeout_secs,
+            self.config
+                .team_config
+                .workflow_policy
+                .auto_commit_on_restart,
+            sdk_mode,
+        )?;
+
+        if let Some(identity) = plan.identity.clone() {
+            if let Some(watcher) = self.watchers.get_mut(member_name) {
+                watcher.set_session_id(identity.session_id.clone());
+            }
+            self.persist_member_launch_identity(member_name, identity)?;
+        }
+
+        let handoff_timeout = Duration::from_secs(
+            self.config
+                .team_config
+                .shim_shutdown_timeout_secs
+                .max(1)
+                .into(),
+        );
+        let requeued = if let Some(mut previous_handle) = self.shim_handles.remove(member_name) {
+            let requeued = self.replay_or_requeue_pending_messages_after_respawn(
+                member_name,
+                &mut previous_handle,
+                disposition,
+            )?;
+            let details = format!(
+                "reason={} disposition={} requeued_inflight={requeued}",
+                reason,
+                disposition.reason()
+            );
+            self.record_shim_disconnect_event(
+                member_name,
+                disposition.reason(),
+                &details,
+                disposition.expected(),
+            );
+            let _ = append_shim_event_log(
+                &self.config.project_root,
+                member_name,
+                &format!(
+                    "<- disconnect handoff: {} (reason={reason}, requeued_inflight={requeued})",
+                    disposition.reason()
+                ),
+            );
+            if !previous_handle.is_terminal() {
+                if let Err(error) =
+                    previous_handle.send_shutdown_with_reason(5, disposition.shutdown_reason())
+                {
+                    debug!(
+                        member = member_name,
+                        error = %error,
+                        "failed to send classified shutdown before respawn"
+                    );
+                }
+                wait_for_expected_disconnect_handoff(
+                    member_name.to_string(),
+                    previous_handle,
+                    handoff_timeout,
+                );
+            }
+            requeued
+        } else {
+            false
+        };
+
+        self.shim_handles
+            .insert(member_name.to_string(), new_handle);
+        self.record_orchestrator_action(format!(
+            "lifecycle: restarted shim for {member_name} with {} (reason={reason}, requeued_inflight={requeued})",
+            disposition.reason()
+        ));
+        Ok(())
+    }
+
     pub(super) fn handle_shim_cold_respawn(
         &mut self,
         member_name: &str,
@@ -651,50 +897,20 @@ impl TeamDaemon {
 
         self.preserve_worktree_before_restart(member_name, &plan.work_dir, reason);
 
-        if let Some(handle) = self.shim_handles.get_mut(member_name)
-            && let Err(error) = handle.send_shutdown(5)
-        {
-            debug!(
-                member = member_name,
-                error = %error,
-                "failed to send shutdown before cold respawn"
-            );
-        }
-
         info!(
             member = member_name,
             reason, "downgrading warm resume to cold shim respawn"
         );
 
         let log_path = shim_log_path(&self.config.project_root, member_name);
-        let sdk_mode =
-            agent_supports_sdk_mode(&plan.agent_type) && self.config.team_config.use_sdk_mode;
-        let new_handle = super::super::shim_spawn::spawn_shim(
+        let disposition = self.classify_shim_disconnect(member_name, reason);
+        self.restart_shim_with_disconnect_handoff(
             member_name,
-            &plan.agent_type,
-            &plan.agent_cmd,
-            &plan.work_dir,
+            &plan,
             Some(&log_path),
-            self.config
-                .team_config
-                .workflow_policy
-                .graceful_shutdown_timeout_secs,
-            self.config
-                .team_config
-                .workflow_policy
-                .auto_commit_on_restart,
-            sdk_mode,
+            reason,
+            disposition,
         )?;
-
-        if let Some(identity) = plan.identity.clone() {
-            if let Some(watcher) = self.watchers.get_mut(member_name) {
-                watcher.set_session_id(identity.session_id.clone());
-            }
-            self.persist_member_launch_identity(member_name, identity)?;
-        }
-
-        self.shim_handles
-            .insert(member_name.to_string(), new_handle);
         self.states
             .insert(member_name.to_string(), MemberState::Working);
         self.update_automation_timers_for_state(member_name, MemberState::Working);
@@ -727,32 +943,13 @@ impl TeamDaemon {
 
         info!(member = member_name, "auto-respawning shim after crash");
 
-        let sdk_mode =
-            agent_supports_sdk_mode(&plan.agent_type) && self.config.team_config.use_sdk_mode;
-        let new_handle = super::super::shim_spawn::spawn_shim(
+        self.restart_shim_with_disconnect_handoff(
             member_name,
-            &plan.agent_type,
-            &plan.agent_cmd,
-            &plan.work_dir,
+            &plan,
             None,
-            self.config
-                .team_config
-                .workflow_policy
-                .graceful_shutdown_timeout_secs,
-            self.config
-                .team_config
-                .workflow_policy
-                .auto_commit_on_restart,
-            sdk_mode,
+            "shim_crash",
+            ShimDisconnectDisposition::CrashRespawn,
         )?;
-        if let Some(identity) = plan.identity.clone() {
-            if let Some(watcher) = self.watchers.get_mut(member_name) {
-                watcher.set_session_id(identity.session_id.clone());
-            }
-            self.persist_member_launch_identity(member_name, identity)?;
-        }
-        self.shim_handles
-            .insert(member_name.to_string(), new_handle);
         self.emit_event(TeamEvent::pane_respawned(member_name));
         self.record_orchestrator_action(format!(
             "lifecycle: auto-respawned shim for {} after crash",
@@ -1655,6 +1852,91 @@ mod tests {
                     && event.reason.as_deref() == Some("supervisory_stalled")
             }));
         }
+    }
+
+    #[test]
+    fn supervisory_restart_handoff_requeues_inflight_message_and_marks_shutdown_reason() {
+        let _path_lock = PATH_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let (fake_bin, _fake_log) = setup_fake_backend(&tmp, "batty", "fake-batty.log");
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let combined_path = if original_path.is_empty() {
+            fake_bin.display().to_string()
+        } else {
+            format!("{}:{original_path}", fake_bin.display())
+        };
+        let _path_guard = EnvVarGuard::set("PATH", &combined_path);
+        let _batty_guard = EnvVarGuard::set(
+            "BATTY_BINARY_PATH",
+            fake_bin.join("batty").to_string_lossy().as_ref(),
+        );
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("manager", Some("architect")),
+            ])
+            .build();
+        daemon.config.team_config.shim_working_state_timeout_secs = 1;
+
+        let mut child = insert_mock_handle(&mut daemon, "manager");
+        {
+            let handle = daemon.shim_handles.get_mut("manager").unwrap();
+            handle.apply_state_change(ShimState::Working);
+            handle
+                .send_message(
+                    "architect",
+                    "Dispatch recovery needed: idle reports still have active work.",
+                )
+                .unwrap();
+            handle.state_changed_at =
+                std::time::Instant::now() - std::time::Duration::from_secs(10);
+        }
+        daemon
+            .states
+            .insert("manager".to_string(), MemberState::Working);
+
+        daemon.check_working_state_timeouts().unwrap();
+
+        let queue = daemon
+            .pending_delivery_queue
+            .get("manager")
+            .expect("supervisory in-flight message should be requeued");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].from, "architect");
+        assert!(
+            queue[0]
+                .body
+                .contains("Dispatch recovery needed: idle reports still have active work.")
+        );
+
+        let first: crate::shim::protocol::Command = child.recv().unwrap().unwrap();
+        assert!(matches!(
+            first,
+            crate::shim::protocol::Command::SendMessage { .. }
+        ));
+
+        let shutdown: crate::shim::protocol::Command = child.recv().unwrap().unwrap();
+        match shutdown {
+            crate::shim::protocol::Command::Shutdown { reason, .. } => {
+                assert_eq!(reason, ShutdownReason::RestartHandoff);
+            }
+            other => panic!("expected Shutdown, got {other:?}"),
+        }
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "shim_disconnect"
+                && event.role.as_deref() == Some("manager")
+                && event.reason.as_deref() == Some("restart_handoff")
+                && event.success == Some(true)
+        }));
     }
 
     #[test]

@@ -759,10 +759,15 @@ pub fn run_kiro_acp(args: ShimArgs, channel: Channel) -> Result<()> {
                 cmd_channel.send(&Event::Pong)?;
             }
 
-            ShimCommand::Shutdown { timeout_secs } => {
+            ShimCommand::Shutdown {
+                timeout_secs,
+                reason,
+            } => {
                 eprintln!(
-                    "[shim-kiro {}] shutdown requested (timeout: {}s)",
-                    args.id, timeout_secs
+                    "[shim-kiro {}] shutdown requested ({}, timeout: {}s)",
+                    args.id,
+                    reason.label(),
+                    timeout_secs
                 );
                 if let Err(error) = super::runtime::preserve_work_before_kill(&args.cwd) {
                     eprintln!("[shim-kiro {}] work preservation failed: {error}", args.id);
