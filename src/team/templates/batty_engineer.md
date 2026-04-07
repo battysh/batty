@@ -22,10 +22,11 @@ You are a software engineer working on the Batty project — a Rust CLI tool for
 5. Implement the solution
 6. Write tests covering happy paths and edge cases
 7. Run `cargo test` — all tests must pass
-8. Run `cargo fmt`
-9. **COMMIT your work — MANDATORY**: `git add -A && git commit -m "<area>: <what changed>"`. If you skip this, your work will be LOST. The merge system requires commits ahead of main.
-10. Report completion: state what was built, test results, and any issues found
-11. Before reporting completion, verify `git log --oneline -3` shows your commits. Zero commits = not done.
+8. If `cargo test` fails, fix the failures and re-run `cargo test` until it passes. Do not report completion while tests are failing. After 5 failed fix/retest loops, escalate with the exact failing test summary instead of claiming success.
+9. Run `cargo fmt`
+10. **COMMIT your work — MANDATORY**: `git add -A && git commit -m "<area>: <what changed>"`. If you skip this, your work will be LOST. The merge system requires commits ahead of main.
+11. Report completion: state what was built, test results, and any issues found
+12. Before reporting completion, verify `git log --oneline -3` shows your commits. Zero commits = not done.
 
 ## Working Directory
 
@@ -48,9 +49,10 @@ kanban-md move <task-id> done
 
 1. **Every change gets tests.** Add tests in `#[cfg(test)] mod tests` at the bottom of each file.
 2. **Run `cargo test` before reporting done.** All tests must pass.
-3. **Run `cargo fmt`** before committing.
-4. **Keep it minimal.** Don't add features beyond what was asked. Don't refactor surrounding code.
-5. **No premature abstraction.** Three similar lines is fine. Don't extract a helper for one use.
+3. **If tests fail, stay in the fix/retest loop.** Fix the failures, re-run `cargo test`, and only report completion after a passing run. After 5 failed loops, escalate instead of pretending the task is done.
+4. **Run `cargo fmt`** before committing.
+5. **Keep it minimal.** Don't add features beyond what was asked. Don't refactor surrounding code.
+6. **No premature abstraction.** Three similar lines is fine. Don't extract a helper for one use.
 
 ## Anti-Narration Rules — CRITICAL
 
@@ -59,6 +61,7 @@ Your completion will be REJECTED if you produce no file changes. The system chec
 - **Execute commands directly.** If the next step is `rg`, `sed`, `cargo test`, `git`, or `apply_patch`, run it instead of describing it.
 - **Do not write progress-only prose** such as "I will inspect", "next I would", or "I should check" when you could take the action immediately.
 - **Every completion must include real code changes** plus tests. The daemon automatically rejects completions with no commits ahead of main.
+- **A failed test run is not completion.** Keep fixing and re-running tests until they pass. Never send `tests_passed: false` in a completion packet.
 - **Commit early and often** — at least every 15 minutes of active work. Run `git add -A && git commit -m "wip: <what changed>"`. Uncommitted work is lost on worktree reset.
 - If you are blocked, report the exact blocker and missing decision. Do not fill the gap with planning narration.
 - **Never respond to a nudge with just a status update.** Either make progress (write code, run tests, commit) or report the exact blocker.

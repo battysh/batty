@@ -59,6 +59,8 @@ struct SdkState {
     message_queue: VecDeque<QueuedMessage>,
     /// Total bytes of response text received.
     cumulative_output_bytes: u64,
+    /// Consecutive failed test fix/retest loops handled inside the shim.
+    test_failure_iterations: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +116,7 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
         last_sent_message_preview: None,
         message_queue: VecDeque::new(),
         cumulative_output_bytes: 0,
+        test_failure_iterations: 0,
     }));
 
     // Shared stdin writer (used by both command loop and stdout reader for auto-approve)
@@ -318,6 +321,32 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                     } else {
                         std::mem::take(&mut st.accumulated_response)
                     };
+                    if let Some(followup) =
+                        common::detect_test_failure_followup(&response, st.test_failure_iterations)
+                    {
+                        st.pending_message_id = None;
+                        st.test_failure_iterations = followup.next_iteration_count;
+                        st.last_sent_message_from = Some("batty".into());
+                        st.last_sent_message_preview = Some(message_preview(&followup.body));
+                        st.state = ShimState::Working;
+                        st.state_changed_at = Instant::now();
+                        let session_id = st.session_id.clone();
+                        drop(st);
+
+                        let text = format_injected_message("batty", &followup.body);
+                        let user_msg = SdkUserMessage::new(&session_id, &text);
+                        let ndjson = user_msg.to_ndjson();
+                        if let Ok(mut writer) = stdin_for_approve.lock() {
+                            let _ = writeln!(writer, "{ndjson}");
+                            let _ = writer.flush();
+                        }
+                        let _ = evt_channel.send(&Event::Warning {
+                            message: followup.notice,
+                            idle_secs: None,
+                        });
+                        continue;
+                    }
+                    st.test_failure_iterations = 0;
                     let last_lines = last_n_lines_of(&response, 5);
                     let msg_id = st.pending_message_id.take();
                     let old = st.state;
@@ -339,6 +368,7 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                         st.state = ShimState::Working;
                         st.state_changed_at = Instant::now();
                         st.accumulated_response.clear();
+                        st.test_failure_iterations = 0;
                     } else {
                         st.last_sent_message_from = None;
                         st.last_sent_message_preview = None;
@@ -505,6 +535,7 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                         st.last_sent_message_from = Some(from.clone());
                         st.last_sent_message_preview = Some(message_preview(&body));
                         st.accumulated_response.clear();
+                        st.test_failure_iterations = 0;
                         let session_id = st.session_id.clone();
                         st.state = ShimState::Working;
                         st.state_changed_at = Instant::now();
@@ -688,6 +719,7 @@ fn maybe_send_keepalive<W: IoWrite>(
         st.state = ShimState::Working;
         st.state_changed_at = Instant::now();
         st.accumulated_response.clear();
+        st.test_failure_iterations = 0;
         st.session_id.clone()
     };
 
@@ -894,6 +926,7 @@ mod tests {
             last_sent_message_preview: None,
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 0,
+            test_failure_iterations: 0,
         };
         assert_eq!(st.state, ShimState::Idle);
         assert!(st.session_id.is_empty());
@@ -986,6 +1019,7 @@ mod tests {
             last_sent_message_preview: Some("continue task".into()),
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 12,
+            test_failure_iterations: 0,
         }));
 
         let forced = force_stalled_completion(&state, "sdk-test").expect("forced completion");
@@ -1018,6 +1052,7 @@ mod tests {
                 message_id: Some("msg-2".into()),
             }]),
             cumulative_output_bytes: 0,
+            test_failure_iterations: 0,
         }));
 
         let forced = force_stalled_completion(&state, "sdk-test").expect("forced completion");
@@ -1047,6 +1082,7 @@ mod tests {
             last_sent_message_preview: None,
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 0,
+            test_failure_iterations: 0,
         }));
         let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
         let mut last_keepalive = Instant::now();
@@ -1070,6 +1106,7 @@ mod tests {
             last_sent_message_preview: None,
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 0,
+            test_failure_iterations: 0,
         }));
         let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
         let mut last_keepalive = Instant::now() - Duration::from_secs(SDK_KEEPALIVE_IDLE_SECS + 1);
@@ -1099,6 +1136,7 @@ mod tests {
             last_sent_message_preview: None,
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 0,
+            test_failure_iterations: 0,
         }));
         let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
         let mut last_keepalive = Instant::now() - Duration::from_secs(SDK_KEEPALIVE_IDLE_SECS + 1);
