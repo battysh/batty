@@ -19,6 +19,8 @@ const REVIEW_READY_SCOPE_FENCE: &[&str] = &[
     "src/team/completion.rs",
     "src/team/review.rs",
 ];
+pub(crate) const ADDITIVE_CONFLICT_AUTO_RESOLVE_FENCE: &[&str] =
+    &["src/team/task_loop.rs", "src/team/review.rs"];
 const MIN_REVIEW_READY_PRODUCTION_ADDITIONS: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -819,6 +821,75 @@ fn line_has_unresolved_conflict(line: &str) -> bool {
             (bytes[0], bytes[1]),
             (b'U', _) | (_, b'U') | (b'A', b'A') | (b'D', b'D')
         )
+}
+
+pub(crate) fn merge_additive_only_text(
+    base: &str,
+    current: &str,
+    incoming: &str,
+) -> Option<String> {
+    let base_lines = split_lines_preserving_endings(base);
+    let current_slots = insertion_slots_relative_to_base(&base_lines, current)?;
+    let incoming_slots = insertion_slots_relative_to_base(&base_lines, incoming)?;
+    let mut merged = String::new();
+
+    for (index, base_line) in base_lines.iter().enumerate() {
+        append_slot(&mut merged, &current_slots[index], &incoming_slots[index]);
+        merged.push_str(base_line);
+    }
+    append_slot(
+        &mut merged,
+        &current_slots[base_lines.len()],
+        &incoming_slots[base_lines.len()],
+    );
+
+    Some(merged)
+}
+
+fn split_lines_preserving_endings(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        text.split_inclusive('\n').collect()
+    }
+}
+
+fn insertion_slots_relative_to_base<'a>(
+    base_lines: &[&str],
+    variant: &'a str,
+) -> Option<Vec<Vec<&'a str>>> {
+    let variant_lines = split_lines_preserving_endings(variant);
+    let mut slots = vec![Vec::new(); base_lines.len() + 1];
+    let mut variant_index = 0usize;
+
+    for (base_index, base_line) in base_lines.iter().enumerate() {
+        while variant_index < variant_lines.len() && variant_lines[variant_index] != *base_line {
+            slots[base_index].push(variant_lines[variant_index]);
+            variant_index += 1;
+        }
+        if variant_index == variant_lines.len() {
+            return None;
+        }
+        variant_index += 1;
+    }
+
+    while variant_index < variant_lines.len() {
+        slots[base_lines.len()].push(variant_lines[variant_index]);
+        variant_index += 1;
+    }
+
+    Some(slots)
+}
+
+fn append_slot(output: &mut String, current_slot: &[&str], incoming_slot: &[&str]) {
+    for line in current_slot {
+        output.push_str(line);
+    }
+    if current_slot != incoming_slot {
+        for line in incoming_slot {
+            output.push_str(line);
+        }
+    }
 }
 
 /// Returns `false` if the worktree has uncommitted changes on a task branch
@@ -3118,5 +3189,28 @@ mod tests {
         assert!(line_has_unresolved_conflict("DU src/main.rs"));
         assert!(!line_has_unresolved_conflict(" M src/main.rs"));
         assert!(!line_has_unresolved_conflict("?? scratch.txt"));
+    }
+
+    #[test]
+    fn merge_additive_only_text_keeps_both_insertions() {
+        let base = "const CHECKS: &[&str] = &[\n    \"existing\",\n];\n";
+        let current = "const CHECKS: &[&str] = &[\n    \"main\",\n    \"existing\",\n];\n";
+        let incoming = "const CHECKS: &[&str] = &[\n    \"engineer\",\n    \"existing\",\n];\n";
+
+        let merged = merge_additive_only_text(base, current, incoming)
+            .expect("pure insertions should auto-merge");
+
+        assert!(merged.contains("\"main\""));
+        assert!(merged.contains("\"engineer\""));
+        assert!(merged.contains("\"existing\""));
+    }
+
+    #[test]
+    fn merge_additive_only_text_rejects_modified_base_lines() {
+        let base = "const CHECKS: &[&str] = &[\n    \"existing\",\n];\n";
+        let current = "const CHECKS: &[&str] = &[\n    \"existing\",\n    \"main\",\n];\n";
+        let incoming = "const CHECKS: &[&str] = &[\n    \"renamed\",\n];\n";
+
+        assert!(merge_additive_only_text(base, current, incoming).is_none());
     }
 }
