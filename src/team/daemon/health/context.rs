@@ -25,6 +25,7 @@ pub(crate) enum ContextPressureAction {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ContextPressureInputs {
     output_bytes: u64,
+    session_uptime_secs: u64,
     narration_detected: bool,
     meta_conversation_detected: bool,
     assistant_message_count: u32,
@@ -33,6 +34,7 @@ struct ContextPressureInputs {
     shrinking_responses: bool,
     repeated_identical_outputs: bool,
     tool_failure_message: Option<String>,
+    shim_failure_count: u32,
     secs_since_last_commit: Option<u64>,
 }
 
@@ -42,6 +44,7 @@ struct ContextPressureState {
     warning_emitted: bool,
     nudge_sent: bool,
     over_threshold_polls: u32,
+    shim_failure_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -76,11 +79,24 @@ impl ContextPressureTracker {
         }
     }
 
+    pub(super) fn record_failure(&mut self, member: &str) {
+        let state = self.members.entry(member.to_string()).or_default();
+        state.shim_failure_count = state.shim_failure_count.saturating_add(1);
+    }
+
+    pub(super) fn shim_failure_count(&self, member: &str) -> u32 {
+        self.members
+            .get(member)
+            .map(|state| state.shim_failure_count)
+            .unwrap_or(0)
+    }
+
     pub(super) fn observe_at(
         &mut self,
         member: &str,
         inputs: &ContextPressureInputs,
         is_working: bool,
+        restart_delay_secs: u64,
         _now: Instant,
     ) -> (u64, Vec<ContextPressureAction>) {
         let warn_at = self.threshold.saturating_mul(WARNING_PERCENT) / 100;
@@ -106,6 +122,11 @@ impl ContextPressureTracker {
         if score >= nudge_at && !state.nudge_sent {
             state.nudge_sent = true;
             actions.push(ContextPressureAction::Nudge);
+        }
+
+        if should_force_restart(inputs, restart_delay_secs) {
+            actions.push(ContextPressureAction::Restart);
+            return (score, actions);
         }
 
         if score >= self.threshold {
@@ -151,14 +172,31 @@ fn compute_pressure_score(inputs: &ContextPressureInputs, threshold_bytes: u64) 
     if inputs.tool_failure_message.is_some() {
         score += 10;
     }
+    if inputs.shim_failure_count >= 2 {
+        score += 10;
+    }
+    if inputs.shim_failure_count >= 3 {
+        score += 15;
+    }
     if inputs.assistant_message_count >= 3
         && inputs.output_bytes >= threshold_bytes / 2
         && inputs.secs_since_last_commit.unwrap_or(u64::MAX) >= 900
     {
         score += 15;
     }
+    if inputs.session_uptime_secs >= 900 && inputs.secs_since_last_commit.unwrap_or(u64::MAX) >= 900
+    {
+        score += 15;
+    }
 
     score
+}
+
+fn should_force_restart(inputs: &ContextPressureInputs, restart_delay_secs: u64) -> bool {
+    let restart_delay_secs = restart_delay_secs.max(1);
+    inputs.session_uptime_secs >= restart_delay_secs
+        && inputs.shim_failure_count >= 3
+        && inputs.secs_since_last_commit.unwrap_or(u64::MAX) >= restart_delay_secs
 }
 
 /// Minimum uptime (seconds) before a zero-output agent is considered dead.
@@ -210,11 +248,17 @@ impl TeamDaemon {
             .team_config
             .workflow_policy
             .context_pressure_threshold;
-        let inputs = self.context_pressure_inputs(member_name, output_bytes);
+        let restart_delay_secs = self
+            .config
+            .team_config
+            .workflow_policy
+            .context_pressure_restart_delay_secs;
+        let inputs = self.context_pressure_inputs(member_name, output_bytes, uptime_secs);
         let (score, actions) = self.context_pressure_tracker.observe_at(
             member_name,
             &inputs,
             is_working,
+            restart_delay_secs,
             Instant::now(),
         );
         if actions.is_empty() {
@@ -303,12 +347,14 @@ impl TeamDaemon {
         &mut self,
         member_name: &str,
         output_bytes: u64,
+        uptime_secs: u64,
     ) -> ContextPressureInputs {
         let quality = self
             .current_codex_quality_signals(member_name)
             .unwrap_or_default();
         ContextPressureInputs {
             output_bytes,
+            session_uptime_secs: uptime_secs,
             narration_detected: self.narration_tracker.is_narrating(member_name),
             meta_conversation_detected: self.narration_tracker.is_narrating(member_name),
             assistant_message_count: quality.assistant_message_count,
@@ -317,8 +363,13 @@ impl TeamDaemon {
             shrinking_responses: quality.shrinking_responses,
             repeated_identical_outputs: quality.repeated_identical_outputs,
             tool_failure_message: quality.tool_failure_message,
+            shim_failure_count: self.context_pressure_tracker.shim_failure_count(member_name),
             secs_since_last_commit: self.secs_since_last_commit(member_name),
         }
+    }
+
+    pub(super) fn record_context_pressure_failure(&mut self, member_name: &str) {
+        self.context_pressure_tracker.record_failure(member_name);
     }
 
     fn current_codex_quality_signals(&mut self, member_name: &str) -> Option<CodexQualitySignals> {
@@ -402,6 +453,7 @@ mod tests {
     fn pressure_inputs() -> ContextPressureInputs {
         ContextPressureInputs {
             output_bytes: 450_000,
+            session_uptime_secs: 2_000,
             narration_detected: true,
             meta_conversation_detected: true,
             assistant_message_count: 4,
@@ -410,6 +462,7 @@ mod tests {
             shrinking_responses: true,
             repeated_identical_outputs: false,
             tool_failure_message: None,
+            shim_failure_count: 0,
             secs_since_last_commit: Some(2_000),
         }
     }
@@ -425,6 +478,7 @@ mod tests {
     fn score_rewards_real_action_diversity() {
         let inputs = ContextPressureInputs {
             output_bytes: 250_000,
+            session_uptime_secs: 60,
             narration_detected: false,
             meta_conversation_detected: false,
             assistant_message_count: 2,
@@ -433,6 +487,7 @@ mod tests {
             shrinking_responses: false,
             repeated_identical_outputs: false,
             tool_failure_message: None,
+            shim_failure_count: 0,
             secs_since_last_commit: Some(60),
         };
         assert!(compute_pressure_score(&inputs, 512_000) < 30);
@@ -442,7 +497,7 @@ mod tests {
     fn threshold_crossing_detection_warns_at_seventy_percent() {
         let mut tracker = ContextPressureTracker::new(100, 512_000);
         let (score, actions) =
-            tracker.observe_at("eng-1", &pressure_inputs(), true, Instant::now());
+            tracker.observe_at("eng-1", &pressure_inputs(), true, 120, Instant::now());
         assert!(score >= 70);
         assert_eq!(
             actions,
@@ -455,6 +510,7 @@ mod tests {
         let mut tracker = ContextPressureTracker::new(100, 512_000);
         let inputs = ContextPressureInputs {
             output_bytes: 120_000,
+            session_uptime_secs: 120,
             narration_detected: false,
             meta_conversation_detected: false,
             assistant_message_count: 2,
@@ -463,10 +519,11 @@ mod tests {
             shrinking_responses: false,
             repeated_identical_outputs: false,
             tool_failure_message: None,
+            shim_failure_count: 0,
             secs_since_last_commit: Some(120),
         };
 
-        let (score, actions) = tracker.observe_at("eng-1", &inputs, true, Instant::now());
+        let (score, actions) = tracker.observe_at("eng-1", &inputs, true, 120, Instant::now());
         assert!(
             score < 70,
             "brief planning should stay below the warning threshold"
@@ -479,12 +536,12 @@ mod tests {
         let mut tracker = ContextPressureTracker::new(100, 512_000);
         let inputs = pressure_inputs();
         assert_eq!(
-            tracker.observe_at("eng-1", &inputs, true, Instant::now()).1,
+            tracker.observe_at("eng-1", &inputs, true, 120, Instant::now()).1,
             vec![ContextPressureAction::Warn, ContextPressureAction::Nudge]
         );
         backdate_score(&mut tracker, "eng-1", inputs.output_bytes);
         assert_eq!(
-            tracker.observe_at("eng-1", &inputs, true, Instant::now()).1,
+            tracker.observe_at("eng-1", &inputs, true, 120, Instant::now()).1,
             vec![ContextPressureAction::Restart]
         );
     }
@@ -494,11 +551,12 @@ mod tests {
         let mut tracker = ContextPressureTracker::new(100, 512_000);
         let inputs = pressure_inputs();
         assert_eq!(
-            tracker.observe_at("eng-1", &inputs, true, Instant::now()).1,
+            tracker.observe_at("eng-1", &inputs, true, 120, Instant::now()).1,
             vec![ContextPressureAction::Warn, ContextPressureAction::Nudge]
         );
         let reset_inputs = ContextPressureInputs {
             output_bytes: 100,
+            session_uptime_secs: 5,
             narration_detected: false,
             meta_conversation_detected: false,
             assistant_message_count: 0,
@@ -507,16 +565,17 @@ mod tests {
             shrinking_responses: false,
             repeated_identical_outputs: false,
             tool_failure_message: None,
+            shim_failure_count: 0,
             secs_since_last_commit: Some(0),
         };
         assert!(
             tracker
-                .observe_at("eng-1", &reset_inputs, true, Instant::now())
+                .observe_at("eng-1", &reset_inputs, true, 120, Instant::now())
                 .1
                 .is_empty()
         );
         assert_eq!(
-            tracker.observe_at("eng-1", &inputs, true, Instant::now()).1,
+            tracker.observe_at("eng-1", &inputs, true, 120, Instant::now()).1,
             vec![ContextPressureAction::Warn, ContextPressureAction::Nudge]
         );
     }
@@ -527,11 +586,58 @@ mod tests {
         backdate_score(&mut tracker, "eng-1", 512_000);
         assert!(
             tracker
-                .observe_at("eng-1", &pressure_inputs(), false, Instant::now())
+                .observe_at("eng-1", &pressure_inputs(), false, 120, Instant::now())
                 .1
                 .is_empty()
         );
         assert_eq!(tracker.members["eng-1"].over_threshold_polls, 0);
+    }
+
+    #[test]
+    fn repeated_shim_failures_force_restart_after_delay_without_progress() {
+        let mut tracker = ContextPressureTracker::new(100, 512_000);
+        tracker.record_failure("eng-1");
+        tracker.record_failure("eng-1");
+        tracker.record_failure("eng-1");
+
+        let inputs = ContextPressureInputs {
+            output_bytes: 64_000,
+            session_uptime_secs: 180,
+            narration_detected: false,
+            meta_conversation_detected: false,
+            assistant_message_count: 1,
+            tool_call_count: 1,
+            unique_tool_names: 1,
+            shrinking_responses: false,
+            repeated_identical_outputs: false,
+            tool_failure_message: None,
+            shim_failure_count: tracker.shim_failure_count("eng-1"),
+            secs_since_last_commit: Some(180),
+        };
+
+        let (score, actions) = tracker.observe_at("eng-1", &inputs, true, 120, Instant::now());
+        assert!(score < 70, "forced restart should not depend on score crossing");
+        assert_eq!(actions, vec![ContextPressureAction::Restart]);
+    }
+
+    #[test]
+    fn long_running_session_with_failures_increases_pressure_score() {
+        let inputs = ContextPressureInputs {
+            output_bytes: 220_000,
+            session_uptime_secs: 1_200,
+            narration_detected: false,
+            meta_conversation_detected: false,
+            assistant_message_count: 3,
+            tool_call_count: 1,
+            unique_tool_names: 1,
+            shrinking_responses: false,
+            repeated_identical_outputs: false,
+            tool_failure_message: None,
+            shim_failure_count: 3,
+            secs_since_last_commit: Some(1_200),
+        };
+
+        assert!(compute_pressure_score(&inputs, 512_000) >= 55);
     }
 
     #[test]

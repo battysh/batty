@@ -486,6 +486,7 @@ impl TeamDaemon {
                     member_name,
                     &format!("<- error {command}: {reason}"),
                 );
+                self.record_context_pressure_failure(member_name);
                 if self.should_cold_respawn_codex_member(member_name, &reason) {
                     self.record_member_crashed(member_name, true);
                     if let Err(error) =
@@ -1248,6 +1249,43 @@ mod tests {
             messages.iter().any(|msg| msg.body.contains("Shim warning")),
             "manager should receive stall warning"
         );
+    }
+
+    #[test]
+    fn handle_shim_event_error_counts_toward_context_pressure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+        insert_mock_handle(&mut daemon, "eng-1");
+
+        daemon
+            .handle_shim_event(
+                "eng-1",
+                Event::Error {
+                    command: "SendMessage".into(),
+                    reason: "PTY write failed".into(),
+                },
+            )
+            .unwrap();
+        daemon
+            .handle_shim_event(
+                "eng-1",
+                Event::Error {
+                    command: "SendMessage".into(),
+                    reason: "agent in dead state".into(),
+                },
+            )
+            .unwrap();
+        daemon
+            .handle_shim_event(
+                "eng-1",
+                Event::Error {
+                    command: "startup".into(),
+                    reason: "prompt timeout".into(),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(daemon.context_pressure_tracker.shim_failure_count("eng-1"), 3);
     }
 
     // ── working-state timeout tests ──

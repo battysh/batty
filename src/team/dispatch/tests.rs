@@ -181,6 +181,56 @@ fn prepare_assignment_launch_refreshes_stale_worktree_before_dispatch() {
 }
 
 #[test]
+fn prepare_assignment_launch_resets_stale_existing_branch_to_current_main() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "dispatch-stale-branch");
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    let team_config_dir = repo.join(".batty").join("team_config");
+
+    setup_engineer_worktree(
+        &repo,
+        &worktree_dir,
+        &engineer_base_branch_name("eng-1"),
+        &team_config_dir,
+    )
+    .unwrap();
+
+    git_ok(&worktree_dir, &["checkout", "-B", "eng-1/300"]);
+    std::fs::write(worktree_dir.join("stale.txt"), "stale work\n").unwrap();
+    git_ok(&worktree_dir, &["add", "stale.txt"]);
+    git_ok(&worktree_dir, &["commit", "-m", "stale task work"]);
+
+    git_ok(&repo, &["checkout", "main"]);
+    std::fs::write(
+        repo.join("src").join("lib.rs"),
+        "pub fn smoke() -> bool { false }\n",
+    )
+    .unwrap();
+    git_ok(&repo, &["add", "src/lib.rs"]);
+    git_ok(&repo, &["commit", "-m", "advance main"]);
+
+    let mut daemon = TestDaemonBuilder::new(repo.as_path())
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ])
+        .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+        .build();
+
+    let launch = daemon
+        .prepare_assignment_launch("eng-1", "Task #301: current assignment", Some(301))
+        .unwrap();
+
+    assert_eq!(launch.branch.as_deref(), Some("eng-1/301"));
+    assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-1/301");
+    assert_eq!(
+        git_stdout(&worktree_dir, &["rev-parse", "HEAD"]),
+        git_stdout(&repo, &["rev-parse", "main"])
+    );
+    assert!(!worktree_dir.join("stale.txt").exists());
+}
+
+#[test]
 fn prepare_assignment_launch_resets_stale_worktree_after_rebase_conflict() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = init_git_repo(&tmp, "dispatch-stale-reset");
@@ -879,7 +929,7 @@ fn dispatch_preps_worktree_for_idle_engineer() {
 
     // Task branch should have been created by prepare_engineer_assignment_worktree
     let task_branch = "eng-1/301";
-    let branches = crate::team::test_support::git_stdout(&repo, &["branch", "--list"]);
+    let branches = git_stdout(&repo, &["branch", "--list"]);
     assert!(
         branches.contains(task_branch),
         "idle engineer should have task branch created by worktree prep; branches: {branches}"

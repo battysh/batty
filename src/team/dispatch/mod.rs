@@ -191,6 +191,9 @@ impl TeamDaemon {
                     &team_config_dir,
                     &sub_repo_names,
                 )?
+            } else if work_dir.exists() {
+                crate::worktree::ensure_worktree_branch_for_dispatch(&work_dir, task_branch)?;
+                work_dir
             } else {
                 self.maybe_refresh_assignment_worktree(
                     engineer,

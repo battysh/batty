@@ -637,6 +637,61 @@ pub fn git_current_branch(path: &Path) -> Result<String> {
     Ok(branch)
 }
 
+fn preferred_main_start_ref(path: &Path) -> Result<String> {
+    let output = run_git(
+        path,
+        [
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/remotes/origin/main",
+        ],
+    )?;
+    match output.status.code() {
+        Some(0) => Ok("origin/main".to_string()),
+        Some(1) => Ok("main".to_string()),
+        _ => bail!(
+            "failed to inspect origin/main in {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+    }
+}
+
+pub fn ensure_worktree_branch_for_dispatch(
+    worktree_path: &Path,
+    expected_branch: &str,
+) -> Result<bool> {
+    let current_branch = git_current_branch(worktree_path)?;
+    if current_branch == expected_branch {
+        return Ok(false);
+    }
+
+    let start_ref = preferred_main_start_ref(worktree_path)?;
+    let _ = run_git(worktree_path, ["merge", "--abort"]);
+    let _ = run_git(worktree_path, ["checkout", "--", "."]);
+    let _ = run_git(
+        worktree_path,
+        ["clean", "-fd", "--exclude=.batty/", "--exclude=.cargo/"],
+    );
+
+    let checkout = run_git(
+        worktree_path,
+        ["checkout", "-B", expected_branch, start_ref.as_str()],
+    )?;
+    if !checkout.status.success() {
+        bail!(
+            "failed to checkout '{}' from '{}' in {}: {}",
+            expected_branch,
+            start_ref,
+            worktree_path.display(),
+            String::from_utf8_lossy(&checkout.stderr).trim()
+        );
+    }
+
+    Ok(true)
+}
+
 /// Reset a worktree to point at its base branch. Used to clean up after a
 /// cherry-pick merge has made the task branch redundant.
 pub fn reset_worktree_to_base(worktree_path: &Path, base_branch: &str) -> Result<()> {
@@ -1216,5 +1271,114 @@ mod tests {
         );
         let _ = run_git(tmp.path(), ["branch", "-D", "feature-reset"]);
         let _ = run_git(tmp.path(), ["branch", "-D", "eng-main/test-eng"]);
+    }
+
+    #[test]
+    fn ensure_worktree_branch_for_dispatch_keeps_matching_branch() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        let wt_path = tmp.path().join("wt");
+        git(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-1-1-502",
+                wt_path.to_str().unwrap(),
+                "main",
+            ],
+        );
+
+        let before = run_git(&wt_path, ["rev-parse", "HEAD"]).unwrap().stdout;
+        let reset = ensure_worktree_branch_for_dispatch(&wt_path, "eng-1-1-502").unwrap();
+        let after = run_git(&wt_path, ["rev-parse", "HEAD"]).unwrap().stdout;
+
+        assert!(!reset);
+        assert_eq!(before, after);
+
+        let _ = run_git(
+            tmp.path(),
+            ["worktree", "remove", "--force", wt_path.to_str().unwrap()],
+        );
+        let _ = run_git(tmp.path(), ["branch", "-D", "eng-1-1-502"]);
+    }
+
+    #[test]
+    fn ensure_worktree_branch_for_dispatch_resets_mismatched_branch() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        let wt_path = tmp.path().join("wt");
+        git(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-1-1-500",
+                wt_path.to_str().unwrap(),
+                "main",
+            ],
+        );
+        fs::write(wt_path.join("work.txt"), "old work\n").unwrap();
+        git(&wt_path, &["add", "work.txt"]);
+        git(&wt_path, &["commit", "-q", "-m", "old task"]);
+
+        let reset = ensure_worktree_branch_for_dispatch(&wt_path, "eng-1-1-502").unwrap();
+        let head = run_git(&wt_path, ["rev-parse", "HEAD"]).unwrap().stdout;
+        let main = run_git(tmp.path(), ["rev-parse", "main"]).unwrap().stdout;
+
+        assert!(reset);
+        assert_eq!(git_current_branch(&wt_path).unwrap(), "eng-1-1-502");
+        assert_eq!(head, main);
+
+        let _ = run_git(
+            tmp.path(),
+            ["worktree", "remove", "--force", wt_path.to_str().unwrap()],
+        );
+        let _ = run_git(tmp.path(), ["branch", "-D", "eng-1-1-500"]);
+        let _ = run_git(tmp.path(), ["branch", "-D", "eng-1-1-502"]);
+    }
+
+    #[test]
+    fn ensure_worktree_branch_for_dispatch_cleans_dirty_worktree_before_reset() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        let wt_path = tmp.path().join("wt");
+        git(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-1-1-500",
+                wt_path.to_str().unwrap(),
+                "main",
+            ],
+        );
+        fs::write(wt_path.join("scratch.txt"), "dirty\n").unwrap();
+
+        ensure_worktree_branch_for_dispatch(&wt_path, "eng-1-1-502").unwrap();
+
+        assert_eq!(git_current_branch(&wt_path).unwrap(), "eng-1-1-502");
+        assert!(!wt_path.join("scratch.txt").exists());
+        assert!(
+            String::from_utf8_lossy(&run_git(&wt_path, ["status", "--porcelain"]).unwrap().stdout)
+                .trim()
+                .is_empty()
+        );
+
+        let _ = run_git(
+            tmp.path(),
+            ["worktree", "remove", "--force", wt_path.to_str().unwrap()],
+        );
+        let _ = run_git(tmp.path(), ["branch", "-D", "eng-1-1-500"]);
+        let _ = run_git(tmp.path(), ["branch", "-D", "eng-1-1-502"]);
     }
 }
