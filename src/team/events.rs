@@ -649,6 +649,14 @@ impl TeamEvent {
         }
     }
 
+    pub fn backend_quota_exhausted(role: &str, reason: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            reason: Some(reason.into()),
+            ..Self::base("backend_quota_exhausted")
+        }
+    }
+
     pub fn agent_spawned(role: &str) -> Self {
         Self {
             role: Some(role.into()),

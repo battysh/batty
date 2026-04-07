@@ -600,6 +600,29 @@ impl TeamDaemon {
                     member_name,
                     &format!("<- error {command}: {reason}"),
                 );
+
+                // Quota exhaustion: mark backend unhealthy and stop dispatching.
+                // Don't restart the agent — it will just hit the same error.
+                if command == "QuotaExhausted" {
+                    warn!(
+                        member = member_name,
+                        reason = reason.as_str(),
+                        "backend quota exhausted — pausing agent"
+                    );
+                    self.backend_health.insert(
+                        member_name.to_string(),
+                        crate::agent::BackendHealth::QuotaExhausted,
+                    );
+                    self.record_orchestrator_action(format!(
+                        "quota: {member_name} backend quota exhausted — {reason}"
+                    ));
+                    self.emit_event(crate::team::events::TeamEvent::backend_quota_exhausted(
+                        member_name,
+                        &reason,
+                    ));
+                    return Ok(());
+                }
+
                 self.record_context_pressure_failure(member_name);
                 if self.should_cold_respawn_codex_member(member_name, &reason) {
                     self.record_member_crashed(member_name, true);

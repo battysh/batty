@@ -1110,6 +1110,7 @@ fn backend_health(health: crate::agent::BackendHealth) -> BackendHealth {
         crate::agent::BackendHealth::Healthy => BackendHealth::Healthy,
         crate::agent::BackendHealth::Degraded => BackendHealth::Degraded,
         crate::agent::BackendHealth::Unreachable => BackendHealth::Unreachable,
+        crate::agent::BackendHealth::QuotaExhausted => BackendHealth::Unreachable,
     }
 }
 

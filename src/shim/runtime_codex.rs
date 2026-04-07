@@ -520,6 +520,21 @@ fn run_codex_exec(
                     .map(|e| e.message.clone())
                     .unwrap_or_else(|| "stream error".to_string());
                 eprintln!("[shim-codex {shim_id}] error event: {error_msg}");
+
+                // Detect quota/billing exhaustion — emit a specific event so
+                // the daemon can pause dispatch and alert the human.
+                let lower = error_msg.to_ascii_lowercase();
+                if lower.contains("usage limit")
+                    || lower.contains("quota")
+                    || lower.contains("billing")
+                    || lower.contains("purchase more credits")
+                {
+                    eprintln!("[shim-codex {shim_id}] QUOTA EXHAUSTED: {error_msg}");
+                    let _ = evt_channel.send(&Event::Error {
+                        command: "QuotaExhausted".into(),
+                        reason: error_msg.clone(),
+                    });
+                }
             }
 
             // turn.started, turn.completed, item.started — informational, no action

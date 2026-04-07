@@ -212,6 +212,7 @@ fn is_attention_event(event: &TeamEvent) -> bool {
         || name.contains("escalat")
         || name.contains("blocked")
         || name == "stall_detected"
+        || name == "backend_quota_exhausted"
 }
 
 fn is_agent_event(event: &TeamEvent) -> bool {
@@ -224,6 +225,7 @@ fn is_agent_event(event: &TeamEvent) -> bool {
             | "stall_detected"
             | "narration_rejection"
             | "pattern_detected"
+            | "backend_quota_exhausted"
     )
 }
 
@@ -254,6 +256,7 @@ fn friendly_event_title(event: &TeamEvent) -> String {
         "stall_detected" => "🚧 Agent Stalled",
         "context_exhausted" => "💾 Context Exhausted",
         "narration_rejection" => "🚫 Narration Rejected",
+        "backend_quota_exhausted" => "💳 Quota Exhausted",
         "auto_doctor_action" => "🩺 Auto-Doctor",
         "pattern_detected" => "📊 Pattern Detected",
         other => return format!("{role_prefix} — {}", other.replace('_', " ")),
@@ -326,6 +329,13 @@ fn friendly_event_description(event: &TeamEvent) -> String {
         "narration_rejection" => {
             let role = event.role.as_deref().unwrap_or("?");
             format!("**{role}** tried to narrate instead of code — rejected, retrying")
+        }
+        "backend_quota_exhausted" => {
+            let role = event.role.as_deref().unwrap_or("?");
+            let reason = event.reason.as_deref().unwrap_or("credits exhausted");
+            format!(
+                "**{role}** hit backend quota limit — agent paused\n> {reason}\n\nAdd credits or switch to a different backend in team.yaml"
+            )
         }
         "auto_doctor_action" => {
             let action = event.details.as_deref().unwrap_or("board maintenance");

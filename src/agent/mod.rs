@@ -33,6 +33,8 @@ pub enum BackendHealth {
     Degraded,
     /// Backend binary not found or not executable.
     Unreachable,
+    /// Backend quota/billing limit exhausted — agent cannot work until credits are added.
+    QuotaExhausted,
 }
 
 impl BackendHealth {
@@ -40,6 +42,7 @@ impl BackendHealth {
         match self {
             Self::Healthy => "healthy",
             Self::Degraded => "degraded",
+            Self::QuotaExhausted => "quota_exhausted",
             Self::Unreachable => "unreachable",
         }
     }
