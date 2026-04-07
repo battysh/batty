@@ -74,6 +74,12 @@ At 05:05 EDT on April 7, 2026, another architect review loop reproduced the same
 - task `#536` was sent from `review` back to `todo`, but the task file again retained `claimed_by: worker-2` after the rollback
 - the stale claim had to be cleared manually, confirming the claim/status reconciliation bug is broader than the earlier `#520` incident
 
+At 05:07 EDT on April 7, 2026, the next root-tree verification found the delivery test fixture drift had widened:
+
+- `cargo fmt --check` still passed
+- `cargo test` failed compiling `src/team/delivery/routing.rs` because a `TeamDaemon` test helper there also omitted `discord_bot`, `discord_event_cursor`, and `recent_escalations`
+- the same file also constructed `ChannelConfig` without the newer `agents_channel_id`, `commands_channel_id`, and `events_channel_id` fields, so the green-main task now needs to cover both daemon and config test-builder drift
+
 ### Known Failure Modes (Fixed)
 
 These were all discovered and fixed during the nether_earth stabilization session:
