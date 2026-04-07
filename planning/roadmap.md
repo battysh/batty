@@ -62,6 +62,7 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 | Issue | Status | Priority |
 |---|---|---|
 | Verification loop is still open after agent completion | Need daemon-run test/fix/retry cycle before merge | Critical |
+| `cargo test` on `main` is still red because tmux runtime tests assume a working live session environment | Need tmux command/session bootstrap hardening or correct capability gating in `src/tmux.rs` so default verification is green again | Critical |
 | Architect and manager stalls are less visible than engineer stalls | Non-engineer shim stall detection still needs hardening | Critical |
 | Manager inbox noise buries actionable work | Needs batching and signal-first routing | Critical |
 | Auto-merge path is not yet proven end-to-end | Review handoff and merge trigger need production verification | Critical |
