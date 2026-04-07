@@ -34,10 +34,11 @@ The architect receives a periodic nudge to:
 
 When default `cargo test` is red or intermittently failing on `main`, feature and experiment
 lanes stay in `backlog`. That includes Discord/Telegram walk-away work and OMX/clawhip study
-tasks. As of April 7, 2026, the latest architect cycle got a clean manual
-`cargo fmt --check` + `cargo test` pass, but the commit-hook suite still surfaced an
-intermittent failure in
-`reconcile_stale_worktrees_rebases_clean_base_worktree_after_main_advances`. Treat the default
+tasks. On April 7, 2026, architect verification first got one clean manual
+`cargo fmt --check` + `cargo test` run, then hit
+`reconcile_stale_worktrees_rebases_clean_base_worktree_after_main_advances` in the commit-hook
+suite, and later reproduced a fresh default-suite failure in
+`reconcile_stale_worktrees_skips_base_worktree_when_engineer_has_active_task`. Treat the default
 verification lane as unstable until repeated full-suite runs stay green. Promotions back to
 `todo` should stay deliberate and must not displace the active stabilization lanes below.
 
@@ -77,7 +78,7 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 | False review routing can still surface stale or already-merged work as actionable | Need commit-existence and branch-state validation before a card can enter or stay in `review` | High |
 | Failed shim delivery recovery still needs production hardening | Retry/escalation exists, but the daemon still needs stronger visibility and cleanup for repeated failed injections | High |
 | Codex agents still degrade before hitting hard context limits | RestartAgent exists; proactive restart with handoff remains open | Medium |
-| Architect backlog creation can emit malformed duplicate tasks | Need creation-time validation plus duplicate-title suppression so replenishment never pastes raw logs into backlog cards (for example `#522`/`#523`) | High |
+| Architect backlog creation can emit malformed duplicate tasks | Need creation-time validation plus duplicate-title suppression so replenishment never pastes raw logs into backlog cards or opens generic duplicates beside a specific stabilization card (for example `#522`/`#523` and `#533`/`#535`) | High |
 
 ### Tact Engine Status
 
@@ -85,11 +86,13 @@ Daemon-driven board replenishment is now in place. The tact engine detects idle-
 
 The verification and reopen loop is healthier than it was before the reopen automation landed,
 but the default verification path is not yet stable enough to declare fixed. On April 7, 2026
-the architect got one clean `cargo fmt --check` + `cargo test` run on `main`, then immediately
-hit an intermittent failure in
+the architect got one clean `cargo fmt --check` + `cargo test` run on `main`, then hit
 `reconcile_stale_worktrees_rebases_clean_base_worktree_after_main_advances` during the commit
-hook suite. Baseline verification therefore stays at the top of the stabilization stack beside
-supervisory stall detection.
+hook suite, and later reproduced
+`reconcile_stale_worktrees_skips_base_worktree_when_engineer_has_active_task` in a fresh
+default `cargo test` run. Baseline verification therefore stays at the top of the stabilization
+stack beside supervisory stall detection, and the active backlog should prefer the specific
+stale-worktree stabilization card over new generic reopen cards.
 
 Next hardening work is about execution quality rather than backlog creation:
 - Stabilize the default `cargo test` path on `main` across repeated full-suite runs
