@@ -67,6 +67,7 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 | Manager inbox noise buries actionable work | Needs batching and signal-first routing | Critical |
 | Auto-merge path is not yet proven end-to-end | Review handoff and merge trigger need production verification | Critical |
 | Codex agents still degrade before hitting hard context limits | RestartAgent exists; proactive restart with handoff remains open | Medium |
+| Architect backlog creation can emit malformed duplicate tasks | Need creation-time validation plus duplicate-title suppression so replenishment never pastes raw logs into backlog cards (for example `#522`/`#523`) | High |
 
 ### Tact Engine Status
 
