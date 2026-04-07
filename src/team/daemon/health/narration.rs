@@ -9,7 +9,7 @@ use tracing::warn;
 
 use super::super::*;
 use super::format_checkpoint_section;
-use crate::shim::classifier::{AgentType, NarrationLineKind};
+use crate::shim::classifier::AgentType;
 use crate::team::events::TeamEvent;
 
 const DEFAULT_NARRATION_THRESHOLD_POLLS: u32 = 5;
@@ -66,7 +66,11 @@ impl NarrationTracker {
     }
 
     pub(super) fn narration_ratio(&self, member: &str) -> f64 {
-        if self.is_narrating(member) { 1.0 } else { 0.0 }
+        if self.is_narrating(member) {
+            1.0
+        } else {
+            0.0
+        }
     }
 
     pub(super) fn note_breach(&mut self, member: &str, narrating: bool) -> BreakerState {
@@ -100,15 +104,6 @@ impl NarrationTracker {
             .get(member)
             .is_some_and(|state| state.nudged && state.post_nudge_polls >= self.threshold_polls)
     }
-}
-
-pub(super) fn has_tool_markers(content: &str, agent_type: AgentType) -> bool {
-    content.lines().any(|line| {
-        matches!(
-            crate::shim::classifier::classify_narration_line(line, agent_type),
-            NarrationLineKind::ToolOrCommand
-        )
-    })
 }
 
 impl TeamDaemon {
@@ -299,29 +294,6 @@ impl TeamDaemon {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn has_tool_markers_claude_read() {
-        assert!(has_tool_markers("⏺ Read(src/main.rs)", AgentType::Claude));
-    }
-
-    #[test]
-    fn has_tool_markers_claude_bash() {
-        assert!(has_tool_markers("⏺ Bash(cargo test)", AgentType::Claude));
-    }
-
-    #[test]
-    fn has_tool_markers_codex_shell() {
-        assert!(has_tool_markers("$ cargo test", AgentType::Codex));
-    }
-
-    #[test]
-    fn has_tool_markers_no_markers() {
-        assert!(!has_tool_markers(
-            "I will inspect the issue and then explain the next step.",
-            AgentType::Claude
-        ));
-    }
 
     #[test]
     fn record_and_detect_narration() {
