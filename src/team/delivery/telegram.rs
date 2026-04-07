@@ -253,6 +253,8 @@ mod tests {
             intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
+            discord_bot: None,
+            discord_event_cursor: 0,
             telegram_bot: None,
             failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),

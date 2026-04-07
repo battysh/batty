@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, de};
 
 use super::super::DEFAULT_EVENT_LOG_MAX_BYTES;
 
@@ -871,15 +871,49 @@ pub enum ClaudeAuthMode {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChannelConfig {
+    #[serde(default)]
     pub target: String,
+    #[serde(default)]
     pub provider: String,
     /// Telegram bot token for native API (optional; falls back to provider CLI).
     /// Can also be set via `BATTY_TELEGRAM_BOT_TOKEN` env var.
     #[serde(default)]
     pub bot_token: Option<String>,
-    /// Telegram user IDs allowed to send messages (access control).
-    #[serde(default)]
+    /// User IDs allowed to send messages (access control).
+    ///
+    /// Accepts either numeric YAML values or quoted strings so the same field
+    /// can represent Telegram integers and Discord snowflake IDs.
+    #[serde(default, deserialize_with = "deserialize_user_id_list")]
     pub allowed_user_ids: Vec<i64>,
+    #[serde(default)]
+    pub events_channel_id: Option<String>,
+    #[serde(default)]
+    pub agents_channel_id: Option<String>,
+    #[serde(default)]
+    pub commands_channel_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum UserIdValue {
+    Integer(i64),
+    String(String),
+}
+
+fn deserialize_user_id_list<'de, D>(deserializer: D) -> Result<Vec<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<UserIdValue>::deserialize(deserializer)?;
+    values
+        .into_iter()
+        .map(|value| match value {
+            UserIdValue::Integer(id) => Ok(id),
+            UserIdValue::String(raw) => raw
+                .parse::<i64>()
+                .map_err(|error| de::Error::custom(format!("invalid user id '{raw}': {error}"))),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

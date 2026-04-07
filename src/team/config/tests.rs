@@ -77,6 +77,42 @@ roles:
 }
 
 #[test]
+fn parse_config_with_discord_user_role() {
+    let yaml = r#"
+name: test-team
+roles:
+  - name: human
+    role_type: user
+    channel: discord
+    channel_config:
+      bot_token: discord-token
+      events_channel_id: "1490930323608047647"
+      agents_channel_id: "1490930375822676070"
+      commands_channel_id: "1490930426812829716"
+      allowed_user_ids: ["170281556", 170281557]
+    talks_to: [architect]
+  - name: architect
+    role_type: architect
+    agent: claude
+    instances: 1
+    talks_to: [human]
+"#;
+
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    let channel_config = config.roles[0].channel_config.as_ref().unwrap();
+    assert_eq!(config.roles[0].channel.as_deref(), Some("discord"));
+    assert_eq!(
+        channel_config.events_channel_id.as_deref(),
+        Some("1490930323608047647")
+    );
+    assert_eq!(
+        channel_config.commands_channel_id.as_deref(),
+        Some("1490930426812829716")
+    );
+    assert_eq!(channel_config.allowed_user_ids, vec![170281556, 170281557]);
+}
+
+#[test]
 fn planning_directive_path_uses_team_config_directory() {
     let root = std::path::Path::new("/tmp/project");
 

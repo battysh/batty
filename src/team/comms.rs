@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 use super::config::ChannelConfig;
+use super::discord::DiscordBot;
 use super::errors::DeliveryError;
 use super::telegram::TelegramBot;
 
@@ -222,6 +223,41 @@ impl Channel for NativeTelegramChannel {
     }
 }
 
+/// Native Discord channel using the Bot API directly.
+pub struct DiscordChannel {
+    bot: DiscordBot,
+    channel_id: String,
+}
+
+impl DiscordChannel {
+    pub fn new(bot: DiscordBot, channel_id: String) -> Self {
+        Self { bot, channel_id }
+    }
+
+    pub fn from_config(config: &ChannelConfig) -> Option<Self> {
+        let channel_id = config
+            .commands_channel_id
+            .clone()
+            .or_else(|| config.events_channel_id.clone())?;
+        DiscordBot::from_config(config).map(|bot| Self::new(bot, channel_id))
+    }
+}
+
+impl Channel for DiscordChannel {
+    fn send(&self, message: &str) -> std::result::Result<(), DeliveryError> {
+        self.bot
+            .send_formatted_message(&self.channel_id, message)
+            .map_err(|error| DeliveryError::ChannelSend {
+                recipient: self.channel_id.clone(),
+                detail: error.to_string(),
+            })
+    }
+
+    fn channel_type(&self) -> &str {
+        "discord"
+    }
+}
+
 /// Create a channel from config fields.
 pub fn channel_from_config(
     channel_type: &str,
@@ -235,6 +271,11 @@ pub fn channel_from_config(
                 Ok(Box::new(TelegramChannel::from_config(config)))
             }
         }
+        "discord" => DiscordChannel::from_config(config)
+            .map(|channel| Box::new(channel) as Box<dyn Channel>)
+            .ok_or_else(|| DeliveryError::UnsupportedChannel {
+                channel_type: "discord".to_string(),
+            }),
         other => Err(DeliveryError::UnsupportedChannel {
             channel_type: other.to_string(),
         }),
@@ -260,12 +301,22 @@ mod tests {
     }
 
     #[test]
+    fn discord_channel_type() {
+        let bot = DiscordBot::new("test-token".into(), vec![42], "67890".into());
+        let ch = DiscordChannel::new(bot, "67890".into());
+        assert_eq!(ch.channel_type(), "discord");
+    }
+
+    #[test]
     fn channel_from_config_telegram() {
         let config = ChannelConfig {
             target: "12345".into(),
             provider: "openclaw".into(),
             bot_token: None,
             allowed_user_ids: vec![],
+            events_channel_id: None,
+            agents_channel_id: None,
+            commands_channel_id: None,
         };
         // Without bot_token (and assuming env var is not set), falls back to CLI channel.
         if std::env::var("BATTY_TELEGRAM_BOT_TOKEN").is_err() {
@@ -281,6 +332,9 @@ mod tests {
             provider: "openclaw".into(),
             bot_token: Some("test-bot-token".into()),
             allowed_user_ids: vec![],
+            events_channel_id: None,
+            agents_channel_id: None,
+            commands_channel_id: None,
         };
         let ch = channel_from_config("telegram", &config).unwrap();
         assert_eq!(ch.channel_type(), "telegram-native");
@@ -293,6 +347,9 @@ mod tests {
             provider: "openclaw".into(),
             bot_token: None,
             allowed_user_ids: vec![],
+            events_channel_id: None,
+            agents_channel_id: None,
+            commands_channel_id: None,
         };
         // Only assert CLI fallback when the env var is also absent.
         if std::env::var("BATTY_TELEGRAM_BOT_TOKEN").is_err() {
@@ -308,11 +365,29 @@ mod tests {
             provider: "x".into(),
             bot_token: None,
             allowed_user_ids: vec![],
+            events_channel_id: None,
+            agents_channel_id: None,
+            commands_channel_id: None,
         };
         match channel_from_config("slack", &config) {
             Err(e) => assert!(e.to_string().contains("unsupported")),
             Ok(_) => panic!("expected error for unsupported channel"),
         }
+    }
+
+    #[test]
+    fn channel_from_config_discord() {
+        let config = ChannelConfig {
+            target: String::new(),
+            provider: String::new(),
+            bot_token: Some("discord-token".into()),
+            allowed_user_ids: vec![42],
+            events_channel_id: Some("100".into()),
+            agents_channel_id: Some("200".into()),
+            commands_channel_id: Some("300".into()),
+        };
+        let ch = channel_from_config("discord", &config).unwrap();
+        assert_eq!(ch.channel_type(), "discord");
     }
 
     #[test]
