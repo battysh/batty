@@ -319,9 +319,11 @@ pub(crate) fn prepare_engineer_assignment_worktree(
     }
 
     let previous_branch = current_worktree_branch(worktree_dir)?;
+    let previous_branch_is_engineer_owned = previous_branch == engineer_name
+        || previous_branch.starts_with(&format!("{engineer_name}/"));
     if previous_branch != base_branch
-        && previous_branch != engineer_name
         && previous_branch != task_branch
+        && !previous_branch_is_engineer_owned
         && !branch_is_merged_into(project_root, &previous_branch, "main")?
     {
         bail!(
@@ -338,8 +340,7 @@ pub(crate) fn prepare_engineer_assignment_worktree(
 
     if previous_branch != base_branch
         && previous_branch != task_branch
-        && (previous_branch == engineer_name
-            || previous_branch.starts_with(&format!("{engineer_name}/")))
+        && previous_branch_is_engineer_owned
         && branch_is_merged_into(project_root, &previous_branch, "main")?
     {
         delete_branch(project_root, &previous_branch)?;
@@ -1512,6 +1513,51 @@ mod tests {
     }
 
     #[test]
+    fn test_prepare_assignment_worktree_resets_mismatched_engineer_task_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-5c");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            &engineer_base_branch_name("eng-5c"),
+            &team_config_dir,
+        )
+        .unwrap();
+
+        git_ok(&worktree_dir, &["checkout", "-B", "eng-5c/300"]);
+        std::fs::write(worktree_dir.join("stale.txt"), "stale work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "stale.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "stale task work"]);
+
+        git_ok(&repo, &["checkout", "main"]);
+        std::fs::write(repo.join("fresh.txt"), "fresh main content\n").unwrap();
+        git_ok(&repo, &["add", "fresh.txt"]);
+        git_ok(&repo, &["commit", "-m", "advance main"]);
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-5c",
+            "eng-5c/301",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "eng-5c/301"
+        );
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "HEAD"]),
+            git_stdout(&repo, &["rev-parse", "main"])
+        );
+        assert!(!worktree_dir.join("stale.txt").exists());
+    }
+
+    #[test]
     fn test_setup_engineer_worktree_writes_shared_cargo_target_config() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp);
@@ -2663,7 +2709,10 @@ mod tests {
             "wip: auto-save before restart [batty]",
             Duration::from_secs(30),
         );
-        assert!(result.is_ok(), "commit with generous timeout should succeed");
+        assert!(
+            result.is_ok(),
+            "commit with generous timeout should succeed"
+        );
     }
 
     // --- priority_rank tests ---
