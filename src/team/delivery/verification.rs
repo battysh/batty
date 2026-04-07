@@ -596,6 +596,9 @@ mod tests {
             planning_cycle_active: false,
             last_shim_health_check: Instant::now(),
             merge_queue: crate::team::daemon::MergeQueue::default(),
+            discord_bot: None,
+            discord_event_cursor: 0,
+            recent_escalations: HashMap::new(),
         }
     }
 
