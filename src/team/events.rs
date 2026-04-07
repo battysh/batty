@@ -487,6 +487,16 @@ impl TeamEvent {
         }
     }
 
+    pub fn shim_disconnect(role: &str, reason: &str, details: &str, expected: bool) -> Self {
+        Self {
+            role: Some(role.into()),
+            reason: Some(reason.into()),
+            details: Some(details.into()),
+            success: Some(expected),
+            ..Self::base("shim_disconnect")
+        }
+    }
+
     pub fn narration_detected(role: &str, task: Option<u32>) -> Self {
         Self {
             role: Some(role.into()),

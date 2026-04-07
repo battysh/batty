@@ -138,7 +138,11 @@ fn kiro_acp_emits_ready_after_handshake() {
     });
     assert!(evt.is_some(), "expected Ready event after ACP handshake");
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).ok();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .ok();
 }
 
 /// Kiro ACP mode responds to Ping with Pong.
@@ -159,7 +163,11 @@ fn kiro_acp_ping_pong() {
     });
     assert!(evt.is_some(), "expected Pong");
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).ok();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .ok();
 }
 
 /// Kiro ACP mode reports state as Idle after Ready.
@@ -183,7 +191,11 @@ fn kiro_acp_get_state_idle() {
         _ => panic!("expected State event"),
     }
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).ok();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .ok();
 }
 
 /// Sending a prompt produces a Completion with streamed text.
@@ -263,7 +275,11 @@ sleep 30
     );
     assert_eq!(completion_msg_id.as_deref(), Some("msg-1"));
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).ok();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .ok();
 }
 
 /// Permission requests are auto-approved.
@@ -315,7 +331,11 @@ sleep 30
         _ => panic!("expected Completion"),
     }
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).ok();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .ok();
 }
 
 /// When the mock subprocess exits, Died is emitted.
@@ -406,7 +426,11 @@ done
         "expected second Completion from queued message"
     );
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).ok();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .ok();
 }
 
 /// Context exhaustion detected from high usage metadata notification.
@@ -469,7 +493,11 @@ fn kiro_acp_capture_screen() {
         _ => panic!("expected ScreenCapture"),
     }
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).ok();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .ok();
 }
 
 /// Shutdown terminates cleanly.
@@ -488,7 +516,11 @@ fn kiro_acp_shutdown_terminates_cleanly() {
     })
     .expect("Ready");
 
-    ch.send(&Command::Shutdown { timeout_secs: 3 }).unwrap();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 3,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 
     // The shim may emit Died/Dead or just close the channel — both are fine.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);

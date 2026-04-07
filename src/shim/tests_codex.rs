@@ -84,7 +84,11 @@ fn codex_sdk_emits_ready() {
     });
     assert!(evt.is_some(), "expected Ready event");
 
-    ch.send(&Command::Shutdown { timeout_secs: 1 }).ok();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 1,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .ok();
 }
 
 /// Codex SDK responds to Ping.
@@ -103,7 +107,11 @@ fn codex_sdk_ping_pong() {
     });
     assert!(evt.is_some(), "expected Pong");
 
-    ch.send(&Command::Shutdown { timeout_secs: 1 }).ok();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 1,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .ok();
 }
 
 /// Codex SDK reports Idle state.
@@ -125,7 +133,11 @@ fn codex_sdk_state_is_idle() {
         _ => panic!("expected State"),
     }
 
-    ch.send(&Command::Shutdown { timeout_secs: 1 }).ok();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 1,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .ok();
 }
 
 /// When a message is sent, Codex spawns a subprocess and produces a Completion.
@@ -180,7 +192,11 @@ fn codex_sdk_message_completion() {
     assert!(got_completion, "expected Completion event");
     assert!(got_idle, "expected Idle state after completion");
 
-    ch.send(&Command::Shutdown { timeout_secs: 1 }).ok();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 1,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .ok();
 }
 
 /// Shutdown terminates cleanly.
@@ -193,7 +209,11 @@ fn codex_sdk_shutdown() {
     })
     .expect("Ready");
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).unwrap();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 
     // Channel should close (shim exited)
     std::thread::sleep(Duration::from_secs(1));

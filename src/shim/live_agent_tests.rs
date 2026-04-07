@@ -237,7 +237,10 @@ fn collect_until_completion(ch: &mut Channel, timeout: Duration) -> (Vec<Event>,
 }
 
 fn shutdown(ch: &mut Channel) {
-    let _ = ch.send(&Command::Shutdown { timeout_secs: 5 });
+    let _ = ch.send(&Command::Shutdown {
+        timeout_secs: 5,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    });
 }
 
 // =========================================================================
