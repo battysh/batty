@@ -33,6 +33,7 @@ pub mod daemon;
 mod daemon_mgmt;
 pub mod delivery;
 pub mod deps;
+pub mod discord;
 pub mod doctor;
 pub mod equivalence;
 pub mod errors;

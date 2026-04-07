@@ -167,6 +167,9 @@ impl TeamDaemon {
             self.run_recoverable_step("tact_check", |daemon| daemon.tact_check());
 
             // -- Recoverable with catch_unwind (panic-safe) --
+            self.run_optional_subsystem_step("process_discord_queue", "discord", |daemon| {
+                daemon.process_discord_queue()
+            });
             self.run_optional_subsystem_step("process_telegram_queue", "telegram", |daemon| {
                 daemon.process_telegram_queue()
             });
