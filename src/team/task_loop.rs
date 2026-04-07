@@ -1252,6 +1252,27 @@ pub(crate) fn recycle_cron_tasks(board_dir: &Path) -> Result<Vec<(u32, String)>>
 mod tests {
     use super::*;
     use crate::team::test_support::{EnvVarGuard, PATH_LOCK, git, git_ok, git_stdout};
+    use std::sync::MutexGuard;
+
+    fn git_binary_path() -> Option<&'static str> {
+        ["git", "/usr/bin/git", "/opt/homebrew/bin/git"]
+            .into_iter()
+            .find(|program| Command::new(program).arg("--version").output().is_ok())
+    }
+
+    fn git_binary_available() -> bool {
+        git_binary_path().is_some()
+    }
+
+    fn git_test_guard() -> Option<MutexGuard<'static, ()>> {
+        let guard = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        if git_binary_available() {
+            Some(guard)
+        } else {
+            eprintln!("skipping git-dependent task_loop test: git binary unavailable");
+            None
+        }
+    }
 
     fn production_unwrap_expect_count(path: &Path) -> usize {
         let content = std::fs::read_to_string(path).unwrap();
@@ -1319,6 +1340,9 @@ mod tests {
 
     #[test]
     fn test_refresh_worktree_rebases_behind_main() {
+        let Some(_path_lock) = git_test_guard() else {
+            return;
+        };
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp);
         let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
@@ -1821,6 +1845,9 @@ mod tests {
 
     #[test]
     fn test_run_tests_in_worktree_sets_shared_target_dir_for_engineer_worktree() {
+        let Some(_path_lock) = git_test_guard() else {
+            return;
+        };
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp);
         let worktree_dir = repo.join(".batty").join("worktrees").join("eng-target");
@@ -2362,6 +2389,9 @@ mod tests {
 
     #[test]
     fn auto_commit_saves_uncommitted_changes() {
+        let Some(_path_lock) = git_test_guard() else {
+            return;
+        };
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp);
         let wt_dir = repo.join(".batty").join("worktrees").join("eng-ac");
@@ -2423,6 +2453,9 @@ mod tests {
 
     #[test]
     fn auto_commit_saves_untracked_files() {
+        let Some(_path_lock) = git_test_guard() else {
+            return;
+        };
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp);
         let wt_dir = repo.join(".batty").join("worktrees").join("eng-ut2");
@@ -2448,6 +2481,9 @@ mod tests {
 
     #[test]
     fn auto_clean_worktree_uses_commit_not_stash() {
+        let Some(_path_lock) = git_test_guard() else {
+            return;
+        };
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp);
         let wt_dir = repo.join(".batty").join("worktrees").join("eng-ns");
@@ -2514,6 +2550,9 @@ mod tests {
 
     #[test]
     fn preserve_worktree_with_commit_saves_dirty_changes() {
+        let Some(_path_lock) = git_test_guard() else {
+            return;
+        };
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp);
         let wt_dir = repo.join(".batty").join("worktrees").join("eng-preserve");
@@ -2591,6 +2630,9 @@ mod tests {
 
     #[test]
     fn preserve_worktree_with_commit_times_out() {
+        let Some(_path_lock) = git_test_guard() else {
+            return;
+        };
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp);
         let wt_dir = repo.join(".batty").join("worktrees").join("eng-timeout");
