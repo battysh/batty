@@ -2,7 +2,10 @@
 
 ## North Star
 
-**Stability and resilience.** Batty must run multi-agent teams for hours without stalling, looping, or losing work. The nether_earth project is our live test bed — every hour we inspect it, find issues, fix them, and validate that the system self-recovers. Feature work is secondary to operational reliability.
+**Reliable autonomous throughput.** Batty should run hierarchical coding teams
+for hours without stalling, losing work, or requiring humans to babysit the
+board. Stability still comes first, but the bar is now broader: shipped changes
+must move cleanly from idea to merged code.
 
 ## Principles
 
@@ -16,11 +19,25 @@
 
 ---
 
-## Current Phase: Continuous Stabilization (Active)
+## Current Phase: Release Hardening And Proof (Active)
 
-**Goal:** Make batty a factory that runs indefinitely. Every failure mode discovered during nether_earth runs must be detected, logged, and auto-recovered.
+**Goal:** Prove the v0.10.0 operating model end-to-end: auto-dispatch,
+verification, review routing, auto-merge, and release documentation should all
+reflect the same system behavior.
 
-### Hourly Health Check Protocol
+### Shipped In v0.10.0
+
+- Auto-dispatch as the default board posture
+- Auto-merge queue for green, low-risk diffs
+- Claim TTL reclaim policy
+- Per-worktree Cargo target isolation
+- Claude stall detection with restart behavior
+- Smart worktree recovery and additive-conflict reduction
+- OAuth-friendly auth posture for Claude and Codex
+- Team scaling and richer role metadata (`posture`, `model_class`)
+- Updated release documentation, quick start, and config guidance
+
+### Active Validation Loop
 
 The architect receives a periodic nudge to:
 1. Inspect nether_earth daemon logs for warnings/errors
@@ -30,27 +47,12 @@ The architect receives a periodic nudge to:
 5. Fix the root cause in batty code if found
 6. Restart nether_earth with the fix and verify recovery
 
-### Backlog Discipline
-
-When default `cargo test` is red or intermittently failing on `main`, feature and experiment
-lanes stay in `backlog`. That includes Discord/Telegram walk-away work and OMX/clawhip study
-tasks. On April 7, 2026, architect verification first got one clean manual
-`cargo fmt --check` + `cargo test` run, then hit
-`reconcile_stale_worktrees_rebases_clean_base_worktree_after_main_advances` in the commit-hook
-suite. Later on April 7, 2026, a fresh default `cargo test` run failed after 176.25s with
-`reconcile_stale_worktrees_rebases_clean_base_worktree_after_main_advances` and
-`reconcile_stale_worktrees_skips_base_worktree_when_engineer_has_active_task`, both failing while
-trying to `git worktree add ...` with `No such file or directory (os error 2)`. Treat the default
-verification lane as unstable until repeated full-suite runs stay green. Promotions back to
-`todo` should stay deliberate and must not displace the active stabilization lanes below. Release,
-Discord, and other feature lanes should stay in `backlog` until this verification lane is stable.
-
 ### Known Failure Modes (Fixed)
 
 These were all discovered and fixed during the nether_earth stabilization session:
 
 | Failure Mode | Root Cause | Fix |
-|---|---|---|
+| --- | --- | --- |
 | Permanent "working" state stall | Shim classifier missed idle prompt behind "esc to interrupt" footer | Classifier rewrite: status bar is sole signal |
 | 10-hour deadlock | `mark_member_working` overrode shim state | No-op for shim agents; shim is source of truth |
 | Pipeline starvation suppressed | Manager "working" permanently blocked detection | Time-bounded suppression (10min grace) |
@@ -75,42 +77,35 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 ### Remaining Known Issues
 
 | Issue | Status | Priority |
-|---|---|---|
-| Architect and manager stalls are less visible than engineer stalls | Non-engineer shim stall detection still needs hardening | Critical |
-| Notifications and status chatter still leak into agent working context | Isolation is in progress, but supervisory messages can still displace coding context instead of staying out-of-band | High |
-| False review routing can still surface stale or already-merged work as actionable | Need commit-existence and branch-state validation before a card can enter or stay in `review` | High |
-| Failed shim delivery recovery still needs production hardening | Retry/escalation exists, but the daemon still needs stronger visibility and cleanup for repeated failed injections | High |
-| Codex agents still degrade before hitting hard context limits | RestartAgent exists; proactive restart with handoff remains open | Medium |
-| Architect backlog creation can emit malformed duplicate tasks | Need creation-time validation plus duplicate-title suppression so replenishment never pastes raw logs into backlog cards or opens generic duplicates beside a specific stabilization card (for example `#522`/`#523` and `#533`/`#535`) | High |
+| --- | --- | --- |
+| Verification loop is reliable but still needs stronger end-to-end proof on live runs | Active validation | Critical |
+| Architect and manager stalls are less visible than engineer stalls | Needs broader non-engineer stall heuristics | Critical |
+| Manager inbox noise still buries the most actionable review and dispatch items | Needs batching and signal-first routing | Critical |
+| Auto-merge needs more production mileage on heterogeneous diffs | Needs wider dogfooding | High |
+| Context exhaustion recovery is reactive; proactive restart/handoff remains open | Planned | Medium |
+| Release automation still ends at local verification instead of a fully automated publish flow | Planned | Medium |
 
 ### Tact Engine Status
 
 Daemon-driven board replenishment is now in place. The tact engine detects idle-worker starvation, composes a structured planning prompt from roadmap and board state, routes it to the architect, and creates board tasks automatically.
 
-The verification and reopen loop is healthier than it was before the reopen automation landed,
-but the default verification path is not yet stable enough to declare fixed. On April 7, 2026
-the architect got one clean `cargo fmt --check` + `cargo test` run on `main`, then hit
-`reconcile_stale_worktrees_rebases_clean_base_worktree_after_main_advances` during the commit
-hook suite. A later April 7, 2026 default `cargo test` rerun then failed after 176.25s with
-`reconcile_stale_worktrees_rebases_clean_base_worktree_after_main_advances` and
-`reconcile_stale_worktrees_skips_base_worktree_when_engineer_has_active_task`, both failing while
-creating engineer worktrees via `git worktree add ...` (`No such file or directory (os error 2)`).
-Baseline verification therefore stays at the top of the stabilization stack beside supervisory
-stall detection, and the active backlog should prefer the specific stale-worktree stabilization
-card over new generic reopen cards or release/feature work.
-
 Next hardening work is about execution quality rather than backlog creation:
-- Stabilize the default `cargo test` path on `main` across repeated full-suite runs
-- Harden architect/manager shim stall detection and recovery
+- Close the completion loop with automatic test, retry, and escalation behavior
+- Verify the auto-merge path end-to-end under production-like runs
 - Keep notifications and status chatter out of agent context windows
-- Harden failed-delivery retry and false-review detection under live daemon runs
-- Keep reopen/failure task creation structured and duplicate-free
 - Add proactive context-exhaustion restarts with handoff summaries
 
-The old "board empties because nobody creates tasks" failure mode stays closed, but the default
-verification lane is still flaky on `main`. Active roadmap attention is therefore split between
-stabilizing repeated full-suite verification and continuing the supervision, merge/review
-correctness, delivery, and context-hygiene hardening work.
+This removes the old "board empties because nobody creates tasks" failure mode from the active roadmap and shifts attention to verification, merge reliability, and context hygiene.
+
+### Next Phase: Context And Supervision Hygiene
+
+After release hardening, the next phase is reducing coordination drag:
+
+- proactive context-budget handoffs before hard exhaustion
+- better batching and prioritization for architect/manager inboxes
+- stronger supervision visibility for non-engineer roles
+- cleaner publish/release automation from green main to tagged release
+- tighter GitHub verification feedback wired back into the daemon loop
 
 ---
 

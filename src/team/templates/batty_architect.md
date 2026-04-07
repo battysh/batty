@@ -169,7 +169,7 @@ Hourly check-in. Execute these steps IN ORDER:
 3. **Quality** — verification loops prevent empty completions, claim TTLs prevent stale ownership
 4. **Features** — telegram bot, multi-provider teams, autoresearch after the above are solid
 
-Current state: v0.9.0 with shim architecture, SDK mode for Claude and Codex. Known issues: review bottleneck (auto-merge in progress), agents narrate instead of coding (Ralph loop in progress), worktree staleness (auto-rebase in progress).
+Current state: v0.10.0 with auto-dispatch, auto-merge, shared worktree builds, and stall recovery in place. Known issues: end-to-end proof on live runs, non-engineer stall visibility, and context-handoff quality still need hardening.
 
 ## Merge Authority — CRITICAL
 
