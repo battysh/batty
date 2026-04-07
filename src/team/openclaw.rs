@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::project_registry::{self, RegisteredProject};
 
-use super::{config, events, hierarchy, messaging, pause_marker_path, status, team_config_path};
+use super::{
+    config, events, hierarchy, messaging, openclaw_contract, pause_marker_path, status,
+    team_config_path,
+};
 
 const DEFAULT_RECENT_EVENTS: usize = 8;
 const OPENCLAW_EVENT_KIND: &str = "batty.openclaw.projectEvent";
@@ -323,37 +326,6 @@ pub fn openclaw_follow_up_summary(project_root: &Path) -> Result<FollowUpRunSumm
     run_follow_ups_with_adapter(project_root, &BattySupervisorAdapter, Utc::now())
 }
 
-pub fn openclaw_events(
-    project_root: &Path,
-    subscription: &OpenClawEventSubscription,
-    project_id: Option<&str>,
-    all_projects: bool,
-    json: bool,
-) -> Result<()> {
-    let events = openclaw_event_stream(project_root, subscription, project_id, all_projects)?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&events)?);
-    } else {
-        println!("{}", format_event_stream(&events));
-    }
-    Ok(())
-}
-
-pub fn openclaw_event_stream(
-    project_root: &Path,
-    subscription: &OpenClawEventSubscription,
-    project_id: Option<&str>,
-    all_projects: bool,
-) -> Result<Vec<OpenClawProjectEventEnvelope>> {
-    openclaw_event_stream_at(
-        &project_registry::registry_path()?,
-        project_root,
-        subscription,
-        project_id,
-        all_projects,
-    )
-}
-
 pub fn watch_project_events(
     project_id: &str,
     subscription: &OpenClawEventSubscription,
@@ -371,6 +343,98 @@ pub fn watch_all_project_events(
     watch_all_project_events_at(&project_registry::registry_path()?, subscription)
 }
 
+pub fn openclaw_contract_descriptor() -> openclaw_contract::ContractDescriptor {
+    openclaw_contract::descriptor()
+}
+
+pub fn openclaw_team_status_contract(project_root: &Path) -> Result<openclaw_contract::TeamStatus> {
+    let report = load_status_report(project_root)?;
+    Ok(openclaw_contract::team_status_from_report(&report))
+}
+
+pub fn watch_project_event_contracts(
+    project_id: &str,
+    subscription: &OpenClawEventSubscription,
+) -> Result<Vec<openclaw_contract::ProjectEventEnvelope>> {
+    watch_project_events(project_id, subscription)?
+        .into_iter()
+        .map(legacy_envelope_to_contract)
+        .collect()
+}
+
+pub fn watch_all_event_contracts(
+    subscription: &OpenClawEventSubscription,
+) -> Result<Vec<openclaw_contract::ProjectEventEnvelope>> {
+    watch_all_project_events(subscription)?
+        .into_iter()
+        .map(legacy_envelope_to_contract)
+        .collect()
+}
+
+fn legacy_event_topic(topic: openclaw_contract::TeamEventTopic) -> OpenClawEventTopic {
+    match topic {
+        openclaw_contract::TeamEventTopic::Completion => OpenClawEventTopic::Completion,
+        openclaw_contract::TeamEventTopic::Review => OpenClawEventTopic::Review,
+        openclaw_contract::TeamEventTopic::Stall => OpenClawEventTopic::Stall,
+        openclaw_contract::TeamEventTopic::Merge => OpenClawEventTopic::Merge,
+        openclaw_contract::TeamEventTopic::Escalation => OpenClawEventTopic::Escalation,
+        openclaw_contract::TeamEventTopic::DeliveryFailure => OpenClawEventTopic::DeliveryFailure,
+        openclaw_contract::TeamEventTopic::Lifecycle => OpenClawEventTopic::Lifecycle,
+    }
+}
+
+fn contract_event_topic(topic: OpenClawEventTopic) -> openclaw_contract::TeamEventTopic {
+    match topic {
+        OpenClawEventTopic::Completion => openclaw_contract::TeamEventTopic::Completion,
+        OpenClawEventTopic::Review => openclaw_contract::TeamEventTopic::Review,
+        OpenClawEventTopic::Stall => openclaw_contract::TeamEventTopic::Stall,
+        OpenClawEventTopic::Merge => openclaw_contract::TeamEventTopic::Merge,
+        OpenClawEventTopic::Escalation => openclaw_contract::TeamEventTopic::Escalation,
+        OpenClawEventTopic::DeliveryFailure => openclaw_contract::TeamEventTopic::DeliveryFailure,
+        OpenClawEventTopic::Lifecycle => openclaw_contract::TeamEventTopic::Lifecycle,
+    }
+}
+
+fn legacy_envelope_to_contract(
+    envelope: OpenClawProjectEventEnvelope,
+) -> Result<openclaw_contract::ProjectEventEnvelope> {
+    let event_kind = openclaw_contract::event_kind_from_legacy_event_type(&envelope.event_type)
+        .with_context(|| {
+            format!(
+                "unsupported legacy OpenClaw event type '{}'",
+                envelope.event_type
+            )
+        })?;
+
+    Ok(openclaw_contract::ProjectEventEnvelope {
+        kind: openclaw_contract::TEAM_EVENT_KIND.to_string(),
+        schema_version: openclaw_contract::CONTRACT_SCHEMA_VERSION,
+        min_supported_schema_version: openclaw_contract::MIN_SUPPORTED_SCHEMA_VERSION,
+        project_id: envelope.project_id,
+        project_name: envelope.project_name,
+        project_root: envelope.project_root,
+        team_name: envelope.team_name,
+        session_name: envelope.session_name,
+        event: openclaw_contract::TeamEvent {
+            topic: contract_event_topic(envelope.topic),
+            event_kind,
+            ts: envelope.ts,
+            member_name: envelope.identifiers.role,
+            task_id: envelope.identifiers.task_id,
+            sender: envelope.identifiers.sender,
+            recipient: envelope.identifiers.recipient,
+            reason: envelope.reason,
+            detail: envelope.details,
+            action_type: envelope.action_type,
+            success: envelope.success,
+            restart_count: envelope.restart_count,
+            load: envelope.load,
+            uptime_secs: envelope.uptime_secs,
+            session_running: envelope.session_running,
+        },
+    })
+}
+
 fn load_project_config(project_root: &Path) -> Result<OpenClawProjectConfig> {
     let path = project_config_path(project_root);
     let content = fs::read_to_string(&path)
@@ -378,25 +442,6 @@ fn load_project_config(project_root: &Path) -> Result<OpenClawProjectConfig> {
     let config = serde_yaml::from_str(&content)
         .with_context(|| format!("failed to parse OpenClaw project config {}", path.display()))?;
     Ok(config)
-}
-
-fn openclaw_event_stream_at(
-    registry_path: &Path,
-    project_root: &Path,
-    subscription: &OpenClawEventSubscription,
-    project_id: Option<&str>,
-    all_projects: bool,
-) -> Result<Vec<OpenClawProjectEventEnvelope>> {
-    if all_projects {
-        return watch_all_project_events_at(registry_path, subscription);
-    }
-
-    if let Some(project_id) = project_id {
-        return watch_project_events_at(registry_path, project_id, subscription);
-    }
-
-    let project_id = resolve_registered_project_id_at(registry_path, project_root)?;
-    watch_project_events_at(registry_path, &project_id, subscription)
 }
 
 fn save_project_config(path: &Path, config: &OpenClawProjectConfig) -> Result<()> {
@@ -407,26 +452,6 @@ fn save_project_config(path: &Path, config: &OpenClawProjectConfig) -> Result<()
     let content = serde_yaml::to_string(config)?;
     fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
-}
-
-fn resolve_registered_project_id_at(registry_path: &Path, project_root: &Path) -> Result<String> {
-    let current_root = canonical_project_root(project_root);
-    let registry = project_registry::load_registry_at(registry_path)?;
-    registry
-        .projects
-        .into_iter()
-        .find(|project| canonical_project_root(&project.project_root) == current_root)
-        .map(|project| project.project_id)
-        .with_context(|| {
-            format!(
-                "project '{}' is not registered; pass --project-id or register it first",
-                project_root.display()
-            )
-        })
-}
-
-fn canonical_project_root(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn collect_project_events(
@@ -554,35 +579,8 @@ fn map_team_event_to_openclaw_event(
 }
 
 fn public_event_contract(event: &events::TeamEvent) -> Option<(OpenClawEventTopic, &'static str)> {
-    match event.event.as_str() {
-        "task_completed" => Some((OpenClawEventTopic::Completion, "task.completed")),
-        "review_nudge_sent" => Some((OpenClawEventTopic::Review, "review.nudged")),
-        "review_escalated" => Some((OpenClawEventTopic::Review, "review.escalated")),
-        "review_stale" => Some((OpenClawEventTopic::Review, "review.stalled")),
-        "stall_detected" => Some((OpenClawEventTopic::Stall, "agent.stalled")),
-        "task_stale" => Some((OpenClawEventTopic::Stall, "task.stalled")),
-        "task_auto_merged" => Some((OpenClawEventTopic::Merge, "task.merged.automatic")),
-        "task_manual_merged" => Some((OpenClawEventTopic::Merge, "task.merged.manual")),
-        "task_escalated" => Some((OpenClawEventTopic::Escalation, "task.escalated")),
-        "verification_max_iterations_reached" => {
-            Some((OpenClawEventTopic::Escalation, "verification.escalated"))
-        }
-        "delivery_failed" => Some((OpenClawEventTopic::DeliveryFailure, "delivery.failed")),
-        "daemon_started" => Some((OpenClawEventTopic::Lifecycle, "session.started")),
-        "daemon_reloading" => Some((OpenClawEventTopic::Lifecycle, "session.reloading")),
-        "daemon_reloaded" => Some((OpenClawEventTopic::Lifecycle, "session.reloaded")),
-        "daemon_stopped" => Some((OpenClawEventTopic::Lifecycle, "session.stopped")),
-        "agent_spawned" => Some((OpenClawEventTopic::Lifecycle, "agent.started")),
-        "agent_restarted" => Some((OpenClawEventTopic::Lifecycle, "agent.restarted")),
-        "member_crashed" => Some((OpenClawEventTopic::Lifecycle, "agent.crashed")),
-        "pane_death" => Some((OpenClawEventTopic::Lifecycle, "agent.stopped")),
-        "pane_respawned" => Some((OpenClawEventTopic::Lifecycle, "agent.respawned")),
-        "context_exhausted" => Some((OpenClawEventTopic::Lifecycle, "agent.context_exhausted")),
-        "health_changed" => Some((OpenClawEventTopic::Lifecycle, "agent.health_changed")),
-        "topology_changed" => Some((OpenClawEventTopic::Lifecycle, "session.topology_changed")),
-        "agent_removed" => Some((OpenClawEventTopic::Lifecycle, "agent.removed")),
-        _ => None,
-    }
+    openclaw_contract::contract_for_internal_event(event)
+        .map(|(topic, event_kind)| (legacy_event_topic(topic), event_kind.legacy_event_type()))
 }
 
 fn watch_project_events_at(
@@ -710,47 +708,6 @@ fn format_status_summary(summary: &OpenClawStatusSummary) -> String {
     }
 
     lines.join("\n")
-}
-
-fn format_event_stream(events: &[OpenClawProjectEventEnvelope]) -> String {
-    if events.is_empty() {
-        return "No OpenClaw events matched.".to_string();
-    }
-
-    events
-        .iter()
-        .map(|event| {
-            let mut parts = vec![
-                format!("ts={}", event.ts),
-                format!("project={}", event.project_id),
-                format!("topic={}", event_topic_label(&event.topic)),
-                format!("event={}", event.event_type),
-            ];
-            if let Some(task_id) = event.identifiers.task_id.as_deref() {
-                parts.push(format!("task={task_id}"));
-            }
-            if let Some(role) = event.identifiers.role.as_deref() {
-                parts.push(format!("role={role}"));
-            }
-            if let Some(reason) = event.reason.as_deref() {
-                parts.push(format!("reason={reason}"));
-            }
-            parts.join(" | ")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn event_topic_label(topic: &OpenClawEventTopic) -> &'static str {
-    match topic {
-        OpenClawEventTopic::Completion => "completion",
-        OpenClawEventTopic::Review => "review",
-        OpenClawEventTopic::Stall => "stall",
-        OpenClawEventTopic::Merge => "merge",
-        OpenClawEventTopic::Escalation => "escalation",
-        OpenClawEventTopic::DeliveryFailure => "delivery_failure",
-        OpenClawEventTopic::Lifecycle => "lifecycle",
-    }
 }
 
 fn validate_instruction_role(config: &OpenClawProjectConfig, role: &str) -> Result<()> {
@@ -1285,42 +1242,6 @@ mod tests {
     }
 
     #[test]
-    fn format_event_stream_includes_project_and_identifier_context() {
-        let rendered = format_event_stream(&[OpenClawProjectEventEnvelope {
-            kind: OPENCLAW_EVENT_KIND.to_string(),
-            schema_version: OPENCLAW_EVENT_SCHEMA_VERSION,
-            topic: OpenClawEventTopic::Escalation,
-            event_type: "task.escalated".to_string(),
-            project_id: "fixture-degraded".to_string(),
-            project_name: "Fixture Degraded".to_string(),
-            project_root: "/tmp/fixture-degraded".to_string(),
-            team_name: "fixture-team".to_string(),
-            session_name: "batty-fixture-team".to_string(),
-            ts: 1_712_402_100,
-            identifiers: OpenClawEventIdentifiers {
-                role: Some("eng-1-1".to_string()),
-                task_id: Some("449".to_string()),
-                sender: None,
-                recipient: None,
-            },
-            reason: Some("Needs architectural input".to_string()),
-            details: None,
-            action_type: None,
-            success: None,
-            restart_count: None,
-            load: None,
-            uptime_secs: None,
-            session_running: None,
-        }]);
-
-        assert!(rendered.contains("project=fixture-degraded"));
-        assert!(rendered.contains("event=task.escalated"));
-        assert!(rendered.contains("task=449"));
-        assert!(rendered.contains("role=eng-1-1"));
-        assert!(rendered.contains("reason=Needs architectural input"));
-    }
-
-    #[test]
     fn watch_project_events_maps_internal_events_to_stable_public_contract() {
         let degraded = copy_fixture_project("degraded");
         let registry_path = degraded.path().join("registry.json");
@@ -1493,34 +1414,57 @@ mod tests {
     }
 
     #[test]
-    fn openclaw_event_stream_defaults_to_registered_current_project() {
-        let degraded = copy_fixture_project("degraded");
-        let registry_dir = tempfile::tempdir().unwrap();
-        let registry_path = registry_dir.path().join("project-registry.json");
+    fn openclaw_team_status_contract_maps_fixture_to_stable_dto() {
+        let report = openclaw_contract_descriptor();
+        let project = copy_fixture_project("degraded");
 
+        let status = openclaw_team_status_contract(project.path()).unwrap();
+
+        assert_eq!(report.kind, openclaw_contract::CONTRACT_DESCRIPTOR_KIND);
+        assert_eq!(status.kind, openclaw_contract::TEAM_STATUS_KIND);
+        assert_eq!(status.team_name, "fixture-team");
+        assert_eq!(status.lifecycle, openclaw_contract::TeamLifecycle::Stopped);
+        assert_eq!(status.pipeline.active_task_count, 1);
+        assert_eq!(status.pipeline.review_queue_count, 1);
+        assert!(
+            status
+                .approval_surface
+                .human_only_decisions
+                .contains(&openclaw_contract::HumanDecisionKind::MergeDisposition)
+        );
+    }
+
+    #[test]
+    fn legacy_event_contract_conversion_uses_explicit_event_kinds() {
+        let degraded = copy_fixture_project("degraded");
+        let registry_path = degraded.path().join("registry.json");
         register_fixture_project(
             &registry_path,
             "fixture-degraded",
             "Fixture Degraded",
             degraded.path(),
-            "fixture-team-degraded",
+            "fixture-team",
             "batty-fixture-team-degraded",
         );
 
-        let events = openclaw_event_stream_at(
+        let events = watch_project_events_at(
             &registry_path,
-            degraded.path(),
-            &OpenClawEventSubscription {
-                topics: vec![OpenClawEventTopic::Escalation],
-                ..OpenClawEventSubscription::default()
-            },
-            None,
-            false,
+            "fixture-degraded",
+            &OpenClawEventSubscription::default(),
         )
         .unwrap();
 
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].project_id, "fixture-degraded");
-        assert_eq!(events[0].event_type, "task.escalated");
+        let converted = legacy_envelope_to_contract(events[2].clone()).unwrap();
+
+        assert_eq!(converted.kind, openclaw_contract::TEAM_EVENT_KIND);
+        assert_eq!(
+            converted.event.event_kind,
+            openclaw_contract::TeamEventKind::TaskEscalated
+        );
+        assert_eq!(
+            converted.event.topic,
+            openclaw_contract::TeamEventTopic::Escalation
+        );
+        assert_eq!(converted.event.task_id.as_deref(), Some("449"));
     }
 }
