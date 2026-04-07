@@ -122,7 +122,9 @@ const CONTEXT_APPROACHING_PATTERNS: &[&str] = &[
 /// (e.g. automatic compression notifications from Claude).
 pub fn detect_context_approaching_limit(text: &str) -> bool {
     let lower = text.to_lowercase();
-    CONTEXT_APPROACHING_PATTERNS.iter().any(|p| lower.contains(p))
+    CONTEXT_APPROACHING_PATTERNS
+        .iter()
+        .any(|p| lower.contains(p))
 }
 
 const TEST_COMMAND_PATTERNS: &[&str] = &[
@@ -293,8 +295,12 @@ mod tests {
 
     #[test]
     fn context_approaching_not_detected_for_normal_text() {
-        assert!(!detect_context_approaching_limit("context manager initialized"));
-        assert!(!detect_context_approaching_limit("compression algorithm works"));
+        assert!(!detect_context_approaching_limit(
+            "context manager initialized"
+        ));
+        assert!(!detect_context_approaching_limit(
+            "compression algorithm works"
+        ));
     }
 
     #[test]
