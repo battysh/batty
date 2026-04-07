@@ -1547,7 +1547,11 @@ mod tests {
 
     #[test]
     fn test_setup_engineer_worktree_finds_git_when_path_is_stripped() {
-        let _path_lock = PATH_LOCK.lock().unwrap();
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        if !git_binary_available() {
+            eprintln!("skipping git-dependent task_loop test: git binary unavailable");
+            return;
+        }
         let _path_guard = EnvVarGuard::set("PATH", "/definitely/missing");
 
         let tmp = tempfile::tempdir().unwrap();
