@@ -10,8 +10,9 @@ use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use crate::team::task_loop::{
-    branch_is_merged_into, checkout_worktree_branch_from_main, current_worktree_branch,
-    delete_branch, engineer_base_branch_name, is_worktree_safe_to_mutate,
+    ADDITIVE_CONFLICT_AUTO_RESOLVE_FENCE, branch_is_merged_into,
+    checkout_worktree_branch_from_main, current_worktree_branch, delete_branch,
+    engineer_base_branch_name, is_worktree_safe_to_mutate, merge_additive_only_text,
 };
 use crate::team::verification::{self, VerifyStatus};
 
@@ -190,6 +191,11 @@ fn try_auto_resolve_rebase(worktree_dir: &Path) -> bool {
                 &["add", conflict],
                 &format!("stage auto-resolved {conflict}"),
             );
+        } else if try_auto_resolve_additive_conflict(worktree_dir, conflict) {
+            info!(
+                file = conflict,
+                "auto-resolved additive-only rebase conflict"
+            );
         } else {
             // Non-auto-resolvable conflict — bail
             info!(
@@ -236,6 +242,8 @@ fn try_auto_resolve_rebase(worktree_dir: &Path) -> bool {
                         );
                         let _ =
                             run_git_with_context(worktree_dir, &["add", r], &format!("stage {r}"));
+                    } else if try_auto_resolve_additive_conflict(worktree_dir, r) {
+                        info!(file = r, "auto-resolved additive-only rebase conflict");
                     } else {
                         return false;
                     }
@@ -245,6 +253,48 @@ fn try_auto_resolve_rebase(worktree_dir: &Path) -> bool {
         }
     }
     false
+}
+
+fn try_auto_resolve_additive_conflict(worktree_dir: &Path, path: &str) -> bool {
+    if !ADDITIVE_CONFLICT_AUTO_RESOLVE_FENCE.contains(&path) {
+        return false;
+    }
+
+    let Some(base) = read_conflict_stage(worktree_dir, 1, path) else {
+        return false;
+    };
+    let Some(current) = read_conflict_stage(worktree_dir, 2, path) else {
+        return false;
+    };
+    let Some(incoming) = read_conflict_stage(worktree_dir, 3, path) else {
+        return false;
+    };
+
+    let Some(merged) = merge_additive_only_text(&base, &current, &incoming) else {
+        return false;
+    };
+
+    std::fs::write(worktree_dir.join(path), merged).is_ok()
+        && run_git_with_context(
+            worktree_dir,
+            &["add", path],
+            &format!("stage additive-only conflict resolution for {path}"),
+        )
+        .is_ok_and(|output| output.status.success())
+}
+
+fn read_conflict_stage(worktree_dir: &Path, stage: u8, path: &str) -> Option<String> {
+    let stage_spec = format!(":{stage}:{path}");
+    let output = run_git_with_context(
+        worktree_dir,
+        &["show", stage_spec.as_str()],
+        &format!("read stage {stage} for conflicted path {path}"),
+    )
+    .ok()?;
+    if !output.status.success() || output.stdout.contains(&0) {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
 }
 
 pub(crate) fn reset_engineer_worktree(project_root: &Path, engineer_name: &str) -> Result<()> {
@@ -739,6 +789,49 @@ overall_parity: 100%
 
         let status = git(&worktree_dir, &["status", "--porcelain"]);
         assert!(status.status.success());
+    }
+
+    #[test]
+    fn merge_rebase_additive_conflict_keeps_both_sides() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        let (worktree_dir, team_config_dir) = engineer_worktree_paths(&repo, "eng-2");
+        let review_file = repo.join("src").join("team").join("review.rs");
+
+        std::fs::create_dir_all(review_file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &review_file,
+            "const REVIEW_CHECKS: &[&str] = &[\n    \"existing\",\n];\n",
+        )
+        .unwrap();
+        git_ok(&repo, &["add", "src/team/review.rs"]);
+        git_ok(&repo, &["commit", "-m", "add review checks"]);
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-2", &team_config_dir).unwrap();
+
+        std::fs::write(
+            worktree_dir.join("src").join("team").join("review.rs"),
+            "const REVIEW_CHECKS: &[&str] = &[\n    \"engineer\",\n    \"existing\",\n];\n",
+        )
+        .unwrap();
+        git_ok(&worktree_dir, &["add", "src/team/review.rs"]);
+        git_ok(&worktree_dir, &["commit", "-m", "engineer review addition"]);
+
+        std::fs::write(
+            &review_file,
+            "const REVIEW_CHECKS: &[&str] = &[\n    \"main\",\n    \"existing\",\n];\n",
+        )
+        .unwrap();
+        git_ok(&repo, &["add", "src/team/review.rs"]);
+        git_ok(&repo, &["commit", "-m", "main review addition"]);
+
+        let result = merge_engineer_branch(&repo, "eng-2").unwrap();
+
+        assert!(matches!(result, MergeOutcome::Success));
+        let merged = std::fs::read_to_string(review_file).unwrap();
+        assert!(merged.contains("\"main\""));
+        assert!(merged.contains("\"engineer\""));
+        assert!(merged.contains("\"existing\""));
     }
 
     fn setup_rebase_conflict_repo(
