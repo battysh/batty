@@ -730,6 +730,8 @@ pub struct AutomationConfig {
     pub utilization_recovery_interval_secs: u64,
     #[serde(default = "default_enabled")]
     pub commit_before_reset: bool,
+    #[serde(default)]
+    pub disk_hygiene: DiskHygieneConfig,
 }
 
 impl Default for AutomationConfig {
@@ -749,6 +751,7 @@ impl Default for AutomationConfig {
             intervention_cooldown_secs: default_intervention_cooldown_secs(),
             utilization_recovery_interval_secs: default_utilization_recovery_interval_secs(),
             commit_before_reset: default_enabled(),
+            disk_hygiene: DiskHygieneConfig::default(),
         }
     }
 }
@@ -1045,6 +1048,62 @@ fn default_event_log_max_bytes() -> u64 {
 
 fn default_retro_min_duration_secs() -> u64 {
     60
+}
+
+fn default_disk_hygiene_check_interval_secs() -> u64 {
+    600
+}
+
+fn default_disk_hygiene_min_free_gb() -> u64 {
+    10
+}
+
+fn default_disk_hygiene_max_shared_target_gb() -> u64 {
+    4
+}
+
+fn default_disk_hygiene_log_rotation_hours() -> u64 {
+    24
+}
+
+/// Configuration for automated disk hygiene during long runs.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiskHygieneConfig {
+    /// Enable automated disk hygiene checks.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    /// Interval in seconds between periodic disk pressure checks.
+    #[serde(default = "default_disk_hygiene_check_interval_secs")]
+    pub check_interval_secs: u64,
+    /// Minimum free disk space in GB before triggering cleanup.
+    #[serde(default = "default_disk_hygiene_min_free_gb")]
+    pub min_free_gb: u64,
+    /// Maximum size in GB for the shared-target directory.
+    #[serde(default = "default_disk_hygiene_max_shared_target_gb")]
+    pub max_shared_target_gb: u64,
+    /// Hours after which shim-logs and inbox messages are rotated.
+    #[serde(default = "default_disk_hygiene_log_rotation_hours")]
+    pub log_rotation_hours: u64,
+    /// Run `cargo clean --profile dev` in engineer worktree shared-target after merge.
+    #[serde(default = "default_enabled")]
+    pub post_merge_cleanup: bool,
+    /// Prune completed task branches after merge.
+    #[serde(default = "default_enabled")]
+    pub prune_merged_branches: bool,
+}
+
+impl Default for DiskHygieneConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            check_interval_secs: default_disk_hygiene_check_interval_secs(),
+            min_free_gb: default_disk_hygiene_min_free_gb(),
+            max_shared_target_gb: default_disk_hygiene_max_shared_target_gb(),
+            log_rotation_hours: default_disk_hygiene_log_rotation_hours(),
+            post_merge_cleanup: default_enabled(),
+            prune_merged_branches: default_enabled(),
+        }
+    }
 }
 
 fn default_shim_health_check_interval_secs() -> u64 {

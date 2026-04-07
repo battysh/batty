@@ -286,6 +286,7 @@ mod tests {
             last_health_check: Instant::now(),
             last_uncommitted_warn: HashMap::new(),
             last_shared_target_cleanup: Instant::now(),
+            last_disk_hygiene_check: Instant::now(),
             pending_delivery_queue: HashMap::new(),
             verification_states: HashMap::new(),
             narration_rejection_counts: HashMap::new(),
