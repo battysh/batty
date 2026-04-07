@@ -252,6 +252,41 @@ impl TeamDaemon {
                 continue;
             }
 
+            // SAFETY: never reset a worktree that has commits ahead of main.
+            // This protects against the race where active_tasks is empty during
+            // stop/start cycles but the engineer has uncommitted or unmerged work.
+            match crate::worktree::commits_ahead(&worktree_path, "main") {
+                Ok(ahead) if ahead > 0 => {
+                    debug!(
+                        member = %name,
+                        branch = %current_branch,
+                        ahead,
+                        "worktree has {} commits ahead of main; skipping reset",
+                        ahead
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    debug!(
+                        member = %name,
+                        error = %error,
+                        "failed to count commits ahead; skipping reset to be safe"
+                    );
+                    continue;
+                }
+                _ => {}
+            }
+
+            // Also check for uncommitted changes — don't destroy dirty work.
+            if crate::worktree::has_uncommitted_changes(&worktree_path).unwrap_or(true) {
+                debug!(
+                    member = %name,
+                    branch = %current_branch,
+                    "worktree has uncommitted changes; skipping reset"
+                );
+                continue;
+            }
+
             match crate::worktree::branch_fully_merged(
                 &self.config.project_root,
                 &current_branch,

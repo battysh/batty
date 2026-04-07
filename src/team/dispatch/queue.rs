@@ -257,9 +257,7 @@ impl TeamDaemon {
                     Some(&MemberState::Idle) => true,
                     // Working engineers with no active task are effectively idle
                     // and should be eligible for dispatch.
-                    Some(&MemberState::Working) => {
-                        !self.active_tasks.contains_key(&member.name)
-                    }
+                    Some(&MemberState::Working) => !self.active_tasks.contains_key(&member.name),
                     _ => false,
                 }
             })
@@ -593,9 +591,46 @@ impl TeamDaemon {
                         "dispatch queue: worktree not ready for dispatch"
                     );
 
-                    // Auto-recover: reset worktree to base branch on first failure
-                    // instead of waiting for 3 failures to escalate.
+                    // Auto-recover: try rebase first, only reset as last resort.
                     let base_branch = format!("eng-main/{}", entry.engineer);
+
+                    // SAFETY: if worktree has commits ahead of main, try rebase not reset.
+                    let has_work = crate::worktree::commits_ahead(&worktree_dir, "main")
+                        .map(|n| n > 0)
+                        .unwrap_or(false)
+                        || crate::worktree::has_uncommitted_changes(&worktree_dir).unwrap_or(false);
+
+                    if has_work {
+                        info!(
+                            engineer = %entry.engineer,
+                            "dispatch queue: worktree has work; trying rebase instead of reset"
+                        );
+                        // Try to rebase onto main to preserve work
+                        let rebase_result = std::process::Command::new("git")
+                            .args(["rebase", "main"])
+                            .current_dir(&worktree_dir)
+                            .output();
+                        if rebase_result.map(|o| o.status.success()).unwrap_or(false) {
+                            info!(
+                                engineer = %entry.engineer,
+                                "dispatch queue: rebase succeeded; retrying dispatch"
+                            );
+                            entry.validation_failures = 0;
+                            entry.last_failure = None;
+                            retained.push(entry);
+                            continue;
+                        }
+                        // Rebase failed — abort and fall through to reset
+                        let _ = std::process::Command::new("git")
+                            .args(["rebase", "--abort"])
+                            .current_dir(&worktree_dir)
+                            .output();
+                        warn!(
+                            engineer = %entry.engineer,
+                            "dispatch queue: rebase failed; falling through to reset (work may be lost)"
+                        );
+                    }
+
                     info!(
                         engineer = %entry.engineer,
                         base_branch = %base_branch,
