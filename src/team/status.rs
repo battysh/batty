@@ -372,26 +372,34 @@ pub(crate) fn worktree_staleness_by_member(
 ) -> HashMap<String, u32> {
     members
         .iter()
-        .filter(|member| member.role_type == RoleType::Engineer && member.use_worktrees)
         .filter_map(|member| {
-            let worktree_dir = project_root
-                .join(".batty")
-                .join("worktrees")
-                .join(&member.name);
-            if !worktree_dir.exists() {
-                return None;
-            }
-
-            match super::task_loop::worktree_commits_behind_main(&worktree_dir) {
-                Ok(count) => Some((member.name.clone(), count)),
-                Err(error) => {
-                    warn!(
-                        member = %member.name,
-                        error = %error,
-                        "failed to measure engineer worktree staleness for status"
-                    );
-                    None
+            if member.role_type == RoleType::Engineer && member.use_worktrees {
+                let worktree_dir = project_root
+                    .join(".batty")
+                    .join("worktrees")
+                    .join(&member.name);
+                if !worktree_dir.exists() {
+                    return None;
                 }
+
+                match super::task_loop::worktree_commits_behind_main(&worktree_dir) {
+                    Ok(count) => Some((member.name.clone(), count)),
+                    Err(error) => {
+                        warn!(
+                            member = %member.name,
+                            error = %error,
+                            "failed to measure engineer worktree staleness for status"
+                        );
+                        None
+                    }
+                }
+            } else if member.agent.as_deref() == Some("claude") {
+                // Claude management roles do not have worktrees, but we still
+                // surface them in the STALE column so status shows they are
+                // included in shim stall tracking.
+                Some((member.name.clone(), 0))
+            } else {
+                None
             }
         })
         .collect()
@@ -1953,6 +1961,38 @@ mod tests {
         }
     }
 
+    fn architect(name: &str) -> MemberInstance {
+        MemberInstance {
+            name: name.to_string(),
+            role_name: name.to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            model: None,
+            prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
+            reports_to: None,
+            use_worktrees: false,
+        }
+    }
+
+    fn claude_manager(name: &str) -> MemberInstance {
+        MemberInstance {
+            name: name.to_string(),
+            role_name: name.to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            model: None,
+            prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+        }
+    }
+
     fn user_member(name: &str) -> MemberInstance {
         MemberInstance {
             name: name.to_string(),
@@ -2458,6 +2498,37 @@ mod tests {
 
         assert_eq!(health.get("eng-1"), Some(&AgentHealthSummary::default()));
         assert_eq!(health.get("eng-2"), Some(&AgentHealthSummary::default()));
+    }
+
+    #[test]
+    fn worktree_staleness_by_member_includes_claude_management_roles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staleness = worktree_staleness_by_member(
+            tmp.path(),
+            &[
+                architect("architect"),
+                claude_manager("manager"),
+                MemberInstance {
+                    name: "codex-manager".to_string(),
+                    role_name: "codex-manager".to_string(),
+                    role_type: RoleType::Manager,
+                    agent: Some("codex".to_string()),
+                    model: None,
+                    prompt: None,
+                    posture: None,
+                    model_class: None,
+                    provider_overlay: None,
+                    reports_to: Some("architect".to_string()),
+                    use_worktrees: false,
+                },
+                user_member("human"),
+            ],
+        );
+
+        assert_eq!(staleness.get("architect"), Some(&0));
+        assert_eq!(staleness.get("manager"), Some(&0));
+        assert!(!staleness.contains_key("codex-manager"));
+        assert!(!staleness.contains_key("human"));
     }
 
     #[test]
