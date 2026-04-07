@@ -82,8 +82,6 @@ mod interventions;
 mod launcher;
 #[path = "daemon/merge_queue.rs"]
 mod merge_queue;
-#[path = "daemon/outbox.rs"]
-mod outbox;
 #[path = "daemon/poll.rs"]
 mod poll;
 #[path = "daemon/reconcile.rs"]
