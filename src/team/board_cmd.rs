@@ -303,7 +303,7 @@ fn run_board_owned(board_dir: &Path, args: &[String]) -> Result<BoardOutput, Boa
     run_board(board_dir, &arg_refs)
 }
 
-fn run_board_with_program(
+pub(crate) fn run_board_with_program(
     program: &str,
     board_dir: &Path,
     args: &[&str],
