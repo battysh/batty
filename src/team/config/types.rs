@@ -869,7 +869,7 @@ pub enum ClaudeAuthMode {
     Custom,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct ChannelConfig {
     #[serde(default)]
     pub target: String,

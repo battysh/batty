@@ -300,11 +300,7 @@ pub(crate) fn test_channel_config(target: &str, provider: &str) -> ChannelConfig
     ChannelConfig {
         target: target.to_string(),
         provider: provider.to_string(),
-        bot_token: None,
-        allowed_user_ids: vec![],
-        agents_channel_id: None,
-        commands_channel_id: None,
-        events_channel_id: None,
+        ..Default::default()
     }
 }
 
@@ -593,5 +589,34 @@ pub(crate) fn backdate_idle_grace(daemon: &mut TeamDaemon, member_name: &str) {
         .insert(member_name.to_string(), Instant::now() - grace);
     if let Some(schedule) = daemon.nudges.get_mut(member_name) {
         schedule.idle_since = Some(Instant::now() - schedule.interval.max(grace));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TestDaemonBuilder, test_channel_config};
+
+    #[test]
+    fn test_daemon_builder_initializes_delivery_runtime_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+
+        assert!(daemon.discord_bot.is_none());
+        assert_eq!(daemon.discord_event_cursor, 0);
+        assert!(daemon.recent_escalations.is_empty());
+    }
+
+    #[test]
+    fn test_channel_config_defaults_optional_channels() {
+        let config = test_channel_config("123", "fake");
+
+        assert_eq!(config.target, "123");
+        assert_eq!(config.provider, "fake");
+        assert!(config.allowed_user_ids.is_empty());
+        assert!(config.bot_token.is_none());
+        assert!(config.agents_channel_id.is_none());
+        assert!(config.commands_channel_id.is_none());
+        assert!(config.events_channel_id.is_none());
     }
 }
