@@ -579,6 +579,8 @@ struct ShimInner {
     /// Used for response extraction when TUI agents redraw the screen
     /// before the Working→Idle transition is detected.
     last_working_screen: String,
+    /// Consecutive failed test fix/retest loops handled inside the shim.
+    test_failure_iterations: u8,
 }
 
 impl ShimInner {
@@ -686,6 +688,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
         message_queue: VecDeque::new(),
         dialogs_dismissed: 0,
         last_working_screen: String::new(),
+        test_failure_iterations: 0,
     }));
 
     // -- PTY log writer (optional) --
@@ -783,6 +786,47 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                         let working_screen = inner.last_working_screen.clone();
                         let msg_id = inner.pending_message_id.take();
 
+                        let response =
+                            completion_response(&pre_content, &current_content, &working_screen);
+
+                        if old_state == ShimState::Working && new == ShimState::Idle {
+                            if let Some(followup) = common::detect_test_failure_followup(
+                                &response,
+                                inner.test_failure_iterations,
+                            ) {
+                                inner.test_failure_iterations = followup.next_iteration_count;
+                                inner.pre_injection_content = inner.screen_contents();
+                                inner.pending_message_id = None;
+                                inner.state = ShimState::Working;
+                                inner.state_changed_at = Instant::now();
+                                inner.active_session_started_at = Instant::now();
+                                let agent_type_for_enter = inner.agent_type;
+                                drop(inner);
+
+                                let enter = enter_seq(agent_type_for_enter);
+                                if let Err(e) = pty_write_paced(
+                                    &pty_writer_pty,
+                                    agent_type_for_enter,
+                                    format_injected_message("batty", &followup.body).as_bytes(),
+                                    enter.as_bytes(),
+                                ) {
+                                    let _ = evt_channel.send(&Event::Error {
+                                        command: "SendMessage".into(),
+                                        reason: format!(
+                                            "PTY write failed for test failure follow-up: {e}"
+                                        ),
+                                    });
+                                } else {
+                                    let _ = evt_channel.send(&Event::Warning {
+                                        message: followup.notice,
+                                        idle_secs: None,
+                                    });
+                                }
+                                continue;
+                            }
+                            inner.test_failure_iterations = 0;
+                        }
+
                         // On terminal states, drain the queue
                         let drain_errors =
                             if new == ShimState::Dead || new == ShimState::ContextExhausted {
@@ -808,6 +852,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                             inner.state = ShimState::Working;
                             inner.state_changed_at = Instant::now();
                             inner.active_session_started_at = Instant::now();
+                            inner.test_failure_iterations = 0;
                         }
 
                         let queue_depth = inner.message_queue.len();
@@ -927,6 +972,40 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
             let current_content = inner.screen_contents();
             let working_screen = inner.last_working_screen.clone();
             let msg_id = inner.pending_message_id.take();
+            let response = completion_response(&pre_content, &current_content, &working_screen);
+
+            if let Some(followup) =
+                common::detect_test_failure_followup(&response, inner.test_failure_iterations)
+            {
+                inner.test_failure_iterations = followup.next_iteration_count;
+                inner.pre_injection_content = inner.screen_contents();
+                inner.pending_message_id = None;
+                inner.state = ShimState::Working;
+                inner.state_changed_at = Instant::now();
+                inner.active_session_started_at = Instant::now();
+                let agent_type_for_enter = inner.agent_type;
+                drop(inner);
+
+                let enter = enter_seq(agent_type_for_enter);
+                if let Err(e) = pty_write_paced(
+                    &pty_writer_idle,
+                    agent_type_for_enter,
+                    format_injected_message("batty", &followup.body).as_bytes(),
+                    enter.as_bytes(),
+                ) {
+                    let _ = idle_channel.send(&Event::Error {
+                        command: "SendMessage".into(),
+                        reason: format!("PTY write failed for test failure follow-up: {e}"),
+                    });
+                } else {
+                    let _ = idle_channel.send(&Event::Warning {
+                        message: followup.notice,
+                        idle_secs: None,
+                    });
+                }
+                continue;
+            }
+            inner.test_failure_iterations = 0;
 
             inner.state = ShimState::Idle;
             inner.state_changed_at = Instant::now();
@@ -943,6 +1022,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                 inner.state = ShimState::Working;
                 inner.state_changed_at = Instant::now();
                 inner.active_session_started_at = Instant::now();
+                inner.test_failure_iterations = 0;
             }
 
             let queue_depth = inner.message_queue.len();
@@ -1171,6 +1251,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                     ShimState::Idle => {
                         inner.pre_injection_content = inner.screen_contents();
                         inner.pending_message_id = message_id;
+                        inner.test_failure_iterations = 0;
                         let agent_type = inner.agent_type;
                         let enter = enter_seq(agent_type);
                         let injected = format_injected_message(&from, &body);
@@ -1392,13 +1473,8 @@ fn build_transition_events(
     // Skip Completion for transitions caused by agent startup/loading (e.g.,
     // MCP server init) where no user message was injected.
     if from == ShimState::Working && to == ShimState::Idle && !pre_injection_content.is_empty() {
-        // Try diffing against current screen first; if empty (TUI agents
-        // redraw to idle before we capture), fall back to the last screen
-        // seen during Working state.
-        let mut response = extract_response(pre_injection_content, current_content);
-        if response.is_empty() && !last_working_screen.is_empty() {
-            response = extract_response(pre_injection_content, last_working_screen);
-        }
+        let response =
+            completion_response(pre_injection_content, current_content, last_working_screen);
         events.push(Event::Completion {
             message_id,
             response,
@@ -1415,6 +1491,21 @@ fn build_transition_events(
     }
 
     events
+}
+
+fn completion_response(
+    pre_injection_content: &str,
+    current_content: &str,
+    last_working_screen: &str,
+) -> String {
+    // Try diffing against current screen first; if empty (TUI agents redraw
+    // to idle before we capture), fall back to the last screen seen during
+    // Working state.
+    let mut response = extract_response(pre_injection_content, current_content);
+    if response.is_empty() && !last_working_screen.is_empty() {
+        response = extract_response(pre_injection_content, last_working_screen);
+    }
+    response
 }
 
 fn sanitize_summary(summary: &str) -> String {
@@ -1724,6 +1815,12 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(matches!(&events[0], Event::StateChanged { .. }));
         assert!(matches!(&events[1], Event::Completion { .. }));
+    }
+
+    #[test]
+    fn completion_response_uses_last_working_screen_fallback() {
+        let response = completion_response("pre\n$ ", "pre\n$ ", "pre\nfailed tests\n$ ");
+        assert_eq!(response, "failed tests");
     }
 
     #[test]

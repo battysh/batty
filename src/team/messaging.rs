@@ -479,6 +479,37 @@ mod tests {
     }
 
     #[test]
+    fn send_message_does_not_ingest_failed_test_completion_packet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = team_config_dir(tmp.path()).join("board").join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let task_path = tasks_dir.join("027-completion-packets.md");
+        std::fs::write(
+            &task_path,
+            "---\nid: 27\ntitle: Completion packets\nstatus: review\npriority: medium\nclaimed_by: human\nclass: standard\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        send_message(
+            tmp.path(),
+            "architect",
+            r#"Done.
+
+## Completion Packet
+
+```json
+{"task_id":27,"branch":"eng-1-4/task-27","worktree_path":".batty/worktrees/eng-1-4","commit":"abc1234","changed_paths":["src/team/completion.rs"],"tests_run":true,"tests_passed":false,"artifacts":[],"outcome":"ready_for_review"}
+```"#,
+        )
+        .unwrap();
+
+        let metadata = board::read_workflow_metadata(&task_path).unwrap();
+        assert!(metadata.branch.is_none());
+        assert!(metadata.tests_run.is_none());
+        assert!(metadata.review_blockers.is_empty());
+    }
+
+    #[test]
     fn assign_task_delivers_to_inbox() {
         let tmp = tempfile::tempdir().unwrap();
         let _tmux_pane = EnvVarGuard::unset("TMUX_PANE");
