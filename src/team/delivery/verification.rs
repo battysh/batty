@@ -125,10 +125,8 @@ impl TeamDaemon {
             delivery.message_marker(),
             delivery.body
         );
-        let root = inbox::inboxes_root(&self.config.project_root);
         let msg = inbox::InboxMessage::new_send("daemon", &manager, &body);
-        inbox::deliver_to_inbox(&root, &msg)?;
-        self.record_message_routed("daemon", &manager);
+        let _ = self.queue_inbox_message(&msg)?;
         warn!(
             recipient = %delivery.recipient,
             from = %delivery.from,
@@ -513,6 +511,7 @@ mod tests {
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
+            recent_escalations: HashMap::new(),
             telemetry_db: None,
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),

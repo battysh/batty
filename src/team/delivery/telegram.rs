@@ -275,6 +275,7 @@ mod tests {
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
+            recent_escalations: HashMap::new(),
             telemetry_db: None,
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),

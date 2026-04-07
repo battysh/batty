@@ -146,6 +146,43 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::delivery_failed(role, from, reason));
     }
 
+    pub(crate) fn record_inbox_message_expired(
+        &mut self,
+        target: &str,
+        from: &str,
+        message_age_secs: u64,
+    ) {
+        self.emit_event(TeamEvent::inbox_message_expired(
+            target,
+            from,
+            message_age_secs,
+        ));
+    }
+
+    pub(crate) fn record_inbox_message_deduplicated(
+        &mut self,
+        target: &str,
+        from: &str,
+        signature: u64,
+    ) {
+        self.emit_event(TeamEvent::inbox_message_deduplicated(
+            target, from, signature,
+        ));
+    }
+
+    pub(crate) fn record_inbox_batch_delivered(
+        &mut self,
+        target: &str,
+        message_count: usize,
+        escalation_count: usize,
+    ) {
+        self.emit_event(TeamEvent::inbox_batch_delivered(
+            target,
+            message_count,
+            escalation_count,
+        ));
+    }
+
     pub(crate) fn record_task_escalated(
         &mut self,
         role: &str,
@@ -843,6 +880,7 @@ mod tests {
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
+            recent_escalations: HashMap::new(),
             telemetry_db: None,
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
@@ -1269,6 +1307,7 @@ mod tests {
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
+            recent_escalations: HashMap::new(),
             telemetry_db: None,
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),

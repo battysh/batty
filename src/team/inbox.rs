@@ -9,7 +9,9 @@
 //! - `tmp/` — atomic write staging (managed by `maildir` crate)
 
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use maildir::Maildir;
@@ -84,6 +86,11 @@ impl InboxMessage {
         msg.id = id.to_string();
         Ok(msg)
     }
+
+    /// Return how long the message has been in the inbox.
+    pub fn age(&self) -> Duration {
+        Duration::from_secs(now_unix().saturating_sub(self.timestamp))
+    }
 }
 
 /// Resolve the inboxes root directory: `.batty/inboxes/`.
@@ -118,6 +125,66 @@ pub fn deliver_to_inbox(inboxes_root: &Path, msg: &InboxMessage) -> Result<Strin
         .store_new(&data)
         .with_context(|| format!("failed to store message in inbox for '{}'", msg.to))?;
     Ok(id)
+}
+
+/// Read recent messages for a member across both pending and delivered states.
+pub fn read_recent_messages(
+    inboxes_root: &Path,
+    member: &str,
+    max_age: Duration,
+) -> Result<Vec<InboxMessage>> {
+    let cutoff = now_unix().saturating_sub(max_age.as_secs());
+    let mut messages: Vec<InboxMessage> = all_messages(inboxes_root, member)?
+        .into_iter()
+        .map(|(message, _)| message)
+        .filter(|message| message.timestamp >= cutoff)
+        .collect();
+    messages.sort_by_key(|message| message.timestamp);
+    Ok(messages)
+}
+
+/// Produce a stable signature for duplicate detection.
+pub fn message_signature(body: &str) -> u64 {
+    let normalized = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let preview: String = normalized.chars().take(200).collect();
+    let mut hasher = DefaultHasher::new();
+    preview.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Return the most recent duplicate message seen within the provided window.
+pub fn find_recent_duplicate(
+    inboxes_root: &Path,
+    member: &str,
+    new_msg: &InboxMessage,
+    max_age: Duration,
+) -> Result<Option<InboxMessage>> {
+    let signature = message_signature(&new_msg.body);
+    let duplicate = read_recent_messages(inboxes_root, member, max_age)?
+        .into_iter()
+        .rev()
+        .find(|existing| {
+            existing.from == new_msg.from
+                && existing.msg_type == new_msg.msg_type
+                && message_signature(&existing.body) == signature
+        });
+    Ok(duplicate)
+}
+
+/// Expire pending messages older than the provided age by marking them delivered.
+pub fn expire_stale_pending_messages(
+    inboxes_root: &Path,
+    member: &str,
+    max_age: Duration,
+) -> Result<Vec<InboxMessage>> {
+    let mut expired = Vec::new();
+    for message in pending_messages(inboxes_root, member)? {
+        if message.age() > max_age {
+            mark_delivered(inboxes_root, member, &message.id)?;
+            expired.push(message);
+        }
+    }
+    Ok(expired)
 }
 
 /// List all pending (undelivered) messages in a member's inbox.
@@ -368,6 +435,14 @@ mod tests {
     }
 
     #[test]
+    fn inbox_message_age_uses_timestamp() {
+        let mut msg = InboxMessage::new_send("human", "architect", "hello world");
+        msg.timestamp = now_unix().saturating_sub(60);
+
+        assert!(msg.age() >= Duration::from_secs(60));
+    }
+
+    #[test]
     fn init_inbox_creates_dirs() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -414,6 +489,73 @@ mod tests {
 
         let pending = pending_messages(root, "manager").unwrap();
         assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn read_recent_messages_filters_old_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        init_inbox(root, "manager").unwrap();
+
+        let mut old = InboxMessage::new_send("eng-1", "manager", "old");
+        old.timestamp = now_unix().saturating_sub(601);
+        deliver_to_inbox(root, &old).unwrap();
+
+        let mut recent = InboxMessage::new_send("eng-2", "manager", "recent");
+        recent.timestamp = now_unix().saturating_sub(60);
+        let recent_id = deliver_to_inbox(root, &recent).unwrap();
+        mark_delivered(root, "manager", &recent_id).unwrap();
+
+        let messages = read_recent_messages(root, "manager", Duration::from_secs(300)).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].body, "recent");
+    }
+
+    #[test]
+    fn message_signature_normalizes_whitespace() {
+        let compact = "Task #42 failed after retries";
+        let noisy = "Task   #42\nfailed   after   retries";
+
+        assert_eq!(message_signature(compact), message_signature(noisy));
+    }
+
+    #[test]
+    fn find_recent_duplicate_matches_same_sender_and_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        init_inbox(root, "manager").unwrap();
+
+        let mut existing = InboxMessage::new_send("eng-1", "manager", "status update");
+        existing.timestamp = now_unix().saturating_sub(30);
+        let existing_id = deliver_to_inbox(root, &existing).unwrap();
+        mark_delivered(root, "manager", &existing_id).unwrap();
+
+        let candidate = InboxMessage::new_send("eng-1", "manager", "status   update");
+        let duplicate =
+            find_recent_duplicate(root, "manager", &candidate, Duration::from_secs(300)).unwrap();
+
+        assert!(duplicate.is_some());
+        assert_eq!(duplicate.unwrap().from, "eng-1");
+    }
+
+    #[test]
+    fn find_recent_duplicate_ignores_old_or_different_sender_messages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        init_inbox(root, "manager").unwrap();
+
+        let mut old = InboxMessage::new_send("eng-1", "manager", "status update");
+        old.timestamp = now_unix().saturating_sub(601);
+        deliver_to_inbox(root, &old).unwrap();
+
+        let recent_other_sender = InboxMessage::new_send("eng-2", "manager", "status update");
+        deliver_to_inbox(root, &recent_other_sender).unwrap();
+
+        let candidate = InboxMessage::new_send("eng-1", "manager", "status update");
+        let duplicate =
+            find_recent_duplicate(root, "manager", &candidate, Duration::from_secs(300)).unwrap();
+
+        assert!(duplicate.is_none());
     }
 
     #[test]
@@ -516,6 +658,37 @@ mod tests {
         assert_eq!(pending_messages(root, "eng").unwrap().len(), 1);
         delete_message(root, "eng", &id).unwrap();
         assert_eq!(pending_messages(root, "eng").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn expire_stale_pending_messages_marks_old_entries_delivered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        init_inbox(root, "manager").unwrap();
+
+        let mut old = InboxMessage::new_send("eng-1", "manager", "old");
+        old.timestamp = now_unix().saturating_sub(900);
+        let old_id = deliver_to_inbox(root, &old).unwrap();
+
+        let mut fresh = InboxMessage::new_send("eng-2", "manager", "fresh");
+        fresh.timestamp = now_unix().saturating_sub(30);
+        deliver_to_inbox(root, &fresh).unwrap();
+
+        let expired =
+            expire_stale_pending_messages(root, "manager", Duration::from_secs(600)).unwrap();
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].id, old_id);
+
+        let pending = pending_messages(root, "manager").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].body, "fresh");
+
+        let all = all_messages(root, "manager").unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(
+            all.iter()
+                .any(|(message, delivered)| message.body == "old" && *delivered)
+        );
     }
 
     #[test]
