@@ -723,6 +723,88 @@ fn daemon_lifecycle_happy_path_exercises_decomposed_modules() {
     let _ = std::fs::remove_file(&session_file);
     let _ = std::fs::remove_dir_all(&fake_bin);
 }
+
+#[test]
+fn preserve_worktree_before_restart_uses_shared_preservation_filters() {
+    let _path_lock = PATH_LOCK.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "batty-daemon-preserve");
+    let team_config_dir = repo.join(".batty").join("team_config");
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    crate::team::task_loop::prepare_engineer_assignment_worktree(
+        &repo,
+        &worktree_dir,
+        "eng-1",
+        "eng-1/42",
+        &team_config_dir,
+    )
+    .unwrap();
+
+    std::fs::write(worktree_dir.join("user.txt"), "keep this change\n").unwrap();
+    std::fs::create_dir_all(worktree_dir.join(".batty")).unwrap();
+    std::fs::write(
+        worktree_dir.join(".batty").join("restart_context.json"),
+        "{\"reason\":\"test\"}\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(worktree_dir.join(".cargo")).unwrap();
+    std::fs::write(worktree_dir.join(".cargo").join("cache.txt"), "transient\n").unwrap();
+
+    let daemon = TestDaemonBuilder::new(&repo)
+        .members(vec![engineer_member("eng-1", None, true)])
+        .build();
+    daemon.preserve_worktree_before_restart("eng-1", &worktree_dir, "test");
+
+    crate::team::test_support::assert_worktree_clean(&worktree_dir);
+    let last_subject =
+        crate::team::test_support::git_stdout(&worktree_dir, &["log", "--format=%s", "-1"]);
+    assert_eq!(last_subject, "wip: auto-save before restart [batty]");
+
+    let committed_files =
+        crate::team::test_support::git_stdout(&worktree_dir, &["show", "--pretty=", "--name-only"]);
+    assert!(committed_files.lines().any(|line| line == "user.txt"));
+    assert!(!committed_files.contains("restart_context.json"));
+    assert!(!committed_files.contains(".cargo/cache.txt"));
+}
+
+#[test]
+fn preserve_worktree_before_restart_skips_support_files_without_user_changes() {
+    let _path_lock = PATH_LOCK.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "batty-daemon-preserve-support");
+    let team_config_dir = repo.join(".batty").join("team_config");
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    crate::team::task_loop::prepare_engineer_assignment_worktree(
+        &repo,
+        &worktree_dir,
+        "eng-1",
+        "eng-1/43",
+        &team_config_dir,
+    )
+    .unwrap();
+
+    std::fs::create_dir_all(worktree_dir.join(".batty")).unwrap();
+    std::fs::write(
+        worktree_dir.join(".batty").join("restart_context.json"),
+        "{\"reason\":\"test\"}\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(worktree_dir.join(".cargo")).unwrap();
+    std::fs::write(worktree_dir.join(".cargo").join("cache.txt"), "transient\n").unwrap();
+
+    let daemon = TestDaemonBuilder::new(&repo)
+        .members(vec![engineer_member("eng-1", None, true)])
+        .build();
+    let head_before = crate::team::test_support::git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
+    daemon.preserve_worktree_before_restart("eng-1", &worktree_dir, "test");
+    let head_after = crate::team::test_support::git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
+
+    assert_eq!(
+        head_before, head_after,
+        "support files should not trigger a preservation commit"
+    );
+}
+
 #[test]
 #[serial]
 #[cfg_attr(not(feature = "integration"), ignore)]
