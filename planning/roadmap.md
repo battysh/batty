@@ -37,10 +37,13 @@ lanes stay in `backlog`. That includes Discord/Telegram walk-away work and OMX/c
 tasks. On April 7, 2026, architect verification first got one clean manual
 `cargo fmt --check` + `cargo test` run, then hit
 `reconcile_stale_worktrees_rebases_clean_base_worktree_after_main_advances` in the commit-hook
-suite, and later reproduced a fresh default-suite failure in
-`reconcile_stale_worktrees_skips_base_worktree_when_engineer_has_active_task`. Treat the default
+suite. Later on April 7, 2026, a fresh default `cargo test` run failed after 176.25s with
+`reconcile_stale_worktrees_rebases_clean_base_worktree_after_main_advances` and
+`reconcile_stale_worktrees_skips_base_worktree_when_engineer_has_active_task`, both failing while
+trying to `git worktree add ...` with `No such file or directory (os error 2)`. Treat the default
 verification lane as unstable until repeated full-suite runs stay green. Promotions back to
-`todo` should stay deliberate and must not displace the active stabilization lanes below.
+`todo` should stay deliberate and must not displace the active stabilization lanes below. Release,
+Discord, and other feature lanes should stay in `backlog` until this verification lane is stable.
 
 ### Known Failure Modes (Fixed)
 
@@ -88,11 +91,13 @@ The verification and reopen loop is healthier than it was before the reopen auto
 but the default verification path is not yet stable enough to declare fixed. On April 7, 2026
 the architect got one clean `cargo fmt --check` + `cargo test` run on `main`, then hit
 `reconcile_stale_worktrees_rebases_clean_base_worktree_after_main_advances` during the commit
-hook suite, and later reproduced
-`reconcile_stale_worktrees_skips_base_worktree_when_engineer_has_active_task` in a fresh
-default `cargo test` run. Baseline verification therefore stays at the top of the stabilization
-stack beside supervisory stall detection, and the active backlog should prefer the specific
-stale-worktree stabilization card over new generic reopen cards.
+hook suite. A later April 7, 2026 default `cargo test` rerun then failed after 176.25s with
+`reconcile_stale_worktrees_rebases_clean_base_worktree_after_main_advances` and
+`reconcile_stale_worktrees_skips_base_worktree_when_engineer_has_active_task`, both failing while
+creating engineer worktrees via `git worktree add ...` (`No such file or directory (os error 2)`).
+Baseline verification therefore stays at the top of the stabilization stack beside supervisory
+stall detection, and the active backlog should prefer the specific stale-worktree stabilization
+card over new generic reopen cards or release/feature work.
 
 Next hardening work is about execution quality rather than backlog creation:
 - Stabilize the default `cargo test` path on `main` across repeated full-suite runs
