@@ -90,6 +90,11 @@ pub enum Event {
         message: String,
         last_lines: String,
     },
+    ContextApproaching {
+        message: String,
+        input_tokens: u64,
+        output_tokens: u64,
+    },
     ScreenCapture {
         content: String,
         cursor_row: u16,
