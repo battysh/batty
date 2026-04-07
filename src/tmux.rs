@@ -71,9 +71,8 @@ pub struct PaneDetails {
     pub dead: bool,
 }
 
-/// Check that tmux is installed and reachable.
-pub fn check_tmux() -> Result<String> {
-    let output = Command::new("tmux")
+fn check_tmux_with_program(program: &str) -> Result<String> {
+    let output = Command::new(program)
         .arg("-V")
         .output()
         .map_err(|error| TmuxError::exec("tmux -V", error))?;
@@ -90,6 +89,16 @@ pub fn check_tmux() -> Result<String> {
     let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
     debug!(version = %version, "tmux found");
     Ok(version)
+}
+
+/// Check that tmux is installed and reachable.
+pub fn check_tmux() -> Result<String> {
+    check_tmux_with_program("tmux")
+}
+
+/// Return whether the tmux binary is available in the current environment.
+pub fn tmux_available() -> bool {
+    check_tmux().is_ok()
 }
 
 fn parse_tmux_version(version_raw: &str) -> Option<(u32, u32)> {
@@ -1096,7 +1105,26 @@ pub fn tmux_set(session: &str, option: &str, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::team::test_support::PATH_LOCK;
     use serial_test::serial;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static TMUX_TEST_PATH_GUARD: RefCell<Option<std::sync::MutexGuard<'static, ()>>> = const { RefCell::new(None) };
+    }
+
+    fn require_tmux_integration() -> bool {
+        TMUX_TEST_PATH_GUARD.with(|slot| {
+            if slot.borrow().is_none() {
+                *slot.borrow_mut() = Some(PATH_LOCK.lock().unwrap());
+            }
+        });
+        if tmux_available() {
+            return true;
+        }
+        eprintln!("skipping tmux integration test: tmux binary unavailable");
+        false
+    }
 
     #[test]
     fn session_name_convention() {
@@ -1123,6 +1151,11 @@ mod tests {
         assert_eq!(parse_tmux_version("tmux 3.3a"), Some((3, 3)));
         assert_eq!(parse_tmux_version("tmux 2.9"), Some((2, 9)));
         assert_eq!(parse_tmux_version("tmux unknown"), None);
+    }
+
+    #[test]
+    fn check_tmux_reports_missing_binary() {
+        assert!(check_tmux_with_program("__batty_missing_tmux__").is_err());
     }
 
     #[test]
@@ -1169,6 +1202,9 @@ mod tests {
     #[test]
     #[serial]
     fn create_and_kill_session() {
+        if !require_tmux_integration() {
+            return;
+        }
         let session = "batty-test-lifecycle";
         // Clean up in case a previous test left it
         let _ = kill_session(session);
@@ -1830,6 +1866,9 @@ mod tests {
     #[test]
     #[serial]
     fn pane_exists_for_valid_pane() {
+        if !require_tmux_integration() {
+            return;
+        }
         let session = "batty-test-pane-exists";
         let _guard = TestSession::new(session);
         create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
@@ -1841,6 +1880,9 @@ mod tests {
     #[test]
     #[serial]
     fn session_exists_returns_false_after_kill() {
+        if !require_tmux_integration() {
+            return;
+        }
         let session = "batty-test-sess-exists-gone";
         let _ = kill_session(session);
         create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
@@ -1856,6 +1898,9 @@ mod tests {
     #[test]
     #[serial]
     fn pane_dead_for_running_process() {
+        if !require_tmux_integration() {
+            return;
+        }
         let session = "batty-test-pane-dead-alive";
         let _guard = TestSession::new(session);
         create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
@@ -1868,6 +1913,9 @@ mod tests {
     #[test]
     #[serial]
     fn list_sessions_with_prefix_finds_matching() {
+        if !require_tmux_integration() {
+            return;
+        }
         let prefix = "batty-test-prefix-match";
         let s1 = format!("{prefix}-aaa");
         let s2 = format!("{prefix}-bbb");
@@ -1891,6 +1939,9 @@ mod tests {
     #[test]
     #[serial]
     fn list_sessions_with_prefix_excludes_non_matching() {
+        if !require_tmux_integration() {
+            return;
+        }
         let found = list_sessions_with_prefix("batty-test-zzz-nonexist-99999");
         assert!(found.is_empty(), "should find no sessions for bogus prefix");
     }
@@ -1898,6 +1949,9 @@ mod tests {
     #[test]
     #[serial]
     fn split_window_horizontal_creates_new_pane() {
+        if !require_tmux_integration() {
+            return;
+        }
         let session = "batty-test-hsplit";
         let _guard = TestSession::new(session);
         create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
@@ -1917,6 +1971,9 @@ mod tests {
     #[test]
     #[serial]
     fn split_window_vertical_creates_new_pane() {
+        if !require_tmux_integration() {
+            return;
+        }
         let session = "batty-test-vsplit";
         let _guard = TestSession::new(session);
         create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
@@ -1936,6 +1993,9 @@ mod tests {
     #[test]
     #[serial]
     fn load_buffer_and_paste_buffer_injects_text() {
+        if !require_tmux_integration() {
+            return;
+        }
         let session = "batty-test-paste-buf";
         let _guard = TestSession::new(session);
         create_session(session, "cat", &[], "/tmp").unwrap();
@@ -1957,6 +2017,9 @@ mod tests {
     #[test]
     #[serial]
     fn kill_pane_removes_pane() {
+        if !require_tmux_integration() {
+            return;
+        }
         let session = "batty-test-kill-pane";
         let _guard = TestSession::new(session);
         create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
@@ -1975,6 +2038,9 @@ mod tests {
     #[test]
     #[serial]
     fn kill_pane_nonexistent_returns_error() {
+        if !require_tmux_integration() {
+            return;
+        }
         // tmux returns "can't find pane" for nonexistent pane IDs,
         // which kill_pane only suppresses when it says "not found"
         let result = kill_pane("batty-test-no-such-session-xyz:0.0");
@@ -1986,6 +2052,9 @@ mod tests {
     #[test]
     #[serial]
     fn set_mouse_disable_and_enable() {
+        if !require_tmux_integration() {
+            return;
+        }
         let session = "batty-test-mouse-toggle";
         let _guard = TestSession::new(session);
         create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
@@ -2018,6 +2087,9 @@ mod tests {
     #[test]
     #[serial]
     fn tmux_set_custom_option() {
+        if !require_tmux_integration() {
+            return;
+        }
         let session = "batty-test-tmux-set";
         let _guard = TestSession::new(session);
         create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
@@ -2035,6 +2107,9 @@ mod tests {
     #[test]
     #[serial]
     fn create_window_fails_for_missing_session() {
+        if !require_tmux_integration() {
+            return;
+        }
         let result = create_window(
             "batty-test-nonexistent-session-99999",
             "test-win",
@@ -2052,6 +2127,9 @@ mod tests {
     #[test]
     #[serial]
     fn setup_pipe_pane_if_missing_works() {
+        if !require_tmux_integration() {
+            return;
+        }
         let session = "batty-test-pipe-if-missing";
         let _guard = TestSession::new(session);
         let tmp = tempfile::tempdir().unwrap();
@@ -2076,6 +2154,9 @@ mod tests {
     #[test]
     #[serial]
     fn select_layout_even_after_splits() {
+        if !require_tmux_integration() {
+            return;
+        }
         let session = "batty-test-layout-even";
         let _guard = TestSession::new(session);
         create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
@@ -2090,6 +2171,9 @@ mod tests {
     #[test]
     #[serial]
     fn rename_window_changes_name() {
+        if !require_tmux_integration() {
+            return;
+        }
         let session = "batty-test-rename-win";
         let _guard = TestSession::new(session);
         create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
@@ -2105,6 +2189,9 @@ mod tests {
     #[test]
     #[serial]
     fn select_window_switches_active() {
+        if !require_tmux_integration() {
+            return;
+        }
         let session = "batty-test-select-win";
         let _guard = TestSession::new(session);
         create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
@@ -2117,6 +2204,9 @@ mod tests {
     #[test]
     #[serial]
     fn capture_pane_recent_zero_lines_returns_full() {
+        if !require_tmux_integration() {
+            return;
+        }
         let session = "batty-test-capture-zero";
         let _guard = TestSession::new(session);
         create_session(
@@ -2142,6 +2232,9 @@ mod tests {
     #[test]
     #[serial]
     fn list_pane_details_shows_command_info() {
+        if !require_tmux_integration() {
+            return;
+        }
         let session = "batty-test-pane-details-cmd";
         let _guard = TestSession::new(session);
         create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
@@ -2159,6 +2252,9 @@ mod tests {
     #[test]
     #[serial]
     fn pane_id_returns_percent_prefixed() {
+        if !require_tmux_integration() {
+            return;
+        }
         let session = "batty-test-paneid-fmt";
         let _guard = TestSession::new(session);
         create_session(session, "sleep", &["10".to_string()], "/tmp").unwrap();
@@ -2173,6 +2269,9 @@ mod tests {
     #[test]
     #[serial]
     fn respawn_pane_restarts_running_pane() {
+        if !require_tmux_integration() {
+            return;
+        }
         let session = "batty-test-respawn";
         let _guard = TestSession::new(session);
         // Start with a long-running command so session stays alive
