@@ -33,9 +33,10 @@ The architect receives a periodic nudge to:
 ### Backlog Discipline
 
 When default `cargo test` is red on `main`, feature and experiment lanes stay in `backlog`.
-That includes Discord/Telegram walk-away work and OMX/clawhip study tasks. They can return to
-`todo` only after the default verification path is green again and the active stabilization
-regressions are closed.
+That includes Discord/Telegram walk-away work and OMX/clawhip study tasks. As of April 7, 2026,
+the default verification path is green again on `main` (`cargo fmt --check` and `cargo test`
+both pass), so the hard backlog gate is lifted. Promotions back to `todo` should still be
+deliberate and must not displace the active stabilization regressions below.
 
 ### Known Failure Modes (Fixed)
 
@@ -68,11 +69,10 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 
 | Issue | Status | Priority |
 |---|---|---|
-| Verification loop is still open after agent completion | Need daemon-run test/fix/retry cycle before merge | Critical |
-| `cargo test` on `main` is still red in the default verification environment because 26 tests fail: 24 `tmux::tests::*` cases now panic with `PoisonError` in `src/tmux.rs`, and 2 daemon `poll_shim` regressions remain open | Immediate mainline repair is tracked in `#528`; keep all feature and rollout lanes gated in `backlog` until the default verification path is green again | Critical |
 | Architect and manager stalls are less visible than engineer stalls | Non-engineer shim stall detection still needs hardening | Critical |
-| Manager inbox noise buries actionable work | Needs batching and signal-first routing | Critical |
-| Auto-merge path is not yet proven end-to-end | Review handoff and merge trigger need production verification | Critical |
+| Notifications and status chatter still leak into agent working context | Isolation is in progress, but supervisory messages can still displace coding context instead of staying out-of-band | High |
+| False review routing can still surface stale or already-merged work as actionable | Need commit-existence and branch-state validation before a card can enter or stay in `review` | High |
+| Failed shim delivery recovery still needs production hardening | Retry/escalation exists, but the daemon still needs stronger visibility and cleanup for repeated failed injections | High |
 | Codex agents still degrade before hitting hard context limits | RestartAgent exists; proactive restart with handoff remains open | Medium |
 | Architect backlog creation can emit malformed duplicate tasks | Need creation-time validation plus duplicate-title suppression so replenishment never pastes raw logs into backlog cards (for example `#522`/`#523`) | High |
 
@@ -80,16 +80,22 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 
 Daemon-driven board replenishment is now in place. The tact engine detects idle-worker starvation, composes a structured planning prompt from roadmap and board state, routes it to the architect, and creates board tasks automatically.
 
-The highest-friction runtime path is still verification/reopen handling: a fresh `cargo test` run in this environment fails 26 tests, with 24 `tmux::tests::*` panicking on `PoisonError` in `src/tmux.rs` plus 2 daemon `poll_shim` regressions. `#528` remains the active mainline repair lane, and non-stability work stays gated in `backlog` until default verification is green again.
+The verification and reopen loop is now materially healthier: on April 7, 2026 the default
+verification path on `main` is green again (`cargo fmt --check` and `cargo test` both passed),
+the persistent engineer test/fix/retest loop is merged, and the stale red-build repair lane
+`#528` has been closed. The highest-friction runtime path has shifted from baseline verification
+to supervisory stall detection, delivery reliability, false-review prevention, and context hygiene.
 
 Next hardening work is about execution quality rather than backlog creation:
-- Close the completion loop with automatic test, retry, and escalation behavior
-- Verify the auto-merge path end-to-end under production-like runs
+- Harden architect/manager shim stall detection and recovery
 - Keep notifications and status chatter out of agent context windows
+- Harden failed-delivery retry and false-review detection under live daemon runs
 - Keep reopen/failure task creation structured and duplicate-free
 - Add proactive context-exhaustion restarts with handoff summaries
 
-This removes the old "board empties because nobody creates tasks" failure mode from the active roadmap and shifts attention to verification, merge reliability, and context hygiene.
+This removes the old "board empties because nobody creates tasks" and "main is red by default"
+failure modes from the active roadmap and shifts attention to supervision reliability, merge/review
+correctness, and context hygiene.
 
 ---
 
