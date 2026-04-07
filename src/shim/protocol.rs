@@ -102,6 +102,10 @@ pub enum Event {
     SessionStats {
         output_bytes: u64,
         uptime_secs: u64,
+        #[serde(default)]
+        input_tokens: u64,
+        #[serde(default)]
+        output_tokens: u64,
     },
     Pong,
     Warning {
@@ -555,6 +559,8 @@ mod tests {
         let evt = Event::SessionStats {
             output_bytes: 123_456,
             uptime_secs: 61,
+            input_tokens: 5000,
+            output_tokens: 1200,
         };
         sender.send(&evt).unwrap();
         let received: Event = receiver.recv::<Event>().unwrap().unwrap();
@@ -562,9 +568,40 @@ mod tests {
             Event::SessionStats {
                 output_bytes,
                 uptime_secs,
+                input_tokens,
+                output_tokens,
             } => {
                 assert_eq!(output_bytes, 123_456);
                 assert_eq!(uptime_secs, 61);
+                assert_eq!(input_tokens, 5000);
+                assert_eq!(output_tokens, 1200);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_event_context_approaching() {
+        let (a, b) = socketpair().unwrap();
+        let mut sender = Channel::new(a);
+        let mut receiver = Channel::new(b);
+
+        let evt = Event::ContextApproaching {
+            message: "context pressure detected".into(),
+            input_tokens: 80000,
+            output_tokens: 20000,
+        };
+        sender.send(&evt).unwrap();
+        let received: Event = receiver.recv::<Event>().unwrap().unwrap();
+        match received {
+            Event::ContextApproaching {
+                message,
+                input_tokens,
+                output_tokens,
+            } => {
+                assert_eq!(message, "context pressure detected");
+                assert_eq!(input_tokens, 80000);
+                assert_eq!(output_tokens, 20000);
             }
             _ => panic!("wrong variant"),
         }
