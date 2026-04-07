@@ -302,6 +302,9 @@ pub(crate) fn test_channel_config(target: &str, provider: &str) -> ChannelConfig
         provider: provider.to_string(),
         bot_token: None,
         allowed_user_ids: vec![],
+        agents_channel_id: None,
+        commands_channel_id: None,
+        events_channel_id: None,
     }
 }
 
