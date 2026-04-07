@@ -47,6 +47,15 @@ The architect receives a periodic nudge to:
 5. Fix the root cause in batty code if found
 6. Restart nether_earth with the fix and verify recovery
 
+### Latest Verification Snapshot
+
+On April 7, 2026, architect verification regained a clean baseline:
+
+- `cargo fmt --check` passed
+- `cargo test` passed end-to-end in 931.02s
+- the default suite still emitted 4 dead-code warnings in `src/team/tact/parser.rs`
+- multiple worktree, merge, and supervision tests exceeded 60 seconds before completing
+
 ### Known Failure Modes (Fixed)
 
 These were all discovered and fixed during the nether_earth stabilization session:
@@ -78,7 +87,7 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 
 | Issue | Status | Priority |
 | --- | --- | --- |
-| Verification loop is reliable but still needs stronger end-to-end proof on live runs | Active validation | Critical |
+| Default verification is green again, but unattended confidence still needs warning cleanup and shorter long-tail test runtime | Active validation | Critical |
 | Architect and manager stalls are less visible than engineer stalls | Needs broader non-engineer stall heuristics | Critical |
 | Manager inbox noise still buries the most actionable review and dispatch items | Needs batching and signal-first routing | Critical |
 | Auto-merge needs more production mileage on heterogeneous diffs | Needs wider dogfooding | High |
