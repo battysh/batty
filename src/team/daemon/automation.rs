@@ -4313,6 +4313,7 @@ Second body.
     }
 
     #[test]
+    #[serial_test::serial]
     fn reconcile_stale_worktrees_rebases_clean_base_worktree_after_main_advances() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "worktree-auto-rebase");

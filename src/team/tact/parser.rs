@@ -5,7 +5,7 @@ use serde::Deserialize;
 use tracing::warn;
 
 use super::TaskSpec;
-use crate::team::board_cmd;
+use crate::task::load_tasks_from_dir;
 
 #[derive(Debug, Deserialize)]
 struct Frontmatter {
@@ -112,18 +112,152 @@ fn build_create_task_args(spec: &TaskSpec) -> Vec<String> {
     args
 }
 
-/// Create board tasks from parsed specs by shelling out to kanban-md.
-pub fn create_board_tasks(specs: &[TaskSpec], board_dir: &Path) -> Result<Vec<u32>> {
+fn normalize_reopen_title(title: &str) -> String {
+    let mut normalized = String::with_capacity(title.len());
+    let mut last_was_space = false;
+
+    for ch in title.chars().flat_map(char::to_lowercase) {
+        let mapped = match ch {
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+            | '\u{2212}' => '-',
+            _ => ch,
+        };
+        if mapped.is_whitespace() {
+            if !last_was_space {
+                normalized.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            normalized.push(mapped);
+            last_was_space = false;
+        }
+    }
+
+    normalized.trim().to_string()
+}
+
+fn is_reopen_title(title: &str) -> bool {
+    normalize_reopen_title(title).starts_with("reopen ")
+}
+
+fn is_open_task_status(status: &str) -> bool {
+    !matches!(status, "done" | "archived")
+}
+
+fn existing_open_reopen_titles(board_dir: &Path) -> std::collections::HashSet<String> {
+    let tasks_dir = board_dir.join("tasks");
+    if !tasks_dir.is_dir() {
+        return std::collections::HashSet::new();
+    }
+
+    load_tasks_from_dir(&tasks_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|task| is_open_task_status(&task.status) && is_reopen_title(&task.title))
+        .map(|task| normalize_reopen_title(&task.title))
+        .collect()
+}
+
+fn looks_like_raw_test_log(body: &str) -> bool {
+    let has_running_header = body.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with("running ") && trimmed.ends_with(" tests")
+    });
+    let test_line_count = body
+        .lines()
+        .filter(|line| line.trim_start().starts_with("test "))
+        .count();
+    let has_failure_marker = body.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.ends_with("FAILED")
+            || trimmed.starts_with("failures:")
+            || trimmed.starts_with("error:")
+            || trimmed.contains("panicked at")
+            || trimmed.contains("No such file or directory")
+    });
+
+    (has_running_header && test_line_count >= 3) || (test_line_count >= 5 && has_failure_marker)
+}
+
+fn summarize_reopen_body(body: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut highlights = Vec::new();
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("running ")
+            || trimmed.ends_with("... ok")
+            || trimmed.starts_with("test result: ok")
+        {
+            continue;
+        }
+
+        let keep = trimmed.ends_with("FAILED")
+            || trimmed.starts_with("error:")
+            || trimmed.starts_with("failures:")
+            || trimmed.contains("panicked at")
+            || trimmed.contains("No such file or directory")
+            || trimmed.starts_with("called `Result::unwrap()`");
+        if !keep {
+            continue;
+        }
+
+        let normalized = trimmed.to_string();
+        if seen.insert(normalized.clone()) {
+            highlights.push(normalized);
+        }
+        if highlights.len() == 6 {
+            break;
+        }
+    }
+
+    let mut summary = String::from("Automatic reopen after failed verification.\n\nSummary:\n");
+    if highlights.is_empty() {
+        summary.push_str("- `cargo test` failed in the default verification environment.\n");
+        return summary;
+    }
+
+    for line in highlights {
+        summary.push_str("- ");
+        summary.push_str(&line);
+        summary.push('\n');
+    }
+    summary
+}
+
+fn sanitize_task_spec(spec: &TaskSpec) -> TaskSpec {
+    let mut sanitized = spec.clone();
+    sanitized.body = if is_reopen_title(&spec.title) && looks_like_raw_test_log(&spec.body) {
+        summarize_reopen_body(&spec.body)
+    } else {
+        spec.body.trim().to_string()
+    };
+    sanitized
+}
+
+fn create_board_tasks_with_program(
+    specs: &[TaskSpec],
+    board_dir: &Path,
+    program: &str,
+) -> Result<Vec<u32>> {
     if !board_dir.exists() {
         anyhow::bail!("board directory does not exist: {}", board_dir.display());
     }
 
+    let mut open_reopen_titles = existing_open_reopen_titles(board_dir);
     let mut created_ids = Vec::with_capacity(specs.len());
     for spec in specs {
-        let args = build_create_task_args(spec);
+        let normalized_title = normalize_reopen_title(&spec.title);
+        if is_reopen_title(&spec.title) && open_reopen_titles.contains(&normalized_title) {
+            continue;
+        }
+
+        let sanitized = sanitize_task_spec(spec);
+        let args = build_create_task_args(&sanitized);
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-        let output = board_cmd::run_board(board_dir, &arg_refs)
-            .with_context(|| format!("failed to create board task '{}'", spec.title))?;
+        let output = crate::team::board_cmd::run_board_with_program(program, board_dir, &arg_refs)
+            .with_context(|| format!("failed to create board task '{}'", sanitized.title))?;
 
         let task_id = output
             .stdout
@@ -134,14 +268,21 @@ pub fn create_board_tasks(specs: &[TaskSpec], board_dir: &Path) -> Result<Vec<u3
             .parse::<u32>()
             .with_context(|| format!("invalid task id returned by kanban-md: '{task_id}'"))?;
         created_ids.push(parsed_id);
+        if is_reopen_title(&sanitized.title) {
+            open_reopen_titles.insert(normalized_title);
+        }
     }
     Ok(created_ids)
+}
+
+/// Create board tasks from parsed specs by shelling out to kanban-md.
+pub fn create_board_tasks(specs: &[TaskSpec], board_dir: &Path) -> Result<Vec<u32>> {
+    create_board_tasks_with_program(specs, board_dir, "kanban-md")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::team::test_support::{EnvVarGuard, PATH_LOCK};
 
     fn setup_fake_kanban(tmp: &tempfile::TempDir) -> std::path::PathBuf {
         let fake_bin = tmp.path().join("fake-bin");
@@ -158,6 +299,16 @@ mod tests {
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         fake_bin
+    }
+
+    fn write_task_file(board_dir: &Path, id: u32, title: &str, status: &str) {
+        std::fs::write(
+            board_dir.join("tasks").join(format!("{id:03}-task.md")),
+            format!(
+                "---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: critical\n---\n\nTask body.\n"
+            ),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -306,17 +457,10 @@ No title here."#;
 
     #[test]
     fn create_board_tasks_round_trip_creates_tasks_with_metadata() {
-        let _path_lock = PATH_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let board_dir = tmp.path().join("board");
         std::fs::create_dir_all(board_dir.join("tasks")).unwrap();
-        let fake_bin = setup_fake_kanban(&tmp);
-        let path = format!(
-            "{}:{}",
-            fake_bin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
-        let _path_guard = EnvVarGuard::set("PATH", &path);
+        let fake_kanban = setup_fake_kanban(&tmp).join("kanban-md");
 
         let specs = vec![
             TaskSpec {
@@ -335,7 +479,9 @@ No title here."#;
             },
         ];
 
-        let ids = create_board_tasks(&specs, &board_dir).unwrap();
+        let ids =
+            create_board_tasks_with_program(&specs, &board_dir, fake_kanban.to_str().unwrap())
+                .unwrap();
         assert_eq!(ids, vec![1, 2]);
         let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks")).unwrap();
         assert_eq!(tasks.len(), 2);
@@ -381,5 +527,120 @@ No title here."#;
                 "17",
             ]
         );
+    }
+
+    #[test]
+    fn create_board_tasks_sanitizes_reopen_log_dump() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        std::fs::create_dir_all(board_dir.join("tasks")).unwrap();
+        let fake_kanban = setup_fake_kanban(&tmp).join("kanban-md");
+
+        let raw_body = "\
+running 3144 tests
+test agent::claude::tests::default_mode_is_interactive ... ok
+test tmux::tests::split_window_horizontal_creates_new_pane ... FAILED
+
+failures:
+
+---- tmux::tests::split_window_horizontal_creates_new_pane stdout ----
+thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/tmux.rs:1903:71:
+called `Result::unwrap()` on an `Err` value: failed to create tmux session 'batty-test-hsplit'
+
+Caused by:
+    No such file or directory (os error 2)
+
+test result: FAILED. 3011 passed; 14 failed; 119 ignored; 0 measured; 0 filtered out;
+";
+        let specs = vec![TaskSpec {
+            title: "Reopen tmux runtime test hardening - make cargo test green on main".into(),
+            body: raw_body.into(),
+            priority: Some("critical".into()),
+            depends_on: vec![],
+            tags: vec!["stability".into(), "tmux".into()],
+        }];
+
+        let ids =
+            create_board_tasks_with_program(&specs, &board_dir, fake_kanban.to_str().unwrap())
+                .unwrap();
+        assert_eq!(ids, vec![1]);
+
+        let created = std::fs::read_to_string(board_dir.join("tasks").join("001-task.md")).unwrap();
+        assert!(created.contains("Automatic reopen after failed verification."));
+        assert!(created.contains("tmux::tests::split_window_horizontal_creates_new_pane"));
+        assert!(created.contains("No such file or directory"));
+        assert!(!created.contains("running 3144 tests"));
+        assert!(!created.contains("default_mode_is_interactive ... ok"));
+
+        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks")).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert!(
+            tasks[0]
+                .description
+                .contains("Automatic reopen after failed verification.")
+        );
+    }
+
+    #[test]
+    fn create_board_tasks_skips_duplicate_open_reopen_title_variants() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        std::fs::create_dir_all(board_dir.join("tasks")).unwrap();
+        let fake_kanban = setup_fake_kanban(&tmp).join("kanban-md");
+
+        write_task_file(
+            &board_dir,
+            41,
+            "Reopen tmux runtime test hardening - make cargo test green on main",
+            "todo",
+        );
+
+        let specs = vec![TaskSpec {
+            title: "Reopen tmux runtime test hardening — make cargo test green on main".into(),
+            body: "running 3144 tests\ntest tmux::tests::split_window_horizontal_creates_new_pane ... FAILED\n".into(),
+            priority: Some("critical".into()),
+            depends_on: vec![],
+            tags: vec!["stability".into()],
+        }];
+
+        let ids =
+            create_board_tasks_with_program(&specs, &board_dir, fake_kanban.to_str().unwrap())
+                .unwrap();
+        assert!(ids.is_empty());
+
+        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks")).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, 41);
+    }
+
+    #[test]
+    fn create_board_tasks_allows_new_reopen_after_terminal_duplicate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        std::fs::create_dir_all(board_dir.join("tasks")).unwrap();
+        let fake_kanban = setup_fake_kanban(&tmp).join("kanban-md");
+
+        write_task_file(
+            &board_dir,
+            41,
+            "Reopen tmux runtime test hardening - make cargo test green on main",
+            "archived",
+        );
+
+        let specs = vec![TaskSpec {
+            title: "Reopen tmux runtime test hardening — make cargo test green on main".into(),
+            body: "Automatic reopen after failed verification.".into(),
+            priority: Some("critical".into()),
+            depends_on: vec![],
+            tags: vec!["stability".into()],
+        }];
+
+        let ids =
+            create_board_tasks_with_program(&specs, &board_dir, fake_kanban.to_str().unwrap())
+                .unwrap();
+        assert_eq!(ids, vec![2]);
+
+        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks")).unwrap();
+        assert_eq!(tasks.len(), 2);
     }
 }
