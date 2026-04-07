@@ -661,11 +661,16 @@ fn ensure_shared_cargo_target_config(project_root: &Path, worktree_dir: &Path) -
 
     let config_rel_path = Path::new(".cargo").join("config.toml");
     if worktree_relative_path_is_tracked(worktree_dir, &config_rel_path)? {
-        debug!(
+        // .cargo/config.toml must NOT be tracked — it contains worktree-specific
+        // target-dir paths that pollute other worktrees on rebase.  Untrack it.
+        warn!(
             config = %worktree_dir.join(&config_rel_path).display(),
-            "skipping managed cargo config because file is tracked by git"
+            "untracking .cargo/config.toml — worktree-specific file must not be in git"
         );
-        return Ok(());
+        let _ =
+            run_git_command_with_fallback(worktree_dir, &["rm", "--cached", ".cargo/config.toml"]);
+        // Remove the stale file so the managed config gets written below.
+        let _ = std::fs::remove_file(worktree_dir.join(&config_rel_path));
     }
 
     let cargo_dir = worktree_dir.join(".cargo");
@@ -744,7 +749,7 @@ fn ensure_engineer_worktree_excludes(worktree_dir: &Path) -> Result<()> {
         content.push('\n');
     }
 
-    for rule in [".cargo/", ".batty/team_config"] {
+    for rule in [".cargo/", ".cargo/config.toml", ".batty/team_config"] {
         if !content.lines().any(|line| line.trim() == rule) {
             content.push_str(rule);
             content.push('\n');
@@ -1690,7 +1695,7 @@ mod tests {
     }
 
     #[test]
-    fn test_setup_engineer_worktree_does_not_mutate_tracked_cargo_config() {
+    fn test_setup_engineer_worktree_untracks_cargo_config_and_writes_managed() {
         let Some(_guard) = git_test_guard() else {
             return;
         };
@@ -1699,6 +1704,7 @@ mod tests {
         let repo = init_git_repo(&tmp);
         let team_config_dir = repo.join(".batty").join("team_config");
 
+        // Simulate the pollution scenario: .cargo/config.toml committed to git
         std::fs::create_dir_all(repo.join(".cargo")).unwrap();
         std::fs::write(
             repo.join(".cargo").join("config.toml"),
@@ -1715,18 +1721,52 @@ mod tests {
         setup_engineer_worktree(&repo, &worktree_dir, "eng-tracked-config", &team_config_dir)
             .unwrap();
 
-        assert_eq!(
-            std::fs::read_to_string(worktree_dir.join(".cargo").join("config.toml")).unwrap(),
-            "[alias]\nxtask = \"run\"\n"
+        // After setup, the file should contain managed config (not the old alias)
+        let config =
+            std::fs::read_to_string(worktree_dir.join(".cargo").join("config.toml")).unwrap();
+        assert!(
+            config.contains(SHARED_CARGO_CONFIG_MARKER),
+            "cargo config should be managed after untracking: {config}"
         );
         assert!(
-            git_stdout(
-                &worktree_dir,
-                &["diff", "--name-only", "--", ".cargo/config.toml"]
-            )
-            .trim()
-            .is_empty(),
-            "tracked cargo config should stay unchanged after setup"
+            !config.contains("[alias]"),
+            "old tracked content should be replaced with managed config"
+        );
+    }
+
+    #[test]
+    fn test_setup_engineer_worktree_excludes_cargo_config_toml() {
+        let Some(_guard) = git_test_guard() else {
+            return;
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo
+            .join(".batty")
+            .join("worktrees")
+            .join("eng-exclude-test");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-exclude-test", &team_config_dir)
+            .unwrap();
+
+        // The git exclude file should contain .cargo/config.toml
+        let git_dir_output = git_stdout(&worktree_dir, &["rev-parse", "--git-dir"]);
+        let git_dir = if Path::new(git_dir_output.trim()).is_absolute() {
+            PathBuf::from(git_dir_output.trim())
+        } else {
+            worktree_dir.join(git_dir_output.trim())
+        };
+        let exclude_content =
+            std::fs::read_to_string(git_dir.join("info").join("exclude")).unwrap();
+        assert!(
+            exclude_content.contains(".cargo/config.toml"),
+            "worktree exclude should contain .cargo/config.toml: {exclude_content}"
+        );
+        assert!(
+            exclude_content.contains(".cargo/"),
+            "worktree exclude should contain .cargo/: {exclude_content}"
         );
     }
 
