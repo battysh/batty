@@ -65,9 +65,8 @@ pub(crate) struct AgentHealthSummary {
     pub(crate) restart_count: u32,
     pub(crate) context_exhaustion_count: u32,
     pub(crate) delivery_failure_count: u32,
+    pub(crate) supervisory_digest_count: u32,
     pub(crate) task_elapsed_secs: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) stall_summary: Option<String>,
     pub(crate) backend_health: crate::agent::BackendHealth,
 }
 
@@ -374,34 +373,26 @@ pub(crate) fn worktree_staleness_by_member(
 ) -> HashMap<String, u32> {
     members
         .iter()
+        .filter(|member| member.role_type == RoleType::Engineer && member.use_worktrees)
         .filter_map(|member| {
-            if member.role_type == RoleType::Engineer && member.use_worktrees {
-                let worktree_dir = project_root
-                    .join(".batty")
-                    .join("worktrees")
-                    .join(&member.name);
-                if !worktree_dir.exists() {
-                    return None;
-                }
+            let worktree_dir = project_root
+                .join(".batty")
+                .join("worktrees")
+                .join(&member.name);
+            if !worktree_dir.exists() {
+                return None;
+            }
 
-                match super::task_loop::worktree_commits_behind_main(&worktree_dir) {
-                    Ok(count) => Some((member.name.clone(), count)),
-                    Err(error) => {
-                        warn!(
-                            member = %member.name,
-                            error = %error,
-                            "failed to measure engineer worktree staleness for status"
-                        );
-                        None
-                    }
+            match super::task_loop::worktree_commits_behind_main(&worktree_dir) {
+                Ok(count) => Some((member.name.clone(), count)),
+                Err(error) => {
+                    warn!(
+                        member = %member.name,
+                        error = %error,
+                        "failed to measure engineer worktree staleness for status"
+                    );
+                    None
                 }
-            } else if member.agent.as_deref() == Some("claude") {
-                // Claude management roles do not have worktrees, but we still
-                // surface them in the STALE column so status shows they are
-                // included in shim stall tracking.
-                Some((member.name.clone(), 0))
-            } else {
-                None
             }
         })
         .collect()
@@ -456,20 +447,6 @@ pub(crate) fn agent_health_by_member(
                                 .map(|health| health.restart_count.max(restart_count))
                                 .unwrap_or(restart_count);
                         }
-                        if event
-                            .reason
-                            .as_deref()
-                            .is_some_and(|reason| reason.contains("stall"))
-                        {
-                            let current = health_by_member
-                                .get(role)
-                                .and_then(|health| health.stall_summary.clone());
-                            health_by_member
-                                .entry(role.to_string())
-                                .or_default()
-                                .stall_summary =
-                                Some(stall_summary_with_action("restart", current.as_deref()));
-                        }
                     }
                     "context_exhausted" => {
                         health_by_member
@@ -483,38 +460,11 @@ pub(crate) fn agent_health_by_member(
                             .or_default()
                             .delivery_failure_count += 1;
                     }
-                    "stall_detected" => {
-                        let summary = event
-                            .details
-                            .clone()
-                            .or_else(|| {
-                                event
-                                    .uptime_secs
-                                    .map(|secs| format!("stalled in working state for {secs}s"))
-                            })
-                            .or_else(|| event.reason.clone());
-                        if let Some(summary) = summary {
-                            health_by_member
-                                .entry(role.to_string())
-                                .or_default()
-                                .stall_summary = Some(summary);
-                        }
-                    }
-                    "task_escalated" => {
-                        if event
-                            .reason
-                            .as_deref()
-                            .is_some_and(|reason| reason.contains("stall"))
-                        {
-                            let current = health_by_member
-                                .get(role)
-                                .and_then(|health| health.stall_summary.clone());
-                            health_by_member
-                                .entry(role.to_string())
-                                .or_default()
-                                .stall_summary =
-                                Some(stall_summary_with_action("escalated", current.as_deref()));
-                        }
+                    "supervisory_digest_emitted" => {
+                        health_by_member
+                            .entry(role.to_string())
+                            .or_default()
+                            .supervisory_digest_count += 1;
                     }
                     "task_assigned" => {
                         latest_assignment_ts.insert(role.to_string(), event.ts);
@@ -777,8 +727,8 @@ pub(crate) fn format_agent_health_summary(health: &AgentHealthSummary) -> String
     if health.delivery_failure_count > 0 {
         parts.push(format!("d{}", health.delivery_failure_count));
     }
-    if let Some(stall_summary) = health.stall_summary.as_deref() {
-        parts.push(format!("s:{}", compact_stall_summary(stall_summary)));
+    if health.supervisory_digest_count > 0 {
+        parts.push(format!("sd{}", health.supervisory_digest_count));
     }
     if let Some(task_elapsed_secs) = health.task_elapsed_secs {
         parts.push(format!("t{}", format_health_duration(task_elapsed_secs)));
@@ -800,22 +750,6 @@ fn format_health_duration(task_elapsed_secs: u64) -> String {
         format!("{}h", task_elapsed_secs / 3_600)
     } else {
         format!("{}d", task_elapsed_secs / 86_400)
-    }
-}
-
-fn stall_summary_with_action(action: &str, summary: Option<&str>) -> String {
-    match summary.map(str::trim).filter(|summary| !summary.is_empty()) {
-        Some(summary) => format!("{action}: {summary}"),
-        None => action.to_string(),
-    }
-}
-
-fn compact_stall_summary(summary: &str) -> String {
-    let normalized = summary.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.len() <= 36 {
-        normalized
-    } else {
-        format!("{}...", normalized[..36].trim_end())
     }
 }
 
@@ -2029,38 +1963,6 @@ mod tests {
         }
     }
 
-    fn architect(name: &str) -> MemberInstance {
-        MemberInstance {
-            name: name.to_string(),
-            role_name: name.to_string(),
-            role_type: RoleType::Architect,
-            agent: Some("claude".to_string()),
-            model: None,
-            prompt: None,
-            posture: None,
-            model_class: None,
-            provider_overlay: None,
-            reports_to: None,
-            use_worktrees: false,
-        }
-    }
-
-    fn claude_manager(name: &str) -> MemberInstance {
-        MemberInstance {
-            name: name.to_string(),
-            role_name: name.to_string(),
-            role_type: RoleType::Manager,
-            agent: Some("claude".to_string()),
-            model: None,
-            prompt: None,
-            posture: None,
-            model_class: None,
-            provider_overlay: None,
-            reports_to: Some("architect".to_string()),
-            use_worktrees: false,
-        }
-    }
-
     fn user_member(name: &str) -> MemberInstance {
         MemberInstance {
             name: name.to_string(),
@@ -2237,8 +2139,8 @@ mod tests {
                     restart_count: 1,
                     context_exhaustion_count: 0,
                     delivery_failure_count: 0,
+                    supervisory_digest_count: 0,
                     task_elapsed_secs: None,
-                    stall_summary: None,
                     backend_health: crate::agent::BackendHealth::default(),
                 },
                 health_summary: "r1".to_string(),
@@ -2262,8 +2164,8 @@ mod tests {
                     restart_count: 0,
                     context_exhaustion_count: 1,
                     delivery_failure_count: 1,
+                    supervisory_digest_count: 0,
                     task_elapsed_secs: None,
-                    stall_summary: None,
                     backend_health: crate::agent::BackendHealth::default(),
                 },
                 health_summary: "c1 d1".to_string(),
@@ -2571,37 +2473,6 @@ mod tests {
     }
 
     #[test]
-    fn worktree_staleness_by_member_includes_claude_management_roles() {
-        let tmp = tempfile::tempdir().unwrap();
-        let staleness = worktree_staleness_by_member(
-            tmp.path(),
-            &[
-                architect("architect"),
-                claude_manager("manager"),
-                MemberInstance {
-                    name: "codex-manager".to_string(),
-                    role_name: "codex-manager".to_string(),
-                    role_type: RoleType::Manager,
-                    agent: Some("codex".to_string()),
-                    model: None,
-                    prompt: None,
-                    posture: None,
-                    model_class: None,
-                    provider_overlay: None,
-                    reports_to: Some("architect".to_string()),
-                    use_worktrees: false,
-                },
-                user_member("human"),
-            ],
-        );
-
-        assert_eq!(staleness.get("architect"), Some(&0));
-        assert_eq!(staleness.get("manager"), Some(&0));
-        assert!(!staleness.contains_key("codex-manager"));
-        assert!(!staleness.contains_key("human"));
-    }
-
-    #[test]
     fn board_status_task_queues_split_active_and_review_tasks() {
         let tmp = tempfile::tempdir().unwrap();
         let tasks_dir = tmp
@@ -2784,8 +2655,8 @@ mod tests {
                         restart_count: 1,
                         context_exhaustion_count: 0,
                         delivery_failure_count: 0,
+                        supervisory_digest_count: 0,
                         task_elapsed_secs: Some(30),
-                        stall_summary: None,
                         backend_health: crate::agent::BackendHealth::default(),
                     },
                     health_summary: "r1 t30s".to_string(),
@@ -2952,52 +2823,15 @@ mod tests {
             restart_count: 2,
             context_exhaustion_count: 1,
             delivery_failure_count: 3,
+            supervisory_digest_count: 1,
             task_elapsed_secs: Some(750),
-            stall_summary: Some(
-                "restart: manager stayed in Working for 600s without progress".to_string(),
-            ),
             backend_health: crate::agent::BackendHealth::default(),
         });
 
-        assert_eq!(
-            summary,
-            "r2 c1 d3 s:restart: manager stayed in Working f... t12m"
-        );
+        assert_eq!(summary, "r2 c1 d3 sd1 t12m");
         assert_eq!(
             format_agent_health_summary(&AgentHealthSummary::default()),
             "-"
-        );
-    }
-
-    #[test]
-    fn agent_health_by_member_surfaces_supervisory_stall_action() {
-        let tmp = tempfile::tempdir().unwrap();
-        let events_path = team_events_path(tmp.path());
-        let mut sink = EventSink::new(&events_path).unwrap();
-
-        let mut detected = TeamEvent::stall_detected("manager", None, 600);
-        detected.reason = Some("supervisory_stalled".to_string());
-        detected.details = Some("manager stayed in Working for 600s without progress".to_string());
-        sink.emit(detected).unwrap();
-        sink.emit(TeamEvent::agent_restarted(
-            "manager",
-            "supervisory::manager",
-            "supervisory_stalled",
-            1,
-        ))
-        .unwrap();
-        sink.emit(TeamEvent::task_escalated(
-            "manager",
-            "supervisory::manager",
-            Some("supervisory_stalled"),
-        ))
-        .unwrap();
-
-        let health = agent_health_by_member(tmp.path(), &[manager("manager")]);
-        let manager = health.get("manager").unwrap();
-        assert_eq!(
-            manager.stall_summary.as_deref(),
-            Some("escalated: restart: manager stayed in Working for 600s without progress")
         );
     }
 
@@ -3024,6 +2858,10 @@ mod tests {
         delivery_failed.ts = now_unix().saturating_sub(570);
         sink.emit(delivery_failed).unwrap();
 
+        let mut digest_emitted = TeamEvent::supervisory_digest_emitted("eng-1", 3, 1);
+        digest_emitted.ts = now_unix().saturating_sub(565);
+        sink.emit(digest_emitted).unwrap();
+
         let daemon_state = serde_json::json!({
             "active_tasks": {"eng-1": 42},
             "retry_counts": {"eng-1": 1}
@@ -3040,6 +2878,7 @@ mod tests {
         assert_eq!(eng_1.restart_count, 2);
         assert_eq!(eng_1.context_exhaustion_count, 1);
         assert_eq!(eng_1.delivery_failure_count, 1);
+        assert_eq!(eng_1.supervisory_digest_count, 1);
         assert!(eng_1.task_elapsed_secs.unwrap() >= 600);
         assert_eq!(health.get("eng-2").unwrap(), &AgentHealthSummary::default());
     }

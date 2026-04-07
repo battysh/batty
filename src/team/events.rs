@@ -431,6 +431,20 @@ impl TeamEvent {
         }
     }
 
+    pub fn supervisory_digest_emitted(
+        role: &str,
+        notice_count: u32,
+        suppressed_duplicates: u32,
+    ) -> Self {
+        Self {
+            role: Some(role.into()),
+            details: Some(format!(
+                "notice_count={notice_count} suppressed_duplicates={suppressed_duplicates}"
+            )),
+            ..Self::base("supervisory_digest_emitted")
+        }
+    }
+
     pub fn retro_generated() -> Self {
         Self::base("retro_generated")
     }
