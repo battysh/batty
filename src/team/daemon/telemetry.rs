@@ -164,43 +164,6 @@ impl TeamDaemon {
         ));
     }
 
-    pub(crate) fn record_inbox_message_expired(
-        &mut self,
-        target: &str,
-        from: &str,
-        message_age_secs: u64,
-    ) {
-        self.emit_event(TeamEvent::inbox_message_expired(
-            target,
-            from,
-            message_age_secs,
-        ));
-    }
-
-    pub(crate) fn record_inbox_message_deduplicated(
-        &mut self,
-        target: &str,
-        from: &str,
-        signature: u64,
-    ) {
-        self.emit_event(TeamEvent::inbox_message_deduplicated(
-            target, from, signature,
-        ));
-    }
-
-    pub(crate) fn record_inbox_batch_delivered(
-        &mut self,
-        target: &str,
-        message_count: usize,
-        escalation_count: usize,
-    ) {
-        self.emit_event(TeamEvent::inbox_batch_delivered(
-            target,
-            message_count,
-            escalation_count,
-        ));
-    }
-
     pub(crate) fn record_task_escalated(
         &mut self,
         role: &str,
@@ -548,19 +511,6 @@ impl TeamDaemon {
 
     pub(super) fn record_standup_generated(&mut self, recipient: &str) {
         self.emit_event(TeamEvent::standup_generated(recipient));
-    }
-
-    pub(crate) fn record_supervisory_digest_emitted(
-        &mut self,
-        recipient: &str,
-        notice_count: u32,
-        suppressed_duplicates: u32,
-    ) {
-        self.emit_event(TeamEvent::supervisory_digest_emitted(
-            recipient,
-            notice_count,
-            suppressed_duplicates,
-        ));
     }
 
     pub(super) fn record_parity_updated(&mut self, summary: &crate::team::parity::ParitySummary) {
