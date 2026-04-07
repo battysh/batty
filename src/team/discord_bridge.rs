@@ -123,10 +123,20 @@ impl TeamDaemon {
             return Ok(());
         }
 
+        // Rate limit: send at most 5 events per sync cycle to avoid Discord 429s.
+        let batch_limit = 5;
+        let mut sent = 0;
         for event in events.iter().skip(self.discord_event_cursor) {
-            self.send_discord_event(event)?;
+            if sent >= batch_limit {
+                break;
+            }
+            if let Err(error) = self.send_discord_event(event) {
+                tracing::warn!(error = %error, "discord event send failed; will retry next cycle");
+                break;
+            }
+            sent += 1;
         }
-        self.discord_event_cursor = events.len();
+        self.discord_event_cursor += sent;
         Ok(())
     }
 

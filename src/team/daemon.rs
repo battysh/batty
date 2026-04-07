@@ -445,7 +445,12 @@ impl TeamDaemon {
             channels,
             nudges,
             discord_bot,
-            discord_event_cursor: 0,
+            // Skip backlog on startup — only send events that happen after boot.
+            // Reading the entire history on first start hammers Discord API with
+            // hundreds of events and triggers rate limits (429).
+            discord_event_cursor: crate::team::events::read_events(event_sink.path())
+                .map(|events| events.len())
+                .unwrap_or(0),
             telegram_bot,
             failure_tracker: FailureTracker::new(20),
             event_sink,
