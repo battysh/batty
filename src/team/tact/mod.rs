@@ -25,6 +25,8 @@ pub struct TaskSpec {
     pub tags: Vec<String>,
 }
 
+pub type GeneratedTask = TaskSpec;
+
 pub use parser::{create_board_tasks, parse_planning_response};
 pub use prompt::{PLANNING_RESPONSE_FORMAT, compose_planning_prompt};
 

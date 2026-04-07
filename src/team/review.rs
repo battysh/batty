@@ -3,6 +3,7 @@
 //! Review and merge transitions for Batty-managed workflow metadata.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
@@ -31,6 +32,13 @@ pub struct ReviewState {
     pub reviewed_at: Option<u64>,
     #[serde(default)]
     pub nudge_sent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewEligibility {
+    Eligible,
+    MissingMetadata { reasons: Vec<String> },
+    AlreadyMerged { reason: String },
 }
 
 pub fn apply_review(
@@ -93,6 +101,68 @@ pub fn validate_review_readiness(meta: &WorkflowMeta) -> Result<(), String> {
             meta.state
         ))
     }
+}
+
+pub fn validate_review_candidate(
+    project_root: &Path,
+    meta: &WorkflowMeta,
+) -> anyhow::Result<ReviewEligibility> {
+    let branch = meta
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let commit = meta
+        .commit
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut reasons = Vec::new();
+
+    if branch.is_none() {
+        reasons.push("branch metadata missing".to_string());
+    }
+    if commit.is_none() {
+        reasons.push("commit metadata missing".to_string());
+    }
+    if !reasons.is_empty() {
+        return Ok(ReviewEligibility::MissingMetadata { reasons });
+    }
+
+    let branch = branch.expect("branch checked above");
+    let commit = commit.expect("commit checked above");
+
+    let commit_merged =
+        match crate::team::git_cmd::merge_base_is_ancestor(project_root, commit, "main") {
+            Ok(merged) => merged,
+            Err(_) => {
+                return Ok(ReviewEligibility::MissingMetadata {
+                    reasons: vec![format!("commit metadata is invalid: `{commit}`")],
+                });
+            }
+        };
+    if commit_merged {
+        return Ok(ReviewEligibility::AlreadyMerged {
+            reason: format!("commit `{commit}` is already on main"),
+        });
+    }
+
+    let branch_merged =
+        match crate::team::task_loop::branch_is_merged_into(project_root, branch, "main") {
+            Ok(merged) => merged,
+            Err(_) => {
+                return Ok(ReviewEligibility::MissingMetadata {
+                    reasons: vec![format!("branch metadata is invalid: `{branch}`")],
+                });
+            }
+        };
+    if branch_merged {
+        return Ok(ReviewEligibility::AlreadyMerged {
+            reason: format!("branch `{branch}` is already merged into main"),
+        });
+    }
+
+    Ok(ReviewEligibility::Eligible)
 }
 
 pub(crate) fn task_reference_mismatch_blockers(
@@ -161,6 +231,10 @@ fn format_task_id_list(task_ids: &BTreeSet<u32>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::team::test_support::{git_ok, init_git_repo};
+    use std::fs;
+    use std::process::Command;
+    use tempfile::tempdir;
 
     fn review_meta() -> WorkflowMeta {
         WorkflowMeta {
@@ -266,6 +340,79 @@ mod tests {
 
         let err = validate_review_readiness(&meta).expect_err("todo should not be review-ready");
         assert!(err.contains("Review state"));
+    }
+
+    #[test]
+    fn validate_review_candidate_rejects_missing_metadata() {
+        let tmp = tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "review_missing_meta");
+        let meta = WorkflowMeta {
+            state: TaskState::Review,
+            ..WorkflowMeta::default()
+        };
+
+        let eligibility = validate_review_candidate(&repo, &meta).unwrap();
+        assert_eq!(
+            eligibility,
+            ReviewEligibility::MissingMetadata {
+                reasons: vec![
+                    "branch metadata missing".to_string(),
+                    "commit metadata missing".to_string()
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn validate_review_candidate_rejects_already_merged_commit() {
+        let tmp = tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "review_merged_meta");
+
+        git_ok(&repo, &["checkout", "-b", "eng-1/task-42"]);
+        fs::write(
+            repo.join("src").join("review_candidate.rs"),
+            "pub fn review_candidate() {}\n",
+        )
+        .unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(&repo, &["commit", "-m", "review candidate"]);
+        let commit = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        git_ok(&repo, &["checkout", "main"]);
+        git_ok(
+            &repo,
+            &[
+                "merge",
+                "--no-ff",
+                "eng-1/task-42",
+                "-m",
+                "merge review candidate",
+            ],
+        );
+
+        let meta = WorkflowMeta {
+            state: TaskState::Review,
+            branch: Some("eng-1/task-42".to_string()),
+            commit: Some(commit.clone()),
+            ..WorkflowMeta::default()
+        };
+
+        let eligibility = validate_review_candidate(&repo, &meta).unwrap();
+        assert_eq!(
+            eligibility,
+            ReviewEligibility::AlreadyMerged {
+                reason: format!("commit `{commit}` is already on main")
+            }
+        );
     }
 
     #[test]

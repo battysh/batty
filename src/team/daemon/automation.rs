@@ -1751,6 +1751,22 @@ depends_on: [1]
 Second body.
 "#;
 
+    const RAW_LOG_RESPONSE: &str = r#"---
+title: "Valid planning task"
+priority: high
+tags: [tact]
+---
+Write a real planning task body.
+---
+title: "Rejected raw log task"
+priority: high
+tags: [tact]
+---
+running 3144 tests
+test tmux::tests::split_window_horizontal_creates_new_pane ... FAILED
+thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/tmux.rs:42:9
+"#;
+
     #[test]
     fn planning_cycle_trigger_generates_prompt_in_architect_inbox() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1922,6 +1938,37 @@ Second body.
     }
 
     #[test]
+    fn planning_round_trip_rejects_raw_log_generated_tasks() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let (fake_bin, _log_path) = setup_fake_kanban_for_planning(&tmp);
+        let path = format!(
+            "{}:{}",
+            fake_bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let _path_guard = EnvVarGuard::set("PATH", &path);
+
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        daemon.planning_cycle_active = true;
+
+        let created = daemon.handle_planning_response(RAW_LOG_RESPONSE).unwrap();
+        assert_eq!(created, 1);
+        assert!(!daemon.planning_cycle_active);
+
+        let tasks = crate::task::load_tasks_from_dir(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks"),
+        )
+        .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Valid planning task");
+    }
+
+    #[test]
     fn planning_response_empty_creates_zero_tasks_and_resets_cycle() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = planning_test_daemon(&tmp, 300);
@@ -2006,11 +2053,11 @@ Second body.
             daemon
                 .handle_planning_response(SINGLE_TASK_RESPONSE)
                 .unwrap(),
-            1
+            0
         );
 
         let tasks = crate::task::load_tasks_from_dir(&daemon.board_dir().join("tasks")).unwrap();
-        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks.len(), 1);
         assert!(!daemon.planning_cycle_active);
     }
 
