@@ -15,8 +15,8 @@ use crate::team::artifact::append_test_timing_record;
 #[cfg(test)]
 use crate::team::artifact::read_test_timing_log;
 use crate::team::auto_merge::{self, AutoMergeDecision};
-use crate::team::daemon::TeamDaemon;
 use crate::team::daemon::verification::run_automatic_verification;
+use crate::team::daemon::{MergeRequest, TeamDaemon};
 use crate::team::task_loop::{
     checkout_worktree_branch_from_main, current_worktree_branch, engineer_base_branch_name,
     read_task_title,
@@ -676,14 +676,20 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                                 lines = summary.total_lines(),
                                 "auto-merging task"
                             );
-                            daemon.record_task_auto_merged(
-                                engineer,
+                            daemon.enqueue_merge_request(MergeRequest {
                                 task_id,
+                                engineer: engineer.to_string(),
+                                branch: task_branch.clone(),
+                                worktree_dir: worktree_dir.clone(),
+                                queued_at: Instant::now(),
+                                test_passed: true,
+                                should_post_merge_verify: verification_policy.auto_run_tests,
+                                test_duration_ms,
                                 confidence,
-                                summary.files_changed,
-                                summary.total_lines(),
-                            );
-                            // Fall through to normal merge path below
+                                files_changed: summary.files_changed,
+                                lines_changed: summary.total_lines(),
+                            });
+                            return Ok(());
                         }
                         AutoMergeDecision::ManualReview {
                             confidence,
@@ -1112,7 +1118,7 @@ fn reset_engineer_worktree_in_repo(
     Ok(())
 }
 
-fn record_merge_test_timing(
+pub(crate) fn record_merge_test_timing(
     daemon: &mut TeamDaemon,
     task_id: u32,
     engineer: &str,
@@ -1346,6 +1352,14 @@ mod tests {
         daemon
     }
 
+    fn complete_task_and_process_queue(
+        daemon: &mut crate::team::daemon::TeamDaemon,
+        engineer: &str,
+    ) {
+        handle_engineer_completion(daemon, engineer).unwrap();
+        daemon.process_merge_queue_for_test().unwrap();
+    }
+
     #[test]
     fn completion_routes_engineers_with_tasks() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1362,7 +1376,7 @@ mod tests {
         let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
 
         daemon.set_active_task_for_test("eng-1", 42);
-        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+        complete_task_and_process_queue(&mut daemon, "eng-1");
         assert_eq!(daemon.active_task_id("eng-1"), Some(42));
     }
 
@@ -1391,7 +1405,7 @@ mod tests {
 
         daemon.set_active_task_for_test("eng-1", 42);
         daemon.set_member_state_for_test("eng-1", MemberState::Working);
-        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+        complete_task_and_process_queue(&mut daemon, "eng-1");
 
         // Task stays active — engineer still owns it (false-done prevention)
         assert_eq!(daemon.active_task_id("eng-1"), Some(42));
@@ -1427,7 +1441,7 @@ mod tests {
         daemon.set_active_task_for_test("eng-1", 42);
         daemon.set_member_state_for_test("eng-1", MemberState::Working);
 
-        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+        complete_task_and_process_queue(&mut daemon, "eng-1");
 
         assert_eq!(daemon.active_task_id("eng-1"), None);
         assert_eq!(
@@ -1488,7 +1502,7 @@ mod tests {
         daemon.set_active_task_for_test("eng-1", 42);
         daemon.set_member_state_for_test("eng-1", MemberState::Working);
 
-        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+        complete_task_and_process_queue(&mut daemon, "eng-1");
 
         assert_eq!(daemon.active_task_id("eng-1"), None);
         assert_eq!(
@@ -1525,7 +1539,7 @@ mod tests {
         daemon.set_active_task_for_test("eng-1", 42);
         daemon.set_member_state_for_test("eng-1", MemberState::Working);
 
-        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+        complete_task_and_process_queue(&mut daemon, "eng-1");
 
         assert_eq!(daemon.active_task_id("eng-1"), None);
         assert_eq!(
@@ -2094,7 +2108,7 @@ mod tests {
         daemon.set_active_task_for_test("eng-1", 42);
         daemon.set_member_state_for_test("eng-1", MemberState::Working);
 
-        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+        complete_task_and_process_queue(&mut daemon, "eng-1");
 
         assert_eq!(daemon.active_task_id("eng-1"), None);
         assert_eq!(
@@ -2177,7 +2191,7 @@ mod tests {
         daemon.set_active_task_for_test("eng-1", 42);
         daemon.set_member_state_for_test("eng-1", MemberState::Working);
 
-        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+        complete_task_and_process_queue(&mut daemon, "eng-1");
 
         let events = crate::team::events::read_events(
             &repo.join(".batty").join("team_config").join("events.jsonl"),
@@ -2262,7 +2276,27 @@ mod tests {
 
         handle_engineer_completion(&mut daemon, "eng-1").unwrap();
 
-        // Task should be completed and cleared
+        assert_eq!(daemon.queued_merge_count_for_test(), 1);
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+        assert_eq!(
+            daemon.member_state_for_test("eng-1"),
+            Some(MemberState::Working)
+        );
+
+        let task = crate::task::Task::from_file(
+            &repo
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("042-auto-merge-task.md"),
+        )
+        .unwrap();
+        assert_eq!(task.status, "in-progress");
+
+        daemon.process_merge_queue_for_test().unwrap();
+
+        assert_eq!(daemon.queued_merge_count_for_test(), 0);
         assert_eq!(daemon.active_task_id("eng-1"), None);
         assert_eq!(
             daemon.member_state_for_test("eng-1"),
@@ -2315,7 +2349,7 @@ mod tests {
         };
         let mut daemon = auto_merge_daemon(&repo, policy);
 
-        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+        complete_task_and_process_queue(&mut daemon, "eng-1");
 
         let task = crate::task::Task::from_file(
             &repo
@@ -2478,7 +2512,7 @@ mod tests {
         };
         let mut daemon = auto_merge_daemon(&repo, policy);
 
-        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+        complete_task_and_process_queue(&mut daemon, "eng-1");
 
         let events_path = repo.join(".batty").join("team_config").join("events.jsonl");
         let events = read_events(&events_path).unwrap();
