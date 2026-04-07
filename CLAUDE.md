@@ -4,27 +4,27 @@ This file is generated for a live OMX team worker run and is disposable.
 
 ## Worker Identity
 - Team: you-are-an-engineer-on-the-bat
-- Worker: worker-1
+- Worker: worker-3
 - Role: executor
 - Leader cwd: /Users/zedmor/batty
-- Worktree root: /Users/zedmor/batty/.omx/team/you-are-an-engineer-on-the-bat/worktrees/worker-1
+- Worktree root: /Users/zedmor/batty/.omx/team/you-are-an-engineer-on-the-bat/worktrees/worker-3
 - Team state root: /Users/zedmor/batty/.omx/state
-- Inbox path: /Users/zedmor/batty/.omx/state/team/you-are-an-engineer-on-the-bat/workers/worker-1/inbox.md
-- Mailbox path: /Users/zedmor/batty/.omx/state/team/you-are-an-engineer-on-the-bat/mailbox/worker-1.json
+- Inbox path: /Users/zedmor/batty/.omx/state/team/you-are-an-engineer-on-the-bat/workers/worker-3/inbox.md
+- Mailbox path: /Users/zedmor/batty/.omx/state/team/you-are-an-engineer-on-the-bat/mailbox/worker-3.json
 - Leader mailbox path: /Users/zedmor/batty/.omx/state/team/you-are-an-engineer-on-the-bat/mailbox/leader-fixed.json
 - Task directory: /Users/zedmor/batty/.omx/state/team/you-are-an-engineer-on-the-bat/tasks
-- Worker status path: /Users/zedmor/batty/.omx/state/team/you-are-an-engineer-on-the-bat/workers/worker-1/status.json
-- Worker identity path: /Users/zedmor/batty/.omx/state/team/you-are-an-engineer-on-the-bat/workers/worker-1/identity.json
+- Worker status path: /Users/zedmor/batty/.omx/state/team/you-are-an-engineer-on-the-bat/workers/worker-3/status.json
+- Worker identity path: /Users/zedmor/batty/.omx/state/team/you-are-an-engineer-on-the-bat/workers/worker-3/identity.json
 
 ## Protocol
-1. Read your inbox at `/Users/zedmor/batty/.omx/state/team/you-are-an-engineer-on-the-bat/workers/worker-1/inbox.md`.
+1. Read your inbox at `/Users/zedmor/batty/.omx/state/team/you-are-an-engineer-on-the-bat/workers/worker-3/inbox.md`.
 2. Load the worker skill from the first existing path:
    - `${CODEX_HOME:-~/.codex}/skills/worker/SKILL.md`
    - `/Users/zedmor/batty/.codex/skills/worker/SKILL.md`
    - `/Users/zedmor/batty/skills/worker/SKILL.md`
 3. Send startup ACK before task work:
 
-   `omx team api send-message --input "{"team_name":"you-are-an-engineer-on-the-bat","from_worker":"worker-1","to_worker":"leader-fixed","body":"ACK: worker-1 initialized"}" --json`
+   `omx team api send-message --input "{"team_name":"you-are-an-engineer-on-the-bat","from_worker":"worker-3","to_worker":"leader-fixed","body":"ACK: worker-3 initialized"}" --json`
 
 4. Resolve canonical team state root in this order: `OMX_TEAM_STATE_ROOT` env -> worker identity `team_state_root` -> config/manifest `team_state_root` -> local cwd fallback.
 5. Read task files from `/Users/zedmor/batty/.omx/state/team/you-are-an-engineer-on-the-bat/tasks/task-<id>.json` using bare `task_id` values in APIs.
@@ -33,13 +33,13 @@ This file is generated for a live OMX team worker run and is disposable.
    - `omx team api transition-task-status --json`
    - `omx team api release-task-claim --json` only for rollback to pending
 7. Use mailbox delivery flow:
-   - `omx team api mailbox-list --input "{"team_name":"you-are-an-engineer-on-the-bat","worker":"worker-1"}" --json`
-   - `omx team api mailbox-mark-delivered --input "{"team_name":"you-are-an-engineer-on-the-bat","worker":"worker-1","message_id":"<MESSAGE_ID>"}" --json`
+   - `omx team api mailbox-list --input "{"team_name":"you-are-an-engineer-on-the-bat","worker":"worker-3"}" --json`
+   - `omx team api mailbox-mark-delivered --input "{"team_name":"you-are-an-engineer-on-the-bat","worker":"worker-3","message_id":"<MESSAGE_ID>"}" --json`
 8. Preserve leader steering via inbox/mailbox nudges; task payload stays in inbox/task JSON, not this file.
 9. Do not pass `workingDirectory` to legacy team_* MCP tools; use `omx team api` CLI interop.
 
 ## Message Protocol
-- Always include `from_worker: "worker-1"`
+- Always include `from_worker: "worker-3"`
 - Send leader messages to `to_worker: "leader-fixed"`
 
 ## Scope Rules
