@@ -11,7 +11,8 @@ must move cleanly from idea to merged code.
 
 - **Stability first.** No feature ships unless the system can run unattended for 8+ hours without intervention.
 - **Self-healing by default.** Every failure mode the daemon can detect, it must recover from automatically — orphaned tasks, stuck agents, stale worktrees, dead shims, state desync.
-- **Observable.** Every problem must be visible in logs, telemetry, and Grafana dashboards before it becomes a stall.
+- **Observable.** Every problem must be visible in Discord, logs, telemetry, and Grafana dashboards before it becomes a stall.
+- **Discord-first.** Discord is the primary human interface. See `planning/discord-interface-strategy.md` for the full strategy.
 - **Tested against reality.** The nether_earth project is the integration test. If it stalls, batty has a bug.
 - The shim is the agent runtime. Each agent runs inside a dedicated shim process.
 - Compose, don't monolith. shim + kanban-md + BYO agents.
