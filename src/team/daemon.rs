@@ -596,7 +596,7 @@ impl TeamDaemon {
                 .workflow_policy
                 .graceful_shutdown_timeout_secs,
         );
-        match super::git_cmd::auto_commit_if_dirty(
+        match preserve_worktree_with_commit(
             worktree_dir,
             "wip: auto-save before restart [batty]",
             timeout,
