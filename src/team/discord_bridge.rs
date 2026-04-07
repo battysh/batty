@@ -268,21 +268,27 @@ fn friendly_event_description(event: &TeamEvent) -> String {
         "task_assigned" => {
             let engineer = event.to.as_deref().unwrap_or("?");
             let task = event.task.as_deref().unwrap_or("unknown task");
-            // Show first 200 chars of the task — the actual work being assigned
-            let preview = if task.len() > 200 {
-                format!(
-                    "{}...",
-                    &task[..task
+            // Extract title (first line) and body (rest)
+            let (title, body) = task.split_once('\n').unwrap_or((task, ""));
+            let title = title.trim();
+            let body = body.trim();
+            if body.is_empty() {
+                format!("**{engineer}** picked up:\n**{title}**")
+            } else {
+                // Truncate body for spoiler at 1500 chars (Discord embed limit ~4096)
+                let body_preview = if body.len() > 1500 {
+                    let end = body
                         .char_indices()
-                        .take_while(|&(i, _)| i < 200)
+                        .take_while(|&(i, _)| i < 1500)
                         .last()
                         .map(|(i, c)| i + c.len_utf8())
-                        .unwrap_or(200)]
-                )
-            } else {
-                task.to_string()
-            };
-            format!("**{engineer}** picked up:\n>>> {preview}")
+                        .unwrap_or(1500);
+                    format!("{}...", &body[..end])
+                } else {
+                    body.to_string()
+                };
+                format!("**{engineer}** picked up:\n**{title}**\n||{body_preview}||")
+            }
         }
         "task_claim_created" => {
             let role = event.role.as_deref().unwrap_or("?");
