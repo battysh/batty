@@ -136,6 +136,10 @@ pub struct SdkOutput {
     #[serde(default)]
     pub errors: Option<Vec<String>>,
 
+    /// For `result` messages: token usage from the API call.
+    #[serde(default)]
+    pub usage: Option<SdkUsage>,
+
     /// For `control_request` messages: the request ID to echo in responses.
     #[serde(default)]
     pub request_id: Option<String>,
@@ -143,6 +147,15 @@ pub struct SdkOutput {
     /// For `control_request` messages: the request payload.
     #[serde(default)]
     pub request: Option<Value>,
+}
+
+/// Token usage reported in `result` messages.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SdkUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
 }
 
 impl SdkOutput {

@@ -753,7 +753,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                     {
                         inner.context_approaching_emitted = true;
                         drop(inner);
-                        let _ = event_channel.send(&Event::ContextApproaching {
+                        let _ = evt_channel.send(&Event::ContextApproaching {
                             message: "Screen output contains context-pressure signals"
                                 .into(),
                             input_tokens: 0,
