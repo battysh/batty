@@ -581,6 +581,8 @@ struct ShimInner {
     last_working_screen: String,
     /// Consecutive failed test fix/retest loops handled inside the shim.
     test_failure_iterations: u8,
+    /// Whether a ContextApproaching event has already been emitted this session.
+    context_approaching_emitted: bool,
 }
 
 impl ShimInner {
@@ -689,6 +691,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
         dialogs_dismissed: 0,
         last_working_screen: String::new(),
         test_failure_iterations: 0,
+        context_approaching_emitted: false,
     }));
 
     // -- PTY log writer (optional) --
@@ -743,6 +746,21 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
 
                     let verdict = classifier::classify(inner.agent_type, inner.parser.screen());
                     let old_state = inner.state;
+
+                    // Check for context approaching limit (proactive, once per session).
+                    if !inner.context_approaching_emitted
+                        && common::detect_context_approaching_limit(&content)
+                    {
+                        inner.context_approaching_emitted = true;
+                        drop(inner);
+                        let _ = event_channel.send(&Event::ContextApproaching {
+                            message: "Screen output contains context-pressure signals"
+                                .into(),
+                            input_tokens: 0,
+                            output_tokens: 0,
+                        });
+                        continue;
+                    }
 
                     // Track screen content during Working state for response
                     // extraction. TUI agents may redraw the screen before the
@@ -1133,6 +1151,8 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                 .send(&Event::SessionStats {
                     output_bytes,
                     uptime_secs,
+                    input_tokens: 0,
+                    output_tokens: 0,
                 })
                 .is_err()
             {

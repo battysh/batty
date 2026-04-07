@@ -481,6 +481,48 @@ impl TeamDaemon {
                 }
             }
 
+            Event::ContextApproaching {
+                message,
+                input_tokens,
+                output_tokens,
+            } => {
+                let task_id = self.active_task_id(member_name);
+                let _ = append_shim_event_log(
+                    &self.config.project_root,
+                    member_name,
+                    &format!(
+                        "<- context_approaching: {message} (input_tokens={input_tokens}, output_tokens={output_tokens})"
+                    ),
+                );
+                warn!(
+                    member = member_name,
+                    task_id,
+                    input_tokens,
+                    output_tokens,
+                    "shim reports context approaching limit — proactive handoff"
+                );
+                self.record_orchestrator_action(format!(
+                    "health: proactive context handoff for {} — {} (tokens: {}/{})",
+                    member_name, message, input_tokens, output_tokens
+                ));
+
+                if let Err(error) = self.handle_context_pressure_restart(member_name) {
+                    warn!(
+                        member = member_name,
+                        error = %error,
+                        "proactive context handoff restart failed"
+                    );
+                } else if let Some(task_id) = task_id {
+                    self.record_agent_restarted(
+                        member_name,
+                        task_id.to_string(),
+                        "proactive_context_handoff",
+                        1,
+                    );
+                }
+                self.context_pressure_tracker.clear_member(member_name);
+            }
+
             Event::Pong => {
                 // Pong events are high-frequency health heartbeats — don't log
                 // them to event logs or daemon output to reduce noise.
@@ -492,6 +534,7 @@ impl TeamDaemon {
             Event::SessionStats {
                 output_bytes,
                 uptime_secs,
+                ..
             } => {
                 if let Some(handle) = self.shim_handles.get_mut(member_name) {
                     handle.record_output_bytes(output_bytes);
@@ -1444,6 +1487,8 @@ mod tests {
             .send(&Event::SessionStats {
                 output_bytes: 512,
                 uptime_secs: 42,
+                input_tokens: 0,
+                output_tokens: 0,
             })
             .unwrap();
         child.send(&Event::Pong).unwrap();
@@ -1547,6 +1592,42 @@ mod tests {
             .unwrap();
 
         assert!(daemon.shim_handles["eng-1"].is_terminal());
+    }
+
+    #[test]
+    fn handle_shim_event_context_approaching_logs_proactive_handoff() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![engineer_member("eng-1", Some("manager"), false)])
+            .build();
+        insert_mock_handle(&mut daemon, "eng-1");
+
+        daemon
+            .handle_shim_event(
+                "eng-1",
+                Event::ContextApproaching {
+                    message: "context pressure detected".into(),
+                    input_tokens: 80000,
+                    output_tokens: 20000,
+                },
+            )
+            .unwrap();
+
+        // Verify orchestrator log recorded a proactive handoff action.
+        let log_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("orchestrator.log");
+        if log_path.exists() {
+            let log = std::fs::read_to_string(&log_path).unwrap();
+            assert!(
+                log.contains("proactive context handoff"),
+                "orchestrator log should mention proactive handoff"
+            );
+        }
     }
 
     #[test]

@@ -61,6 +61,12 @@ struct SdkState {
     cumulative_output_bytes: u64,
     /// Consecutive failed test fix/retest loops handled inside the shim.
     test_failure_iterations: u8,
+    /// Cumulative input tokens reported by the API.
+    cumulative_input_tokens: u64,
+    /// Cumulative output tokens reported by the API.
+    cumulative_output_tokens: u64,
+    /// Whether a ContextApproaching event has already been emitted this session.
+    context_approaching_emitted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +123,9 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
         message_queue: VecDeque::new(),
         cumulative_output_bytes: 0,
         test_failure_iterations: 0,
+        cumulative_input_tokens: 0,
+        cumulative_output_tokens: 0,
+        context_approaching_emitted: false,
     }));
 
     // Shared stdin writer (used by both command loop and stdout reader for auto-approve)
@@ -278,6 +287,14 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                         }
                     }
 
+                    // Track cumulative token usage from result messages.
+                    if let Some(ref usage) = msg.usage {
+                        st.cumulative_input_tokens =
+                            st.cumulative_input_tokens.saturating_add(usage.input_tokens);
+                        st.cumulative_output_tokens =
+                            st.cumulative_output_tokens.saturating_add(usage.output_tokens);
+                    }
+
                     // Check for context exhaustion
                     let is_context_exhausted = msg
                         .errors
@@ -313,6 +330,28 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                             let _ = evt_channel.send(&event);
                         }
                         continue;
+                    }
+
+                    // Check for context approaching limit (proactive early warning).
+                    // Emit once per session to avoid spamming the daemon.
+                    if !st.context_approaching_emitted {
+                        let text_signal = common::detect_context_approaching_limit(
+                            &st.accumulated_response,
+                        );
+                        if text_signal {
+                            st.context_approaching_emitted = true;
+                            let input_tokens = st.cumulative_input_tokens;
+                            let output_tokens = st.cumulative_output_tokens;
+                            drop(st);
+                            let _ = evt_channel.send(&Event::ContextApproaching {
+                                message: "Agent output contains context-pressure signals"
+                                    .into(),
+                                input_tokens,
+                                output_tokens,
+                            });
+                            // Re-acquire for the rest of the result handling
+                            st = state_stdout.lock().unwrap();
+                        }
                     }
 
                     // Normal completion: Working → Idle
@@ -472,12 +511,16 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
             }
             let output_bytes = st.cumulative_output_bytes;
             let uptime_secs = st.started_at.elapsed().as_secs();
+            let input_tokens = st.cumulative_input_tokens;
+            let output_tokens = st.cumulative_output_tokens;
             drop(st);
 
             if stats_channel
                 .send(&Event::SessionStats {
                     output_bytes,
                     uptime_secs,
+                    input_tokens,
+                    output_tokens,
                 })
                 .is_err()
             {
