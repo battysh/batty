@@ -461,9 +461,8 @@ fn run_codex_exec(
                                 st.context_approaching_emitted = true;
                                 drop(st);
                                 let _ = evt_channel.send(&Event::ContextApproaching {
-                                    message:
-                                        "Agent output contains context-pressure signals"
-                                            .into(),
+                                    message: "Agent output contains context-pressure signals"
+                                        .into(),
                                     input_tokens: 0,
                                     output_tokens: 0,
                                 });
