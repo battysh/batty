@@ -63,6 +63,12 @@ Later on April 7, 2026, a fresh architect loop found the baseline had regressed:
 - the root tree carried partial supervisory-delivery edits while engineer worktrees remained on older completed-task branches
 - board state showed a worker simultaneously claiming multiple in-progress tasks, indicating claim/worktree reconciliation drift still exists under recovery paths
 
+At 04:46 EDT on April 7, 2026, a follow-up architect loop narrowed the current red-main failure:
+
+- `cargo fmt --check` still passed
+- `cargo test` failed compiling `src/team/delivery/verification.rs` because a `TeamDaemon` test fixture omitted the newer `discord_bot`, `discord_event_cursor`, and `recent_escalations` fields
+- task `#520` was re-queued to `todo`, but the task file initially retained `claimed_by: worker-2`, confirming claim metadata can survive a status rollback unless the board is reconciled explicitly
+
 ### Known Failure Modes (Fixed)
 
 These were all discovered and fixed during the nether_earth stabilization session:
