@@ -502,6 +502,19 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::standup_generated(recipient));
     }
 
+    pub(crate) fn record_supervisory_digest_emitted(
+        &mut self,
+        recipient: &str,
+        notice_count: u32,
+        suppressed_duplicates: u32,
+    ) {
+        self.emit_event(TeamEvent::supervisory_digest_emitted(
+            recipient,
+            notice_count,
+            suppressed_duplicates,
+        ));
+    }
+
     pub(super) fn record_parity_updated(&mut self, summary: &crate::team::parity::ParitySummary) {
         self.emit_event(TeamEvent::parity_updated(summary));
     }
