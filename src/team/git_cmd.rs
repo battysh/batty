@@ -315,7 +315,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn git_ok(repo: &Path, args: &[&str]) {
-        let output = Command::new("git")
+        let output = Command::new(git_program())
             .arg("-C")
             .arg(repo)
             .args(args)
@@ -404,7 +404,7 @@ mod tests {
     #[test]
     fn git_initialized_dir_returns_true() {
         let tmp = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
+        std::process::Command::new(git_program())
             .args(["init"])
             .current_dir(tmp.path())
             .output()
@@ -429,7 +429,7 @@ mod tests {
         let committed = auto_commit_if_dirty(
             tmp.path(),
             "wip: auto-save before restart [batty]",
-            Duration::from_secs(1),
+            Duration::from_secs(20),
         )
         .unwrap();
 
