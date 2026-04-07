@@ -111,6 +111,9 @@ pub(crate) fn ingest_completion_message(project_root: &Path, message: &str) -> R
     }
 
     let packet = parse_completion(message)?;
+    if !packet.tests_passed {
+        anyhow::bail!("completion packet rejected: tests_passed must be true");
+    }
     let validation = validate_completion(&packet);
     let task_path = find_task_path(project_root, packet.task_id)?;
     let task_text = std::fs::read_to_string(&task_path)
@@ -393,6 +396,37 @@ outcome: ready_for_review
         assert_eq!(metadata.branch.as_deref(), Some("eng-1-4/task-27"));
         assert_eq!(metadata.commit.as_deref(), Some("abc1234"));
         assert_eq!(metadata.tests_run, Some(true));
+        assert!(metadata.review_blockers.is_empty());
+    }
+
+    #[test]
+    fn ingest_completion_message_rejects_failed_tests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = team_config_dir(tmp.path()).join("board").join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let task_path = tasks_dir.join("027-task.md");
+        std::fs::write(
+            &task_path,
+            "---\nid: 27\ntitle: Completion packets\nstatus: review\npriority: medium\nclaimed_by: eng-1-4\nclass: standard\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        let error = ingest_completion_message(
+            tmp.path(),
+            r#"Done.
+
+## Completion Packet
+
+```json
+{"task_id":27,"branch":"eng-1-4/task-27","worktree_path":".batty/worktrees/eng-1-4","commit":"abc1234","changed_paths":["src/team/completion.rs"],"tests_run":true,"tests_passed":false,"artifacts":[],"outcome":"ready_for_review"}
+```"#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("tests_passed must be true"));
+        let metadata = read_workflow_metadata(&task_path).unwrap();
+        assert!(metadata.branch.is_none());
         assert!(metadata.review_blockers.is_empty());
     }
 }
