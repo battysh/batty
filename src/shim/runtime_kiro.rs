@@ -65,6 +65,8 @@ struct KiroState {
     sent_session_new: bool,
     /// Pending prompt request ID (to match result).
     pending_prompt_request_id: Option<u64>,
+    /// Whether a ContextApproaching event has already been emitted this session.
+    context_approaching_emitted: bool,
 }
 
 /// Monotonically increasing JSON-RPC request ID counter.
@@ -117,6 +119,7 @@ pub fn run_kiro_acp(args: ShimArgs, channel: Channel) -> Result<()> {
         initialized: false,
         sent_session_new: false,
         pending_prompt_request_id: None,
+        context_approaching_emitted: false,
     }));
 
     // Shared stdin writer — wrapped in Option so Shutdown can take and close it.
@@ -354,7 +357,21 @@ pub fn run_kiro_acp(args: ShimArgs, channel: Channel) -> Result<()> {
                                             let mut st = state_stdout.lock().unwrap();
                                             st.accumulated_response.push_str(text);
                                             st.cumulative_output_bytes += text.len() as u64;
-                                            drop(st);
+
+                                            // Check for context approaching limit.
+                                            if !st.context_approaching_emitted
+                                                && common::detect_context_approaching_limit(text)
+                                            {
+                                                st.context_approaching_emitted = true;
+                                                drop(st);
+                                                let _ = evt_channel.send(&Event::ContextApproaching {
+                                                    message: "Agent output contains context-pressure signals".into(),
+                                                    input_tokens: 0,
+                                                    output_tokens: 0,
+                                                });
+                                            } else {
+                                                drop(st);
+                                            }
 
                                             if let Some(ref log) = pty_log_stdout {
                                                 let _ = log.lock().unwrap().write(text.as_bytes());
@@ -569,6 +586,8 @@ pub fn run_kiro_acp(args: ShimArgs, channel: Channel) -> Result<()> {
                 .send(&Event::SessionStats {
                     output_bytes,
                     uptime_secs,
+                    input_tokens: 0,
+                    output_tokens: 0,
                 })
                 .is_err()
             {
@@ -898,6 +917,7 @@ mod tests {
             initialized: false,
             sent_session_new: false,
             pending_prompt_request_id: None,
+            context_approaching_emitted: false,
         };
         assert_eq!(st.state, ShimState::Starting);
         assert!(st.session_id.is_empty());

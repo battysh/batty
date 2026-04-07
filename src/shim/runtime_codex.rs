@@ -57,6 +57,8 @@ struct CodexState {
     program: String,
     /// Working directory for spawning subprocesses.
     cwd: std::path::PathBuf,
+    /// Whether a ContextApproaching event has already been emitted this session.
+    context_approaching_emitted: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +85,7 @@ pub fn run_codex_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
         cumulative_output_bytes: 0,
         program: "codex".to_string(),
         cwd: args.cwd.clone(),
+        context_approaching_emitted: false,
     }));
 
     // PTY log writer (optional — writes readable text for tmux display)
@@ -119,6 +122,8 @@ pub fn run_codex_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                 .send(&Event::SessionStats {
                     output_bytes,
                     uptime_secs,
+                    input_tokens: 0,
+                    output_tokens: 0,
                 })
                 .is_err()
             {
@@ -448,7 +453,23 @@ fn run_codex_exec(
                                 st.accumulated_response = text.to_string();
                             }
                             st.cumulative_output_bytes += text.len() as u64;
-                            drop(st);
+
+                            // Check for context approaching limit (proactive).
+                            if !st.context_approaching_emitted
+                                && common::detect_context_approaching_limit(text)
+                            {
+                                st.context_approaching_emitted = true;
+                                drop(st);
+                                let _ = evt_channel.send(&Event::ContextApproaching {
+                                    message:
+                                        "Agent output contains context-pressure signals"
+                                            .into(),
+                                    input_tokens: 0,
+                                    output_tokens: 0,
+                                });
+                            } else {
+                                drop(st);
+                            }
 
                             if let Some(log) = pty_log {
                                 let _ = log.lock().unwrap().write(text.as_bytes());
@@ -644,6 +665,7 @@ mod tests {
             cumulative_output_bytes: 0,
             program: "codex".into(),
             cwd: std::path::PathBuf::from("/tmp"),
+            context_approaching_emitted: false,
         };
         assert_eq!(st.state, ShimState::Idle);
         assert!(st.thread_id.is_none());
