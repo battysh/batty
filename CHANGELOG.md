@@ -4,81 +4,117 @@ All notable changes to Batty are documented here.
 
 ## 0.10.0 — 2026-04-07
 
-Self-improving agent teams: auto-dispatch, auto-merge, stall recovery, per-worktree
-build isolation, and release-documentation cleanup. This release turns the happy
-path into a daemon-owned loop instead of a human-operated relay race.
+The daemon-owned development loop. Batty can now run a full architect → engineer →
+reviewer cycle autonomously for hours. Dispatch, verify, merge, and replenish the
+board without human intervention. 224 commits since v0.9.0, 3,080+ tests passing.
 
 ### Highlights
 
-- **Auto-dispatch enabled by default** — idle engineers pull from `todo` without
-  waiting for manual manager intervention.
-- **Auto-merge on green** — low-risk engineer branches now merge through a serial
-  queue when tests and policy checks pass.
-- **Claude stall detection and restart** — shim health checks catch mid-turn
-  stalls and restart unhealthy agents before they block the pipeline.
-- **Per-worktree Cargo targets** — engineer worktrees no longer fight over build
-  locks or duplicate multi-gigabyte artifact trees.
+- **Discord channel integration** — native three-channel Discord bot
+  (`#commands`, `#events`, `#agents`) with rich embeds, `$go`/`$stop`/`$status`
+  commands, and bidirectional control. Monitor from your phone, type directives,
+  walk away. (`src/team/discord.rs`, `src/team/discord_bridge.rs`)
+- **Closed verification loop** — daemon auto-tests engineer completions, retries
+  on failure, and merges on green. No agent in the merge path.
+- **Ralph-style persistent execution** — engineers stay in a test-fix-retest
+  cycle until verification passes. Completions without passing tests are rejected.
+- **Notification isolation** — daemon nudges, standups, and status queries stay
+  in the orchestrator log, not injected into agent PTY context. Agents stay
+  focused on their code task.
+- **Supervisory stall detection** — architect and manager roles now get the same
+  stall detection and auto-restart that engineers have. No more silent 30-minute
+  stalls on management roles.
 
 ### Throughput
 
-- `board.auto_dispatch: true` is now the default team posture.
-- Review bottlenecks are reduced by a daemon-owned auto-merge path for small,
-  low-risk diffs.
-- Worktree reuse keeps each engineer on a stable checkout while creating fresh
-  task branches for each assignment.
-- Claim TTL policy now reclaims stale ownership automatically instead of letting
-  forgotten tasks sit in `in-progress`.
-- Smart rebase behavior reduces additive-only merge conflicts during engineer
-  branch recovery.
+- **Auto-dispatch enabled by default** — idle engineers pull from `todo` without
+  waiting for manual manager intervention.
+- **Auto-merge on green** — low-risk engineer branches merge through a serial
+  queue when tests and policy checks pass. Verified completions route directly
+  through the merge queue.
+- **Manager inbox signal shaping** — daemon supervision chatter is batched and
+  deduplicated before delivery. Manager sees prioritized digests instead of 200
+  raw messages per session.
+- **Claim TTL and auto-reclaim** — stale ownership expires automatically. Tasks
+  stuck in `in-progress` with no commits return to `todo`.
+- **Merge conflict auto-resolution** — additive-only conflicts are resolved
+  automatically, reducing manual recovery.
+- **Board health automation** — architect replenishes when todo < 4, archives
+  stale items, validates dependency graphs.
 
 ### Reliability
 
-- Claude SDK stdout timeout and shim health polling detect dead air before an
-  agent burns hours in a false-working state.
-- Restart backoff limits repeated restart churn while still recovering from
-  recoverable stalls.
-- Pending delivery and inbox retry paths preserve messages when shim delivery
-  fails instead of silently dropping work.
-- Stale nudge suppression avoids bothering engineers who do not currently own a
-  task.
-- OAuth-friendly launch posture clears stale API-key assumptions and aligns
-  Claude and Codex setup with current CLI auth flows.
+- **Ping/Pong socket health** — daemon sends Ping every 60s, detects stale shim
+  handles, triggers restart before the agent blocks the pipeline.
+- **In-flight message tracking** — daemon tracks the last sent message per agent,
+  cleared on response. Failed deliveries fall through to inbox with retry.
+- **Failed delivery recovery** — exhausted retries are surfaced with telemetry
+  events instead of churning silently.
+- **Context exhaustion prevention** — proactive detection of agents nearing
+  context limits, with handoff summaries for restart.
+- **False review detection** — validates commits exist on the engineer's branch
+  before accepting a completion packet.
+- **Worktree branch validation** — dispatch verifies worktree is on the correct
+  branch before assignment. Stale worktrees are rebased automatically.
+
+### Discord Integration
+
+- Three-channel routing: events → `#batty-events`, agent lifecycle → `#batty-agents`,
+  human commands → `#batty-commands`.
+- Rich embeds with role colors: architect (blue), engineer (green), reviewer (orange).
+- Command parser: `$go`, `$stop`, `$status`, `$board`, `$assign`, `$merge`,
+  `$kick`, `$pause`, `$resume`, `$goal`, `$task`, `$block`, `$help`.
+- Inbound polling: daemon reads commands from Discord and executes them.
+- Runs alongside Telegram — user picks preferred channel per role.
+- Config: `channel: discord` with `events_channel_id`, `agents_channel_id`,
+  `commands_channel_id` in `channel_config`.
+
+### OpenClaw Integration
+
+- OpenClaw supervisor contract and DTO interfaces defined.
+- Batty adapter layer for stable status/event reporting.
+- Multi-project event stream and subscription channels.
+
+### OMX-Inspired Features
+
+- **Hashline-style edit validation** — content-hash validation for agent file
+  edits to prevent stale-file corruption when multiple agents work concurrently.
+- **Board-as-protocol** — board is the coordination channel, reducing message
+  relay through the manager.
+- **Structured session lifecycle events** — typed event schema for agent sessions
+  compatible with external routers like clawhip.
 
 ### Role Prompts
 
-- Architect prompt now emphasizes board health, merge authority, and immediate
-  review draining.
-- Manager prompt is aligned to next-task dispatch and escalation instead of
-  passive narration.
-- Engineer prompt enforces anti-narration behavior and concrete commit/test
-  discipline.
+- Architect prompt: board health checklist, merge authority, anti-narration,
+  freeze/hold discipline, task scope guidelines.
+- Manager prompt: anti-narration enforcement, next-task dispatch, escalation
+  over passive waiting.
+- Engineer prompt: test-fix-retest cycle, commit-every-15-minutes rule,
+  structured completion packets.
 
 ### Configuration
 
 - `workflow_policy.auto_merge.enabled: true`
 - `board.auto_dispatch: true`
 - `workflow_policy.claim_ttl.default_secs: 1800`
-- `workflow_policy.claim_ttl.critical_secs: 900`
 - `automation.intervention_idle_grace_secs: 60`
 - Per-role `posture` and `model_class` fields in `team.yaml`
-- `workflow_policy.context_handoff_enabled: true`
+- `channel: discord` with multi-channel config
 - `workflow_policy.verification.*` for daemon-owned test/retry loops
 
 ### Documentation
 
-- README rewritten around the v0.10.0 operating model and quick start.
-- Added handbook-style `docs/cli-reference.md` and `docs/config-reference.md`
-  pages that explain the current workflow surface.
-- Getting started, roadmap, and planning architecture docs now match the
-  shipped daemon behavior.
+- README rewritten around the v0.10.0 daemon-owned operating model.
+- CLI reference and config reference updated for Discord and verification settings.
+- Planning docs aligned with shipped behavior.
 
 ### Tests
 
-- 3,000+ tests passing across runtime, workflow, and regression suites.
-- Delivery retry behavior is covered so failed shim sends cannot regress
-  silently.
-- Auto-merge, dispatch, and worktree stabilization paths gained deeper coverage
-  during the v0.10.0 cycle.
+- 3,080+ tests passing (up from 2,854 in v0.9.0).
+- 226 new tests added across delivery, verification, dispatch, and health subsystems.
+- Flaky git-backed tests stabilized under parallel execution.
+- Delivery retry, auto-merge, and completion gate paths covered.
 
 ## 0.9.0 — 2026-04-05
 
