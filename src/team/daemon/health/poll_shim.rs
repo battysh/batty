@@ -1285,7 +1285,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(daemon.context_pressure_tracker.shim_failure_count("eng-1"), 3);
+        assert_eq!(
+            daemon.context_pressure_tracker.shim_failure_count("eng-1"),
+            3
+        );
     }
 
     // ── working-state timeout tests ──
