@@ -61,23 +61,23 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 
 | Issue | Status | Priority |
 |---|---|---|
-| Agents narrate instead of running commands | Behavioral/prompting — needs tact engine | High |
-| Board empties when agents don't create tasks | Needs daemon-driven board population | High |
-| Codex agents exhaust context on meta-conversations | RestartAgent helps but doesn't prevent | Medium |
-| Manager Pong stale warnings (false alarm) | Mutex contention in shim — cosmetic | Low |
-| Grafana dashboard needs alerting rules | No alerts configured yet | Medium |
+| Verification loop is still open after agent completion | Need daemon-run test/fix/retry cycle before merge | Critical |
+| Architect and manager stalls are less visible than engineer stalls | Non-engineer shim stall detection still needs hardening | Critical |
+| Manager inbox noise buries actionable work | Needs batching and signal-first routing | Critical |
+| Auto-merge path is not yet proven end-to-end | Review handoff and merge trigger need production verification | Critical |
+| Codex agents still degrade before hitting hard context limits | RestartAgent exists; proactive restart with handoff remains open | Medium |
 
-### Tact Engine (Next)
+### Tact Engine Status
 
-Replace agent-driven board replenishment with daemon-driven planning cycles:
-- Trigger when idle workers > dispatchable tasks
-- Daemon composes structured prompt from current state
-- Sends to architect as single-turn interaction
-- Parses response for task specs
-- Creates board tasks directly via kanban-md
-- Auto-dispatch handles assignment
+Daemon-driven board replenishment is now in place. The tact engine detects idle-worker starvation, composes a structured planning prompt from roadmap and board state, routes it to the architect, and creates board tasks automatically.
 
-This eliminates the "architect updates roadmap file but doesn't send directive" failure mode.
+Next hardening work is about execution quality rather than backlog creation:
+- Close the completion loop with automatic test, retry, and escalation behavior
+- Verify the auto-merge path end-to-end under production-like runs
+- Keep notifications and status chatter out of agent context windows
+- Add proactive context-exhaustion restarts with handoff summaries
+
+This removes the old "board empties because nobody creates tasks" failure mode from the active roadmap and shifts attention to verification, merge reliability, and context hygiene.
 
 ---
 
