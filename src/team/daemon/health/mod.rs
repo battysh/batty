@@ -21,6 +21,7 @@ mod auto_doctor;
 mod checks;
 pub mod context;
 mod context_exhaustion;
+pub(super) mod disk_hygiene;
 pub mod narration;
 mod ping_pong;
 mod poll_shim;

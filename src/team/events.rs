@@ -465,6 +465,13 @@ impl TeamEvent {
         }
     }
 
+    pub fn disk_hygiene_cleanup(summary: &str) -> Self {
+        Self {
+            details: Some(summary.into()),
+            ..Self::base("disk_hygiene_cleanup")
+        }
+    }
+
     pub fn member_crashed(role: &str, restart: bool) -> Self {
         Self {
             role: Some(role.into()),

@@ -251,7 +251,18 @@ impl TeamDaemon {
             .members
             .iter()
             .filter(|member| member.role_type == RoleType::Engineer)
-            .filter(|member| self.states.get(&member.name) == Some(&MemberState::Idle))
+            .filter(|member| {
+                let state = self.states.get(&member.name);
+                match state {
+                    Some(&MemberState::Idle) => true,
+                    // Working engineers with no active task are effectively idle
+                    // and should be eligible for dispatch.
+                    Some(&MemberState::Working) => {
+                        !self.active_tasks.contains_key(&member.name)
+                    }
+                    _ => false,
+                }
+            })
             .map(|member| member.name.clone())
             .collect()
     }
@@ -845,7 +856,7 @@ mod tests {
     #[test]
     fn idle_engineers_returns_only_idle() {
         let tmp = tempfile::tempdir().unwrap();
-        let daemon = TestDaemonBuilder::new(tmp.path())
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
             .members(vec![
                 manager_member("mgr", None),
                 engineer_member("eng-1", Some("mgr"), false),
@@ -858,23 +869,68 @@ mod tests {
                 ("eng-3".to_string(), MemberState::Idle),
             ]))
             .build();
+        // eng-2 is Working WITH an active task — should be excluded
+        daemon.active_tasks.insert("eng-2".to_string(), 42);
 
         let idle = daemon.idle_engineer_names();
         assert_eq!(idle, vec!["eng-1", "eng-3"]);
     }
 
     #[test]
-    fn idle_engineers_empty_when_all_working() {
+    fn idle_engineers_empty_when_all_working_with_tasks() {
         let tmp = tempfile::tempdir().unwrap();
-        let daemon = TestDaemonBuilder::new(tmp.path())
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
             .members(vec![
                 manager_member("mgr", None),
                 engineer_member("eng-1", Some("mgr"), false),
             ])
             .states(HashMap::from([("eng-1".to_string(), MemberState::Working)]))
             .build();
+        daemon.active_tasks.insert("eng-1".to_string(), 10);
 
         assert!(daemon.idle_engineer_names().is_empty());
+    }
+
+    #[test]
+    fn idle_engineers_includes_working_without_active_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+                engineer_member("eng-2", Some("mgr"), false),
+            ])
+            .states(HashMap::from([
+                ("eng-1".to_string(), MemberState::Working),
+                ("eng-2".to_string(), MemberState::Idle),
+            ]))
+            .build();
+        // eng-1 is Working but has NO active task — should be dispatchable
+        let idle = daemon.idle_engineer_names();
+        assert_eq!(idle, vec!["eng-1", "eng-2"]);
+    }
+
+    #[test]
+    fn idle_engineers_working_no_task_mixed_with_working_with_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+                engineer_member("eng-2", Some("mgr"), false),
+                engineer_member("eng-3", Some("mgr"), false),
+            ])
+            .states(HashMap::from([
+                ("eng-1".to_string(), MemberState::Working),
+                ("eng-2".to_string(), MemberState::Working),
+                ("eng-3".to_string(), MemberState::Idle),
+            ]))
+            .build();
+        // eng-1 has an active task, eng-2 does not
+        daemon.active_tasks.insert("eng-1".to_string(), 50);
+
+        let idle = daemon.idle_engineer_names();
+        assert_eq!(idle, vec!["eng-2", "eng-3"]);
     }
 
     #[test]

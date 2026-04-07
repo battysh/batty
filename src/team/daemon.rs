@@ -221,6 +221,8 @@ pub struct TeamDaemon {
     pub(super) last_uncommitted_warn: HashMap<String, Instant>,
     /// Last time the daemon checked for stale per-worktree cargo targets to prune.
     pub(super) last_shared_target_cleanup: Instant,
+    /// Last time the daemon ran a full disk hygiene pass.
+    pub(super) last_disk_hygiene_check: Instant,
     /// Per-engineer completion verification loop state.
     pub(super) verification_states: HashMap<String, VerificationState>,
     /// Tracks consecutive narration-only rejections per task (commits exist
@@ -491,6 +493,7 @@ impl TeamDaemon {
             last_health_check: Instant::now() - Duration::from_secs(3600),
             last_uncommitted_warn: HashMap::new(),
             last_shared_target_cleanup: Instant::now() - Duration::from_secs(3600),
+            last_disk_hygiene_check: Instant::now() - Duration::from_secs(3600),
             verification_states: HashMap::new(),
             narration_rejection_counts: HashMap::new(),
             pending_delivery_queue: HashMap::new(),

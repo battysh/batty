@@ -189,6 +189,9 @@ impl TeamDaemon {
             self.run_recoverable_step("maybe_cleanup_shared_cargo_target", |daemon| {
                 daemon.maybe_cleanup_shared_cargo_target()
             });
+            self.run_recoverable_step("maybe_run_disk_hygiene", |daemon| {
+                daemon.maybe_run_disk_hygiene()
+            });
             self.run_recoverable_step("record_parity_snapshot", |daemon| {
                 if daemon.config.team_config.automation.clean_room_mode {
                     daemon.sync_cleanroom_specs()?;
