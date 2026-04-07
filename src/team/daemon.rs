@@ -199,6 +199,8 @@ pub struct TeamDaemon {
     pub(super) auto_merge_overrides: HashMap<u32, bool>,
     /// Tracks recent (task_id, engineer) dispatch pairs for deduplication.
     pub(super) recent_dispatches: HashMap<(u32, String), Instant>,
+    /// Tracks recent escalation keys to suppress repeated alerts.
+    pub(super) recent_escalations: HashMap<String, Instant>,
     /// SQLite telemetry database connection (None if open failed).
     pub(super) telemetry_db: Option<rusqlite::Connection>,
     /// Timestamp of the last manual assignment per engineer (for cooldown).
@@ -460,6 +462,7 @@ impl TeamDaemon {
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
+            recent_escalations: HashMap::new(),
             telemetry_db,
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
@@ -482,6 +485,24 @@ impl TeamDaemon {
             last_shim_health_check: Instant::now(),
             merge_queue: MergeQueue::default(),
         })
+    }
+
+    pub(crate) fn suppress_recent_escalation(
+        &mut self,
+        key: impl Into<String>,
+        window: Duration,
+    ) -> bool {
+        let now = Instant::now();
+        self.recent_escalations
+            .retain(|_, seen_at| now.duration_since(*seen_at) < window);
+
+        let key = key.into();
+        if self.recent_escalations.contains_key(&key) {
+            return true;
+        }
+
+        self.recent_escalations.insert(key, now);
+        false
     }
 
     pub(super) fn member_nudge_text(&self, member: &MemberInstance) -> Option<String> {

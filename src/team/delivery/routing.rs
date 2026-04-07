@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -38,21 +39,58 @@ fn shim_log_preview(body: &str) -> String {
     preview
 }
 
+const INBOX_DEDUP_WINDOW: Duration = Duration::from_secs(300);
+const INBOX_STALE_MESSAGE_AGE: Duration = Duration::from_secs(600);
+
+fn message_batch_priority(message: &inbox::InboxMessage) -> u8 {
+    let upper = message.body.to_ascii_uppercase();
+    if upper.contains("URGENT") || upper.contains("ESCALAT") {
+        0
+    } else {
+        1
+    }
+}
+
 fn format_batched_message(messages: &[inbox::InboxMessage]) -> String {
-    messages
+    let oldest_age_secs = messages
+        .iter()
+        .map(inbox::InboxMessage::age)
+        .map(|age| age.as_secs())
+        .max()
+        .unwrap_or(0);
+    let escalation_count = messages
+        .iter()
+        .filter(|message| message_batch_priority(message) == 0)
+        .count();
+
+    let rendered = messages
         .iter()
         .enumerate()
         .map(|(index, message)| {
+            let label = if message_batch_priority(message) == 0 {
+                "URGENT"
+            } else {
+                "INFO"
+            };
             format!(
-                "--- Message {}/{} from {} ---\n{}",
+                "--- {label} {}/{} from {} ({}s old) ---\n{}",
                 index + 1,
                 messages.len(),
                 message.from,
+                message.age().as_secs(),
                 message.body
             )
         })
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n\n");
+
+    format!(
+        "=== {} pending messages (oldest: {}s ago, escalations: {}) ===\n\n{}",
+        messages.len(),
+        oldest_age_secs,
+        escalation_count,
+        rendered
+    )
 }
 
 impl TeamDaemon {
@@ -124,8 +162,6 @@ impl TeamDaemon {
         let max_age = Duration::from_secs(max_age_secs);
 
         let recipients: Vec<String> = self.pending_delivery_queue.keys().cloned().collect();
-        let inbox_root = inbox::inboxes_root(&self.config.project_root);
-
         for recipient in recipients {
             let Some(messages) = self.pending_delivery_queue.get_mut(&recipient) else {
                 continue;
@@ -165,7 +201,7 @@ impl TeamDaemon {
                         for msg in sender_msgs {
                             let inbox_msg =
                                 inbox::InboxMessage::new_send(&msg.from, &recipient, &msg.body);
-                            if let Err(error) = inbox::deliver_to_inbox(&inbox_root, &inbox_msg) {
+                            if let Err(error) = self.queue_inbox_message(&inbox_msg) {
                                 warn!(
                                     from = msg.from.as_str(),
                                     to = recipient.as_str(),
@@ -199,7 +235,7 @@ impl TeamDaemon {
                             newest_preview,
                         );
                         let inbox_msg = inbox::InboxMessage::new_send(sender, &recipient, &digest);
-                        if let Err(error) = inbox::deliver_to_inbox(&inbox_root, &inbox_msg) {
+                        if let Err(error) = self.queue_inbox_message(&inbox_msg) {
                             warn!(
                                 from = sender.as_str(),
                                 to = recipient.as_str(),
@@ -242,6 +278,44 @@ impl TeamDaemon {
         body: &str,
     ) -> Result<()> {
         self.deliver_message(from, recipient, body).map(|_| ())
+    }
+
+    pub(in crate::team) fn queue_inbox_message(
+        &mut self,
+        message: &inbox::InboxMessage,
+    ) -> Result<bool> {
+        let root = inbox::inboxes_root(&self.config.project_root);
+        if inbox::find_recent_duplicate(&root, &message.to, message, INBOX_DEDUP_WINDOW)?.is_some()
+        {
+            self.record_inbox_message_deduplicated(
+                &message.to,
+                &message.from,
+                inbox::message_signature(&message.body),
+            );
+            debug!(
+                from = %message.from,
+                to = %message.to,
+                "suppressing duplicate inbox message"
+            );
+            return Ok(false);
+        }
+
+        inbox::deliver_to_inbox(&root, message).map_err(|error| DeliveryError::InboxQueue {
+            recipient: message.to.clone(),
+            detail: error.to_string(),
+        })?;
+        self.record_message_routed(&message.from, &message.to);
+        Ok(true)
+    }
+
+    fn expire_stale_inbox_messages(&mut self, member_name: &str) -> Result<usize> {
+        let root = inbox::inboxes_root(&self.config.project_root);
+        let expired =
+            inbox::expire_stale_pending_messages(&root, member_name, INBOX_STALE_MESSAGE_AGE)?;
+        for message in &expired {
+            self.record_inbox_message_expired(member_name, &message.from, message.age().as_secs());
+        }
+        Ok(expired.len())
     }
 
     fn deliver_message(
@@ -320,13 +394,8 @@ impl TeamDaemon {
         }
 
         // All delivery falls through to inbox when shim channel is unavailable.
-        let root = inbox::inboxes_root(&self.config.project_root);
         let msg = inbox::InboxMessage::new_send(from, recipient, body);
-        inbox::deliver_to_inbox(&root, &msg).map_err(|error| DeliveryError::InboxQueue {
-            recipient: recipient.to_string(),
-            detail: error.to_string(),
-        })?;
-        self.record_message_routed(from, recipient);
+        let _ = self.queue_inbox_message(&msg)?;
         Ok(MessageDelivery::InboxQueued)
     }
 
@@ -337,7 +406,6 @@ impl TeamDaemon {
             return Ok(());
         }
 
-        let root = inbox::inboxes_root(&self.config.project_root);
         let mut remaining_commands = Vec::new();
         for cmd in commands {
             let result: Result<()> = (|| match &cmd {
@@ -359,7 +427,7 @@ impl TeamDaemon {
                         }
                     } else {
                         let inbox_msg = inbox::InboxMessage::new_send(from, to, msg);
-                        inbox::deliver_to_inbox(&root, &inbox_msg)?;
+                        let _ = self.queue_inbox_message(&inbox_msg)?;
                         debug!(from, to, "legacy command routed to inbox");
                     }
                     Ok(())
@@ -370,7 +438,7 @@ impl TeamDaemon {
                     task,
                 } => {
                     let msg = inbox::InboxMessage::new_assign(from, engineer, task);
-                    inbox::deliver_to_inbox(&root, &msg)?;
+                    let _ = self.queue_inbox_message(&msg)?;
                     debug!(engineer, "legacy assign routed to inbox");
                     Ok(())
                 }
@@ -393,6 +461,11 @@ impl TeamDaemon {
         for name in &member_names {
             if !self.member_ready_for_delivery(name) {
                 continue;
+            }
+
+            let expired = self.expire_stale_inbox_messages(name)?;
+            if expired > 0 {
+                debug!(member = %name, expired, "expired stale inbox messages before delivery");
             }
 
             let messages = match inbox::pending_messages(&root, name) {
@@ -606,20 +679,26 @@ impl TeamDaemon {
             return Ok(false);
         };
 
-        let first_sender = messages
+        let mut sorted = messages.to_vec();
+        sorted.sort_by_key(|message| (message_batch_priority(message), Reverse(message.timestamp)));
+        let first_sender = sorted
             .first()
             .map(|message| message.from.as_str())
             .unwrap_or("daemon");
-        let batched_body = format_batched_message(messages);
+        let escalation_count = sorted
+            .iter()
+            .filter(|message| message_batch_priority(message) == 0)
+            .count();
+        let batched_body = format_batched_message(&sorted);
         info!(
             to = %member_name,
-            count = messages.len(),
+            count = sorted.len(),
             "delivering batched inbox messages via shim"
         );
         if let Err(error) = handle.send_message(first_sender, &batched_body) {
             warn!(
                 to = %member_name,
-                count = messages.len(),
+                count = sorted.len(),
                 error = %error,
                 "failed to deliver batched inbox messages"
             );
@@ -632,11 +711,11 @@ impl TeamDaemon {
             member_name,
             &format!(
                 "-> batched {} messages: {}",
-                messages.len(),
+                sorted.len(),
                 shim_log_preview(&batched_body)
             ),
         );
-        for message in messages {
+        for message in &sorted {
             if let Err(error) = inbox::mark_delivered(root, member_name, &message.id) {
                 warn!(
                     member = %member_name,
@@ -648,6 +727,7 @@ impl TeamDaemon {
                 self.record_message_routed(&message.from, member_name);
             }
         }
+        self.record_inbox_batch_delivered(member_name, sorted.len(), escalation_count);
 
         Ok(true)
     }
@@ -802,6 +882,7 @@ mod tests {
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
+            recent_escalations: HashMap::new(),
             telemetry_db: None,
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
@@ -1248,6 +1329,27 @@ mod tests {
     }
 
     #[test]
+    fn queue_message_suppresses_recent_duplicate_inbox_messages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+
+        daemon
+            .queue_message("eng-1", "manager", "Need review on merge handling.")
+            .unwrap();
+        daemon
+            .queue_message("eng-1", "manager", "Need   review on merge handling.")
+            .unwrap();
+
+        let messages =
+            inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "manager").unwrap();
+        assert_eq!(
+            messages.len(),
+            1,
+            "duplicate inbox message should be suppressed"
+        );
+    }
+
+    #[test]
     fn external_sender_delivery() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = empty_legacy_daemon(&tmp);
@@ -1510,7 +1612,8 @@ mod tests {
             .insert("manager".to_string(), "%123".to_string());
 
         let first = inbox::InboxMessage::new_send("eng-1", "manager", "first update");
-        let second = inbox::InboxMessage::new_send("architect", "manager", "second update");
+        let second =
+            inbox::InboxMessage::new_send("architect", "manager", "ESCALATION: second update");
         inbox::deliver_to_inbox(&root, &first).unwrap();
         inbox::deliver_to_inbox(&root, &second).unwrap();
 
@@ -1540,12 +1643,12 @@ mod tests {
         let cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
         match cmd {
             crate::shim::protocol::Command::SendMessage { body, .. } => {
-                assert!(body.contains("--- Message 1/2 from "));
-                assert!(body.contains("--- Message 2/2 from "));
-                assert!(body.contains("from eng-1 ---"));
+                assert!(body.contains("=== 2 pending messages"));
+                assert!(body.contains("escalations: 1"));
+                assert!(body.contains("--- URGENT 1/2 from architect"));
+                assert!(body.contains("ESCALATION: second update"));
+                assert!(body.contains("--- INFO 2/2 from eng-1"));
                 assert!(body.contains("first update"));
-                assert!(body.contains("from architect ---"));
-                assert!(body.contains("second update"));
             }
             other => panic!("expected SendMessage, got {other:?}"),
         }
@@ -1554,6 +1657,56 @@ mod tests {
             inbox::pending_messages(&root, "manager")
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn deliver_inbox_messages_expires_stale_messages_before_delivery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let root = inbox::inboxes_root(tmp.path());
+        daemon
+            .config
+            .pane_map
+            .insert("manager".to_string(), "%123".to_string());
+
+        let mut stale = inbox::InboxMessage::new_send("eng-1", "manager", "stale update");
+        stale.timestamp = crate::team::now_unix().saturating_sub(900);
+        inbox::deliver_to_inbox(&root, &stale).unwrap();
+
+        let mut fresh = inbox::InboxMessage::new_send("architect", "manager", "fresh update");
+        fresh.timestamp = crate::team::now_unix().saturating_sub(30);
+        inbox::deliver_to_inbox(&root, &fresh).unwrap();
+
+        let (parent_sock, _child_sock) = crate::shim::protocol::socketpair().unwrap();
+        let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "manager".to_string(),
+            parent_channel,
+            12345,
+            "claude".to_string(),
+            "claude".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("manager".to_string(), handle);
+        daemon.states.insert(
+            "manager".to_string(),
+            crate::team::standup::MemberState::Idle,
+        );
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        let pending = inbox::pending_messages(&root, "manager").unwrap();
+        assert!(pending.is_empty());
+        let all = inbox::all_messages(&root, "manager").unwrap();
+        assert!(
+            all.iter()
+                .any(|(message, delivered)| message.body == "stale update" && *delivered)
+        );
+        assert!(
+            all.iter()
+                .any(|(message, delivered)| message.body == "fresh update" && *delivered)
         );
     }
 

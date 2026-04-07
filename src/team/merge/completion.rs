@@ -5,7 +5,7 @@
 //! merge, and handles retries and escalation.
 
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
@@ -927,7 +927,13 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         return Ok(());
     }
 
-    if let Some(ref manager_name) = manager_name {
+    let escalation_key = format!("tests_failed_{task_id}_{engineer}");
+    let suppress_duplicate_escalation =
+        daemon.suppress_recent_escalation(escalation_key, Duration::from_secs(600));
+
+    if let Some(ref manager_name) = manager_name
+        && !suppress_duplicate_escalation
+    {
         let failure_summary = test_run.results.failure_summary();
         let msg = format!(
             "[{engineer}] task #{task_id} failed tests after 2 retries. Escalating.\nSummary: {failure_summary}\nLast output:\n{}",
@@ -939,7 +945,9 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
 
     daemon.record_task_escalated(engineer, task_id.to_string(), Some("tests_failed"));
 
-    if let Some(ref manager_name) = manager_name {
+    if let Some(ref manager_name) = manager_name
+        && !suppress_duplicate_escalation
+    {
         let escalation = format!(
             "ESCALATION: Task #{task_id} assigned to {engineer} failed tests after 2 retries. Task blocked on board."
         );
@@ -1804,7 +1812,7 @@ mod tests {
 
         let engineer_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
-        assert_eq!(engineer_messages.len(), 2);
+        assert_eq!(engineer_messages.len(), 1);
 
         let manager_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
@@ -2262,6 +2270,30 @@ mod tests {
             message.body.contains("Summary: 1 tests failed")
                 && message.body.contains("tests::test_dispatch_wip_guard")
         }));
+    }
+
+    #[test]
+    fn test_failure_escalation_is_suppressed_when_recently_sent() {
+        let (_tmp, repo, _worktree_dir) = setup_failing_test_repo("eng-1");
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+        daemon.increment_retry("eng-1");
+        daemon.increment_retry("eng-1");
+        daemon
+            .recent_escalations
+            .insert("tests_failed_42_eng-1".to_string(), Instant::now());
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        let manager_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
+        assert!(
+            manager_messages
+                .iter()
+                .all(|message| !message.body.contains("failed tests after 2 retries")),
+            "recent test failure escalation should be suppressed"
+        );
     }
 
     #[test]
