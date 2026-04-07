@@ -1129,6 +1129,9 @@ mod tests {
             planning_cycle_active: false,
             last_shim_health_check: Instant::now(),
             merge_queue: crate::team::daemon::MergeQueue::default(),
+            discord_bot: None,
+            discord_event_cursor: 0,
+            recent_escalations: HashMap::new(),
         }
     }
 
@@ -1314,6 +1317,9 @@ mod tests {
                             provider: "fake".to_string(),
                             bot_token: None,
                             allowed_user_ids: vec![],
+                            agents_channel_id: None,
+                            commands_channel_id: None,
+                            events_channel_id: None,
                         }),
                         nudge_interval_secs: None,
                         receives_standup: None,

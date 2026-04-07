@@ -2663,6 +2663,8 @@ mod tests {
                         delivery_failure_count: 0,
                         supervisory_digest_count: 0,
                         task_elapsed_secs: Some(30),
+                        stall_reason: None,
+                        stall_summary: None,
                         backend_health: crate::agent::BackendHealth::default(),
                     },
                     health_summary: "r1 t30s".to_string(),
@@ -2831,6 +2833,8 @@ mod tests {
             delivery_failure_count: 3,
             supervisory_digest_count: 1,
             task_elapsed_secs: Some(750),
+            stall_reason: None,
+            stall_summary: None,
             backend_health: crate::agent::BackendHealth::default(),
         });
 
