@@ -400,6 +400,189 @@ fn now_unix() -> u64 {
         .as_secs()
 }
 
+// ---------------------------------------------------------------------------
+// Message classification and digest
+// ---------------------------------------------------------------------------
+
+/// Category of an inbox message, used for priority sorting and collapsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MessageCategory {
+    /// Escalation — highest priority, always shown individually.
+    Escalation = 0,
+    /// Review request or review-related message.
+    ReviewRequest = 1,
+    /// Blocker report from an engineer.
+    Blocker = 2,
+    /// Status update for a task.
+    Status = 3,
+    /// Idle or review nudge — lowest priority.
+    Nudge = 4,
+}
+
+/// Classify a message body into a category.
+pub fn classify_message(msg: &InboxMessage) -> MessageCategory {
+    let body = msg.body.trim().to_ascii_lowercase();
+
+    // Escalation detection
+    if body.contains("escalat")
+        || body.contains("task_escalated")
+        || (body.contains("blocker") && body.contains("escalat"))
+    {
+        return MessageCategory::Escalation;
+    }
+
+    // Nudge detection (before blocker — nudges that mention "blocker" as instructions
+    // are still nudges)
+    if body.contains("idle nudge:")
+        || body.starts_with("review nudge:")
+        || body.contains("if you are idle, take action now")
+        || body.contains("you have been idle past your configured timeout")
+    {
+        return MessageCategory::Nudge;
+    }
+
+    // Blocker detection
+    if body.contains("blocked on") || body.contains("blocker:") || body.starts_with("blocked:") {
+        return MessageCategory::Blocker;
+    }
+
+    // Review request detection
+    if body.contains("ready for review")
+        || body.contains("review request")
+        || body.contains("ready_for_review")
+        || body.starts_with("review:")
+    {
+        return MessageCategory::ReviewRequest;
+    }
+
+    // Status update detection
+    if body.contains("status update")
+        || body.contains("progress update")
+        || body.contains("completion packet")
+        || body.starts_with("status:")
+    {
+        return MessageCategory::Status;
+    }
+
+    // Default: treat as status (middle priority)
+    MessageCategory::Status
+}
+
+/// Extract a task ID reference from a message body, if present.
+/// Looks for patterns like "#42", "Task #42", "task_id: 42".
+fn extract_task_id(body: &str) -> Option<String> {
+    // Try "#N" pattern
+    let body_lower = body.to_ascii_lowercase();
+    if let Some(pos) = body_lower.find('#') {
+        let after = &body[pos + 1..];
+        let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() {
+            return Some(digits);
+        }
+    }
+    // Try "task_id: N" or "task_id\":N"
+    if let Some(pos) = body_lower.find("task_id") {
+        let after = &body[pos + 7..];
+        let digits: String = after
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if !digits.is_empty() {
+            return Some(digits);
+        }
+    }
+    None
+}
+
+/// A single entry in the digested inbox view.
+#[derive(Debug, Clone)]
+pub struct DigestEntry {
+    /// The representative message (latest in the group).
+    pub message: InboxMessage,
+    /// Whether the representative message was delivered.
+    pub delivered: bool,
+    /// Category of this entry.
+    pub category: MessageCategory,
+    /// How many raw messages this entry represents (1 = no collapsing).
+    pub collapsed_count: usize,
+}
+
+/// Digest a list of inbox messages: collapse nudges per sender, status
+/// updates per task (keep latest), and priority-sort the result.
+///
+/// Returns `(digest_entries, raw_count)` where `raw_count` is the original
+/// message count before collapsing.
+pub fn digest_messages(messages: &[(InboxMessage, bool)]) -> (Vec<DigestEntry>, usize) {
+    use std::collections::HashMap;
+
+    let raw_count = messages.len();
+    if messages.is_empty() {
+        return (Vec::new(), 0);
+    }
+
+    // Group messages by (category, grouping key).
+    // - Nudges group by sender ("from").
+    // - Status updates group by task ID (if extractable), else by sender.
+    // - Everything else stays individual.
+    let mut groups: HashMap<(MessageCategory, String), Vec<(usize, MessageCategory)>> =
+        HashMap::new();
+
+    let classified: Vec<MessageCategory> = messages
+        .iter()
+        .map(|(msg, _)| classify_message(msg))
+        .collect();
+
+    for (idx, cat) in classified.iter().enumerate() {
+        let (msg, _) = &messages[idx];
+        let key = match cat {
+            MessageCategory::Nudge => {
+                // Group nudges by sender
+                format!("nudge:{}", msg.from)
+            }
+            MessageCategory::Status => {
+                // Group status by task ID if available, else by sender
+                match extract_task_id(&msg.body) {
+                    Some(tid) => format!("status:task#{tid}"),
+                    None => format!("status:from:{}", msg.from),
+                }
+            }
+            // Escalations, review requests, blockers stay individual
+            _ => format!("individual:{idx}"),
+        };
+        groups.entry((*cat, key)).or_default().push((idx, *cat));
+    }
+
+    // Build digest entries: for each group, keep only the latest message.
+    let mut entries: Vec<DigestEntry> = Vec::new();
+    for ((_cat, _key), indices) in &groups {
+        let count = indices.len();
+        // Latest = highest timestamp (messages are sorted by timestamp, so last index)
+        let Some(&(latest_idx, category)) = indices
+            .iter()
+            .max_by_key(|(idx, _)| messages[*idx].0.timestamp)
+        else {
+            continue;
+        };
+        let (msg, delivered) = &messages[latest_idx];
+        entries.push(DigestEntry {
+            message: msg.clone(),
+            delivered: *delivered,
+            category,
+            collapsed_count: count,
+        });
+    }
+
+    // Priority sort: by category (asc = escalation first), then by timestamp (desc = newest first)
+    entries.sort_by(|a, b| {
+        a.category
+            .cmp(&b.category)
+            .then_with(|| b.message.timestamp.cmp(&a.message.timestamp))
+    });
+
+    (entries, raw_count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -792,6 +975,364 @@ mod tests {
         );
         assert!(all_messages(root, "eng-1").unwrap().is_empty());
         assert!(all_messages(root, "eng-2").unwrap().is_empty());
+    }
+
+    // ---- Message classification tests ----
+
+    fn make_msg(from: &str, to: &str, body: &str, ts: u64) -> InboxMessage {
+        let mut msg = InboxMessage::new_send(from, to, body);
+        msg.timestamp = ts;
+        msg
+    }
+
+    #[test]
+    fn classify_idle_nudge() {
+        let msg = make_msg(
+            "daemon",
+            "eng-1",
+            "Idle nudge: you have been idle past your configured timeout. Move forward.",
+            100,
+        );
+        assert_eq!(classify_message(&msg), MessageCategory::Nudge);
+    }
+
+    #[test]
+    fn classify_review_nudge() {
+        let msg = make_msg(
+            "daemon",
+            "manager",
+            "Review nudge: task #42 awaiting review",
+            100,
+        );
+        assert_eq!(classify_message(&msg), MessageCategory::Nudge);
+    }
+
+    #[test]
+    fn classify_escalation() {
+        let msg = make_msg(
+            "eng-1",
+            "manager",
+            "Task #42 escalated: build failures",
+            100,
+        );
+        assert_eq!(classify_message(&msg), MessageCategory::Escalation);
+    }
+
+    #[test]
+    fn classify_blocker() {
+        let msg = make_msg("eng-1", "manager", "Blocked on #42: missing API key", 100);
+        assert_eq!(classify_message(&msg), MessageCategory::Blocker);
+    }
+
+    #[test]
+    fn classify_review_request() {
+        let msg = make_msg("eng-1", "manager", "Task #42 ready for review", 100);
+        assert_eq!(classify_message(&msg), MessageCategory::ReviewRequest);
+    }
+
+    #[test]
+    fn classify_status_update() {
+        let msg = make_msg(
+            "eng-1",
+            "manager",
+            "Status update on task #42: tests passing",
+            100,
+        );
+        assert_eq!(classify_message(&msg), MessageCategory::Status);
+    }
+
+    #[test]
+    fn classify_generic_message_as_status() {
+        let msg = make_msg("eng-1", "manager", "Hello, just checking in", 100);
+        assert_eq!(classify_message(&msg), MessageCategory::Status);
+    }
+
+    #[test]
+    fn classify_nudge_with_idle_action_text() {
+        let msg = make_msg("daemon", "eng-1", "If you are idle, take action NOW", 100);
+        assert_eq!(classify_message(&msg), MessageCategory::Nudge);
+    }
+
+    // ---- extract_task_id tests ----
+
+    #[test]
+    fn extract_task_id_hash_pattern() {
+        assert_eq!(extract_task_id("Task #42 is done"), Some("42".to_string()));
+    }
+
+    #[test]
+    fn extract_task_id_from_json() {
+        assert_eq!(
+            extract_task_id(r#"{"task_id": 99, "status": "done"}"#),
+            Some("99".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_task_id_none_when_missing() {
+        assert_eq!(extract_task_id("no task reference here"), None);
+    }
+
+    // ---- digest_messages tests ----
+
+    #[test]
+    fn digest_empty_messages() {
+        let (entries, raw) = digest_messages(&[]);
+        assert!(entries.is_empty());
+        assert_eq!(raw, 0);
+    }
+
+    #[test]
+    fn digest_collapses_nudges_per_sender() {
+        let msgs: Vec<(InboxMessage, bool)> = vec![
+            (
+                make_msg("daemon", "eng-1", "Idle nudge: move forward", 100),
+                true,
+            ),
+            (
+                make_msg("daemon", "eng-1", "Idle nudge: move forward", 200),
+                true,
+            ),
+            (
+                make_msg("daemon", "eng-1", "Idle nudge: move forward", 300),
+                true,
+            ),
+        ];
+
+        let (entries, raw_count) = digest_messages(&msgs);
+        assert_eq!(raw_count, 3);
+        assert_eq!(
+            entries.len(),
+            1,
+            "3 nudges from same sender should collapse to 1"
+        );
+        assert_eq!(entries[0].collapsed_count, 3);
+        assert_eq!(entries[0].message.timestamp, 300, "should keep latest");
+        assert_eq!(entries[0].category, MessageCategory::Nudge);
+    }
+
+    #[test]
+    fn digest_keeps_nudges_separate_per_sender() {
+        // Manager inbox with nudges from different sources
+        let msgs: Vec<(InboxMessage, bool)> = vec![
+            (
+                make_msg("daemon", "manager", "Idle nudge: eng-1 is idle", 100),
+                true,
+            ),
+            (
+                make_msg(
+                    "architect",
+                    "manager",
+                    "Review nudge: task #42 awaiting review",
+                    200,
+                ),
+                true,
+            ),
+        ];
+
+        let (entries, _) = digest_messages(&msgs);
+        assert_eq!(
+            entries.len(),
+            2,
+            "nudges from different senders stay separate"
+        );
+    }
+
+    #[test]
+    fn digest_collapses_status_updates_per_task() {
+        let msgs: Vec<(InboxMessage, bool)> = vec![
+            (
+                make_msg(
+                    "eng-1",
+                    "manager",
+                    "Status update on task #42: compiling",
+                    100,
+                ),
+                true,
+            ),
+            (
+                make_msg(
+                    "eng-1",
+                    "manager",
+                    "Status update on task #42: tests passing",
+                    200,
+                ),
+                true,
+            ),
+            (
+                make_msg("eng-1", "manager", "Status update on task #42: done", 300),
+                true,
+            ),
+        ];
+
+        let (entries, raw_count) = digest_messages(&msgs);
+        assert_eq!(raw_count, 3);
+        assert_eq!(
+            entries.len(),
+            1,
+            "3 status updates for same task should collapse"
+        );
+        assert_eq!(entries[0].collapsed_count, 3);
+        assert_eq!(entries[0].message.timestamp, 300, "should keep latest");
+    }
+
+    #[test]
+    fn digest_keeps_status_separate_per_task() {
+        let msgs: Vec<(InboxMessage, bool)> = vec![
+            (
+                make_msg("eng-1", "manager", "Status update on task #42: done", 100),
+                true,
+            ),
+            (
+                make_msg(
+                    "eng-1",
+                    "manager",
+                    "Status update on task #99: compiling",
+                    200,
+                ),
+                true,
+            ),
+        ];
+
+        let (entries, _) = digest_messages(&msgs);
+        assert_eq!(entries.len(), 2, "status for different tasks stay separate");
+    }
+
+    #[test]
+    fn digest_never_collapses_escalations() {
+        let msgs: Vec<(InboxMessage, bool)> = vec![
+            (
+                make_msg(
+                    "eng-1",
+                    "manager",
+                    "Task #42 escalated: build failures",
+                    100,
+                ),
+                false,
+            ),
+            (
+                make_msg("eng-2", "manager", "Task #42 escalated: tests broken", 200),
+                false,
+            ),
+        ];
+
+        let (entries, _) = digest_messages(&msgs);
+        assert_eq!(entries.len(), 2, "escalations are never collapsed");
+        assert_eq!(entries[0].category, MessageCategory::Escalation);
+        assert_eq!(entries[1].category, MessageCategory::Escalation);
+    }
+
+    #[test]
+    fn digest_priority_sorts_escalations_first_nudges_last() {
+        let msgs: Vec<(InboxMessage, bool)> = vec![
+            (
+                make_msg("daemon", "manager", "Idle nudge: move forward", 400),
+                true,
+            ),
+            (
+                make_msg("eng-1", "manager", "Status update on task #42: done", 300),
+                true,
+            ),
+            (
+                make_msg("eng-1", "manager", "Blocked on #99: missing key", 200),
+                true,
+            ),
+            (
+                make_msg("eng-2", "manager", "Task #50 escalated: critical", 100),
+                false,
+            ),
+            (
+                make_msg("eng-1", "manager", "Task #42 ready for review", 350),
+                true,
+            ),
+        ];
+
+        let (entries, _) = digest_messages(&msgs);
+
+        let categories: Vec<MessageCategory> = entries.iter().map(|e| e.category).collect();
+        // Verify ordering: Escalation < ReviewRequest < Blocker < Status < Nudge
+        for i in 1..categories.len() {
+            assert!(
+                categories[i - 1] <= categories[i],
+                "category at {} ({:?}) should come before or equal category at {} ({:?})",
+                i - 1,
+                categories[i - 1],
+                i,
+                categories[i]
+            );
+        }
+        assert_eq!(categories[0], MessageCategory::Escalation);
+        assert_eq!(*categories.last().unwrap(), MessageCategory::Nudge);
+    }
+
+    #[test]
+    fn digest_mixed_scenario_achieves_significant_reduction() {
+        // Simulate a typical noisy session: 5 nudges (same eng), 4 status updates (same task),
+        // 1 escalation, 1 review request, 1 blocker = 12 raw messages
+        let mut msgs: Vec<(InboxMessage, bool)> = Vec::new();
+        for i in 0..5 {
+            msgs.push((
+                make_msg("daemon", "eng-1", "Idle nudge: move forward", 100 + i),
+                true,
+            ));
+        }
+        for i in 0..4 {
+            msgs.push((
+                make_msg(
+                    "eng-1",
+                    "manager",
+                    &format!("Status update on task #42: step {i}"),
+                    200 + i,
+                ),
+                true,
+            ));
+        }
+        msgs.push((
+            make_msg(
+                "eng-2",
+                "manager",
+                "Task #99 escalated: critical failure",
+                300,
+            ),
+            false,
+        ));
+        msgs.push((
+            make_msg("eng-1", "manager", "Task #42 ready for review", 350),
+            true,
+        ));
+        msgs.push((
+            make_msg("eng-3", "manager", "Blocked on #55: need credentials", 320),
+            true,
+        ));
+
+        let (entries, raw_count) = digest_messages(&msgs);
+        assert_eq!(raw_count, 12);
+        // Expected: 1 escalation + 1 review + 1 blocker + 1 status(collapsed 4) + 1 nudge(collapsed 5) = 5 entries
+        assert_eq!(entries.len(), 5);
+        // Reduction: 12 -> 5 = 58% reduction, close to the 60% target
+        let reduction_pct = ((raw_count - entries.len()) as f64 / raw_count as f64) * 100.0;
+        assert!(
+            reduction_pct >= 50.0,
+            "Expected 50%+ reduction, got {reduction_pct:.0}%"
+        );
+    }
+
+    #[test]
+    fn digest_preserves_delivered_status_of_latest() {
+        let msgs: Vec<(InboxMessage, bool)> = vec![
+            (make_msg("daemon", "eng-1", "Idle nudge: old", 100), true),
+            (
+                make_msg("daemon", "eng-1", "Idle nudge: latest", 200),
+                false,
+            ),
+        ];
+
+        let (entries, _) = digest_messages(&msgs);
+        assert_eq!(entries.len(), 1);
+        assert!(
+            !entries[0].delivered,
+            "should use delivered status of latest message"
+        );
     }
 
     fn production_unwrap_expect_count(source: &str) -> usize {

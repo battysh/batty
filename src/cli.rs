@@ -142,6 +142,9 @@ pub enum Command {
         /// Show all messages
         #[arg(long, default_value_t = false)]
         all: bool,
+        /// Show all raw messages without digest collapsing
+        #[arg(long, default_value_t = false)]
+        raw: bool,
     },
 
     /// Read a specific message from a member's inbox
@@ -1631,11 +1634,13 @@ mod tests {
                 member,
                 limit,
                 all,
+                raw,
             } => {
                 assert!(command.is_none());
                 assert_eq!(member.as_deref(), Some("architect"));
                 assert_eq!(limit, 20);
                 assert!(!all);
+                assert!(!raw);
             }
             other => panic!("expected inbox command, got {other:?}"),
         }
@@ -1650,11 +1655,13 @@ mod tests {
                 member,
                 limit,
                 all,
+                raw,
             } => {
                 assert!(command.is_none());
                 assert_eq!(member.as_deref(), Some("architect"));
                 assert_eq!(limit, 50);
                 assert!(!all);
+                assert!(!raw);
             }
             other => panic!("expected inbox command, got {other:?}"),
         }
@@ -1669,11 +1676,31 @@ mod tests {
                 member,
                 limit,
                 all,
+                raw,
             } => {
                 assert!(command.is_none());
                 assert_eq!(member.as_deref(), Some("architect"));
                 assert_eq!(limit, 20);
                 assert!(all);
+                assert!(!raw);
+            }
+            other => panic!("expected inbox command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inbox_subcommand_parses_raw_flag() {
+        let cli = Cli::parse_from(["batty", "inbox", "architect", "--raw"]);
+        match cli.command {
+            Command::Inbox {
+                command,
+                member,
+                raw,
+                ..
+            } => {
+                assert!(command.is_none());
+                assert_eq!(member.as_deref(), Some("architect"));
+                assert!(raw);
             }
             other => panic!("expected inbox command, got {other:?}"),
         }
