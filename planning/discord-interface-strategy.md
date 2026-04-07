@@ -4,7 +4,31 @@
 
 Discord replaces tmux as the primary human interface for batty. tmux is the agent runtime — what agents see. Discord is where humans monitor, control, and direct the team. The goal: **type `$go` on your phone, go to sleep, wake up to merged features, and read the story of what happened in Discord.**
 
+This is the claw-code philosophy applied to batty: "A person can type a sentence from a phone, walk away, sleep, or do something else. The agents read the directive, break it into tasks, assign roles, write code, run tests, argue over failures, recover, and push when the work passes." The human never opens a terminal. The terminal sessions belong to the agents. The human's interface is Discord.
+
 Every Discord message should be interesting to read. If a human wouldn't care about an event, it shouldn't appear. If it does appear, it should answer: "what happened and why should I care?"
+
+## Learnings from the claw-code ecosystem
+
+### The clawhip pattern (most important architectural insight)
+All monitoring stays OUTSIDE the agent's context window. The agent focuses on code. A separate daemon watches git commits, tmux sessions, agent lifecycle, and GitHub events — then routes formatted notifications to Discord. The agent never knows about Discord. This is why batty's discord_bridge reads from events.jsonl rather than injecting into agents.
+
+### What made claw-code's Discord UX work
+- The human interface is the simplest possible thing (a chat text box)
+- Complexity lives in the coordination layer the human never sees
+- Only signal reaches Discord: "session.started", "session.blocked", "session.finished"
+- @mentions ONLY for escalations — not for routine events
+- Batch windowing prevents notification storms (5s for routine, 300s for CI)
+- Three tiers of verbosity: `minimal` (one-liner), `session` (operational context), `verbose` (risk framing)
+
+### OmX patterns that inform our UX
+- `$ralph` persistent loops: human only needs to see START and END, not every intermediate step
+- `$team` parallel workers: show which workers are active and what they're working on, NOT every code action
+- The canonical workflow ($deep-interview → $ralplan → $team/$ralph) maps to: directive → clarify → plan → execute → done
+- The plan approval step is the key human-in-the-loop moment
+
+### What Ralphthon proved
+Participants who designed agent systems and stepped back shipped more than those who coded manually all night. The bottleneck is not typing speed — it's architectural clarity, task decomposition, and system design.
 
 ## Current State (v0.10.0)
 
@@ -34,9 +58,9 @@ Bad: `dispatch overlap skipped — src/team/task_loop.rs — Task: #560`
 Good: `Task #560 can't be assigned yet — it touches the same files as in-progress #563. Conflicting: src/team/task_loop.rs`
 
 ### 2. Channels have distinct personalities
-- **#commands** — conversation. Human talks to architect. Escalations interrupt here. Feels like chatting with a project lead.
-- **#events** — newsfeed. Task lifecycle, merges, board changes. Scannable from phone. Feels like a GitHub activity feed.
-- **#agents** — health monitor. Agent spawns, stalls, restarts, context exhaustion. Feels like a Datadog dashboard.
+- **#commands** — conversation. Human talks to architect. Escalations interrupt here. Feels like chatting with a project lead. This is the ONLY channel that should ping the human's phone.
+- **#events** — newsfeed. Task lifecycle, merges, board changes. Scannable from phone. Feels like a GitHub activity feed. Never pings.
+- **#agents** — health monitor. Agent spawns, stalls, restarts, context exhaustion. Feels like a Datadog dashboard. Never pings unless unhealthy.
 - **#board** — live dashboard. Single auto-updating message. Feels like a kanban board widget.
 
 ### 3. Noise is aggressively filtered
@@ -52,6 +76,29 @@ These NEVER appear in Discord:
 - Discord is for humans monitoring and directing
 - tmux is for agents working (human rarely looks at it)
 - CLI is for ops/debugging (batty status, batty doctor)
+
+### 5. @mention policy (from clawhip)
+Only @mention the human for:
+- **Escalations**: agent blocked, needs human decision
+- **Failures**: tests broken on main, merge conflicts needing manual fix
+- **Session completion**: "all tasks done, ready for your review"
+
+NEVER @mention for: routine commits, task assignments, agent restarts, progress updates, board changes. The phone should only buzz when the human actually needs to act.
+
+### 6. Batch windowing (from clawhip)
+- Routine events (commits, assignments, claim changes): buffer 5 seconds, batch into one message
+- CI/test events: buffer 30 seconds (tests often produce rapid-fire results)
+- Critical events (failures, escalations, stalls): bypass all buffering, deliver immediately
+
+### 7. Verbosity tiers (from OmX OpenClaw integration)
+- **Compact** (default): one-line summary, key metadata. Used for routine events in #events.
+- **Alert**: same content with ⚠️ prefix and @mention. Used for failures and escalations in #commands.
+- **Verbose**: full context with task spec, error details, suggested actions. Used on-demand ($status, $board).
+
+### 8. Show vs Hide
+- **Show**: event type, affected task/agent, one-line summary, timestamp
+- **Hide (behind ||spoiler||)**: full task spec, commit diff, test output, error stacktrace
+- **Never show**: heartbeats, routing internals, claim extensions, worktree refreshes (unless failed)
 
 ## Architecture
 
@@ -93,9 +140,13 @@ Make every Discord message interesting to read.
 - [x] Dispatch overlap explanation with file conflicts
 - [x] Auto-doctor actions with context
 - [x] Verification phase with human-readable status
-- [ ] Rate limit backoff with friendly "catching up" message
+- [x] Rate limit prevention (skip backlog on startup, 5-event batch limit)
+- [ ] @mention policy: only ping #commands for escalations/failures
+- [ ] Batch windowing: 5s routine, 30s CI, immediate for critical
 - [ ] Merge events with commit summary and line counts
 - [ ] Test result events with pass/fail counts
+- [ ] "Catching up" indicator when processing event backlog
+- [ ] Compact one-liner format as default (phone-scannable)
 
 ### Phase 2: Bidirectional Commands (TODO — #556)
 Human types in Discord, batty acts.
@@ -133,11 +184,14 @@ Same `$` commands in Telegram single-channel mode.
 - [ ] Event forwarding to Telegram (filtered same as Discord)
 
 ### Phase 6: Advanced UX (FUTURE)
-- [ ] Thread-per-task in #events (group all events for one task)
+- [ ] Thread-per-task in #events (group all events for one task — OpenClaw pattern: channel=project, thread=task)
 - [ ] Reaction controls (👍 to approve merge, 🔄 to retry)
-- [ ] Voice channel alerts for critical failures
+- [ ] Separate notification bot identity (clawhip pattern — notification bot separate from command bot, so rate limits don't affect commands)
+- [ ] Keyword-triggered alerts from agent PTY output (clawhip tmux.keyword pattern — watch for "error", "FAILED", "complete" in agent panes)
 - [ ] Webhook mode (no bot needed, outbound only)
-- [ ] Multiple team support (one Discord server, multiple project channels)
+- [ ] Multiple team support (one Discord server, multiple project channels — OpenClaw per-channel isolation)
+- [ ] Cron follow-up pattern (periodic standup summaries posted to #events, driven by daemon standup mechanism)
+- [ ] Auto-detect directive type: "simple question" vs "development task" (OpenClaw claw-conductor pattern)
 
 ## Event Taxonomy
 
