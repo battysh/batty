@@ -924,6 +924,46 @@ pub enum OpenClawCommand {
         /// High-level instruction text
         message: String,
     },
+    /// Export stable OpenClaw event envelopes for one project or all registered projects
+    Events {
+        /// Registered project identifier; defaults to the current project if it is registered
+        #[arg(long = "project-id", conflicts_with = "all_projects")]
+        project_id: Option<String>,
+        /// Read events across all registered projects that allow OpenClaw supervision
+        #[arg(
+            long = "all-projects",
+            default_value_t = false,
+            conflicts_with = "project_id"
+        )]
+        all_projects: bool,
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        /// Filter by stable public event topic
+        #[arg(long = "topic", value_enum)]
+        topics: Vec<OpenClawEventTopicArg>,
+        /// Filter by Batty role identifier
+        #[arg(long = "role")]
+        roles: Vec<String>,
+        /// Filter by Batty task identifier
+        #[arg(long = "task-id")]
+        task_ids: Vec<String>,
+        /// Filter by stable public event type
+        #[arg(long = "event-type")]
+        event_types: Vec<String>,
+        /// Filter by tmux/OpenClaw session name
+        #[arg(long = "session-name")]
+        session_names: Vec<String>,
+        /// Include only events at or after this unix timestamp
+        #[arg(long = "since-ts")]
+        since_ts: Option<u64>,
+        /// Trim the result set to the N most recent matching events
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Include archived projects when reading from the project registry
+        #[arg(long, default_value_t = false)]
+        include_archived: bool,
+    },
     /// Run configured OpenClaw follow-up/reminder workflows
     #[command(name = "follow-up")]
     FollowUp {
@@ -940,6 +980,18 @@ pub enum OpenClawFollowUpCommand {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OpenClawEventTopicArg {
+    Completion,
+    Review,
+    Stall,
+    Merge,
+    Escalation,
+    #[value(name = "delivery-failure")]
+    DeliveryFailure,
+    Lifecycle,
 }
 
 impl NudgeIntervention {
@@ -1425,6 +1477,72 @@ mod tests {
                     OpenClawFollowUpCommand::Run { json } => assert!(!json),
                 },
                 other => panic!("expected openclaw follow-up command, got {other:?}"),
+            },
+            other => panic!("expected openclaw command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn openclaw_events_subcommand_parses_filters() {
+        let cli = Cli::parse_from([
+            "batty",
+            "openclaw",
+            "events",
+            "--project-id",
+            "fixture-degraded",
+            "--json",
+            "--topic",
+            "escalation",
+            "--topic",
+            "completion",
+            "--role",
+            "eng-1-1",
+            "--task-id",
+            "449",
+            "--event-type",
+            "task.escalated",
+            "--session-name",
+            "batty-fixture-team-degraded",
+            "--since-ts",
+            "1712402000",
+            "--limit",
+            "5",
+            "--include-archived",
+        ]);
+        match cli.command {
+            Command::OpenClaw { command } => match command {
+                OpenClawCommand::Events {
+                    project_id,
+                    all_projects,
+                    json,
+                    topics,
+                    roles,
+                    task_ids,
+                    event_types,
+                    session_names,
+                    since_ts,
+                    limit,
+                    include_archived,
+                } => {
+                    assert_eq!(project_id.as_deref(), Some("fixture-degraded"));
+                    assert!(!all_projects);
+                    assert!(json);
+                    assert_eq!(
+                        topics,
+                        vec![
+                            OpenClawEventTopicArg::Escalation,
+                            OpenClawEventTopicArg::Completion,
+                        ]
+                    );
+                    assert_eq!(roles, vec!["eng-1-1"]);
+                    assert_eq!(task_ids, vec!["449"]);
+                    assert_eq!(event_types, vec!["task.escalated"]);
+                    assert_eq!(session_names, vec!["batty-fixture-team-degraded"]);
+                    assert_eq!(since_ts, Some(1_712_402_000));
+                    assert_eq!(limit, Some(5));
+                    assert!(include_archived);
+                }
+                other => panic!("expected openclaw events command, got {other:?}"),
             },
             other => panic!("expected openclaw command, got {other:?}"),
         }

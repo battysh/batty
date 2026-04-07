@@ -3,9 +3,9 @@ use batty_cli::{
     agent,
     cli::{
         self, AutoMergeAction, BoardCommand, Cli, Command, DepsFormatArg, GrafanaCommand,
-        InboxCommand, NudgeCommand, OpenClawCommand, OpenClawFollowUpCommand, ProjectCommand,
-        ResearchCommand, ResearchFormatArg, ResearchKeepPolicyArg, ReviewDispositionArg,
-        TaskCommand, TaskStateArg,
+        InboxCommand, NudgeCommand, OpenClawCommand, OpenClawEventTopicArg,
+        OpenClawFollowUpCommand, ProjectCommand, ResearchCommand, ResearchFormatArg,
+        ResearchKeepPolicyArg, ReviewDispositionArg, TaskCommand, TaskStateArg,
     },
     project_registry, team,
 };
@@ -376,6 +376,63 @@ fn main() -> Result<()> {
             OpenClawCommand::Instruct { role, message } => {
                 team::openclaw::send_openclaw_instruction(&root, &role, &message)?;
                 println!("OpenClaw instruction queued for {role}.");
+            }
+            OpenClawCommand::Events {
+                project_id,
+                all_projects,
+                json,
+                topics,
+                roles,
+                task_ids,
+                event_types,
+                session_names,
+                since_ts,
+                limit,
+                include_archived,
+            } => {
+                let subscription = team::openclaw::OpenClawEventSubscription {
+                    topics: topics
+                        .into_iter()
+                        .map(|topic| match topic {
+                            OpenClawEventTopicArg::Completion => {
+                                team::openclaw::OpenClawEventTopic::Completion
+                            }
+                            OpenClawEventTopicArg::Review => {
+                                team::openclaw::OpenClawEventTopic::Review
+                            }
+                            OpenClawEventTopicArg::Stall => {
+                                team::openclaw::OpenClawEventTopic::Stall
+                            }
+                            OpenClawEventTopicArg::Merge => {
+                                team::openclaw::OpenClawEventTopic::Merge
+                            }
+                            OpenClawEventTopicArg::Escalation => {
+                                team::openclaw::OpenClawEventTopic::Escalation
+                            }
+                            OpenClawEventTopicArg::DeliveryFailure => {
+                                team::openclaw::OpenClawEventTopic::DeliveryFailure
+                            }
+                            OpenClawEventTopicArg::Lifecycle => {
+                                team::openclaw::OpenClawEventTopic::Lifecycle
+                            }
+                        })
+                        .collect(),
+                    project_ids: Vec::new(),
+                    session_names,
+                    roles,
+                    task_ids,
+                    event_types,
+                    since_ts,
+                    limit,
+                    include_archived,
+                };
+                team::openclaw::openclaw_events(
+                    &root,
+                    &subscription,
+                    project_id.as_deref(),
+                    all_projects,
+                    json,
+                )?;
             }
             OpenClawCommand::FollowUp { command } => match command {
                 OpenClawFollowUpCommand::Run { json } => {
