@@ -565,6 +565,7 @@ struct ShimInner {
     last_screen_hash: u64,
     last_pty_output_at: Instant,
     started_at: Instant,
+    active_session_started_at: Instant,
     cumulative_output_bytes: u64,
     pre_injection_content: String,
     pending_message_id: Option<String>,
@@ -677,6 +678,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
         last_screen_hash: 0,
         last_pty_output_at: Instant::now(),
         started_at: Instant::now(),
+        active_session_started_at: Instant::now(),
         cumulative_output_bytes: 0,
         pre_injection_content: String::new(),
         pending_message_id: None,
@@ -805,6 +807,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                             inner.pending_message_id = msg.message_id.clone();
                             inner.state = ShimState::Working;
                             inner.state_changed_at = Instant::now();
+                            inner.active_session_started_at = Instant::now();
                         }
 
                         let queue_depth = inner.message_queue.len();
@@ -939,6 +942,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                 inner.pending_message_id = msg.message_id.clone();
                 inner.state = ShimState::Working;
                 inner.state_changed_at = Instant::now();
+                inner.active_session_started_at = Instant::now();
             }
 
             let queue_depth = inner.message_queue.len();
@@ -1037,7 +1041,12 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                 return;
             }
             let output_bytes = inner.cumulative_output_bytes;
-            let uptime_secs = inner.started_at.elapsed().as_secs();
+            let uptime_secs = match inner.state {
+                ShimState::Working | ShimState::ContextExhausted => {
+                    inner.active_session_started_at.elapsed().as_secs()
+                }
+                _ => inner.started_at.elapsed().as_secs(),
+            };
             drop(inner);
 
             if stats_channel
@@ -1193,6 +1202,7 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                         let old = inner.state;
                         inner.state = ShimState::Working;
                         inner.state_changed_at = Instant::now();
+                        inner.active_session_started_at = Instant::now();
                         let summary = inner.last_n_lines(3);
                         drop(inner);
 
