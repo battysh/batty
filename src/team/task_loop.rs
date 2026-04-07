@@ -646,10 +646,6 @@ fn ensure_engineer_worktree_links(worktree_dir: &Path, team_config_dir: &Path) -
 }
 
 fn ensure_shared_cargo_target_config(project_root: &Path, worktree_dir: &Path) -> Result<()> {
-    let cargo_dir = worktree_dir.join(".cargo");
-    std::fs::create_dir_all(&cargo_dir)
-        .with_context(|| format!("failed to create {}", cargo_dir.display()))?;
-    let config_path = cargo_dir.join("config.toml");
     // Each worktree gets its own target subdirectory so parallel builds
     // don't contend on the same Cargo lock. The shared parent is kept for
     // disk-pressure cleanup scans.
@@ -660,6 +656,20 @@ fn ensure_shared_cargo_target_config(project_root: &Path, worktree_dir: &Path) -
     let target_dir = shared_cargo_target_dir(project_root).join(&worktree_name);
     std::fs::create_dir_all(&target_dir)
         .with_context(|| format!("failed to create {}", target_dir.display()))?;
+
+    let config_rel_path = Path::new(".cargo").join("config.toml");
+    if worktree_relative_path_is_tracked(worktree_dir, &config_rel_path)? {
+        debug!(
+            config = %worktree_dir.join(&config_rel_path).display(),
+            "skipping managed cargo config because file is tracked by git"
+        );
+        return Ok(());
+    }
+
+    let cargo_dir = worktree_dir.join(".cargo");
+    std::fs::create_dir_all(&cargo_dir)
+        .with_context(|| format!("failed to create {}", cargo_dir.display()))?;
+    let config_path = cargo_dir.join("config.toml");
 
     let managed = format!(
         "{SHARED_CARGO_CONFIG_MARKER}\n[build]\ntarget-dir = {:?}\n",
@@ -681,6 +691,23 @@ fn ensure_shared_cargo_target_config(project_root: &Path, worktree_dir: &Path) -
     std::fs::write(&config_path, managed)
         .with_context(|| format!("failed to write {}", config_path.display()))?;
     Ok(())
+}
+
+fn worktree_relative_path_is_tracked(worktree_dir: &Path, rel_path: &Path) -> Result<bool> {
+    let rel_path_text = rel_path.to_string_lossy().into_owned();
+    let output = run_git_command_with_fallback(
+        worktree_dir,
+        &["ls-files", "--error-unmatch", &rel_path_text],
+    )
+    .with_context(|| {
+        format!(
+            "failed to check whether {} is tracked in {}",
+            rel_path.display(),
+            worktree_dir.display()
+        )
+    })?;
+
+    Ok(output.status.success())
 }
 
 fn ensure_engineer_worktree_excludes(worktree_dir: &Path) -> Result<()> {
@@ -1588,6 +1615,47 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(config_path).unwrap(),
             "[term]\nverbose = true\n"
+        );
+    }
+
+    #[test]
+    fn test_setup_engineer_worktree_does_not_mutate_tracked_cargo_config() {
+        let Some(_guard) = git_test_guard() else {
+            return;
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        std::fs::create_dir_all(repo.join(".cargo")).unwrap();
+        std::fs::write(
+            repo.join(".cargo").join("config.toml"),
+            "[alias]\nxtask = \"run\"\n",
+        )
+        .unwrap();
+        git_ok(&repo, &["add", ".cargo/config.toml"]);
+        git_ok(&repo, &["commit", "-m", "track cargo config"]);
+
+        let worktree_dir = repo
+            .join(".batty")
+            .join("worktrees")
+            .join("eng-tracked-config");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-tracked-config", &team_config_dir)
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(worktree_dir.join(".cargo").join("config.toml")).unwrap(),
+            "[alias]\nxtask = \"run\"\n"
+        );
+        assert!(
+            git_stdout(
+                &worktree_dir,
+                &["diff", "--name-only", "--", ".cargo/config.toml"]
+            )
+            .trim()
+            .is_empty(),
+            "tracked cargo config should stay unchanged after setup"
         );
     }
 
