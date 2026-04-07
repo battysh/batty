@@ -1704,13 +1704,20 @@ fn maybe_fire_nudges_delivers_when_idle_past_interval() {
         &[],
         None,
     );
+    daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+    daemon.config.team_config.orchestrator_pane = true;
 
     daemon.maybe_fire_nudges().unwrap();
 
     let pending = harness.pending_inbox_messages("eng-1").unwrap();
-    assert_eq!(pending.len(), 1);
-    assert!(pending[0].body.contains("Get moving!"));
-    assert!(pending[0].body.contains("Idle nudge"));
+    assert!(pending.is_empty());
+    let orchestrator_log = std::fs::read_to_string(crate::team::orchestrator_log_path(
+        &daemon.config.project_root,
+    ))
+    .unwrap();
+    assert!(orchestrator_log.contains("diverted nudge"));
+    assert!(orchestrator_log.contains("eng-1"));
+    assert!(orchestrator_log.contains("Get moving!"));
 }
 
 #[test]
@@ -1921,12 +1928,19 @@ fn maybe_fire_nudges_fires_for_engineer_with_in_progress_task() {
         &[],
         None,
     );
+    daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+    daemon.config.team_config.orchestrator_pane = true;
 
     daemon.maybe_fire_nudges().unwrap();
 
     let pending = harness.pending_inbox_messages("eng-1").unwrap();
-    assert_eq!(pending.len(), 1);
-    assert!(pending[0].body.contains("Get moving!"));
+    assert!(pending.is_empty());
+    let orchestrator_log = std::fs::read_to_string(crate::team::orchestrator_log_path(
+        &daemon.config.project_root,
+    ))
+    .unwrap();
+    assert!(orchestrator_log.contains("diverted nudge"));
+    assert!(orchestrator_log.contains("Get moving!"));
 }
 
 // ─── mod.rs helper function tests ─────────────────────────────────────────────

@@ -12,6 +12,7 @@ use crate::team::errors::DeliveryError;
 use crate::team::inbox;
 use crate::team::message;
 use crate::team::standup::MemberState;
+use crate::team::status;
 
 /// Extract a task ID from assignment body text like "Task #42: ..." or "Task #42 ...".
 fn extract_task_id_from_body(body: &str) -> Option<u32> {
@@ -93,6 +94,55 @@ fn format_batched_message(messages: &[inbox::InboxMessage]) -> String {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrchestratorOnlyReason {
+    Nudge,
+    StatusQuery,
+    StandupRequest,
+}
+
+impl OrchestratorOnlyReason {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Nudge => "nudge",
+            Self::StatusQuery => "status query",
+            Self::StandupRequest => "standup request",
+        }
+    }
+}
+
+fn normalized_body(body: &str) -> String {
+    body.trim().to_ascii_lowercase()
+}
+
+fn is_idle_nudge(body: &str) -> bool {
+    normalized_body(body).contains("idle nudge:")
+}
+
+fn is_review_nudge(body: &str) -> bool {
+    normalized_body(body).starts_with("review nudge:")
+}
+
+fn is_status_query(body: &str) -> bool {
+    let body = normalized_body(body);
+    body == "status"
+        || body == "status?"
+        || body.starts_with("status ")
+        || body.contains("what's the status")
+        || body.contains("what is the status")
+        || body.contains("current status")
+        || body.contains("progress update?")
+        || body.contains("screen state")
+}
+
+fn is_standup_request(body: &str) -> bool {
+    let body = normalized_body(body);
+    body == "standup"
+        || body == "standup?"
+        || body.starts_with("standup ")
+        || body.contains("standup request")
+}
+
 impl TeamDaemon {
     fn uses_management_batching(&self, member_name: &str) -> bool {
         self.config
@@ -125,6 +175,115 @@ impl TeamDaemon {
                 )
             })
             .unwrap_or(true)
+    }
+
+    fn member_receives_pty_delivery(&self, member_name: &str) -> bool {
+        if self.shim_handles.contains_key(member_name)
+            || self.config.pane_map.contains_key(member_name)
+        {
+            return true;
+        }
+        self.config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+            .is_some_and(|member| member.role_type != RoleType::User)
+    }
+
+    fn orchestrator_only_reason(
+        &self,
+        recipient: &str,
+        body: &str,
+    ) -> Option<OrchestratorOnlyReason> {
+        if !self.member_receives_pty_delivery(recipient) {
+            return None;
+        }
+
+        if is_idle_nudge(body) || is_review_nudge(body) {
+            return Some(OrchestratorOnlyReason::Nudge);
+        }
+        if is_status_query(body) {
+            return Some(OrchestratorOnlyReason::StatusQuery);
+        }
+        if is_standup_request(body) {
+            return Some(OrchestratorOnlyReason::StandupRequest);
+        }
+
+        None
+    }
+
+    fn cached_member_status_summary(&self, member_name: &str) -> String {
+        let inbox_root = inbox::inboxes_root(&self.config.project_root);
+        let pending_inbox = inbox::pending_message_count(&inbox_root, member_name).unwrap_or(0);
+        let mut owned_task_buckets =
+            status::owned_task_buckets(&self.config.project_root, &self.config.members);
+        let owned_tasks = owned_task_buckets.remove(member_name).unwrap_or_default();
+        let state = self
+            .states
+            .get(member_name)
+            .copied()
+            .unwrap_or(MemberState::Idle);
+        let nudge_status = status::format_nudge_status(self.nudges.get(member_name));
+        let standup_status = crate::team::standup::standup_interval_for_member_name(
+            &self.config.team_config,
+            &self.config.members,
+            member_name,
+        )
+        .map(|interval| {
+            status::format_standup_status(
+                self.last_standup.get(member_name).copied(),
+                interval,
+                self.paused_standups.contains(member_name),
+            )
+        })
+        .unwrap_or_default();
+        let label = status::compose_pane_status_label(status::PaneStatusLabelArgs {
+            state,
+            pending_inbox,
+            triage_backlog: 0,
+            active_task_ids: &owned_tasks.active,
+            review_task_ids: &owned_tasks.review,
+            globally_paused: super::super::pause_marker_path(&self.config.project_root).exists(),
+            nudge_status: &nudge_status,
+            standup_status: &standup_status,
+        });
+        let watcher_state = self
+            .watchers
+            .get(member_name)
+            .map(|watcher| format!("{:?}", watcher.state))
+            .unwrap_or_else(|| "Unknown".to_string())
+            .to_ascii_lowercase();
+        format!(
+            "{} | watcher {watcher_state}",
+            status::strip_tmux_style(&label)
+        )
+    }
+
+    fn record_orchestrator_only_message(
+        &self,
+        from: &str,
+        recipient: &str,
+        body: &str,
+        reason: OrchestratorOnlyReason,
+    ) {
+        let preview = shim_log_preview(body);
+        match reason {
+            OrchestratorOnlyReason::Nudge => self.record_orchestrator_action(format!(
+                "notification isolation: diverted {} for {} from PTY injection ({preview})",
+                reason.label(),
+                recipient
+            )),
+            OrchestratorOnlyReason::StatusQuery | OrchestratorOnlyReason::StandupRequest => {
+                let cached = self.cached_member_status_summary(recipient);
+                self.record_orchestrator_action(format!(
+                    "notification isolation: answered {} from {} about {} using cached state -> {}",
+                    reason.label(),
+                    from,
+                    recipient,
+                    cached
+                ));
+            }
+        }
     }
 
     /// Drain pending messages for an agent that just became ready.
@@ -329,6 +488,17 @@ impl TeamDaemon {
             return self.deliver_channel_message(from, recipient, body);
         }
 
+        if let Some(reason) = self.orchestrator_only_reason(recipient, body) {
+            info!(
+                from,
+                to = recipient,
+                reason = reason.label(),
+                "diverting message to orchestrator log"
+            );
+            self.record_orchestrator_only_message(from, recipient, body, reason);
+            return Ok(MessageDelivery::OrchestratorLogged);
+        }
+
         // Shim delivery path: deliver via the structured shim channel.
         if let Some(handle) = self.shim_handles.get_mut(recipient) {
             if handle.is_ready() {
@@ -512,24 +682,43 @@ impl TeamDaemon {
                 }
 
                 let is_send = matches!(msg.msg_type, inbox::MessageType::Send);
-                let delivery_result = match msg.msg_type {
+                let delivery_result: Result<MessageDelivery> = match msg.msg_type {
                     inbox::MessageType::Send => {
-                        info!(from = %msg.from, to = %name, id = %msg.id, "delivering inbox message via shim");
-                        if let Some(handle) = self.shim_handles.get_mut(name) {
-                            let result = handle.send_message(&msg.from, &msg.body);
-                            if result.is_ok() {
-                                handle
-                                    .apply_state_change(crate::shim::protocol::ShimState::Working);
-                                let _ = append_shim_event_log(
-                                    &self.config.project_root,
-                                    name,
-                                    &format!("-> {}: {}", msg.from, shim_log_preview(&msg.body)),
-                                );
-                            }
-                            result
+                        if let Some(reason) = self.orchestrator_only_reason(name, &msg.body) {
+                            info!(
+                                from = %msg.from,
+                                to = %name,
+                                id = %msg.id,
+                                reason = reason.label(),
+                                "diverting inbox message to orchestrator log"
+                            );
+                            self.record_orchestrator_only_message(
+                                &msg.from, name, &msg.body, reason,
+                            );
+                            Ok(MessageDelivery::OrchestratorLogged)
                         } else {
-                            // No shim handle — skip, leave in inbox
-                            continue;
+                            info!(from = %msg.from, to = %name, id = %msg.id, "delivering inbox message via shim");
+                            if let Some(handle) = self.shim_handles.get_mut(name) {
+                                let result = handle.send_message(&msg.from, &msg.body);
+                                if result.is_ok() {
+                                    handle.apply_state_change(
+                                        crate::shim::protocol::ShimState::Working,
+                                    );
+                                    let _ = append_shim_event_log(
+                                        &self.config.project_root,
+                                        name,
+                                        &format!(
+                                            "-> {}: {}",
+                                            msg.from,
+                                            shim_log_preview(&msg.body)
+                                        ),
+                                    );
+                                }
+                                result.map(|()| MessageDelivery::LivePane)
+                            } else {
+                                // No shim handle — skip, leave in inbox
+                                continue;
+                            }
                         }
                     }
                     inbox::MessageType::Assign => {
@@ -576,7 +765,7 @@ impl TeamDaemon {
                             );
                             let _ = self.queue_message("daemon", &msg.from, &reject_msg);
                             // Still mark delivered so it doesn't retry
-                            Ok(())
+                            Ok(MessageDelivery::OrchestratorLogged)
                         } else {
                             info!(to = %name, id = %msg.id, "delivering inbox assignment");
                             self.manual_assign_cooldowns
@@ -608,6 +797,7 @@ impl TeamDaemon {
                                 self.notify_assignment_sender_success(
                                     &msg.from, name, &msg.id, &msg.body, &launch,
                                 );
+                                MessageDelivery::LivePane
                             })
                         }
                     }
@@ -615,10 +805,12 @@ impl TeamDaemon {
 
                 let mut mark_delivered = false;
                 match delivery_result {
-                    Ok(()) => {
-                        delivered_any = true;
+                    Ok(delivery) => {
+                        if matches!(delivery, MessageDelivery::LivePane) {
+                            delivered_any = true;
+                        }
                         mark_delivered = true;
-                        if is_send {
+                        if is_send && matches!(delivery, MessageDelivery::LivePane) {
                             // Shim delivery is authoritative once the command reaches the
                             // structured channel. Pane-marker verification is a legacy tmux
                             // heuristic and produces false negatives for Claude/Codex shims.
@@ -753,6 +945,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::super::{MessageDelivery, PendingMessage};
+    use super::OrchestratorOnlyReason;
     use crate::team::AssignmentResultStatus;
     use crate::team::comms::Channel;
     use crate::team::config::OrchestratorPosition;
@@ -2219,6 +2412,270 @@ mod tests {
         let result = daemon.deliver_message("manager", "eng-1", "hello");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), MessageDelivery::LivePane);
+    }
+
+    #[test]
+    fn shim_delivery_diverts_nudges_to_orchestrator_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        inbox::init_inbox(&inbox::inboxes_root(tmp.path()), "eng-1").unwrap();
+
+        let mut daemon = empty_legacy_daemon(&tmp);
+        daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+        daemon.config.team_config.roles = vec![
+            RoleDef {
+                name: "manager".to_string(),
+                role_type: RoleType::Manager,
+                agent: Some("claude".to_string()),
+                auth_mode: None,
+                auth_env: vec![],
+                instances: 1,
+                prompt: None,
+                talks_to: vec![],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                barrier_group: None,
+                use_worktrees: false,
+                ..Default::default()
+            },
+            RoleDef {
+                name: "engineer".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("claude".to_string()),
+                auth_mode: None,
+                auth_env: vec![],
+                instances: 1,
+                prompt: None,
+                talks_to: vec![],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                barrier_group: None,
+                use_worktrees: false,
+                ..Default::default()
+            },
+        ];
+        daemon.config.members = vec![MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "engineer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+            ..Default::default()
+        }];
+        daemon
+            .config
+            .pane_map
+            .insert("eng-1".to_string(), "%999".to_string());
+
+        let (parent, child) = crate::shim::protocol::socketpair().unwrap();
+        let channel = crate::shim::protocol::Channel::new(parent);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "eng-1".into(),
+            channel,
+            999,
+            "claude".into(),
+            "claude".into(),
+            std::path::PathBuf::from("/tmp/test"),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("eng-1".to_string(), handle);
+
+        let result = daemon.deliver_message(
+            "daemon",
+            "eng-1",
+            "Idle nudge: you have been idle past your configured timeout.",
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), MessageDelivery::OrchestratorLogged);
+
+        let mut receiver = crate::shim::protocol::Channel::new(child);
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        assert!(
+            receiver.recv::<crate::shim::protocol::Command>().is_err(),
+            "nudge should never be injected into the agent shim"
+        );
+
+        let log = std::fs::read_to_string(crate::team::orchestrator_log_path(tmp.path())).unwrap();
+        assert!(log.contains("notification isolation: diverted nudge"));
+        assert!(log.contains("eng-1"));
+    }
+
+    #[test]
+    fn deliver_inbox_messages_answers_status_queries_from_cached_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        inbox::init_inbox(&inbox::inboxes_root(tmp.path()), "eng-1").unwrap();
+
+        let mut daemon = empty_legacy_daemon(&tmp);
+        daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+        daemon.config.team_config.roles = vec![
+            RoleDef {
+                name: "manager".to_string(),
+                role_type: RoleType::Manager,
+                agent: Some("claude".to_string()),
+                auth_mode: None,
+                auth_env: vec![],
+                instances: 1,
+                prompt: None,
+                talks_to: vec![],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                barrier_group: None,
+                use_worktrees: false,
+                ..Default::default()
+            },
+            RoleDef {
+                name: "engineer".to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("claude".to_string()),
+                auth_mode: None,
+                auth_env: vec![],
+                instances: 1,
+                prompt: None,
+                talks_to: vec![],
+                channel: None,
+                channel_config: None,
+                nudge_interval_secs: None,
+                receives_standup: None,
+                standup_interval_secs: None,
+                owns: Vec::new(),
+                barrier_group: None,
+                use_worktrees: false,
+                ..Default::default()
+            },
+        ];
+        daemon.config.members = vec![MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "engineer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+            ..Default::default()
+        }];
+        daemon
+            .config
+            .pane_map
+            .insert("eng-1".to_string(), "%999".to_string());
+        daemon
+            .states
+            .insert("eng-1".to_string(), crate::team::standup::MemberState::Idle);
+
+        let (parent, child) = crate::shim::protocol::socketpair().unwrap();
+        let channel = crate::shim::protocol::Channel::new(parent);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "eng-1".into(),
+            channel,
+            999,
+            "claude".into(),
+            "claude".into(),
+            std::path::PathBuf::from("/tmp/test"),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("eng-1".to_string(), handle);
+
+        let root = inbox::inboxes_root(tmp.path());
+        let msg = inbox::InboxMessage::new_send("manager", "eng-1", "status?");
+        let id = inbox::deliver_to_inbox(&root, &msg).unwrap();
+        assert!(daemon.config.team_config.can_talk("manager", "engineer"));
+        assert_eq!(
+            daemon.orchestrator_only_reason("eng-1", "status?"),
+            Some(OrchestratorOnlyReason::StatusQuery)
+        );
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        let pending = inbox::pending_messages(&root, "eng-1").unwrap();
+        assert!(pending.is_empty());
+        let all = inbox::all_messages(&root, "eng-1").unwrap();
+        assert!(
+            all.iter()
+                .any(|(message, delivered)| message.id == id && *delivered)
+        );
+
+        let mut receiver = crate::shim::protocol::Channel::new(child);
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        assert!(
+            receiver.recv::<crate::shim::protocol::Command>().is_err(),
+            "status query should be answered from cached state, not injected"
+        );
+
+        let log = std::fs::read_to_string(crate::team::orchestrator_log_path(tmp.path())).unwrap();
+        assert!(
+            log.contains("answered status query from manager about eng-1"),
+            "log contents: {log}"
+        );
+        assert!(log.contains("idle"));
+        assert!(log.contains("watcher"));
+    }
+
+    #[test]
+    fn deliver_message_diverts_standup_requests_to_orchestrator_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        inbox::init_inbox(&inbox::inboxes_root(tmp.path()), "eng-1").unwrap();
+
+        let mut daemon = empty_legacy_daemon(&tmp);
+        daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+        daemon.config.members = vec![MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "engineer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+            ..Default::default()
+        }];
+        daemon
+            .config
+            .pane_map
+            .insert("eng-1".to_string(), "%999".to_string());
+
+        let (parent, child) = crate::shim::protocol::socketpair().unwrap();
+        let channel = crate::shim::protocol::Channel::new(parent);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "eng-1".into(),
+            channel,
+            999,
+            "claude".into(),
+            "claude".into(),
+            std::path::PathBuf::from("/tmp/test"),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("eng-1".to_string(), handle);
+
+        let result = daemon.deliver_message("manager", "eng-1", "standup?");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), MessageDelivery::OrchestratorLogged);
+
+        let mut receiver = crate::shim::protocol::Channel::new(child);
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        assert!(
+            receiver.recv::<crate::shim::protocol::Command>().is_err(),
+            "standup request should stay out of the agent PTY"
+        );
+
+        let log = std::fs::read_to_string(crate::team::orchestrator_log_path(tmp.path())).unwrap();
+        assert!(log.contains("answered standup request from manager about eng-1"));
     }
 
     // ── expire_stale_pending_messages tests ──

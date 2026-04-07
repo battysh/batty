@@ -3162,6 +3162,8 @@ Second body.
             .members(vec![manager])
             .workflow_policy(policy)
             .build();
+        daemon.config.team_config.workflow_mode = crate::team::config::WorkflowMode::Hybrid;
+        daemon.config.team_config.orchestrator_pane = true;
         daemon.event_sink = EventSink::new(&events_path).unwrap();
 
         write_board_task_file(tmp.path(), 60, "nudge-task", "review", None, &[], None);
@@ -3176,11 +3178,15 @@ Second body.
         daemon.maybe_escalate_stale_reviews().unwrap();
 
         let pending_manager = inbox::pending_messages(&inbox_root, "manager").unwrap();
+        let orchestrator_log =
+            std::fs::read_to_string(crate::team::orchestrator_log_path(tmp.path())).unwrap();
         assert!(
-            pending_manager
-                .iter()
-                .any(|msg| msg.body.contains("Review nudge")),
-            "manager should receive nudge"
+            pending_manager.is_empty(),
+            "review nudge should stay out of inbox"
+        );
+        assert!(
+            orchestrator_log.contains("Review nudge"),
+            "review nudge should be recorded in orchestrator log"
         );
         assert!(daemon.review_nudge_sent.contains(&60));
 

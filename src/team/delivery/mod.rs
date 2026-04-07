@@ -68,6 +68,7 @@ impl FailedDelivery {
 pub(super) enum MessageDelivery {
     Channel,
     LivePane,
+    OrchestratorLogged,
     InboxQueued,
     DeferredPending,
     SkippedUnknownRecipient,
@@ -116,6 +117,10 @@ mod tests {
     fn message_delivery_variants_are_distinct() {
         assert_ne!(MessageDelivery::Channel, MessageDelivery::LivePane);
         assert_ne!(MessageDelivery::LivePane, MessageDelivery::InboxQueued);
+        assert_ne!(
+            MessageDelivery::LivePane,
+            MessageDelivery::OrchestratorLogged
+        );
         assert_ne!(
             MessageDelivery::InboxQueued,
             MessageDelivery::SkippedUnknownRecipient
