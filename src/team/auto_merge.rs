@@ -8,6 +8,7 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use super::config::AutoMergePolicy;
 
@@ -70,6 +71,68 @@ pub enum AutoMergeDecision {
         confidence: f64,
         reasons: Vec<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoMergeDecisionKind {
+    Accepted,
+    ManualReview,
+}
+
+impl AutoMergeDecisionKind {
+    pub fn action_type(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::ManualReview => "manual_review",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AutoMergeDecisionRecord {
+    pub decision: AutoMergeDecisionKind,
+    pub confidence: f64,
+    pub reasons: Vec<String>,
+    pub files_changed: usize,
+    pub lines_changed: usize,
+    pub modules_touched: usize,
+    pub has_migrations: bool,
+    pub has_config_changes: bool,
+    pub has_unsafe: bool,
+    pub has_conflicts: bool,
+    pub rename_count: usize,
+    pub tests_passed: bool,
+    pub override_forced: Option<bool>,
+    pub diff_available: bool,
+}
+
+impl AutoMergeDecisionRecord {
+    fn from_summary(
+        summary: Option<&DiffSummary>,
+        confidence: f64,
+        decision: AutoMergeDecisionKind,
+        reasons: Vec<String>,
+        tests_passed: bool,
+        override_forced: Option<bool>,
+    ) -> Self {
+        Self {
+            decision,
+            confidence,
+            reasons,
+            files_changed: summary.map_or(0, |value| value.files_changed),
+            lines_changed: summary.map_or(0, DiffSummary::total_lines),
+            modules_touched: summary.map_or(0, |value| value.modules_touched.len()),
+            has_migrations: summary.is_some_and(|value| value.has_migrations),
+            has_config_changes: summary.is_some_and(|value| value.has_config_changes),
+            has_unsafe: summary.is_some_and(|value| value.has_unsafe),
+            has_conflicts: summary.is_some_and(|value| value.has_conflicts),
+            rename_count: summary.map_or(0, |value| value.rename_count),
+            tests_passed,
+            override_forced,
+            diff_available: summary.is_some(),
+        }
+    }
 }
 
 /// Analyze the diff between `base` and `branch` in the given repo.
@@ -268,24 +331,27 @@ pub fn compute_merge_confidence(summary: &DiffSummary, policy: &AutoMergePolicy)
     confidence.max(0.0)
 }
 
-/// Decide whether to auto-merge or route to manual review.
-///
-/// `tests_passed` indicates whether the task's test suite passed. When
-/// `policy.require_tests_pass` is true and tests haven't passed, the
-/// decision is always manual review regardless of other criteria.
-pub fn should_auto_merge(
+pub fn score_auto_merge_candidate(summary: &DiffSummary, policy: &AutoMergePolicy) -> f64 {
+    compute_merge_confidence(summary, policy)
+}
+
+pub fn evaluate_auto_merge_candidate(
     summary: &DiffSummary,
     policy: &AutoMergePolicy,
     tests_passed: bool,
-) -> AutoMergeDecision {
+) -> AutoMergeDecisionRecord {
     if !policy.enabled {
-        return AutoMergeDecision::ManualReview {
-            confidence: compute_merge_confidence(summary, policy),
-            reasons: vec!["auto-merge disabled by policy".to_string()],
-        };
+        return AutoMergeDecisionRecord::from_summary(
+            Some(summary),
+            score_auto_merge_candidate(summary, policy),
+            AutoMergeDecisionKind::ManualReview,
+            vec!["auto-merge disabled by policy".to_string()],
+            tests_passed,
+            None,
+        );
     }
 
-    let confidence = compute_merge_confidence(summary, policy);
+    let confidence = score_auto_merge_candidate(summary, policy);
     let mut reasons = Vec::new();
 
     if policy.require_tests_pass && !tests_passed {
@@ -347,12 +413,103 @@ pub fn should_auto_merge(
     }
 
     if reasons.is_empty() {
-        AutoMergeDecision::AutoMerge { confidence }
-    } else {
-        AutoMergeDecision::ManualReview {
+        AutoMergeDecisionRecord::from_summary(
+            Some(summary),
             confidence,
+            AutoMergeDecisionKind::Accepted,
+            vec![format!(
+                "confidence {:.2} meets threshold {:.2}; diff stays within file/module/line policy limits",
+                confidence, policy.confidence_threshold
+            )],
+            tests_passed,
+            None,
+        )
+    } else {
+        AutoMergeDecisionRecord::from_summary(
+            Some(summary),
+            confidence,
+            AutoMergeDecisionKind::ManualReview,
             reasons,
-        }
+            tests_passed,
+            None,
+        )
+    }
+}
+
+pub fn forced_auto_merge_decision(
+    summary: Option<&DiffSummary>,
+    policy: &AutoMergePolicy,
+    tests_passed: bool,
+) -> AutoMergeDecisionRecord {
+    AutoMergeDecisionRecord::from_summary(
+        summary,
+        summary.map_or(0.0, |value| score_auto_merge_candidate(value, policy)),
+        AutoMergeDecisionKind::Accepted,
+        vec!["auto-merge forced by per-task override".to_string()],
+        tests_passed,
+        Some(true),
+    )
+}
+
+pub fn forced_manual_review_decision(
+    summary: Option<&DiffSummary>,
+    policy: &AutoMergePolicy,
+    tests_passed: bool,
+) -> AutoMergeDecisionRecord {
+    AutoMergeDecisionRecord::from_summary(
+        summary,
+        summary.map_or(0.0, |value| score_auto_merge_candidate(value, policy)),
+        AutoMergeDecisionKind::ManualReview,
+        vec!["auto-merge disabled by per-task override".to_string()],
+        tests_passed,
+        Some(false),
+    )
+}
+
+pub fn explain_auto_merge_decision(record: &AutoMergeDecisionRecord) -> String {
+    let decision = match record.decision {
+        AutoMergeDecisionKind::Accepted => "accepted for auto-merge",
+        AutoMergeDecisionKind::ManualReview => "routed to manual review",
+    };
+    let override_text = match record.override_forced {
+        Some(true) => " (forced by override)",
+        Some(false) => " (disabled by override)",
+        None => "",
+    };
+    let diff_shape = if record.diff_available {
+        format!(
+            "{} files, {} lines, {} modules",
+            record.files_changed, record.lines_changed, record.modules_touched
+        )
+    } else {
+        "diff summary unavailable".to_string()
+    };
+    format!(
+        "{decision}{override_text}: confidence {:.2}; {diff_shape}; reasons: {}",
+        record.confidence,
+        record.reasons.join("; ")
+    )
+}
+
+/// Decide whether to auto-merge or route to manual review.
+///
+/// `tests_passed` indicates whether the task's test suite passed. When
+/// `policy.require_tests_pass` is true and tests haven't passed, the
+/// decision is always manual review regardless of other criteria.
+pub fn should_auto_merge(
+    summary: &DiffSummary,
+    policy: &AutoMergePolicy,
+    tests_passed: bool,
+) -> AutoMergeDecision {
+    let record = evaluate_auto_merge_candidate(summary, policy, tests_passed);
+    match record.decision {
+        AutoMergeDecisionKind::Accepted => AutoMergeDecision::AutoMerge {
+            confidence: record.confidence,
+        },
+        AutoMergeDecisionKind::ManualReview => AutoMergeDecision::ManualReview {
+            confidence: record.confidence,
+            reasons: record.reasons,
+        },
     }
 }
 
@@ -676,6 +833,34 @@ mod tests {
             (confidence - 1.0).abs() < 0.001,
             "all-rename diff should have full confidence: {}",
             confidence
+        );
+    }
+
+    #[test]
+    fn heterogeneous_but_bounded_diff_still_auto_merges() {
+        let summary = make_summary(3, 45, 15, vec!["team", "metrics"], vec![], false);
+        let policy = enabled_policy();
+        let record = evaluate_auto_merge_candidate(&summary, &policy, true);
+        assert_eq!(record.decision, AutoMergeDecisionKind::Accepted);
+        assert_eq!(
+            record.reasons,
+            vec![
+                "confidence 0.80 meets threshold 0.80; diff stays within file/module/line policy limits"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn forced_override_decision_is_explicit() {
+        let summary = make_summary(5, 80, 20, vec!["team", "metrics", "daemon"], vec![], false);
+        let policy = enabled_policy();
+        let record = forced_auto_merge_decision(Some(&summary), &policy, true);
+        assert_eq!(record.decision, AutoMergeDecisionKind::Accepted);
+        assert_eq!(record.override_forced, Some(true));
+        assert_eq!(
+            explain_auto_merge_decision(&record),
+            "accepted for auto-merge (forced by override): confidence 0.40; 5 files, 100 lines, 3 modules; reasons: auto-merge forced by per-task override"
         );
     }
 

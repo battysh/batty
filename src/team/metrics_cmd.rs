@@ -35,6 +35,13 @@ pub struct DashboardMetrics {
     pub auto_merge_count: i64,
     pub manual_merge_count: i64,
     pub auto_merge_rate: Option<f64>,
+    pub accepted_decision_count: i64,
+    pub rejected_decision_count: i64,
+    pub decision_accept_rate: Option<f64>,
+    pub rejection_reasons: Vec<telemetry_db::AutoMergeReasonRow>,
+    pub post_merge_verify_pass_count: i64,
+    pub post_merge_verify_fail_count: i64,
+    pub post_merge_verify_skip_count: i64,
     pub rework_count: i64,
     pub rework_rate: Option<f64>,
     pub avg_review_latency_secs: Option<f64>,
@@ -128,10 +135,21 @@ pub fn query_dashboard(conn: &Connection) -> Result<DashboardMetrics> {
     m.manual_merge_count = review.manual_merge_count;
     m.rework_count = review.rework_count;
     m.avg_review_latency_secs = review.avg_review_latency_secs;
+    m.accepted_decision_count = review.accepted_decision_count;
+    m.rejected_decision_count = review.rejected_decision_count;
+    m.rejection_reasons = review.rejection_reasons;
+    m.post_merge_verify_pass_count = review.post_merge_verify_pass_count;
+    m.post_merge_verify_fail_count = review.post_merge_verify_fail_count;
+    m.post_merge_verify_skip_count = review.post_merge_verify_skip_count;
 
     let total_merge = m.auto_merge_count + m.manual_merge_count;
     if total_merge > 0 {
         m.auto_merge_rate = Some(m.auto_merge_count as f64 / total_merge as f64 * 100.0);
+    }
+    let total_decisions = m.accepted_decision_count + m.rejected_decision_count;
+    if total_decisions > 0 {
+        m.decision_accept_rate =
+            Some(m.accepted_decision_count as f64 / total_decisions as f64 * 100.0);
     }
     let total_reviewed = total_merge + m.rework_count;
     if total_reviewed > 0 {
@@ -231,6 +249,10 @@ pub fn format_dashboard(m: &DashboardMetrics) -> String {
         .auto_merge_rate
         .map(|r| format!("{:.0}%", r))
         .unwrap_or_else(|| na.clone());
+    let dar = m
+        .decision_accept_rate
+        .map(|r| format!("{:.0}%", r))
+        .unwrap_or_else(|| na.clone());
     let rr = m
         .rework_rate
         .map(|r| format!("{:.0}%", r))
@@ -244,8 +266,24 @@ pub fn format_dashboard(m: &DashboardMetrics) -> String {
         "  Auto: {}  Manual: {}  Rework: {}\n",
         m.auto_merge_count, m.manual_merge_count, m.rework_count
     ));
+    out.push_str(&format!(
+        "  Decision Accept Rate: {} (accepted {} / rejected {})\n",
+        dar, m.accepted_decision_count, m.rejected_decision_count
+    ));
+    out.push_str(&format!(
+        "  Post-merge Verify: pass {}  fail {}  skipped {}\n",
+        m.post_merge_verify_pass_count,
+        m.post_merge_verify_fail_count,
+        m.post_merge_verify_skip_count
+    ));
     out.push_str(&format!("  Rework Rate:     {}\n", rr));
     out.push_str(&format!("  Avg Review Latency: {}\n", latency));
+    if !m.rejection_reasons.is_empty() {
+        out.push_str("  Rejection Reasons:\n");
+        for row in m.rejection_reasons.iter().take(5) {
+            out.push_str(&format!("    - {} ({})\n", row.reason, row.count));
+        }
+    }
 
     if !m.cycle_time_by_priority.is_empty() {
         out.push_str("\nAverage Cycle Time By Priority\n");
@@ -397,10 +435,56 @@ mod tests {
         let mut m1 = TeamEvent::task_auto_merged("eng-1", "10", 0.9, 2, 30);
         m1.ts = 1500;
         telemetry_db::insert_event(&conn, &m1).unwrap();
+        telemetry_db::insert_event(
+            &conn,
+            &TeamEvent::auto_merge_decision_recorded(&crate::team::events::AutoMergeDecisionInfo {
+                engineer: "eng-1",
+                task: "10",
+                action_type: "accepted",
+                confidence: 0.9,
+                reason: "accepted for auto-merge: confidence 0.90; 2 files, 30 lines, 1 modules; reasons: confidence 0.90 meets threshold 0.80",
+                details: r#"{"decision":"accepted","reasons":["confidence 0.90 meets threshold 0.80"],"files_changed":2,"lines_changed":30,"modules_touched":1,"has_migrations":false,"has_config_changes":false,"has_unsafe":false,"has_conflicts":false,"rename_count":0,"tests_passed":true,"override_forced":null,"diff_available":true}"#,
+            }),
+        )
+        .unwrap();
+        telemetry_db::insert_event(
+            &conn,
+            &TeamEvent::auto_merge_post_verify_result(
+                "eng-1",
+                "10",
+                Some(true),
+                "passed",
+                Some("post-merge verification on main passed"),
+            ),
+        )
+        .unwrap();
 
         let mut m2 = TeamEvent::task_manual_merged("20");
         m2.ts = 1800;
         telemetry_db::insert_event(&conn, &m2).unwrap();
+        telemetry_db::insert_event(
+            &conn,
+            &TeamEvent::auto_merge_decision_recorded(&crate::team::events::AutoMergeDecisionInfo {
+                engineer: "eng-2",
+                task: "20",
+                action_type: "manual_review",
+                confidence: 0.6,
+                reason: "routed to manual review: confidence 0.60; 4 files, 120 lines, 3 modules; reasons: touches sensitive paths",
+                details: r#"{"decision":"manual_review","reasons":["touches sensitive paths"],"files_changed":4,"lines_changed":120,"modules_touched":3,"has_migrations":false,"has_config_changes":false,"has_unsafe":false,"has_conflicts":false,"rename_count":0,"tests_passed":true,"override_forced":null,"diff_available":true}"#,
+            }),
+        )
+        .unwrap();
+        telemetry_db::insert_event(
+            &conn,
+            &TeamEvent::auto_merge_post_verify_result(
+                "eng-2",
+                "20",
+                None,
+                "skipped",
+                Some("post-merge verification was not requested for this merge"),
+            ),
+        )
+        .unwrap();
 
         // A failure
         telemetry_db::insert_event(&conn, &TeamEvent::pane_death("eng-1")).unwrap();
@@ -441,6 +525,20 @@ mod tests {
         assert_eq!(m.manual_merge_count, 1);
         let amr = m.auto_merge_rate.unwrap();
         assert!((amr - 50.0).abs() < 0.01);
+        assert_eq!(m.accepted_decision_count, 1);
+        assert_eq!(m.rejected_decision_count, 1);
+        let dar = m.decision_accept_rate.unwrap();
+        assert!((dar - 50.0).abs() < 0.01);
+        assert_eq!(m.post_merge_verify_pass_count, 1);
+        assert_eq!(m.post_merge_verify_fail_count, 0);
+        assert_eq!(m.post_merge_verify_skip_count, 1);
+        assert_eq!(
+            m.rejection_reasons,
+            vec![telemetry_db::AutoMergeReasonRow {
+                reason: "touches sensitive paths".to_string(),
+                count: 1,
+            }]
+        );
 
         // Agents present
         assert_eq!(m.agent_rows.len(), 2);
@@ -531,6 +629,16 @@ mod tests {
             auto_merge_count: 6,
             manual_merge_count: 2,
             auto_merge_rate: Some(75.0),
+            accepted_decision_count: 6,
+            rejected_decision_count: 2,
+            decision_accept_rate: Some(75.0),
+            rejection_reasons: vec![telemetry_db::AutoMergeReasonRow {
+                reason: "needs-human-review".to_string(),
+                count: 2,
+            }],
+            post_merge_verify_pass_count: 5,
+            post_merge_verify_fail_count: 1,
+            post_merge_verify_skip_count: 2,
             rework_count: 1,
             rework_rate: Some(11.0),
             avg_review_latency_secs: Some(120.0),
@@ -586,6 +694,9 @@ mod tests {
 
         assert!(text.contains("Review Pipeline"));
         assert!(text.contains("Auto-merge Rate: 75%"));
+        assert!(text.contains("Decision Accept Rate: 75%"));
+        assert!(text.contains("Post-merge Verify: pass 5  fail 1  skipped 2"));
+        assert!(text.contains("needs-human-review"));
         assert!(text.contains("Rework Rate:     11%"));
 
         assert!(text.contains("Average Cycle Time By Priority"));

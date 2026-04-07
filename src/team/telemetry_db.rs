@@ -4,11 +4,12 @@
 //! in `.batty/telemetry.db`. All tables use `CREATE TABLE IF NOT EXISTS` —
 //! no migration framework needed.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::events::TeamEvent;
 use super::metrics::TaskCycleTimeRecord;
@@ -708,6 +709,18 @@ pub struct ReviewMetricsRow {
     pub review_nudge_count: i64,
     pub review_escalation_count: i64,
     pub avg_review_latency_secs: Option<f64>,
+    pub accepted_decision_count: i64,
+    pub rejected_decision_count: i64,
+    pub rejection_reasons: Vec<AutoMergeReasonRow>,
+    pub post_merge_verify_pass_count: i64,
+    pub post_merge_verify_fail_count: i64,
+    pub post_merge_verify_skip_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutoMergeReasonRow {
+    pub reason: String,
+    pub count: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -847,6 +860,41 @@ fn parse_lines_changed_from_merge_reason(reason: &str) -> Option<u64> {
         .and_then(|value| value.parse::<u64>().ok())
 }
 
+fn load_events_by_type(conn: &Connection, event_type: &str) -> Result<Vec<TeamEvent>> {
+    let mut stmt =
+        conn.prepare("SELECT payload FROM events WHERE event_type = ?1 ORDER BY timestamp ASC")?;
+    let rows = stmt.query_map(params![event_type], |row| row.get::<_, String>(0))?;
+    rows.map(|row| {
+        let payload = row?;
+        serde_json::from_str::<TeamEvent>(&payload)
+            .context("failed to deserialize telemetry event payload")
+    })
+    .collect()
+}
+
+fn extract_auto_merge_reasons(event: &TeamEvent) -> Vec<String> {
+    if let Some(details) = event.details.as_deref()
+        && let Ok(record) =
+            serde_json::from_str::<crate::team::auto_merge::AutoMergeDecisionRecord>(details)
+    {
+        return record.reasons;
+    }
+
+    event
+        .reason
+        .as_deref()
+        .and_then(|reason| reason.split("reasons: ").nth(1))
+        .map(|reasons| {
+            reasons
+                .split("; ")
+                .map(str::trim)
+                .filter(|reason| !reason.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
 /// Query aggregated review pipeline metrics from the events table.
 pub fn query_review_metrics(conn: &Connection) -> Result<ReviewMetricsRow> {
     let count_event = |event_type: &str| -> Result<i64> {
@@ -863,6 +911,35 @@ pub fn query_review_metrics(conn: &Connection) -> Result<ReviewMetricsRow> {
     let rework_count = count_event("task_reworked")?;
     let review_nudge_count = count_event("review_nudge_sent")?;
     let review_escalation_count = count_event("review_escalated")?;
+    let decision_events = load_events_by_type(conn, "auto_merge_decision_recorded")?;
+    let post_verify_events = load_events_by_type(conn, "auto_merge_post_verify_result")?;
+
+    let mut accepted_decision_count = 0;
+    let mut rejected_decision_count = 0;
+    let mut rejection_reasons = BTreeMap::<String, i64>::new();
+    for event in decision_events {
+        match event.action_type.as_deref() {
+            Some("accepted") => accepted_decision_count += 1,
+            Some("manual_review") => {
+                rejected_decision_count += 1;
+                for reason in extract_auto_merge_reasons(&event) {
+                    *rejection_reasons.entry(reason).or_insert(0) += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut post_merge_verify_pass_count = 0;
+    let mut post_merge_verify_fail_count = 0;
+    let mut post_merge_verify_skip_count = 0;
+    for event in post_verify_events {
+        match event.success {
+            Some(true) => post_merge_verify_pass_count += 1,
+            Some(false) => post_merge_verify_fail_count += 1,
+            None => post_merge_verify_skip_count += 1,
+        }
+    }
 
     // Compute average review latency: time between task_completed and its
     // corresponding merge event for each task.
@@ -880,6 +957,17 @@ pub fn query_review_metrics(conn: &Connection) -> Result<ReviewMetricsRow> {
         )
         .unwrap_or(None);
 
+    let mut rejection_reasons = rejection_reasons
+        .into_iter()
+        .map(|(reason, count)| AutoMergeReasonRow { reason, count })
+        .collect::<Vec<_>>();
+    rejection_reasons.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.reason.cmp(&right.reason))
+    });
+
     Ok(ReviewMetricsRow {
         auto_merge_count,
         manual_merge_count,
@@ -887,6 +975,12 @@ pub fn query_review_metrics(conn: &Connection) -> Result<ReviewMetricsRow> {
         review_nudge_count,
         review_escalation_count,
         avg_review_latency_secs,
+        accepted_decision_count,
+        rejected_decision_count,
+        rejection_reasons,
+        post_merge_verify_pass_count,
+        post_merge_verify_fail_count,
+        post_merge_verify_skip_count,
     })
 }
 
@@ -1261,6 +1355,12 @@ mod tests {
         assert_eq!(row.review_nudge_count, 0);
         assert_eq!(row.review_escalation_count, 0);
         assert!(row.avg_review_latency_secs.is_none());
+        assert_eq!(row.accepted_decision_count, 0);
+        assert_eq!(row.rejected_decision_count, 0);
+        assert!(row.rejection_reasons.is_empty());
+        assert_eq!(row.post_merge_verify_pass_count, 0);
+        assert_eq!(row.post_merge_verify_fail_count, 0);
+        assert_eq!(row.post_merge_verify_skip_count, 0);
     }
 
     #[test]
@@ -1281,6 +1381,63 @@ mod tests {
         insert_event(&conn, &TeamEvent::review_nudge_sent("manager", "5")).unwrap();
         insert_event(&conn, &TeamEvent::review_nudge_sent("manager", "6")).unwrap();
         insert_event(&conn, &TeamEvent::review_escalated_by_role("manager", "7")).unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::auto_merge_decision_recorded(&crate::team::events::AutoMergeDecisionInfo {
+                engineer: "eng-1",
+                task: "1",
+                action_type: "accepted",
+                confidence: 0.9,
+                reason: "accepted for auto-merge: confidence 0.90; 2 files, 30 lines, 1 modules; reasons: confidence 0.90 meets threshold 0.80",
+                details: r#"{"decision":"accepted","reasons":["confidence 0.90 meets threshold 0.80"],"files_changed":2,"lines_changed":30,"modules_touched":1,"has_migrations":false,"has_config_changes":false,"has_unsafe":false,"has_conflicts":false,"rename_count":0,"tests_passed":true,"override_forced":null,"diff_available":true}"#,
+            }),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::auto_merge_decision_recorded(&crate::team::events::AutoMergeDecisionInfo {
+                engineer: "eng-1",
+                task: "3",
+                action_type: "manual_review",
+                confidence: 0.52,
+                reason: "routed to manual review: confidence 0.52; 6 files, 220 lines, 3 modules; reasons: touches sensitive paths; 6 files changed (max 5)",
+                details: r#"{"decision":"manual_review","reasons":["touches sensitive paths","6 files changed (max 5)"],"files_changed":6,"lines_changed":220,"modules_touched":3,"has_migrations":false,"has_config_changes":false,"has_unsafe":false,"has_conflicts":false,"rename_count":0,"tests_passed":true,"override_forced":null,"diff_available":true}"#,
+            }),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::auto_merge_post_verify_result(
+                "eng-1",
+                "1",
+                Some(true),
+                "passed",
+                Some("post-merge verification on main passed"),
+            ),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::auto_merge_post_verify_result(
+                "eng-1",
+                "2",
+                Some(false),
+                "failed",
+                Some("post-merge verification on main failed"),
+            ),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::auto_merge_post_verify_result(
+                "eng-1",
+                "3",
+                None,
+                "skipped",
+                Some("post-merge verification was not requested for this merge"),
+            ),
+        )
+        .unwrap();
 
         let row = query_review_metrics(&conn).unwrap();
         assert_eq!(row.auto_merge_count, 2);
@@ -1288,6 +1445,24 @@ mod tests {
         assert_eq!(row.rework_count, 1);
         assert_eq!(row.review_nudge_count, 2);
         assert_eq!(row.review_escalation_count, 1);
+        assert_eq!(row.accepted_decision_count, 1);
+        assert_eq!(row.rejected_decision_count, 1);
+        assert_eq!(
+            row.rejection_reasons,
+            vec![
+                AutoMergeReasonRow {
+                    reason: "6 files changed (max 5)".to_string(),
+                    count: 1,
+                },
+                AutoMergeReasonRow {
+                    reason: "touches sensitive paths".to_string(),
+                    count: 1,
+                },
+            ]
+        );
+        assert_eq!(row.post_merge_verify_pass_count, 1);
+        assert_eq!(row.post_merge_verify_fail_count, 1);
+        assert_eq!(row.post_merge_verify_skip_count, 1);
     }
 
     #[test]

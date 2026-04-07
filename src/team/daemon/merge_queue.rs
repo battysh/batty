@@ -181,6 +181,7 @@ impl TeamDaemon {
 
         match merge_engineer_branch(self.project_root(), &request.engineer)? {
             MergeOutcome::Success => {
+                let mut post_merge_verify_recorded = false;
                 if request.should_post_merge_verify
                     && self
                         .config
@@ -200,6 +201,13 @@ impl TeamDaemon {
                         run_automatic_verification(self.project_root(), test_command)
                             .context("post-merge verification on main failed to execute")?;
                     if !verification.passed {
+                        self.record_auto_merge_post_verify_result(
+                            &request.engineer,
+                            request.task_id,
+                            Some(false),
+                            "failed",
+                            Some("post-merge verification on main failed"),
+                        );
                         reset_main_to(self.project_root(), &pre_merge_head)?;
                         let engineer_notice = format!(
                             "Your task for #{} merged cleanly but failed post-merge verification on main, so Batty reverted it.\nLatest output:\n{}",
@@ -217,6 +225,23 @@ impl TeamDaemon {
                         }
                         return Ok(MergeQueueOutcome::Reverted);
                     }
+                    self.record_auto_merge_post_verify_result(
+                        &request.engineer,
+                        request.task_id,
+                        Some(true),
+                        "passed",
+                        Some("post-merge verification on main passed"),
+                    );
+                    post_merge_verify_recorded = true;
+                }
+                if !post_merge_verify_recorded {
+                    self.record_auto_merge_post_verify_result(
+                        &request.engineer,
+                        request.task_id,
+                        None,
+                        "skipped",
+                        Some("post-merge verification was not requested for this merge"),
+                    );
                 }
 
                 let board_update_ok = move_task_to_done(
