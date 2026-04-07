@@ -124,8 +124,10 @@ pub(crate) fn run_disk_hygiene(
     // 3. Rotate old shim-logs
     let shim_logs = crate::team::shim_logs_dir(project_root);
     if shim_logs.is_dir() {
-        report.shim_logs_rotated =
-            rotate_old_files(&shim_logs, Duration::from_secs(config.log_rotation_hours * 3600))?;
+        report.shim_logs_rotated = rotate_old_files(
+            &shim_logs,
+            Duration::from_secs(config.log_rotation_hours * 3600),
+        )?;
     }
 
     // 4. Rotate old inbox messages
@@ -457,16 +459,16 @@ mod tests {
         // Write old messages
         let old_msg = inboxes.join("eng-1").join("cur").join("msg-old.txt");
         fs::write(&old_msg, "old message").unwrap();
-        let old_time =
-            filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(48 * 3600));
+        let old_time = filetime::FileTime::from_system_time(
+            SystemTime::now() - Duration::from_secs(48 * 3600),
+        );
         filetime::set_file_mtime(&old_msg, old_time).unwrap();
 
         // Write fresh message
         let fresh_msg = inboxes.join("eng-2").join("new").join("msg-fresh.txt");
         fs::write(&fresh_msg, "fresh message").unwrap();
 
-        let count =
-            rotate_old_inbox_messages(inboxes, Duration::from_secs(24 * 3600)).unwrap();
+        let count = rotate_old_inbox_messages(inboxes, Duration::from_secs(24 * 3600)).unwrap();
         assert_eq!(count, 1);
         assert!(!old_msg.exists());
         assert!(fresh_msg.exists());
@@ -549,8 +551,9 @@ mod tests {
         fs::create_dir_all(&shim_logs).unwrap();
         let old_log = shim_logs.join("eng-1.pty.log");
         fs::write(&old_log, "old log data").unwrap();
-        let old_time =
-            filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(48 * 3600));
+        let old_time = filetime::FileTime::from_system_time(
+            SystemTime::now() - Duration::from_secs(48 * 3600),
+        );
         filetime::set_file_mtime(&old_log, old_time).unwrap();
 
         let report = run_disk_hygiene(tmp.path(), &config).unwrap();
