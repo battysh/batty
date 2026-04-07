@@ -2992,10 +2992,13 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
             ..Default::default()
         };
 
-        let daemon = TestDaemonBuilder::new(tmp.path())
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
             .members(vec![eng1, eng2, eng3])
             .states(states)
             .build();
+
+        // eng-3 is Working with an active task → not idle per idle_engineer_names
+        daemon.active_tasks.insert("eng-3".to_string(), 99);
 
         // eng-2 has an in-progress task on the board
         let tasks = vec![crate::task::Task {
@@ -3056,10 +3059,13 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
             ..Default::default()
         };
 
-        let daemon = TestDaemonBuilder::new(tmp.path())
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
             .members(vec![eng1])
             .states(states)
             .build();
+
+        // Working engineer needs an active task to not be treated as idle
+        daemon.active_tasks.insert("eng-1".to_string(), 42);
 
         assert_eq!(daemon.truly_idle_engineer_count(&[]), 0);
     }
