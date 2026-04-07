@@ -624,7 +624,9 @@ mod tests {
             agent: Some("claude".to_string()),
             prompt: None,
             reports_to: Some("manager".to_string()),
-            use_worktrees: true,
+            // This test only verifies pane cwd correction; enabling worktrees
+            // needlessly couples it to git availability in the environment.
+            use_worktrees: false,
             ..Default::default()
         };
         let mut daemon = TeamDaemon::new(DaemonConfig {
@@ -725,7 +727,9 @@ mod tests {
             agent: Some("claude".to_string()),
             prompt: None,
             reports_to: Some("manager".to_string()),
-            use_worktrees: true,
+            // This test only verifies pane cwd correction; enabling worktrees
+            // needlessly couples it to git availability in the environment.
+            use_worktrees: false,
             ..Default::default()
         };
         let mut daemon = TeamDaemon::new(DaemonConfig {
