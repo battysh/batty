@@ -972,6 +972,16 @@ impl TeamDaemon {
         }
         Ok(())
     }
+
+    fn supervisory_stall_summary(&self, _name: &str) -> Option<String> {
+        None
+    }
+
+    fn handle_supervisory_stall(&mut self, name: &str, summary: &str) -> anyhow::Result<()> {
+        tracing::warn!(member = name, summary, "supervisory stall detected");
+        self.record_orchestrator_action(format!("supervisory stall: {name} — {summary}"));
+        Ok(())
+    }
 }
 
 fn is_missing_codex_saved_session(detail: &str) -> bool {

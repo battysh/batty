@@ -343,6 +343,24 @@ pub fn watch_all_project_events(
     watch_all_project_events_at(&project_registry::registry_path()?, subscription)
 }
 
+pub fn openclaw_events(
+    project_root: &Path,
+    _subscription: &OpenClawEventSubscription,
+    _project_id: Option<&str>,
+    _all_projects: bool,
+    _json: bool,
+) -> Result<()> {
+    let events_path = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("events.jsonl");
+    if events_path.exists() {
+        let content = std::fs::read_to_string(&events_path)?;
+        print!("{content}");
+    }
+    Ok(())
+}
+
 pub fn openclaw_contract_descriptor() -> openclaw_contract::ContractDescriptor {
     openclaw_contract::descriptor()
 }
