@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -11,7 +13,10 @@ use crate::team::errors::DeliveryError;
 use crate::team::inbox;
 use crate::team::message;
 use crate::team::standup::MemberState;
-use crate::team::status;
+
+const INBOX_DELIVERY_MAX_ATTEMPTS: u32 = 3;
+static INBOX_DELIVERY_RETRY_COUNTS: LazyLock<Mutex<HashMap<String, u32>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Extract a task ID from assignment body text like "Task #42: ..." or "Task #42 ...".
 fn extract_task_id_from_body(body: &str) -> Option<u32> {
@@ -39,70 +44,232 @@ fn shim_log_preview(body: &str) -> String {
     preview
 }
 
-fn format_batched_message(messages: &[inbox::InboxMessage]) -> String {
-    messages
-        .iter()
-        .enumerate()
-        .map(|(index, message)| {
-            format!(
-                "--- Message {}/{} from {} ---\n{}",
-                index + 1,
-                messages.len(),
-                message.from,
-                message.body
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+const SUPERVISORY_DIGEST_MIN_BATCH_SIZE: usize = 2;
+const SUPERVISORY_DIGEST_SUMMARY_LIMIT: usize = 220;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ManagerNoticeClass {
+    Immediate,
+    Review,
+    Dispatch,
+    Utilization,
+    Recovery,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OrchestratorOnlyReason {
-    Nudge,
-    StatusQuery,
-    StandupRequest,
-}
+impl ManagerNoticeClass {
+    fn priority(self) -> usize {
+        match self {
+            Self::Review => 0,
+            Self::Dispatch => 1,
+            Self::Utilization => 2,
+            Self::Recovery => 3,
+            Self::Immediate => 4,
+        }
+    }
 
-impl OrchestratorOnlyReason {
     fn label(self) -> &'static str {
         match self {
-            Self::Nudge => "nudge",
-            Self::StatusQuery => "status query",
-            Self::StandupRequest => "standup request",
+            Self::Immediate => "Immediate",
+            Self::Review => "Review",
+            Self::Dispatch => "Dispatch",
+            Self::Utilization => "Utilization",
+            Self::Recovery => "Recovery",
         }
     }
 }
 
-fn normalized_body(body: &str) -> String {
-    body.trim().to_ascii_lowercase()
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SupervisoryDigestEntry {
+    class: ManagerNoticeClass,
+    summary: String,
+    occurrences: usize,
 }
 
-fn is_idle_nudge(body: &str) -> bool {
-    normalized_body(body).contains("idle nudge:")
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SupervisoryDigest {
+    entries: Vec<SupervisoryDigestEntry>,
+    total_messages: usize,
+    suppressed_duplicates: usize,
 }
 
-fn is_review_nudge(body: &str) -> bool {
-    normalized_body(body).starts_with("review nudge:")
+fn classify_manager_notice(body: &str) -> ManagerNoticeClass {
+    let normalized = body.trim().to_ascii_lowercase();
+    if normalized.starts_with("review backlog detected:") {
+        ManagerNoticeClass::Review
+    } else if normalized.starts_with("dispatch recovery needed:") {
+        ManagerNoticeClass::Dispatch
+    } else if normalized.starts_with("utilization recovery needed:") {
+        ManagerNoticeClass::Utilization
+    } else if normalized.starts_with("auto-doctor applied ") {
+        ManagerNoticeClass::Recovery
+    } else {
+        ManagerNoticeClass::Immediate
+    }
 }
 
-fn is_status_query(body: &str) -> bool {
-    let body = normalized_body(body);
-    body == "status"
-        || body == "status?"
-        || body.starts_with("status ")
-        || body.contains("what's the status")
-        || body.contains("what is the status")
-        || body.contains("current status")
-        || body.contains("progress update?")
-        || body.contains("screen state")
+fn should_batch_manager_notice(class: ManagerNoticeClass) -> bool {
+    !matches!(class, ManagerNoticeClass::Immediate)
 }
 
-fn is_standup_request(body: &str) -> bool {
-    let body = normalized_body(body);
-    body == "standup"
-        || body == "standup?"
-        || body.starts_with("standup ")
-        || body.contains("standup request")
+fn summarize_manager_notice(body: &str) -> String {
+    let first_line = body
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(body);
+    let single_line = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut summary = single_line
+        .chars()
+        .take(SUPERVISORY_DIGEST_SUMMARY_LIMIT)
+        .collect::<String>();
+    if single_line.chars().count() > SUPERVISORY_DIGEST_SUMMARY_LIMIT {
+        summary.push_str("...");
+    }
+    summary
+}
+
+fn manager_notice_dedup_key(class: ManagerNoticeClass, body: &str) -> String {
+    format!(
+        "{}:{}",
+        class.label().to_ascii_lowercase(),
+        summarize_manager_notice(body).to_ascii_lowercase()
+    )
+}
+
+fn split_management_delivery(
+    messages: &[inbox::InboxMessage],
+) -> (
+    Vec<inbox::InboxMessage>,
+    Option<(Vec<inbox::InboxMessage>, SupervisoryDigest)>,
+) {
+    let mut immediate = Vec::new();
+    let mut batchable = Vec::new();
+
+    for message in messages {
+        let class = classify_manager_notice(&message.body);
+        if matches!(message.msg_type, inbox::MessageType::Send)
+            && message.from == "daemon"
+            && should_batch_manager_notice(class)
+        {
+            batchable.push(message.clone());
+        } else {
+            immediate.push(message.clone());
+        }
+    }
+
+    if batchable.len() < SUPERVISORY_DIGEST_MIN_BATCH_SIZE {
+        immediate.extend(batchable);
+        return (immediate, None);
+    }
+
+    let mut entries: Vec<SupervisoryDigestEntry> = Vec::new();
+    let mut entry_indexes: HashMap<String, usize> = HashMap::new();
+    let mut suppressed_duplicates = 0;
+    for message in &batchable {
+        let class = classify_manager_notice(&message.body);
+        let key = manager_notice_dedup_key(class, &message.body);
+        if let Some(index) = entry_indexes.get(&key) {
+            entries[*index].occurrences += 1;
+            suppressed_duplicates += 1;
+            continue;
+        }
+
+        entry_indexes.insert(key, entries.len());
+        entries.push(SupervisoryDigestEntry {
+            class,
+            summary: summarize_manager_notice(&message.body),
+            occurrences: 1,
+        });
+    }
+    entries.sort_by(|left, right| {
+        left.class
+            .priority()
+            .cmp(&right.class.priority())
+            .then_with(|| left.summary.cmp(&right.summary))
+    });
+
+    (
+        immediate,
+        Some((
+            batchable.clone(),
+            SupervisoryDigest {
+                entries,
+                total_messages: batchable.len(),
+                suppressed_duplicates,
+            },
+        )),
+    )
+}
+
+fn render_supervisory_digest(digest: &SupervisoryDigest) -> String {
+    let duplicate_suffix = if digest.suppressed_duplicates == 0 {
+        "no duplicates suppressed".to_string()
+    } else if digest.suppressed_duplicates == 1 {
+        "1 duplicate suppressed".to_string()
+    } else {
+        format!("{} duplicates suppressed", digest.suppressed_duplicates)
+    };
+    let mut lines = vec![format!(
+        "Supervision digest: batched {} daemon notices ({duplicate_suffix}).",
+        digest.total_messages
+    )];
+    lines.extend(digest.entries.iter().enumerate().map(|(index, entry)| {
+        let count_suffix = if entry.occurrences > 1 {
+            format!(" (x{})", entry.occurrences)
+        } else {
+            String::new()
+        };
+        format!(
+            "{}. {}: {}{}",
+            index + 1,
+            entry.class.label(),
+            entry.summary,
+            count_suffix
+        )
+    }));
+    lines.join("\n")
+}
+
+fn inbox_delivery_attempt_exhausted(attempts: u32) -> bool {
+    attempts >= INBOX_DELIVERY_MAX_ATTEMPTS
+}
+
+fn inbox_delivery_retry_key(
+    project_root: &std::path::Path,
+    recipient: &str,
+    message_id: &str,
+) -> String {
+    format!("{}:{recipient}:{message_id}", project_root.display())
+}
+
+fn increment_inbox_delivery_attempt(
+    project_root: &std::path::Path,
+    recipient: &str,
+    message_id: &str,
+) -> u32 {
+    let key = inbox_delivery_retry_key(project_root, recipient, message_id);
+    let mut counts = INBOX_DELIVERY_RETRY_COUNTS.lock().unwrap();
+    let attempt = counts.entry(key).or_insert(0);
+    *attempt += 1;
+    *attempt
+}
+
+fn clear_inbox_delivery_attempt(project_root: &std::path::Path, recipient: &str, message_id: &str) {
+    let key = inbox_delivery_retry_key(project_root, recipient, message_id);
+    INBOX_DELIVERY_RETRY_COUNTS.lock().unwrap().remove(&key);
+}
+
+#[cfg(test)]
+fn inbox_delivery_attempt_count(
+    project_root: &std::path::Path,
+    recipient: &str,
+    message_id: &str,
+) -> Option<u32> {
+    let key = inbox_delivery_retry_key(project_root, recipient, message_id);
+    INBOX_DELIVERY_RETRY_COUNTS
+        .lock()
+        .unwrap()
+        .get(&key)
+        .copied()
 }
 
 impl TeamDaemon {
@@ -137,115 +304,6 @@ impl TeamDaemon {
                 )
             })
             .unwrap_or(true)
-    }
-
-    fn member_receives_pty_delivery(&self, member_name: &str) -> bool {
-        if self.shim_handles.contains_key(member_name)
-            || self.config.pane_map.contains_key(member_name)
-        {
-            return true;
-        }
-        self.config
-            .members
-            .iter()
-            .find(|member| member.name == member_name)
-            .is_some_and(|member| member.role_type != RoleType::User)
-    }
-
-    fn orchestrator_only_reason(
-        &self,
-        recipient: &str,
-        body: &str,
-    ) -> Option<OrchestratorOnlyReason> {
-        if !self.member_receives_pty_delivery(recipient) {
-            return None;
-        }
-
-        if is_idle_nudge(body) || is_review_nudge(body) {
-            return Some(OrchestratorOnlyReason::Nudge);
-        }
-        if is_status_query(body) {
-            return Some(OrchestratorOnlyReason::StatusQuery);
-        }
-        if is_standup_request(body) {
-            return Some(OrchestratorOnlyReason::StandupRequest);
-        }
-
-        None
-    }
-
-    fn cached_member_status_summary(&self, member_name: &str) -> String {
-        let inbox_root = inbox::inboxes_root(&self.config.project_root);
-        let pending_inbox = inbox::pending_message_count(&inbox_root, member_name).unwrap_or(0);
-        let mut owned_task_buckets =
-            status::owned_task_buckets(&self.config.project_root, &self.config.members);
-        let owned_tasks = owned_task_buckets.remove(member_name).unwrap_or_default();
-        let state = self
-            .states
-            .get(member_name)
-            .copied()
-            .unwrap_or(MemberState::Idle);
-        let nudge_status = status::format_nudge_status(self.nudges.get(member_name));
-        let standup_status = crate::team::standup::standup_interval_for_member_name(
-            &self.config.team_config,
-            &self.config.members,
-            member_name,
-        )
-        .map(|interval| {
-            status::format_standup_status(
-                self.last_standup.get(member_name).copied(),
-                interval,
-                self.paused_standups.contains(member_name),
-            )
-        })
-        .unwrap_or_default();
-        let label = status::compose_pane_status_label(status::PaneStatusLabelArgs {
-            state,
-            pending_inbox,
-            triage_backlog: 0,
-            active_task_ids: &owned_tasks.active,
-            review_task_ids: &owned_tasks.review,
-            globally_paused: super::super::pause_marker_path(&self.config.project_root).exists(),
-            nudge_status: &nudge_status,
-            standup_status: &standup_status,
-        });
-        let watcher_state = self
-            .watchers
-            .get(member_name)
-            .map(|watcher| format!("{:?}", watcher.state))
-            .unwrap_or_else(|| "Unknown".to_string())
-            .to_ascii_lowercase();
-        format!(
-            "{} | watcher {watcher_state}",
-            status::strip_tmux_style(&label)
-        )
-    }
-
-    fn record_orchestrator_only_message(
-        &self,
-        from: &str,
-        recipient: &str,
-        body: &str,
-        reason: OrchestratorOnlyReason,
-    ) {
-        let preview = shim_log_preview(body);
-        match reason {
-            OrchestratorOnlyReason::Nudge => self.record_orchestrator_action(format!(
-                "notification isolation: diverted {} for {} from PTY injection ({preview})",
-                reason.label(),
-                recipient
-            )),
-            OrchestratorOnlyReason::StatusQuery | OrchestratorOnlyReason::StandupRequest => {
-                let cached = self.cached_member_status_summary(recipient);
-                self.record_orchestrator_action(format!(
-                    "notification isolation: answered {} from {} about {} using cached state -> {}",
-                    reason.label(),
-                    from,
-                    recipient,
-                    cached
-                ));
-            }
-        }
     }
 
     /// Drain pending messages for an agent that just became ready.
@@ -414,17 +472,6 @@ impl TeamDaemon {
             return self.deliver_channel_message(from, recipient, body);
         }
 
-        if let Some(reason) = self.orchestrator_only_reason(recipient, body) {
-            info!(
-                from,
-                to = recipient,
-                reason = reason.label(),
-                "diverting message to orchestrator log"
-            );
-            self.record_orchestrator_only_message(from, recipient, body, reason);
-            return Ok(MessageDelivery::OrchestratorLogged);
-        }
-
         // Shim delivery path: deliver via the structured shim channel.
         if let Some(handle) = self.shim_handles.get_mut(recipient) {
             if handle.is_ready() {
@@ -577,19 +624,11 @@ impl TeamDaemon {
                 continue;
             }
 
-            if self.uses_management_batching(name) {
-                let batched_messages: Vec<inbox::InboxMessage> = messages
-                    .iter()
-                    .filter(|msg| matches!(msg.msg_type, inbox::MessageType::Send))
-                    .cloned()
-                    .collect();
-                if batched_messages.len() > 1
-                    && self.deliver_batched_management_messages(&root, name, &batched_messages)?
-                {
-                    self.mark_member_working(name);
-                    continue;
-                }
-            }
+            let (messages, batched_management_messages) = if self.uses_management_batching(name) {
+                split_management_delivery(&messages)
+            } else {
+                (messages, None)
+            };
 
             let Some(_pane_id) = self.config.pane_map.get(name).cloned() else {
                 continue;
@@ -609,43 +648,24 @@ impl TeamDaemon {
                 }
 
                 let is_send = matches!(msg.msg_type, inbox::MessageType::Send);
-                let delivery_result: Result<MessageDelivery> = match msg.msg_type {
+                let delivery_result = match msg.msg_type {
                     inbox::MessageType::Send => {
-                        if let Some(reason) = self.orchestrator_only_reason(name, &msg.body) {
-                            info!(
-                                from = %msg.from,
-                                to = %name,
-                                id = %msg.id,
-                                reason = reason.label(),
-                                "diverting inbox message to orchestrator log"
-                            );
-                            self.record_orchestrator_only_message(
-                                &msg.from, name, &msg.body, reason,
-                            );
-                            Ok(MessageDelivery::OrchestratorLogged)
-                        } else {
-                            info!(from = %msg.from, to = %name, id = %msg.id, "delivering inbox message via shim");
-                            if let Some(handle) = self.shim_handles.get_mut(name) {
-                                let result = handle.send_message(&msg.from, &msg.body);
-                                if result.is_ok() {
-                                    handle.apply_state_change(
-                                        crate::shim::protocol::ShimState::Working,
-                                    );
-                                    let _ = append_shim_event_log(
-                                        &self.config.project_root,
-                                        name,
-                                        &format!(
-                                            "-> {}: {}",
-                                            msg.from,
-                                            shim_log_preview(&msg.body)
-                                        ),
-                                    );
-                                }
-                                result.map(|()| MessageDelivery::LivePane)
-                            } else {
-                                // No shim handle — skip, leave in inbox
-                                continue;
+                        info!(from = %msg.from, to = %name, id = %msg.id, "delivering inbox message via shim");
+                        if let Some(handle) = self.shim_handles.get_mut(name) {
+                            let result = handle.send_message(&msg.from, &msg.body);
+                            if result.is_ok() {
+                                handle
+                                    .apply_state_change(crate::shim::protocol::ShimState::Working);
+                                let _ = append_shim_event_log(
+                                    &self.config.project_root,
+                                    name,
+                                    &format!("-> {}: {}", msg.from, shim_log_preview(&msg.body)),
+                                );
                             }
+                            result
+                        } else {
+                            // No shim handle — skip, leave in inbox
+                            continue;
                         }
                     }
                     inbox::MessageType::Assign => {
@@ -692,7 +712,7 @@ impl TeamDaemon {
                             );
                             let _ = self.queue_message("daemon", &msg.from, &reject_msg);
                             // Still mark delivered so it doesn't retry
-                            Ok(MessageDelivery::OrchestratorLogged)
+                            Ok(())
                         } else {
                             info!(to = %name, id = %msg.id, "delivering inbox assignment");
                             self.manual_assign_cooldowns
@@ -724,7 +744,6 @@ impl TeamDaemon {
                                 self.notify_assignment_sender_success(
                                     &msg.from, name, &msg.id, &msg.body, &launch,
                                 );
-                                MessageDelivery::LivePane
                             })
                         }
                     }
@@ -732,12 +751,11 @@ impl TeamDaemon {
 
                 let mut mark_delivered = false;
                 match delivery_result {
-                    Ok(delivery) => {
-                        if matches!(delivery, MessageDelivery::LivePane) {
-                            delivered_any = true;
-                        }
+                    Ok(()) => {
+                        delivered_any = true;
                         mark_delivered = true;
-                        if is_send && matches!(delivery, MessageDelivery::LivePane) {
+                        if is_send {
+                            clear_inbox_delivery_attempt(&self.config.project_root, name, &msg.id);
                             // Shim delivery is authoritative once the command reaches the
                             // structured channel. Pane-marker verification is a legacy tmux
                             // heuristic and produces false negatives for Claude/Codex shims.
@@ -748,6 +766,7 @@ impl TeamDaemon {
                         warn!(
                             from = %msg.from,
                             to = %name,
+                            to_role = to_role.as_str(),
                             id = %msg.id,
                             error = %error,
                             "failed to deliver inbox message"
@@ -758,6 +777,32 @@ impl TeamDaemon {
                             self.notify_assignment_sender_failure(
                                 &msg.from, name, &msg.id, &msg.body, &error,
                             );
+                        } else {
+                            let attempt = increment_inbox_delivery_attempt(
+                                &self.config.project_root,
+                                name,
+                                &msg.id,
+                            );
+                            warn!(
+                                from = %msg.from,
+                                to = %name,
+                                to_role = to_role.as_str(),
+                                id = %msg.id,
+                                attempt,
+                                error = %error,
+                                "retrying pending inbox message on next poll cycle"
+                            );
+                            if inbox_delivery_attempt_exhausted(attempt) {
+                                warn!(
+                                    from = %msg.from,
+                                    to = %name,
+                                    to_role = to_role.as_str(),
+                                    id = %msg.id,
+                                    attempts = attempt,
+                                    "inbox delivery retry budget exhausted; marking message delivered"
+                                );
+                                mark_delivered = true;
+                            }
                         }
                     }
                 }
@@ -774,10 +819,22 @@ impl TeamDaemon {
                         "failed to mark delivered"
                     );
                 } else {
+                    clear_inbox_delivery_attempt(&self.config.project_root, name, &msg.id);
                     self.record_message_routed(&msg.from, name);
                 }
 
                 std::thread::sleep(Duration::from_secs(1));
+            }
+
+            if let Some((digest_messages, digest)) = batched_management_messages
+                && self.deliver_batched_management_messages(
+                    &root,
+                    name,
+                    &digest_messages,
+                    &digest,
+                )?
+            {
+                delivered_any = true;
             }
 
             if delivered_any {
@@ -793,39 +850,44 @@ impl TeamDaemon {
         root: &std::path::Path,
         member_name: &str,
         messages: &[inbox::InboxMessage],
+        digest: &SupervisoryDigest,
     ) -> Result<bool> {
-        let Some(handle) = self.shim_handles.get_mut(member_name) else {
-            return Ok(false);
-        };
-
-        let first_sender = messages
-            .first()
-            .map(|message| message.from.as_str())
-            .unwrap_or("daemon");
-        let batched_body = format_batched_message(messages);
-        info!(
-            to = %member_name,
-            count = messages.len(),
-            "delivering batched inbox messages via shim"
-        );
-        if let Err(error) = handle.send_message(first_sender, &batched_body) {
-            warn!(
+        let digest_body = render_supervisory_digest(digest);
+        {
+            let Some(handle) = self.shim_handles.get_mut(member_name) else {
+                return Ok(false);
+            };
+            info!(
                 to = %member_name,
-                count = messages.len(),
-                error = %error,
-                "failed to deliver batched inbox messages"
+                count = digest.total_messages,
+                suppressed_duplicates = digest.suppressed_duplicates,
+                "delivering supervisory digest via shim"
             );
-            return Ok(false);
+            if let Err(error) = handle.send_message("daemon", &digest_body) {
+                warn!(
+                    to = %member_name,
+                    count = digest.total_messages,
+                    suppressed_duplicates = digest.suppressed_duplicates,
+                    error = %error,
+                    "failed to deliver supervisory digest"
+                );
+                return Ok(false);
+            }
+            handle.apply_state_change(crate::shim::protocol::ShimState::Working);
         }
 
-        handle.apply_state_change(crate::shim::protocol::ShimState::Working);
+        self.record_supervisory_digest_emitted(
+            member_name,
+            digest.total_messages as u32,
+            digest.suppressed_duplicates as u32,
+        );
         let _ = append_shim_event_log(
             &self.config.project_root,
             member_name,
             &format!(
-                "-> batched {} messages: {}",
-                messages.len(),
-                shim_log_preview(&batched_body)
+                "-> supervisory digest {} notices: {}",
+                digest.total_messages,
+                shim_log_preview(&digest_body)
             ),
         );
         for message in messages {
@@ -837,6 +899,7 @@ impl TeamDaemon {
                     "failed to mark batched message delivered"
                 );
             } else {
+                clear_inbox_delivery_attempt(&self.config.project_root, member_name, &message.id);
                 self.record_message_routed(&message.from, member_name);
             }
         }
@@ -859,31 +922,30 @@ impl TeamDaemon {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::io;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use super::super::{MessageDelivery, PendingMessage};
-    use super::OrchestratorOnlyReason;
+    use super::{ManagerNoticeClass, split_management_delivery};
     use crate::team::AssignmentResultStatus;
     use crate::team::comms::Channel;
     use crate::team::config::OrchestratorPosition;
-    use crate::team::config::RoleDef;
     use crate::team::config::RoleType;
     use crate::team::config::{
-        AutomationConfig, BoardConfig, StandupConfig, WorkflowMode, WorkflowPolicy,
+        AutomationConfig, BoardConfig, ChannelConfig, RoleDef, StandupConfig, WorkflowMode,
+        WorkflowPolicy,
     };
     use crate::team::daemon::{DaemonConfig, TeamDaemon};
     use crate::team::errors::DeliveryError;
     use crate::team::events::EventSink;
+    use crate::team::failure_patterns::FailureTracker;
     use crate::team::hierarchy::MemberInstance;
     use crate::team::inbox;
     use crate::team::message;
     use crate::team::standup::MemberState;
-    use crate::team::test_support::{
-        TestDaemonBuilder, architect_member, engineer_member, manager_member, test_channel_config,
-    };
+    use crate::team::test_support::TestDaemonBuilder;
 
     struct RecordingChannel {
         messages: Arc<Mutex<Vec<String>>>,
@@ -928,20 +990,216 @@ mod tests {
     }
 
     fn empty_legacy_daemon(tmp: &tempfile::TempDir) -> TeamDaemon {
-        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
-        daemon.event_sink = EventSink::new(&tmp.path().join("events.jsonl")).unwrap();
-        daemon
+        TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: crate::team::config::TeamConfig {
+                    name: "test".to_string(),
+                    agent: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    external_senders: Vec::new(),
+                    orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
+                    layout: None,
+                    cost: Default::default(),
+                    grafana: Default::default(),
+                    use_shim: false,
+                    use_sdk_mode: false,
+                    auto_respawn_on_crash: false,
+                    shim_health_check_interval_secs: 60,
+                    shim_health_timeout_secs: 120,
+                    shim_shutdown_timeout_secs: 30,
+                    shim_working_state_timeout_secs: 1800,
+                    pending_queue_max_age_secs: 600,
+                    event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+                    retro_min_duration_secs: 60,
+                    roles: vec![
+                        RoleDef {
+                            name: "architect".to_string(),
+                            role_type: RoleType::Architect,
+                            auth_mode: None,
+                            auth_env: vec![],
+                            instances: 1,
+                            prompt: None,
+                            talks_to: vec![],
+                            channel: None,
+                            channel_config: None,
+                            nudge_interval_secs: None,
+                            receives_standup: None,
+                            standup_interval_secs: None,
+                            owns: Vec::new(),
+                            barrier_group: None,
+                            use_worktrees: false,
+                            ..Default::default()
+                        },
+                        RoleDef {
+                            name: "manager".to_string(),
+                            role_type: RoleType::Manager,
+                            auth_mode: None,
+                            auth_env: vec![],
+                            instances: 1,
+                            prompt: None,
+                            talks_to: vec![],
+                            channel: None,
+                            channel_config: None,
+                            nudge_interval_secs: None,
+                            receives_standup: None,
+                            standup_interval_secs: None,
+                            owns: Vec::new(),
+                            barrier_group: None,
+                            use_worktrees: false,
+                            ..Default::default()
+                        },
+                        RoleDef {
+                            name: "eng".to_string(),
+                            role_type: RoleType::Engineer,
+                            auth_mode: None,
+                            auth_env: vec![],
+                            instances: 1,
+                            prompt: None,
+                            talks_to: vec![],
+                            channel: None,
+                            channel_config: None,
+                            nudge_interval_secs: None,
+                            receives_standup: None,
+                            standup_interval_secs: None,
+                            owns: Vec::new(),
+                            barrier_group: None,
+                            use_worktrees: false,
+                            ..Default::default()
+                        },
+                    ],
+                },
+                session: "test".to_string(),
+                members: Vec::new(),
+                pane_map: HashMap::new(),
+            },
+            watchers: HashMap::new(),
+            states: HashMap::new(),
+            idle_started_at: HashMap::new(),
+            active_tasks: HashMap::new(),
+            retry_counts: HashMap::new(),
+            dispatch_queue: Vec::new(),
+            triage_idle_epochs: HashMap::new(),
+            triage_interventions: HashMap::new(),
+            owned_task_interventions: HashMap::new(),
+            intervention_cooldowns: HashMap::new(),
+            channels: HashMap::new(),
+            nudges: HashMap::new(),
+            telegram_bot: None,
+            failure_tracker: FailureTracker::new(20),
+            event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
+            paused_standups: HashSet::new(),
+            last_standup: HashMap::new(),
+            last_board_rotation: Instant::now(),
+            last_auto_archive: Instant::now(),
+            last_auto_dispatch: Instant::now(),
+            pipeline_starvation_fired: false,
+            pipeline_starvation_last_fired: None,
+            retro_generated: false,
+            failed_deliveries: Vec::new(),
+            review_first_seen: HashMap::new(),
+            review_nudge_sent: HashSet::new(),
+            poll_cycle_count: 0,
+            poll_interval: Duration::from_secs(5),
+            is_git_repo: false,
+            is_multi_repo: false,
+            sub_repo_names: Vec::new(),
+            subsystem_error_counts: HashMap::new(),
+            auto_merge_overrides: HashMap::new(),
+            recent_dispatches: HashMap::new(),
+            telemetry_db: None,
+            manual_assign_cooldowns: HashMap::new(),
+            backend_health: HashMap::new(),
+            narration_tracker: Default::default(),
+            context_pressure_tracker: Default::default(),
+            last_health_check: Instant::now(),
+            last_uncommitted_warn: HashMap::new(),
+            last_shared_target_cleanup: Instant::now(),
+            pending_delivery_queue: HashMap::new(),
+            verification_states: HashMap::new(),
+            narration_rejection_counts: HashMap::new(),
+            shim_handles: HashMap::new(),
+            planning_cycle_last_fired: None,
+            planning_cycle_active: false,
+            last_shim_health_check: Instant::now(),
+            merge_queue: crate::team::daemon::MergeQueue::default(),
+        }
     }
 
     fn failed_delivery_test_daemon(tmp: &tempfile::TempDir) -> TeamDaemon {
-        let mut daemon = empty_legacy_daemon(tmp);
-        daemon.config.members = vec![
-            architect_member("architect"),
-            manager_member("manager", Some("architect")),
-            engineer_member("eng-1", Some("manager"), false),
-        ];
-        daemon.config.pane_map = HashMap::from([("eng-1".to_string(), "%9999999".to_string())]);
-        daemon
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("architect".to_string()),
+            use_worktrees: false,
+            ..Default::default()
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+            ..Default::default()
+        };
+        let architect = MemberInstance {
+            name: "architect".to_string(),
+            role_name: "architect".to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+            ..Default::default()
+        };
+
+        TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: crate::team::config::TeamConfig {
+                    name: "test".to_string(),
+                    agent: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    external_senders: Vec::new(),
+                    orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
+                    layout: None,
+                    cost: Default::default(),
+                    grafana: Default::default(),
+                    use_shim: false,
+                    use_sdk_mode: false,
+                    auto_respawn_on_crash: false,
+                    shim_health_check_interval_secs: 60,
+                    shim_health_timeout_secs: 120,
+                    shim_shutdown_timeout_secs: 30,
+                    shim_working_state_timeout_secs: 1800,
+                    pending_queue_max_age_secs: 600,
+                    event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+                    retro_min_duration_secs: 60,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![architect, manager, engineer],
+                pane_map: HashMap::from([("eng-1".to_string(), "%9999999".to_string())]),
+            },
+            ..empty_legacy_daemon(tmp)
+        }
     }
 
     #[test]
@@ -1013,31 +1271,78 @@ mod tests {
         )
         .unwrap();
 
-        let mut daemon = empty_legacy_daemon(&tmp);
-        daemon.config.team_config.roles = vec![RoleDef {
-            name: "human".to_string(),
-            role_type: RoleType::User,
-            agent: None,
-            auth_mode: None,
-            auth_env: vec![],
-            instances: 1,
-            prompt: None,
-            talks_to: vec![],
-            channel: Some("telegram".to_string()),
-            channel_config: Some(test_channel_config("123", "fake")),
-            nudge_interval_secs: None,
-            receives_standup: None,
-            standup_interval_secs: None,
-            owns: Vec::new(),
-            barrier_group: None,
-            use_worktrees: false,
-            ..Default::default()
-        }];
-        daemon.config.members = vec![engineer_member("eng-1", None, false)];
-        daemon.channels = HashMap::from([(
-            "human".to_string(),
-            Box::new(FailingChannel) as Box<dyn Channel>,
-        )]);
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: crate::team::config::TeamConfig {
+                    name: "test".to_string(),
+                    agent: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    external_senders: Vec::new(),
+                    orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
+                    layout: None,
+                    cost: Default::default(),
+                    grafana: Default::default(),
+                    use_shim: false,
+                    use_sdk_mode: false,
+                    auto_respawn_on_crash: false,
+                    shim_health_check_interval_secs: 60,
+                    shim_health_timeout_secs: 120,
+                    shim_shutdown_timeout_secs: 30,
+                    shim_working_state_timeout_secs: 1800,
+                    pending_queue_max_age_secs: 600,
+                    event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+                    retro_min_duration_secs: 60,
+                    roles: vec![RoleDef {
+                        name: "human".to_string(),
+                        role_type: RoleType::User,
+                        agent: None,
+                        auth_mode: None,
+                        auth_env: vec![],
+                        instances: 1,
+                        prompt: None,
+                        talks_to: vec![],
+                        channel: Some("telegram".to_string()),
+                        channel_config: Some(ChannelConfig {
+                            target: "123".to_string(),
+                            provider: "fake".to_string(),
+                            bot_token: None,
+                            allowed_user_ids: vec![],
+                        }),
+                        nudge_interval_secs: None,
+                        receives_standup: None,
+                        standup_interval_secs: None,
+                        owns: Vec::new(),
+                        barrier_group: None,
+                        use_worktrees: false,
+                        ..Default::default()
+                    }],
+                },
+                session: "test".to_string(),
+                members: vec![MemberInstance {
+                    name: "eng-1".to_string(),
+                    role_name: "eng-1".to_string(),
+                    role_type: RoleType::Engineer,
+                    agent: Some("claude".to_string()),
+                    prompt: None,
+                    reports_to: None,
+                    use_worktrees: false,
+                    ..Default::default()
+                }],
+                pane_map: HashMap::new(),
+            },
+            channels: HashMap::from([(
+                "human".to_string(),
+                Box::new(FailingChannel) as Box<dyn Channel>,
+            )]),
+            ..empty_legacy_daemon(&tmp)
+        };
 
         daemon.drain_legacy_command_queue().unwrap();
 
@@ -1195,9 +1500,52 @@ mod tests {
     #[test]
     fn queue_message_falls_back_to_inbox_when_live_delivery_fails() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut daemon = empty_legacy_daemon(&tmp);
-        daemon.config.members = vec![manager_member("manager", None)];
-        daemon.config.pane_map = HashMap::from([("manager".to_string(), "%999".to_string())]);
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+            ..Default::default()
+        };
+        let mut daemon = TeamDaemon {
+            config: DaemonConfig {
+                project_root: tmp.path().to_path_buf(),
+                team_config: crate::team::config::TeamConfig {
+                    name: "test".to_string(),
+                    agent: None,
+                    workflow_mode: WorkflowMode::Legacy,
+                    workflow_policy: WorkflowPolicy::default(),
+                    board: BoardConfig::default(),
+                    standup: StandupConfig::default(),
+                    automation: AutomationConfig::default(),
+                    automation_sender: None,
+                    external_senders: Vec::new(),
+                    orchestrator_pane: true,
+                    orchestrator_position: OrchestratorPosition::Bottom,
+                    layout: None,
+                    cost: Default::default(),
+                    grafana: Default::default(),
+                    use_shim: false,
+                    use_sdk_mode: false,
+                    auto_respawn_on_crash: false,
+                    shim_health_check_interval_secs: 60,
+                    shim_health_timeout_secs: 120,
+                    shim_shutdown_timeout_secs: 30,
+                    shim_working_state_timeout_secs: 1800,
+                    pending_queue_max_age_secs: 600,
+                    event_log_max_bytes: crate::team::DEFAULT_EVENT_LOG_MAX_BYTES,
+                    retro_min_duration_secs: 60,
+                    roles: Vec::new(),
+                },
+                session: "test".to_string(),
+                members: vec![manager],
+                pane_map: HashMap::from([("manager".to_string(), "%999".to_string())]),
+            },
+            ..empty_legacy_daemon(&tmp)
+        };
 
         daemon
             .queue_message("eng-1", "manager", "Need review on merge handling.")
@@ -1463,7 +1811,221 @@ mod tests {
     }
 
     #[test]
-    fn deliver_inbox_batches_management_messages() {
+    fn inbox_delivery_retry_counter_increments_and_clears() {
+        let tmp = tempfile::tempdir().unwrap();
+        let message_id = "message-1";
+
+        assert_eq!(
+            super::inbox_delivery_attempt_count(tmp.path(), "eng-1", message_id),
+            None
+        );
+        assert_eq!(
+            super::increment_inbox_delivery_attempt(tmp.path(), "eng-1", message_id),
+            1
+        );
+        assert_eq!(
+            super::increment_inbox_delivery_attempt(tmp.path(), "eng-1", message_id),
+            2
+        );
+        assert_eq!(
+            super::inbox_delivery_attempt_count(tmp.path(), "eng-1", message_id),
+            Some(2)
+        );
+
+        super::clear_inbox_delivery_attempt(tmp.path(), "eng-1", message_id);
+        assert_eq!(
+            super::inbox_delivery_attempt_count(tmp.path(), "eng-1", message_id),
+            None
+        );
+    }
+
+    #[test]
+    fn inbox_delivery_retry_budget_exhausts_on_third_attempt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let message_id = "message-2";
+
+        let first = super::increment_inbox_delivery_attempt(tmp.path(), "eng-1", message_id);
+        let second = super::increment_inbox_delivery_attempt(tmp.path(), "eng-1", message_id);
+        let third = super::increment_inbox_delivery_attempt(tmp.path(), "eng-1", message_id);
+
+        assert!(!super::inbox_delivery_attempt_exhausted(first));
+        assert!(!super::inbox_delivery_attempt_exhausted(second));
+        assert!(super::inbox_delivery_attempt_exhausted(third));
+    }
+
+    #[test]
+    fn deliver_inbox_messages_retries_failed_send_until_later_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        daemon.config.team_config.roles = vec![
+            RoleDef {
+                name: "architect".to_string(),
+                role_type: RoleType::Architect,
+                ..Default::default()
+            },
+            RoleDef {
+                name: "manager".to_string(),
+                role_type: RoleType::Manager,
+                ..Default::default()
+            },
+            RoleDef {
+                name: "eng".to_string(),
+                role_type: RoleType::Engineer,
+                ..Default::default()
+            },
+        ];
+        let root = inbox::inboxes_root(tmp.path());
+
+        let msg = inbox::InboxMessage::new_send("manager", "eng-1", "retry me");
+        let id = inbox::deliver_to_inbox(&root, &msg).unwrap();
+
+        let (failed_parent, failed_child) = crate::shim::protocol::socketpair().unwrap();
+        failed_parent.shutdown(std::net::Shutdown::Both).unwrap();
+        drop(failed_child);
+        let failed_channel = crate::shim::protocol::Channel::new(failed_parent);
+        let mut failed_handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "eng-1".to_string(),
+            failed_channel,
+            12345,
+            "codex".to_string(),
+            "codex".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        failed_handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon
+            .shim_handles
+            .insert("eng-1".to_string(), failed_handle);
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        let pending = inbox::pending_messages(&root, "eng-1").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, id);
+        assert_eq!(
+            super::inbox_delivery_attempt_count(tmp.path(), "eng-1", &id),
+            Some(1)
+        );
+
+        let (parent_sock, child_sock) = crate::shim::protocol::socketpair().unwrap();
+        let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+        let mut child_channel = crate::shim::protocol::Channel::new(child_sock);
+        let mut recovered_handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "eng-1".to_string(),
+            parent_channel,
+            12346,
+            "codex".to_string(),
+            "codex".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        recovered_handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon
+            .shim_handles
+            .insert("eng-1".to_string(), recovered_handle);
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        let pending = inbox::pending_messages(&root, "eng-1").unwrap();
+        assert!(
+            pending.is_empty(),
+            "message should be delivered after retry succeeds"
+        );
+        let all = inbox::all_messages(&root, "eng-1").unwrap();
+        assert!(
+            all.iter()
+                .any(|(message, delivered)| message.id == id && *delivered)
+        );
+        assert_eq!(
+            super::inbox_delivery_attempt_count(tmp.path(), "eng-1", &id),
+            None
+        );
+
+        let cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+        match cmd {
+            crate::shim::protocol::Command::SendMessage { from, body, .. } => {
+                assert_eq!(from, "manager");
+                assert_eq!(body, "retry me");
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deliver_inbox_messages_marks_failed_send_delivered_after_third_attempt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        daemon.config.team_config.roles = vec![
+            RoleDef {
+                name: "architect".to_string(),
+                role_type: RoleType::Architect,
+                ..Default::default()
+            },
+            RoleDef {
+                name: "manager".to_string(),
+                role_type: RoleType::Manager,
+                ..Default::default()
+            },
+            RoleDef {
+                name: "eng".to_string(),
+                role_type: RoleType::Engineer,
+                ..Default::default()
+            },
+        ];
+        let root = inbox::inboxes_root(tmp.path());
+
+        let msg = inbox::InboxMessage::new_send("manager", "eng-1", "still failing");
+        let id = inbox::deliver_to_inbox(&root, &msg).unwrap();
+
+        let (failed_parent, failed_child) = crate::shim::protocol::socketpair().unwrap();
+        failed_parent.shutdown(std::net::Shutdown::Both).unwrap();
+        drop(failed_child);
+        let failed_channel = crate::shim::protocol::Channel::new(failed_parent);
+        let mut failed_handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "eng-1".to_string(),
+            failed_channel,
+            12345,
+            "codex".to_string(),
+            "codex".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        failed_handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon
+            .shim_handles
+            .insert("eng-1".to_string(), failed_handle);
+
+        daemon.deliver_inbox_messages().unwrap();
+        assert_eq!(inbox::pending_messages(&root, "eng-1").unwrap().len(), 1);
+        assert_eq!(
+            super::inbox_delivery_attempt_count(tmp.path(), "eng-1", &id),
+            Some(1)
+        );
+
+        daemon.deliver_inbox_messages().unwrap();
+        assert_eq!(inbox::pending_messages(&root, "eng-1").unwrap().len(), 1);
+        assert_eq!(
+            super::inbox_delivery_attempt_count(tmp.path(), "eng-1", &id),
+            Some(2)
+        );
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        let pending = inbox::pending_messages(&root, "eng-1").unwrap();
+        assert!(
+            pending.is_empty(),
+            "message should stop retrying after the third failed attempt"
+        );
+        let all = inbox::all_messages(&root, "eng-1").unwrap();
+        assert!(
+            all.iter()
+                .any(|(message, delivered)| message.id == id && *delivered)
+        );
+        assert_eq!(
+            super::inbox_delivery_attempt_count(tmp.path(), "eng-1", &id),
+            None
+        );
+    }
+
+    #[test]
+    fn deliver_inbox_batches_low_signal_manager_notices_but_keeps_urgent_live() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
         let root = inbox::inboxes_root(tmp.path());
@@ -1472,10 +2034,98 @@ mod tests {
             .pane_map
             .insert("manager".to_string(), "%123".to_string());
 
-        let first = inbox::InboxMessage::new_send("eng-1", "manager", "first update");
-        let second = inbox::InboxMessage::new_send("architect", "manager", "second update");
+        let first = inbox::InboxMessage::new_send(
+            "daemon",
+            "manager",
+            "Review backlog detected: direct-report work has completed and is waiting for your review: #41 by eng-1.",
+        );
+        let second = inbox::InboxMessage::new_send(
+            "daemon",
+            "manager",
+            "Dispatch recovery needed: you are idle, your reports are idle, and executable work is waiting.",
+        );
+        let urgent = inbox::InboxMessage::new_send(
+            "daemon",
+            "manager",
+            "Review urgency: task #41 has been in review for 900s.\nTask: hot path\nNext step: merge it, request rework, or escalate immediately.",
+        );
         inbox::deliver_to_inbox(&root, &first).unwrap();
         inbox::deliver_to_inbox(&root, &second).unwrap();
+        inbox::deliver_to_inbox(&root, &urgent).unwrap();
+
+        let (parent_sock, child_sock) = crate::shim::protocol::socketpair().unwrap();
+        let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+        let mut child_channel = crate::shim::protocol::Channel::new(child_sock);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "manager".to_string(),
+            parent_channel,
+            12345,
+            "claude".to_string(),
+            "claude".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("manager".to_string(), handle);
+        daemon.states.insert(
+            "manager".to_string(),
+            crate::team::standup::MemberState::Idle,
+        );
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        child_channel
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut bodies = Vec::new();
+        for _ in 0..2 {
+            let cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+            match cmd {
+                crate::shim::protocol::Command::SendMessage { body, .. } => bodies.push(body),
+                other => panic!("expected SendMessage, got {other:?}"),
+            }
+        }
+        assert!(
+            bodies
+                .iter()
+                .any(|body| body.contains("Review urgency: task #41 has been in review for 900s.")),
+            "urgent review message should still deliver live: {bodies:?}"
+        );
+        let digest_body = bodies
+            .iter()
+            .find(|body| body.contains("Supervision digest: batched 2 daemon notices"))
+            .expect("digest should be delivered");
+        assert!(digest_body.contains("1. Review: Review backlog detected:"));
+        assert!(digest_body.contains("2. Dispatch: Dispatch recovery needed:"));
+
+        assert!(
+            inbox::pending_messages(&root, "manager")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn deliver_inbox_digest_suppresses_duplicate_manager_notices_and_records_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let root = inbox::inboxes_root(tmp.path());
+        daemon
+            .config
+            .pane_map
+            .insert("manager".to_string(), "%123".to_string());
+        daemon.event_sink = EventSink::new(&crate::team::team_events_path(tmp.path())).unwrap();
+
+        let duplicate = "Utilization recovery needed: you are idle while team throughput is low.";
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("daemon", "manager", duplicate),
+        )
+        .unwrap();
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("daemon", "manager", duplicate),
+        )
+        .unwrap();
 
         let (parent_sock, child_sock) = crate::shim::protocol::socketpair().unwrap();
         let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
@@ -1501,22 +2151,67 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
         let cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
-        match cmd {
-            crate::shim::protocol::Command::SendMessage { body, .. } => {
-                assert!(body.contains("--- Message 1/2 from "));
-                assert!(body.contains("--- Message 2/2 from "));
-                assert!(body.contains("from eng-1 ---"));
-                assert!(body.contains("first update"));
-                assert!(body.contains("from architect ---"));
-                assert!(body.contains("second update"));
-            }
+        let body = match cmd {
+            crate::shim::protocol::Command::SendMessage { body, .. } => body,
             other => panic!("expected SendMessage, got {other:?}"),
-        }
-
+        };
         assert!(
-            inbox::pending_messages(&root, "manager")
-                .unwrap()
-                .is_empty()
+            body.contains("Supervision digest: batched 2 daemon notices (1 duplicate suppressed).")
+        );
+        assert!(body.contains("1. Utilization: Utilization recovery needed: you are idle while team throughput is low. (x2)"));
+
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(tmp.path())).unwrap();
+        let digest_event = events
+            .iter()
+            .find(|event| event.event == "supervisory_digest_emitted")
+            .expect("digest event should be recorded");
+        assert_eq!(digest_event.role.as_deref(), Some("manager"));
+        assert_eq!(
+            digest_event.details.as_deref(),
+            Some("notice_count=2 suppressed_duplicates=1")
+        );
+    }
+
+    #[test]
+    fn split_management_delivery_batches_recovery_after_actionable_notices() {
+        let urgent = inbox::InboxMessage::new_send(
+            "daemon",
+            "manager",
+            "Review urgency: task #41 has been in review for 900s.\nTask: hot path\nNext step: merge it, request rework, or escalate immediately.",
+        );
+        let messages = vec![
+            inbox::InboxMessage::new_send(
+                "daemon",
+                "manager",
+                "Dispatch recovery needed: you are idle, your reports are idle, and executable work is waiting.",
+            ),
+            inbox::InboxMessage::new_send(
+                "daemon",
+                "manager",
+                "Auto-doctor applied 2 board health fix(es):\n- Requeued stale task claims",
+            ),
+            inbox::InboxMessage::new_send(
+                "daemon",
+                "manager",
+                "Review backlog detected: direct-report work has completed and is waiting for your review: #41 by eng-1.",
+            ),
+            urgent.clone(),
+        ];
+
+        let (immediate, digest) = split_management_delivery(&messages);
+        assert_eq!(immediate.len(), 1);
+        assert_eq!(immediate[0].body, urgent.body);
+
+        let digest = digest.expect("digest should be created").1;
+        let classes: Vec<_> = digest.entries.iter().map(|entry| entry.class).collect();
+        assert_eq!(
+            classes,
+            vec![
+                ManagerNoticeClass::Review,
+                ManagerNoticeClass::Dispatch,
+                ManagerNoticeClass::Recovery,
+            ]
         );
     }
 
@@ -2024,270 +2719,6 @@ mod tests {
         let result = daemon.deliver_message("manager", "eng-1", "hello");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), MessageDelivery::LivePane);
-    }
-
-    #[test]
-    fn shim_delivery_diverts_nudges_to_orchestrator_log() {
-        let tmp = tempfile::tempdir().unwrap();
-        inbox::init_inbox(&inbox::inboxes_root(tmp.path()), "eng-1").unwrap();
-
-        let mut daemon = empty_legacy_daemon(&tmp);
-        daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
-        daemon.config.team_config.roles = vec![
-            RoleDef {
-                name: "manager".to_string(),
-                role_type: RoleType::Manager,
-                agent: Some("claude".to_string()),
-                auth_mode: None,
-                auth_env: vec![],
-                instances: 1,
-                prompt: None,
-                talks_to: vec![],
-                channel: None,
-                channel_config: None,
-                nudge_interval_secs: None,
-                receives_standup: None,
-                standup_interval_secs: None,
-                owns: Vec::new(),
-                barrier_group: None,
-                use_worktrees: false,
-                ..Default::default()
-            },
-            RoleDef {
-                name: "engineer".to_string(),
-                role_type: RoleType::Engineer,
-                agent: Some("claude".to_string()),
-                auth_mode: None,
-                auth_env: vec![],
-                instances: 1,
-                prompt: None,
-                talks_to: vec![],
-                channel: None,
-                channel_config: None,
-                nudge_interval_secs: None,
-                receives_standup: None,
-                standup_interval_secs: None,
-                owns: Vec::new(),
-                barrier_group: None,
-                use_worktrees: false,
-                ..Default::default()
-            },
-        ];
-        daemon.config.members = vec![MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "engineer".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("manager".to_string()),
-            use_worktrees: false,
-            ..Default::default()
-        }];
-        daemon
-            .config
-            .pane_map
-            .insert("eng-1".to_string(), "%999".to_string());
-
-        let (parent, child) = crate::shim::protocol::socketpair().unwrap();
-        let channel = crate::shim::protocol::Channel::new(parent);
-        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
-            "eng-1".into(),
-            channel,
-            999,
-            "claude".into(),
-            "claude".into(),
-            std::path::PathBuf::from("/tmp/test"),
-        );
-        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
-        daemon.shim_handles.insert("eng-1".to_string(), handle);
-
-        let result = daemon.deliver_message(
-            "daemon",
-            "eng-1",
-            "Idle nudge: you have been idle past your configured timeout.",
-        );
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), MessageDelivery::OrchestratorLogged);
-
-        let mut receiver = crate::shim::protocol::Channel::new(child);
-        receiver
-            .set_read_timeout(Some(Duration::from_millis(50)))
-            .unwrap();
-        assert!(
-            receiver.recv::<crate::shim::protocol::Command>().is_err(),
-            "nudge should never be injected into the agent shim"
-        );
-
-        let log = std::fs::read_to_string(crate::team::orchestrator_log_path(tmp.path())).unwrap();
-        assert!(log.contains("notification isolation: diverted nudge"));
-        assert!(log.contains("eng-1"));
-    }
-
-    #[test]
-    fn deliver_inbox_messages_answers_status_queries_from_cached_state() {
-        let tmp = tempfile::tempdir().unwrap();
-        inbox::init_inbox(&inbox::inboxes_root(tmp.path()), "eng-1").unwrap();
-
-        let mut daemon = empty_legacy_daemon(&tmp);
-        daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
-        daemon.config.team_config.roles = vec![
-            RoleDef {
-                name: "manager".to_string(),
-                role_type: RoleType::Manager,
-                agent: Some("claude".to_string()),
-                auth_mode: None,
-                auth_env: vec![],
-                instances: 1,
-                prompt: None,
-                talks_to: vec![],
-                channel: None,
-                channel_config: None,
-                nudge_interval_secs: None,
-                receives_standup: None,
-                standup_interval_secs: None,
-                owns: Vec::new(),
-                barrier_group: None,
-                use_worktrees: false,
-                ..Default::default()
-            },
-            RoleDef {
-                name: "engineer".to_string(),
-                role_type: RoleType::Engineer,
-                agent: Some("claude".to_string()),
-                auth_mode: None,
-                auth_env: vec![],
-                instances: 1,
-                prompt: None,
-                talks_to: vec![],
-                channel: None,
-                channel_config: None,
-                nudge_interval_secs: None,
-                receives_standup: None,
-                standup_interval_secs: None,
-                owns: Vec::new(),
-                barrier_group: None,
-                use_worktrees: false,
-                ..Default::default()
-            },
-        ];
-        daemon.config.members = vec![MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "engineer".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("manager".to_string()),
-            use_worktrees: false,
-            ..Default::default()
-        }];
-        daemon
-            .config
-            .pane_map
-            .insert("eng-1".to_string(), "%999".to_string());
-        daemon
-            .states
-            .insert("eng-1".to_string(), crate::team::standup::MemberState::Idle);
-
-        let (parent, child) = crate::shim::protocol::socketpair().unwrap();
-        let channel = crate::shim::protocol::Channel::new(parent);
-        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
-            "eng-1".into(),
-            channel,
-            999,
-            "claude".into(),
-            "claude".into(),
-            std::path::PathBuf::from("/tmp/test"),
-        );
-        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
-        daemon.shim_handles.insert("eng-1".to_string(), handle);
-
-        let root = inbox::inboxes_root(tmp.path());
-        let msg = inbox::InboxMessage::new_send("manager", "eng-1", "status?");
-        let id = inbox::deliver_to_inbox(&root, &msg).unwrap();
-        assert!(daemon.config.team_config.can_talk("manager", "engineer"));
-        assert_eq!(
-            daemon.orchestrator_only_reason("eng-1", "status?"),
-            Some(OrchestratorOnlyReason::StatusQuery)
-        );
-
-        daemon.deliver_inbox_messages().unwrap();
-
-        let pending = inbox::pending_messages(&root, "eng-1").unwrap();
-        assert!(pending.is_empty());
-        let all = inbox::all_messages(&root, "eng-1").unwrap();
-        assert!(
-            all.iter()
-                .any(|(message, delivered)| message.id == id && *delivered)
-        );
-
-        let mut receiver = crate::shim::protocol::Channel::new(child);
-        receiver
-            .set_read_timeout(Some(Duration::from_millis(50)))
-            .unwrap();
-        assert!(
-            receiver.recv::<crate::shim::protocol::Command>().is_err(),
-            "status query should be answered from cached state, not injected"
-        );
-
-        let log = std::fs::read_to_string(crate::team::orchestrator_log_path(tmp.path())).unwrap();
-        assert!(
-            log.contains("answered status query from manager about eng-1"),
-            "log contents: {log}"
-        );
-        assert!(log.contains("idle"));
-        assert!(log.contains("watcher"));
-    }
-
-    #[test]
-    fn deliver_message_diverts_standup_requests_to_orchestrator_log() {
-        let tmp = tempfile::tempdir().unwrap();
-        inbox::init_inbox(&inbox::inboxes_root(tmp.path()), "eng-1").unwrap();
-
-        let mut daemon = empty_legacy_daemon(&tmp);
-        daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
-        daemon.config.members = vec![MemberInstance {
-            name: "eng-1".to_string(),
-            role_name: "engineer".to_string(),
-            role_type: RoleType::Engineer,
-            agent: Some("claude".to_string()),
-            prompt: None,
-            reports_to: Some("manager".to_string()),
-            use_worktrees: false,
-            ..Default::default()
-        }];
-        daemon
-            .config
-            .pane_map
-            .insert("eng-1".to_string(), "%999".to_string());
-
-        let (parent, child) = crate::shim::protocol::socketpair().unwrap();
-        let channel = crate::shim::protocol::Channel::new(parent);
-        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
-            "eng-1".into(),
-            channel,
-            999,
-            "claude".into(),
-            "claude".into(),
-            std::path::PathBuf::from("/tmp/test"),
-        );
-        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
-        daemon.shim_handles.insert("eng-1".to_string(), handle);
-
-        let result = daemon.deliver_message("manager", "eng-1", "standup?");
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), MessageDelivery::OrchestratorLogged);
-
-        let mut receiver = crate::shim::protocol::Channel::new(child);
-        receiver
-            .set_read_timeout(Some(Duration::from_millis(50)))
-            .unwrap();
-        assert!(
-            receiver.recv::<crate::shim::protocol::Command>().is_err(),
-            "standup request should stay out of the agent PTY"
-        );
-
-        let log = std::fs::read_to_string(crate::team::orchestrator_log_path(tmp.path())).unwrap();
-        assert!(log.contains("answered standup request from manager about eng-1"));
     }
 
     // ── expire_stale_pending_messages tests ──
