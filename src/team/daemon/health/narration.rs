@@ -66,11 +66,7 @@ impl NarrationTracker {
     }
 
     pub(super) fn narration_ratio(&self, member: &str) -> f64 {
-        if self.is_narrating(member) {
-            1.0
-        } else {
-            0.0
-        }
+        if self.is_narrating(member) { 1.0 } else { 0.0 }
     }
 
     pub(super) fn note_breach(&mut self, member: &str, narrating: bool) -> BreakerState {

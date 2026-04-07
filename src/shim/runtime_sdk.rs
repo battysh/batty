@@ -679,7 +679,10 @@ fn maybe_send_keepalive<W: IoWrite>(
 
     let session_id = {
         let mut st = state.lock().unwrap();
-        if st.state != ShimState::Idle || st.session_id.is_empty() || st.pending_message_id.is_some() {
+        if st.state != ShimState::Idle
+            || st.session_id.is_empty()
+            || st.pending_message_id.is_some()
+        {
             return;
         }
         st.state = ShimState::Working;
@@ -1069,8 +1072,7 @@ mod tests {
             cumulative_output_bytes: 0,
         }));
         let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut last_keepalive =
-            Instant::now() - Duration::from_secs(SDK_KEEPALIVE_IDLE_SECS + 1);
+        let mut last_keepalive = Instant::now() - Duration::from_secs(SDK_KEEPALIVE_IDLE_SECS + 1);
 
         maybe_send_keepalive(&state, &writer, &mut last_keepalive);
 
@@ -1099,8 +1101,7 @@ mod tests {
             cumulative_output_bytes: 0,
         }));
         let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mut last_keepalive =
-            Instant::now() - Duration::from_secs(SDK_KEEPALIVE_IDLE_SECS + 1);
+        let mut last_keepalive = Instant::now() - Duration::from_secs(SDK_KEEPALIVE_IDLE_SECS + 1);
 
         maybe_send_keepalive(&state, &writer, &mut last_keepalive);
 

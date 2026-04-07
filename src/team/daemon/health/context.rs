@@ -363,7 +363,9 @@ impl TeamDaemon {
             shrinking_responses: quality.shrinking_responses,
             repeated_identical_outputs: quality.repeated_identical_outputs,
             tool_failure_message: quality.tool_failure_message,
-            shim_failure_count: self.context_pressure_tracker.shim_failure_count(member_name),
+            shim_failure_count: self
+                .context_pressure_tracker
+                .shim_failure_count(member_name),
             secs_since_last_commit: self.secs_since_last_commit(member_name),
         }
     }
@@ -536,12 +538,16 @@ mod tests {
         let mut tracker = ContextPressureTracker::new(100, 512_000);
         let inputs = pressure_inputs();
         assert_eq!(
-            tracker.observe_at("eng-1", &inputs, true, 120, Instant::now()).1,
+            tracker
+                .observe_at("eng-1", &inputs, true, 120, Instant::now())
+                .1,
             vec![ContextPressureAction::Warn, ContextPressureAction::Nudge]
         );
         backdate_score(&mut tracker, "eng-1", inputs.output_bytes);
         assert_eq!(
-            tracker.observe_at("eng-1", &inputs, true, 120, Instant::now()).1,
+            tracker
+                .observe_at("eng-1", &inputs, true, 120, Instant::now())
+                .1,
             vec![ContextPressureAction::Restart]
         );
     }
@@ -551,7 +557,9 @@ mod tests {
         let mut tracker = ContextPressureTracker::new(100, 512_000);
         let inputs = pressure_inputs();
         assert_eq!(
-            tracker.observe_at("eng-1", &inputs, true, 120, Instant::now()).1,
+            tracker
+                .observe_at("eng-1", &inputs, true, 120, Instant::now())
+                .1,
             vec![ContextPressureAction::Warn, ContextPressureAction::Nudge]
         );
         let reset_inputs = ContextPressureInputs {
@@ -575,7 +583,9 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(
-            tracker.observe_at("eng-1", &inputs, true, 120, Instant::now()).1,
+            tracker
+                .observe_at("eng-1", &inputs, true, 120, Instant::now())
+                .1,
             vec![ContextPressureAction::Warn, ContextPressureAction::Nudge]
         );
     }
@@ -616,7 +626,10 @@ mod tests {
         };
 
         let (score, actions) = tracker.observe_at("eng-1", &inputs, true, 120, Instant::now());
-        assert!(score < 70, "forced restart should not depend on score crossing");
+        assert!(
+            score < 70,
+            "forced restart should not depend on score crossing"
+        );
         assert_eq!(actions, vec![ContextPressureAction::Restart]);
     }
 
@@ -652,7 +665,9 @@ mod tests {
     fn estimated_context_bytes_sums_input_and_output() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = crate::team::test_support::TestDaemonBuilder::new(tmp.path())
-            .members(vec![crate::team::test_support::architect_member("architect")])
+            .members(vec![crate::team::test_support::architect_member(
+                "architect",
+            )])
             .build();
         let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
         let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(

@@ -53,10 +53,9 @@ fn abort_conflicted_git_operation(repo_dir: &Path, args: &[&str]) {
 }
 
 fn claude_credentials_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from).map(|home| {
-        home.join(".claude")
-            .join(".credentials.json")
-    })
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".claude").join(".credentials.json"))
 }
 
 fn parse_claude_oauth_expiry_ms(credentials: &str) -> Option<i64> {
@@ -505,8 +504,8 @@ fn prune_legacy_worktree_target_dirs(project_root: &Path) -> Result<Vec<PathBuf>
 
 #[cfg(test)]
 mod tests {
-    use super::{claude_oauth_healthy, parse_claude_oauth_expiry_ms};
     use super::super::super::*;
+    use super::{claude_oauth_healthy, parse_claude_oauth_expiry_ms};
     use crate::team::config::{RoleType, WorkflowPolicy};
     use crate::team::hierarchy::MemberInstance;
     use crate::team::standup::MemberState;

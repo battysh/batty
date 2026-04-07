@@ -77,7 +77,14 @@ pub(crate) fn git_ok(dir: &Path, args: &[&str]) {
 pub(crate) fn assert_worktree_clean(dir: &Path) {
     let status = git_stdout(
         dir,
-        &["status", "--porcelain", "--", ".", ":(exclude).batty", ":(exclude).cargo"],
+        &[
+            "status",
+            "--porcelain",
+            "--",
+            ".",
+            ":(exclude).batty",
+            ":(exclude).cargo",
+        ],
     );
     assert!(
         status.trim().is_empty(),
