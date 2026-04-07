@@ -5,8 +5,8 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::team::config::{
-    AutomationConfig, BoardConfig, OrchestratorPosition, RoleDef, RoleType, StandupConfig,
-    TeamConfig, WorkflowMode, WorkflowPolicy,
+    AutomationConfig, BoardConfig, ChannelConfig, OrchestratorPosition, RoleDef, RoleType,
+    StandupConfig, TeamConfig, WorkflowMode, WorkflowPolicy,
 };
 use crate::team::daemon::{DaemonConfig, NudgeSchedule, TeamDaemon};
 use crate::team::failure_patterns::FailureTracker;
@@ -293,6 +293,15 @@ pub(crate) fn engineer_member(
         provider_overlay: None,
         reports_to: reports_to.map(str::to_string),
         use_worktrees,
+    }
+}
+
+pub(crate) fn test_channel_config(target: &str, provider: &str) -> ChannelConfig {
+    ChannelConfig {
+        target: target.to_string(),
+        provider: provider.to_string(),
+        bot_token: None,
+        allowed_user_ids: vec![],
     }
 }
 
