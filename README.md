@@ -99,9 +99,12 @@ Daemon ──> Verify ──> Auto-merge ──> main
 Discord (#events, #agents, #commands)
 ```
 
-The daemon is the control plane. tmux is the display surface. Each agent uses a
-typed SDK protocol (Claude: stream-json NDJSON, Codex: JSONL event stream,
-Kiro: ACP JSON-RPC 2.0) or falls back to the shim-owned PTY runtime.
+The daemon is the control plane. **Discord is the recommended monitoring and
+control surface** — three channels with rich embeds, commands, and mobile access.
+tmux is the agent runtime display (what agents see), not the primary human
+interface. Each agent uses a typed SDK protocol (Claude: stream-json NDJSON,
+Codex: JSONL event stream, Kiro: ACP JSON-RPC 2.0) or falls back to the
+shim-owned PTY runtime.
 
 ## Features
 
