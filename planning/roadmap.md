@@ -62,7 +62,7 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 | Issue | Status | Priority |
 |---|---|---|
 | Verification loop is still open after agent completion | Need daemon-run test/fix/retry cycle before merge | Critical |
-| `cargo test` on `main` is still red because tmux runtime tests assume a working live session environment | Need tmux command/session bootstrap hardening or correct capability gating in `src/tmux.rs` so default verification is green again | Critical |
+| `cargo test` on `main` is still red in the default verification environment because tmux runtime tests intermittently fail session/pane setup with `No such file or directory` in `src/tmux.rs` | Need tmux command/session bootstrap hardening or correct capability gating so default verification is green again | Critical |
 | Architect and manager stalls are less visible than engineer stalls | Non-engineer shim stall detection still needs hardening | Critical |
 | Manager inbox noise buries actionable work | Needs batching and signal-first routing | Critical |
 | Auto-merge path is not yet proven end-to-end | Review handoff and merge trigger need production verification | Critical |
@@ -73,10 +73,13 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 
 Daemon-driven board replenishment is now in place. The tact engine detects idle-worker starvation, composes a structured planning prompt from roadmap and board state, routes it to the architect, and creates board tasks automatically.
 
+The highest-friction runtime path is still verification/reopen handling: a fresh `cargo test --quiet` run in this environment still fails 14 tmux tests with `No such file or directory`, and failed verification can still create malformed duplicate backlog cards.
+
 Next hardening work is about execution quality rather than backlog creation:
 - Close the completion loop with automatic test, retry, and escalation behavior
 - Verify the auto-merge path end-to-end under production-like runs
 - Keep notifications and status chatter out of agent context windows
+- Keep reopen/failure task creation structured and duplicate-free
 - Add proactive context-exhaustion restarts with handoff summaries
 
 This removes the old "board empties because nobody creates tasks" failure mode from the active roadmap and shifts attention to verification, merge reliability, and context hygiene.
