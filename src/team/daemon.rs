@@ -66,6 +66,8 @@ pub(super) mod agent_handle;
 mod automation;
 #[path = "daemon/config_reload.rs"]
 mod config_reload;
+#[path = "discord_bridge.rs"]
+mod discord_bridge;
 #[path = "dispatch/mod.rs"]
 mod dispatch;
 #[path = "daemon/error_handling.rs"]
@@ -171,6 +173,8 @@ pub struct TeamDaemon {
     pub(super) intervention_cooldowns: HashMap<String, Instant>,
     pub(super) channels: HashMap<String, Box<dyn Channel>>,
     pub(super) nudges: HashMap<String, NudgeSchedule>,
+    pub(super) discord_bot: Option<super::discord::DiscordBot>,
+    pub(super) discord_event_cursor: usize,
     pub(super) telegram_bot: Option<super::telegram::TelegramBot>,
     pub(super) failure_tracker: FailureTracker,
     pub(super) event_sink: EventSink,
@@ -360,6 +364,8 @@ impl TeamDaemon {
             }
         }
 
+        // Create Discord bot for inbound polling and event mirroring (if configured)
+        let discord_bot = discord_bridge::build_discord_bot(&config.team_config);
         // Create Telegram bot for inbound polling (if configured)
         let telegram_bot = telegram_bridge::build_telegram_bot(&config.team_config);
         let narration_detection_enabled = config
@@ -438,6 +444,8 @@ impl TeamDaemon {
             intervention_cooldowns: HashMap::new(),
             channels,
             nudges,
+            discord_bot,
+            discord_event_cursor: 0,
             telegram_bot,
             failure_tracker: FailureTracker::new(20),
             event_sink,

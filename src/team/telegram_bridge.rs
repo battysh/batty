@@ -23,7 +23,7 @@ pub(super) fn build_telegram_bot(
 impl TeamDaemon {
     pub(super) fn process_telegram_queue(&mut self) -> Result<()> {
         self.poll_telegram()?;
-        self.deliver_user_inbox()
+        self.deliver_user_channel_inbox()
     }
 
     fn poll_telegram(&mut self) -> Result<()> {
@@ -107,7 +107,7 @@ impl TeamDaemon {
         })
     }
 
-    fn execute_telegram_command(&mut self, command: TelegramCommand) -> Result<String> {
+    pub(super) fn execute_telegram_command(&mut self, command: TelegramCommand) -> Result<String> {
         match command {
             TelegramCommand::Status => Ok(self.render_telegram_status_summary()),
             TelegramCommand::Board { filter } => {
@@ -176,7 +176,7 @@ impl TeamDaemon {
         }
     }
 
-    fn render_telegram_status_summary(&self) -> String {
+    pub(super) fn render_telegram_status_summary(&self) -> String {
         let session = format!("batty-{}", self.config.team_config.name);
         let running = crate::tmux::session_exists(&session);
         let paused = crate::team::pause_marker_path(&self.config.project_root).exists();
@@ -235,7 +235,11 @@ impl TeamDaemon {
         )
     }
 
-    fn execute_telegram_assign_command(&mut self, engineer: &str, task: &str) -> Result<String> {
+    pub(super) fn execute_telegram_assign_command(
+        &mut self,
+        engineer: &str,
+        task: &str,
+    ) -> Result<String> {
         let engineer_member = self
             .config
             .members
@@ -285,7 +289,7 @@ impl TeamDaemon {
         }
     }
 
-    fn execute_telegram_merge_command(&mut self, task_id: u32) -> Result<String> {
+    pub(super) fn execute_telegram_merge_command(&mut self, task_id: u32) -> Result<String> {
         let board_dir = self.board_dir();
         let task_path = crate::team::task_cmd::find_task_path(&board_dir, task_id)?;
         let task = crate::task::Task::from_file(&task_path)?;
@@ -325,7 +329,7 @@ impl TeamDaemon {
         ))
     }
 
-    fn execute_telegram_kick_command(&mut self, member: &str) -> Result<String> {
+    pub(super) fn execute_telegram_kick_command(&mut self, member: &str) -> Result<String> {
         if self.active_task_id(member).is_some() {
             self.restart_member_with_task_context(member, "telegram kick")?;
             return Ok(format!("Restarted {member} with structured handoff."));
@@ -361,7 +365,7 @@ impl TeamDaemon {
         })
     }
 
-    fn deliver_user_inbox(&mut self) -> Result<()> {
+    pub(super) fn deliver_user_channel_inbox(&mut self) -> Result<()> {
         let root = inbox::inboxes_root(&self.config.project_root);
         let user_roles: Vec<String> = self
             .config
@@ -434,7 +438,7 @@ impl TeamDaemon {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum TelegramCommand {
+pub(super) enum TelegramCommand {
     Status,
     Board { filter: Option<String> },
     Logs { member: String },
@@ -1077,6 +1081,8 @@ mod tests {
                     paused: false,
                 },
             )]),
+            discord_bot: None,
+            discord_event_cursor: 0,
             telegram_bot: None,
             failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
@@ -1219,6 +1225,8 @@ mod tests {
             intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
+            discord_bot: None,
+            discord_event_cursor: 0,
             telegram_bot: None,
             failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
@@ -1380,6 +1388,8 @@ mod tests {
             intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
+            discord_bot: None,
+            discord_event_cursor: 0,
             telegram_bot: None,
             failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
@@ -1447,6 +1457,9 @@ mod tests {
                 provider: "telegram".to_string(),
                 bot_token: Some("test-token-123".to_string()),
                 allowed_user_ids: vec![42],
+                events_channel_id: None,
+                agents_channel_id: None,
+                commands_channel_id: None,
             }),
             nudge_interval_secs: None,
             receives_standup: None,

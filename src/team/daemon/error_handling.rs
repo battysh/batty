@@ -248,14 +248,15 @@ impl TeamDaemon {
 pub(crate) fn optional_subsystem_for_step(step: &str) -> Option<&'static str> {
     match step {
         "telemetry_emit_event" => Some("telemetry"),
+        "process_discord_queue" => Some("discord"),
         "process_telegram_queue" => Some("telegram"),
         "maybe_generate_standup" => Some("standup"),
         _ => None,
     }
 }
 
-pub(crate) fn optional_subsystem_names() -> [&'static str; 4] {
-    ["telemetry", "telegram", "grafana", "standup"]
+pub(crate) fn optional_subsystem_names() -> [&'static str; 5] {
+    ["telemetry", "discord", "telegram", "grafana", "standup"]
 }
 
 fn optional_subsystem_backoff_key(subsystem: &str) -> String {

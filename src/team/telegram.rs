@@ -545,6 +545,9 @@ mod tests {
             provider: "telegram".into(),
             bot_token: None,
             allowed_user_ids: vec![],
+            events_channel_id: None,
+            agents_channel_id: None,
+            commands_channel_id: None,
         };
 
         // If the env var is not set, from_config must return None.
@@ -560,6 +563,9 @@ mod tests {
             provider: "telegram".into(),
             bot_token: Some("bot-tok-from-config".into()),
             allowed_user_ids: vec![42],
+            events_channel_id: None,
+            agents_channel_id: None,
+            commands_channel_id: None,
         };
 
         let bot = TelegramBot::from_config(&config).expect("should return Some");
@@ -575,6 +581,9 @@ mod tests {
             provider: "telegram".into(),
             bot_token: Some("from-config".into()),
             allowed_user_ids: vec![],
+            events_channel_id: None,
+            agents_channel_id: None,
+            commands_channel_id: None,
         };
 
         let bot = TelegramBot::from_config(&config).unwrap();
