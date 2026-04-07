@@ -378,6 +378,11 @@ pub struct MemberStatus {
     pub restart_count: u32,
     pub context_exhaustion_count: u32,
     pub delivery_failure_count: u32,
+    pub supervisory_digest_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stall_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stall_summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_elapsed_secs: Option<u64>,
     pub backend_health: BackendHealth,
@@ -1067,6 +1072,9 @@ fn member_status_from_row(row: &status::TeamStatusRow) -> MemberStatus {
         restart_count: row.health.restart_count,
         context_exhaustion_count: row.health.context_exhaustion_count,
         delivery_failure_count: row.health.delivery_failure_count,
+        supervisory_digest_count: row.health.supervisory_digest_count,
+        stall_reason: row.health.stall_reason.clone(),
+        stall_summary: row.health.stall_summary.clone(),
         task_elapsed_secs: row.health.task_elapsed_secs,
         backend_health: backend_health(row.health.backend_health),
     }
@@ -1093,7 +1101,7 @@ fn member_health(row: &status::TeamStatusRow) -> MemberHealth {
     } else if row.health.restart_count > 0
         || row.health.context_exhaustion_count > 0
         || row.health.delivery_failure_count > 0
-        || row.health.stall_summary.is_some()
+        || row.health.has_supervisory_warning()
         || matches!(
             row.health.backend_health,
             crate::agent::BackendHealth::Degraded
@@ -1207,10 +1215,12 @@ mod tests {
                         restart_count: 1,
                         context_exhaustion_count: 1,
                         delivery_failure_count: 0,
+                        supervisory_digest_count: 2,
                         task_elapsed_secs: Some(300),
-                        stall_reason: None,
-                        stall_summary: None,
-                        supervisory_digest_count: 0,
+                        stall_reason: Some("supervisory_stalled".to_string()),
+                        stall_summary: Some(
+                            "eng-1 stayed in Working for 5m (timeout=60s)".to_string(),
+                        ),
                         backend_health: crate::agent::BackendHealth::Degraded,
                     },
                     health_summary: "warning".to_string(),
@@ -1234,10 +1244,10 @@ mod tests {
                         restart_count: 0,
                         context_exhaustion_count: 0,
                         delivery_failure_count: 0,
+                        supervisory_digest_count: 0,
                         task_elapsed_secs: None,
                         stall_reason: None,
                         stall_summary: None,
-                        supervisory_digest_count: 0,
                         backend_health: crate::agent::BackendHealth::Healthy,
                     },
                     health_summary: "healthy".to_string(),
@@ -1283,6 +1293,15 @@ mod tests {
         assert_eq!(status.members[0].state, MemberState::Working);
         assert_eq!(status.members[0].health, MemberHealth::Warning);
         assert_eq!(status.members[0].backend_health, BackendHealth::Degraded);
+        assert_eq!(status.members[0].supervisory_digest_count, 2);
+        assert_eq!(
+            status.members[0].stall_reason.as_deref(),
+            Some("supervisory_stalled")
+        );
+        assert_eq!(
+            status.members[0].stall_summary.as_deref(),
+            Some("eng-1 stayed in Working for 5m (timeout=60s)")
+        );
         assert_eq!(status.members[1].review_task_ids, vec!["43".to_string()]);
     }
 

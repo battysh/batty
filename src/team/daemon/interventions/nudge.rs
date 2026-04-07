@@ -69,7 +69,7 @@ impl TeamDaemon {
                     "{prompt_text}\n\nIdle nudge: you have been idle past your configured timeout. Move the current lane forward now or report the exact blocker."
                 );
                 info!(member = %name, "firing nudge (idle timeout)");
-                let delivered_live = match self.queue_daemon_message(&name, &text) {
+                let delivered_live = match self.deliver_automation_nudge(&name, &text) {
                     Ok(MessageDelivery::LivePane) => true,
                     Ok(_) => false,
                     Err(error) => {
