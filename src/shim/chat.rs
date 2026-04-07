@@ -196,7 +196,10 @@ pub fn run(agent_type: AgentType, cmd: &str, cwd: &Path, sdk_mode: bool) -> Resu
         let n = stdin.lock().read_line(&mut line)?;
         if n == 0 {
             eprintln!("\n[chat] EOF, shutting down...");
-            send_ch.send(&protocol::Command::Shutdown { timeout_secs: 5 })?;
+            send_ch.send(&protocol::Command::Shutdown {
+                timeout_secs: 5,
+                reason: protocol::ShutdownReason::Requested,
+            })?;
             break;
         }
 
@@ -208,7 +211,10 @@ pub fn run(agent_type: AgentType, cmd: &str, cwd: &Path, sdk_mode: bool) -> Resu
         // -- Special commands --
         match parse_special(input) {
             Some(SpecialCommand::Quit) => {
-                send_ch.send(&protocol::Command::Shutdown { timeout_secs: 5 })?;
+                send_ch.send(&protocol::Command::Shutdown {
+                    timeout_secs: 5,
+                    reason: protocol::ShutdownReason::Requested,
+                })?;
                 break;
             }
             Some(SpecialCommand::Screen) => {

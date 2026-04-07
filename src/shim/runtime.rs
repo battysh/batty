@@ -1394,10 +1394,15 @@ pub fn run(args: ShimArgs, channel: Channel) -> Result<()> {
                 cmd_channel.send(&Event::Pong)?;
             }
 
-            Command::Shutdown { timeout_secs } => {
+            Command::Shutdown {
+                timeout_secs,
+                reason,
+            } => {
                 eprintln!(
-                    "[shim {}] shutdown requested (timeout: {}s)",
-                    args.id, timeout_secs
+                    "[shim {}] shutdown requested ({}, timeout: {}s)",
+                    args.id,
+                    reason.label(),
+                    timeout_secs
                 );
                 if let Err(error) = args.preserve_work_before_kill(&args.cwd) {
                     eprintln!(

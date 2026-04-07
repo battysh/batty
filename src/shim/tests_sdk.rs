@@ -91,7 +91,11 @@ fn sdk_emits_ready_immediately() {
     });
     assert!(evt.is_some(), "expected Ready event");
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).ok();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .ok();
 }
 
 /// SDK mode responds to Ping with Pong.
@@ -112,7 +116,11 @@ fn sdk_ping_pong() {
     });
     assert!(evt.is_some(), "expected Pong");
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).ok();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .ok();
 }
 
 /// SDK mode reports state as Idle after Ready.
@@ -135,7 +143,11 @@ fn sdk_get_state_idle() {
         _ => panic!("expected State event"),
     }
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).ok();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .ok();
 }
 
 /// When a message is sent, the SDK runtime transitions Idle→Working.
@@ -218,7 +230,11 @@ sleep 30
     );
     assert_eq!(completion_msg_id.as_deref(), Some("msg-1"));
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).ok();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .ok();
 }
 
 /// When the mock subprocess exits, the SDK runtime emits Died.
@@ -309,7 +325,11 @@ done
         "expected second Completion from queued message"
     );
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).ok();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .ok();
 }
 
 /// Context exhaustion is detected from result error messages.
@@ -395,7 +415,11 @@ sleep 30
         _ => panic!("expected Completion"),
     }
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).ok();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .ok();
 }
 
 /// CaptureScreen returns accumulated response text in SDK mode.
@@ -428,7 +452,11 @@ fn sdk_capture_screen_returns_accumulated_text() {
         _ => panic!("expected ScreenCapture"),
     }
 
-    ch.send(&Command::Shutdown { timeout_secs: 2 }).ok();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 2,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .ok();
 }
 
 /// Shutdown gracefully closes the subprocess.
@@ -442,7 +470,11 @@ fn sdk_shutdown_terminates_cleanly() {
     })
     .expect("Ready");
 
-    ch.send(&Command::Shutdown { timeout_secs: 3 }).unwrap();
+    ch.send(&Command::Shutdown {
+        timeout_secs: 3,
+        reason: crate::shim::protocol::ShutdownReason::Requested,
+    })
+    .unwrap();
 
     // Should eventually get Died or the channel should close
     let evt = wait_for_event(&mut ch, Duration::from_secs(10), |e| {
