@@ -300,6 +300,31 @@ impl TeamDaemon {
                     self.notify_reports_to(manager_name, &rollup)?;
                 }
 
+                // Post-merge disk hygiene: clean build artifacts and prune branch
+                let hygiene_config =
+                    &self.config.team_config.automation.disk_hygiene;
+                let hygiene_report =
+                    super::health::disk_hygiene::post_merge_cleanup(
+                        self.project_root(),
+                        &request.engineer,
+                        request.task_id,
+                        &request.branch,
+                        hygiene_config,
+                    );
+                if hygiene_report.any_action_taken() {
+                    let summary = hygiene_report.summary();
+                    info!(
+                        engineer = request.engineer,
+                        task_id = request.task_id,
+                        summary = %summary,
+                        "post-merge disk hygiene"
+                    );
+                    self.record_orchestrator_action(format!(
+                        "disk-hygiene: post-merge cleanup for {} task #{}: {summary}",
+                        request.engineer, request.task_id
+                    ));
+                }
+
                 self.clear_active_task(&request.engineer);
                 self.record_task_completed(&request.engineer, Some(request.task_id));
                 self.set_member_idle(&request.engineer);
