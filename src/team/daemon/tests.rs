@@ -540,6 +540,8 @@ fn test_auto_dispatch_filters_idle_engineers_only() {
     daemon
         .states
         .insert("eng-2".to_string(), MemberState::Working);
+    // Working engineer needs an active task to not be treated as idle
+    daemon.active_tasks.insert("eng-2".to_string(), 99);
 
     let board_dir = tmp.path().join(".batty").join("team_config").join("board");
     let tasks_dir = board_dir.join("tasks");
