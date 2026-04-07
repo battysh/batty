@@ -647,10 +647,20 @@ impl TeamEvent {
     }
 
     pub fn delivery_failed(role: &str, from: &str, reason: &str) -> Self {
+        Self::delivery_failed_with_details(role, from, reason, None)
+    }
+
+    pub fn delivery_failed_with_details(
+        role: &str,
+        from: &str,
+        reason: &str,
+        details: Option<&str>,
+    ) -> Self {
         Self {
             role: Some(role.into()),
             from: Some(from.into()),
             reason: Some(reason.into()),
+            details: details.map(str::to_string),
             ..Self::base("delivery_failed")
         }
     }
@@ -1362,6 +1372,22 @@ mod tests {
     }
 
     #[test]
+    fn delivery_failed_with_details_serializes_actionable_context() {
+        let event = TeamEvent::delivery_failed_with_details(
+            "eng-1-2",
+            "manager",
+            "recipient has no live shim handle",
+            Some("classification=missing_shim queue_action=cleared"),
+        );
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed["details"].as_str().unwrap(),
+            "classification=missing_shim queue_action=cleared"
+        );
+    }
+
+    #[test]
     fn task_unblocked_serializes_role_and_task() {
         let event = TeamEvent::task_unblocked("eng-1-1", "42");
         let json = serde_json::to_string(&event).unwrap();
@@ -1566,6 +1592,7 @@ mod tests {
         assert_eq!(parsed.role.as_deref(), Some("eng-2"));
         assert_eq!(parsed.from.as_deref(), Some("manager"));
         assert_eq!(parsed.reason.as_deref(), Some("marker missing"));
+        assert!(parsed.details.is_none());
         assert_eq!(parsed.ts, original.ts);
     }
 

@@ -142,8 +142,16 @@ impl TeamDaemon {
         ));
     }
 
-    pub(crate) fn record_delivery_failed(&mut self, role: &str, from: &str, reason: &str) {
-        self.emit_event(TeamEvent::delivery_failed(role, from, reason));
+    pub(crate) fn record_delivery_failed_with_details(
+        &mut self,
+        role: &str,
+        from: &str,
+        reason: &str,
+        details: Option<&str>,
+    ) {
+        self.emit_event(TeamEvent::delivery_failed_with_details(
+            role, from, reason, details,
+        ));
     }
 
     pub(crate) fn record_inbox_message_expired(
