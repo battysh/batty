@@ -14,7 +14,7 @@ use crate::task::load_tasks_from_dir;
 #[cfg(test)]
 use crate::team::artifact::read_test_timing_log;
 use crate::team::artifact::{append_test_timing_record, track_artifact};
-use crate::team::auto_merge::{self, AutoMergeDecision};
+use crate::team::auto_merge::{self, AutoMergeDecisionKind};
 use crate::team::daemon::verification::run_automatic_verification;
 use crate::team::daemon::{MergeRequest, TeamDaemon};
 use crate::team::task_loop::{
@@ -714,7 +714,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         // Analyze diff and emit confidence score for every completed task
         let diff_analysis = auto_merge::analyze_diff(daemon.project_root(), "main", &task_branch);
         if let Ok(ref summary) = diff_analysis {
-            let confidence = auto_merge::compute_merge_confidence(summary, &policy);
+            let confidence = auto_merge::score_auto_merge_candidate(summary, &policy);
             let task_str = task_id.to_string();
             let info = super::super::events::MergeConfidenceInfo {
                 engineer,
@@ -731,6 +731,12 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
 
         // If override explicitly disables auto-merge, route to manual review
         if auto_merge_override == Some(false) {
+            let decision = auto_merge::forced_manual_review_decision(
+                diff_analysis.as_ref().ok(),
+                &policy,
+                true,
+            );
+            daemon.record_auto_merge_decision(engineer, task_id, &decision);
             info!(
                 engineer,
                 task_id, "auto-merge disabled by per-task override, routing to manual review"
@@ -763,20 +769,18 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
             match diff_analysis {
                 Ok(ref summary) => {
                     let decision = if auto_merge_override == Some(true) {
-                        // Force auto-merge regardless of policy thresholds
-                        AutoMergeDecision::AutoMerge {
-                            confidence: auto_merge::compute_merge_confidence(summary, &policy),
-                        }
+                        auto_merge::forced_auto_merge_decision(Some(summary), &policy, true)
                     } else {
-                        auto_merge::should_auto_merge(summary, &policy, true)
+                        auto_merge::evaluate_auto_merge_candidate(summary, &policy, true)
                     };
+                    daemon.record_auto_merge_decision(engineer, task_id, &decision);
 
-                    match decision {
-                        AutoMergeDecision::AutoMerge { confidence } => {
+                    match decision.decision {
+                        AutoMergeDecisionKind::Accepted => {
                             info!(
                                 engineer,
                                 task_id,
-                                confidence,
+                                confidence = decision.confidence,
                                 files = summary.files_changed,
                                 lines = summary.total_lines(),
                                 "auto-merging task"
@@ -790,21 +794,18 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                                 test_passed: true,
                                 should_post_merge_verify: verification_policy.auto_run_tests,
                                 test_duration_ms,
-                                confidence,
+                                confidence: decision.confidence,
                                 files_changed: summary.files_changed,
                                 lines_changed: summary.total_lines(),
                             });
                             return Ok(());
                         }
-                        AutoMergeDecision::ManualReview {
-                            confidence,
-                            reasons,
-                        } => {
+                        AutoMergeDecisionKind::ManualReview => {
                             info!(
                                 engineer,
                                 task_id,
-                                confidence,
-                                ?reasons,
+                                confidence = decision.confidence,
+                                reasons = ?decision.reasons,
                                 "routing to manual review"
                             );
                             if !move_task_to_review(
@@ -817,9 +818,10 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                                 return Ok(());
                             }
                             if let Some(ref manager_name) = manager_name {
-                                let reason_text = reasons.join("; ");
+                                let reason_text = decision.reasons.join("; ");
                                 let msg = format!(
-                                    "[{engineer}] Task #{task_id} passed tests but requires manual review.\nTitle: {task_title}\nConfidence: {confidence:.2}\nReasons: {reason_text}"
+                                    "[{engineer}] Task #{task_id} passed tests but requires manual review.\nTitle: {task_title}\nConfidence: {confidence:.2}\nReasons: {reason_text}",
+                                    confidence = decision.confidence
                                 );
                                 daemon.queue_message(engineer, manager_name, &msg)?;
                                 daemon.mark_member_working(manager_name);
@@ -1988,7 +1990,10 @@ mod tests {
 
         let engineer_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
-        assert_eq!(engineer_messages.len(), 1);
+        assert_eq!(engineer_messages.len(), 2);
+        assert!(engineer_messages[1]
+            .body
+            .contains("Your previous attempt only produced commentary. Execute the actual commands to make the code changes."));
 
         let manager_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
@@ -2545,6 +2550,25 @@ mod tests {
         assert_eq!(auto_merge_events.len(), 1);
         assert_eq!(auto_merge_events[0].role.as_deref(), Some("eng-1"));
         assert_eq!(auto_merge_events[0].task.as_deref(), Some("42"));
+        let decision_event = events
+            .iter()
+            .find(|e| e.event == "auto_merge_decision_recorded")
+            .expect("should record auto-merge decision");
+        assert_eq!(decision_event.action_type.as_deref(), Some("accepted"));
+        assert!(
+            decision_event
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("accepted for auto-merge")),
+            "decision reason should explain acceptance: {:?}",
+            decision_event.reason
+        );
+        let post_verify_event = events
+            .iter()
+            .find(|e| e.event == "auto_merge_post_verify_result")
+            .expect("should record post-merge verification result");
+        assert_eq!(post_verify_event.success, Some(true));
+        assert_eq!(post_verify_event.reason.as_deref(), Some("passed"));
     }
 
     #[test]
@@ -2602,6 +2626,21 @@ mod tests {
                 .any(|m| m.body.contains("manual review")),
             "manager should receive manual review message: {:?}",
             manager_messages
+        );
+        let events_path = repo.join(".batty").join("team_config").join("events.jsonl");
+        let events = read_events(&events_path).unwrap();
+        let decision_event = events
+            .iter()
+            .find(|e| e.event == "auto_merge_decision_recorded")
+            .expect("should record manual review decision");
+        assert_eq!(decision_event.action_type.as_deref(), Some("manual_review"));
+        assert!(
+            decision_event
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("manual review")),
+            "decision reason should explain manual review: {:?}",
+            decision_event.reason
         );
     }
 

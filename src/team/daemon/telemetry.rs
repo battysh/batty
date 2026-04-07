@@ -306,6 +306,44 @@ impl TeamDaemon {
         ));
     }
 
+    pub(crate) fn record_auto_merge_decision(
+        &mut self,
+        engineer: &str,
+        task_id: u32,
+        record: &crate::team::auto_merge::AutoMergeDecisionRecord,
+    ) {
+        let reason = crate::team::auto_merge::explain_auto_merge_decision(record);
+        let details = serde_json::to_string(record)
+            .unwrap_or_else(|_| "{\"serialization\":\"failed\"}".to_string());
+        self.emit_event(TeamEvent::auto_merge_decision_recorded(
+            &crate::team::events::AutoMergeDecisionInfo {
+                engineer,
+                task: &task_id.to_string(),
+                action_type: record.decision.action_type(),
+                confidence: record.confidence,
+                reason: &reason,
+                details: &details,
+            },
+        ));
+    }
+
+    pub(crate) fn record_auto_merge_post_verify_result(
+        &mut self,
+        engineer: &str,
+        task_id: u32,
+        success: Option<bool>,
+        reason: &str,
+        details: Option<&str>,
+    ) {
+        self.emit_event(TeamEvent::auto_merge_post_verify_result(
+            engineer,
+            &task_id.to_string(),
+            success,
+            reason,
+            details,
+        ));
+    }
+
     pub(crate) fn record_merge_confidence_scored(
         &mut self,
         info: &crate::team::events::MergeConfidenceInfo<'_>,
