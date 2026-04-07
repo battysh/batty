@@ -111,6 +111,14 @@ At 05:36 EDT on April 7, 2026, the next architect loop verified that the earlier
 - the clean-room disassembly test `team::daemon::tests::clean_room_ghidra_disassembly_supports_multiple_non_z80_targets` passed in isolation, suggesting the clean-room and many later `tmux` fallouts are collateral once earlier panics poison shared test state rather than independent root causes
 - a new critical task `#546` now tracks the idle/review nudge regression cluster; board state remained healthy with no `in-progress` or `review` tasks and twelve active `todo` items after the replenishment pass
 
+At 06:20 EDT on April 7, 2026, a fresh architect validation loop re-ran the full root-tree checks against the current board:
+
+- `cargo fmt --check` failed on formatting drift inside already-dirty root-tree files (`src/team/daemon/health/poll_shim.rs`, `src/team/daemon/interventions/nudge.rs`, `src/team/delivery/routing.rs`), so the root tree is not merge-ready even before the runtime regressions are addressed
+- `cargo test` failed after 1597.37s with `3055 passed; 32 failed; 119 ignored`
+- the previously tracked non-`tmux` failures are still live: `team::daemon::automation::tests::escalate_stale_reviews_sends_nudge_below_timeout` (task `#546`), `team::merge::completion::tests::narration_only_completion_retries_then_escalates_after_two_rejections` (task `#545`), and the supervisory restart cluster in `src/team/daemon/health/poll_shim.rs` (tasks `#543` and `#544`)
+- two new root-cause lanes surfaced and are now tracked separately: `team::task_loop::tests::auto_commit_saves_uncommitted_changes` plus `...auto_commit_saves_untracked_files` revealed a dirty-worktree preservation regression (task `#547`), and `.batty/daemon.log` showed `tact_check` trying to read task `#511` through a stale title-derived path (`511-github-star-prompt-on-first-run.md`) even though the task exists on disk under a different slug (task `#548`)
+- the many later `tmux` failures still look collateral after earlier panic/poison cascades rather than a distinct new roadmap area, so no new tmux-specific lane was added from this pass
+
 ### Known Failure Modes (Fixed)
 
 These were all discovered and fixed during the nether_earth stabilization session:
@@ -147,6 +155,8 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 | Manager inbox noise still buries the most actionable review and dispatch items | Needs batching and signal-first routing | Critical |
 | Claim ownership, `active_tasks`, and worktree branch state can still drift after recovery, allowing a worker to appear on multiple in-progress tasks while its worktree stays on an old branch | Needs stronger reconciliation hardening | Critical |
 | Supervisory shim restarts can still degrade into `orchestrator disconnected` / `Broken pipe` control-plane loss instead of a clean respawn with pending-work replay | Newly observed on April 7, 2026; tracked in task `#544` | Critical |
+| Dirty or untracked engineer work can still fail to auto-save before reset/restart, breaking the recovery guarantee for worktree cleanup paths | Newly observed on April 7, 2026; tracked in task `#547` | Critical |
+| `tact_check` can still couple task identity to stale title-derived filenames, causing planning-cycle reads to fail even when the task exists under the same ID | Newly observed on April 7, 2026; tracked in task `#548` | High |
 | Auto-merge needs more production mileage on heterogeneous diffs | Needs wider dogfooding | High |
 | Context exhaustion recovery is reactive; proactive restart/handoff remains open | Planned | Medium |
 | Release automation still ends at local verification instead of a fully automated publish flow | Planned | Medium |
