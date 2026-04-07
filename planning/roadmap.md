@@ -34,9 +34,11 @@ The architect receives a periodic nudge to:
 
 When default `cargo test` is red on `main`, feature and experiment lanes stay in `backlog`.
 That includes Discord/Telegram walk-away work and OMX/clawhip study tasks. As of April 7, 2026,
-the default verification path is green again on `main` (`cargo fmt --check` and `cargo test`
-both pass), so the hard backlog gate is lifted. Promotions back to `todo` should still be
-deliberate and must not displace the active stabilization regressions below.
+`cargo fmt --check` is green on `main` again, but the default `cargo test` path regressed with
+28 failing tests concentrated in stale-worktree reconciliation plus `poll_shim`/`tmux` restart
+coverage. The hard backlog gate is therefore back on until the default test suite is green
+again. Promotions back to `todo` should stay deliberate and must not displace the active
+stabilization regressions below.
 
 ### Known Failure Modes (Fixed)
 
@@ -80,22 +82,26 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 
 Daemon-driven board replenishment is now in place. The tact engine detects idle-worker starvation, composes a structured planning prompt from roadmap and board state, routes it to the architect, and creates board tasks automatically.
 
-The verification and reopen loop is now materially healthier: on April 7, 2026 the default
-verification path on `main` is green again (`cargo fmt --check` and `cargo test` both passed),
-the persistent engineer test/fix/retest loop is merged, and the stale red-build repair lane
-`#528` has been closed. The highest-friction runtime path has shifted from baseline verification
-to supervisory stall detection, delivery reliability, false-review prevention, and context hygiene.
+The verification and reopen loop is healthier than it was before the reopen automation landed,
+but on April 7, 2026 the default verification path regressed again: `cargo fmt --check` passes
+while `cargo test` currently fails with 28 tests, led by
+`reconcile_stale_worktrees_rebases_clean_base_worktree_after_main_advances` and a broader
+`poll_shim`/`tmux` poison cascade. The stale red-build repair lane has to stay active again,
+and baseline verification moves back to the top of the stabilization stack beside supervisory
+stall detection.
 
 Next hardening work is about execution quality rather than backlog creation:
+- Restore a green default `cargo test` path on `main`
 - Harden architect/manager shim stall detection and recovery
 - Keep notifications and status chatter out of agent context windows
 - Harden failed-delivery retry and false-review detection under live daemon runs
 - Keep reopen/failure task creation structured and duplicate-free
 - Add proactive context-exhaustion restarts with handoff summaries
 
-This removes the old "board empties because nobody creates tasks" and "main is red by default"
-failure modes from the active roadmap and shifts attention to supervision reliability, merge/review
-correctness, and context hygiene.
+The old "board empties because nobody creates tasks" failure mode stays closed, but "main is red
+by default" is open again until the current regression cluster is repaired. Active roadmap
+attention is therefore split between restoring default verification and continuing the supervision,
+merge/review correctness, and context-hygiene hardening work.
 
 ---
 
