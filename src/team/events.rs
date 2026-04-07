@@ -22,6 +22,15 @@ pub struct MergeConfidenceInfo<'a> {
     pub rename_count: usize,
 }
 
+pub struct AutoMergeDecisionInfo<'a> {
+    pub engineer: &'a str,
+    pub task: &'a str,
+    pub action_type: &'a str,
+    pub confidence: f64,
+    pub reason: &'a str,
+    pub details: &'a str,
+}
+
 pub struct VerificationPhaseChangeInfo<'a> {
     pub engineer: &'a str,
     pub task: &'a str,
@@ -702,6 +711,35 @@ impl TeamEvent {
             load: Some(confidence),
             reason: Some(format!("files={} lines={}", files_changed, lines_changed)),
             ..Self::base("task_auto_merged")
+        }
+    }
+
+    pub fn auto_merge_decision_recorded(info: &AutoMergeDecisionInfo<'_>) -> Self {
+        Self {
+            role: Some(info.engineer.into()),
+            task: Some(info.task.into()),
+            action_type: Some(info.action_type.into()),
+            load: Some(info.confidence),
+            reason: Some(info.reason.into()),
+            details: Some(info.details.into()),
+            ..Self::base("auto_merge_decision_recorded")
+        }
+    }
+
+    pub fn auto_merge_post_verify_result(
+        engineer: &str,
+        task: &str,
+        success: Option<bool>,
+        reason: &str,
+        details: Option<&str>,
+    ) -> Self {
+        Self {
+            role: Some(engineer.into()),
+            task: Some(task.into()),
+            success,
+            reason: Some(reason.into()),
+            details: details.map(str::to_string),
+            ..Self::base("auto_merge_post_verify_result")
         }
     }
 
@@ -1444,6 +1482,56 @@ mod tests {
         assert!(reason.contains("migrations=true"));
         assert!(reason.contains("config=false"));
         assert!(reason.contains("renames=1"));
+    }
+
+    #[test]
+    fn auto_merge_decision_recorded_serializes_reason_and_details() {
+        let event = TeamEvent::auto_merge_decision_recorded(&AutoMergeDecisionInfo {
+            engineer: "eng-1-1",
+            task: "42",
+            action_type: "manual_review",
+            confidence: 0.55,
+            reason: "routed to manual review: confidence 0.55; 4 files, 90 lines, 3 modules; reasons: touches sensitive paths",
+            details: "{\"decision\":\"manual_review\",\"reasons\":[\"touches sensitive paths\"]}",
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed["event"].as_str().unwrap(),
+            "auto_merge_decision_recorded"
+        );
+        assert_eq!(parsed["role"].as_str().unwrap(), "eng-1-1");
+        assert_eq!(parsed["task"].as_str().unwrap(), "42");
+        assert_eq!(parsed["action_type"].as_str().unwrap(), "manual_review");
+        assert!((parsed["load"].as_f64().unwrap() - 0.55).abs() < 0.001);
+        assert!(parsed["reason"].as_str().unwrap().contains("manual review"));
+        assert!(
+            parsed["details"]
+                .as_str()
+                .unwrap()
+                .contains("\"touches sensitive paths\"")
+        );
+    }
+
+    #[test]
+    fn auto_merge_post_verify_result_serializes_success() {
+        let event = TeamEvent::auto_merge_post_verify_result(
+            "eng-1",
+            "42",
+            Some(false),
+            "failed",
+            Some("post-merge verification on main failed"),
+        );
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed["event"].as_str().unwrap(),
+            "auto_merge_post_verify_result"
+        );
+        assert_eq!(parsed["role"].as_str().unwrap(), "eng-1");
+        assert_eq!(parsed["task"].as_str().unwrap(), "42");
+        assert!(!parsed["success"].as_bool().unwrap());
+        assert_eq!(parsed["reason"].as_str().unwrap(), "failed");
     }
 
     #[test]
