@@ -1588,7 +1588,7 @@ mod tests {
         let metadata = crate::team::board::read_workflow_metadata(&task_path).unwrap();
         assert_eq!(metadata.tests_run, Some(true));
         assert_eq!(metadata.tests_passed, Some(true));
-        assert_eq!(metadata.outcome.as_deref(), Some("verification_passed"));
+        assert_eq!(metadata.outcome.as_deref(), Some("approved"));
         let snapshot_path = verification_snapshot_path(&repo, 42, "eng-1", 1);
         assert!(
             metadata
