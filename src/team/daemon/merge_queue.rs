@@ -301,16 +301,14 @@ impl TeamDaemon {
                 }
 
                 // Post-merge disk hygiene: clean build artifacts and prune branch
-                let hygiene_config =
-                    &self.config.team_config.automation.disk_hygiene;
-                let hygiene_report =
-                    super::health::disk_hygiene::post_merge_cleanup(
-                        self.project_root(),
-                        &request.engineer,
-                        request.task_id,
-                        &request.branch,
-                        hygiene_config,
-                    );
+                let hygiene_config = &self.config.team_config.automation.disk_hygiene;
+                let hygiene_report = super::health::disk_hygiene::post_merge_cleanup(
+                    self.project_root(),
+                    &request.engineer,
+                    request.task_id,
+                    &request.branch,
+                    hygiene_config,
+                );
                 if hygiene_report.any_action_taken() {
                     let summary = hygiene_report.summary();
                     info!(
