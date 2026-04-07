@@ -803,6 +803,13 @@ mod tests {
 
         setup_engineer_worktree(&repo, &worktree_dir, engineer, &team_config_dir).unwrap();
 
+        // Clean up untracked files created by setup_engineer_worktree so
+        // the worktree appears clean to has_uncommitted_changes().
+        // Git reads info/exclude from the main repo, not worktree-specific
+        // git dirs, so the per-worktree exclude rules don't take effect.
+        let _ = std::fs::remove_dir_all(worktree_dir.join(".cargo"));
+        let _ = std::fs::remove_dir_all(worktree_dir.join(".batty"));
+
         let task_branch = format!("{engineer}-42");
         git_ok(&worktree_dir, &["checkout", "-b", &task_branch]);
         std::fs::write(worktree_dir.join("feature.txt"), "work\n").unwrap();
