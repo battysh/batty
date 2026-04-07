@@ -17,6 +17,9 @@ use crate::shim::protocol::{Event, ShimState};
 use crate::team::watcher::{SessionTrackerConfig, discover_claude_session_file};
 use crate::team::{append_shim_event_log, shim_log_path};
 
+const SUPERVISORY_STALLED_REASON: &str = "supervisory_stalled";
+const SUPERVISORY_STALL_ESCALATED_REASON: &str = "supervisory_stall_escalated";
+
 #[derive(Debug, Clone)]
 struct ShimRespawnPlan {
     agent_type: String,
@@ -873,13 +876,8 @@ impl TeamDaemon {
                 .unwrap_or_default();
 
             if supervisory_role {
-                let summary = self.supervisory_stall_summary(&name).unwrap_or_else(|| {
-                    format!(
-                        "{name} stayed in Working for {secs}s (timeout={}s)",
-                        timeout_secs
-                    )
-                });
-                if let Err(error) = self.handle_supervisory_stall(&name, &summary) {
+                if let Err(error) = self.handle_supervisory_stall(&name, SUPERVISORY_STALLED_REASON)
+                {
                     warn!(
                         member = name.as_str(),
                         error = %error,
@@ -973,14 +971,121 @@ impl TeamDaemon {
         Ok(())
     }
 
-    fn supervisory_stall_summary(&self, _name: &str) -> Option<String> {
-        None
+    fn supervisory_stall_summary(&self, name: &str) -> Option<String> {
+        let timeout_secs = self.config.team_config.shim_working_state_timeout_secs;
+        let stall_secs = self.shim_handles.get(name)?.secs_since_state_change();
+        let heuristic = self
+            .supervisory_progress_signal(name, timeout_secs)
+            .stall_reason();
+        Some(format!(
+            "{name} stayed in Working for {stall_secs}s (timeout={timeout_secs}s, heuristic={heuristic})"
+        ))
     }
 
-    fn handle_supervisory_stall(&mut self, name: &str, summary: &str) -> anyhow::Result<()> {
-        tracing::warn!(member = name, summary, "supervisory stall detected");
+    fn handle_supervisory_stall(&mut self, name: &str, reason: &str) -> anyhow::Result<()> {
+        let stall_secs = self
+            .shim_handles
+            .get(name)
+            .map(|handle| handle.secs_since_state_change())
+            .unwrap_or(0);
+        let summary = self.supervisory_stall_summary(name).unwrap_or_else(|| {
+            format!("{name} stayed in Working for {stall_secs}s (reason={reason})")
+        });
+        let supervisory_task = format!("supervisory::{name}");
+
+        tracing::warn!(member = name, reason, summary = %summary, "supervisory stall detected");
+
+        let mut event = crate::team::events::TeamEvent::stall_detected_with_reason(
+            name,
+            None,
+            stall_secs,
+            Some(reason),
+        );
+        event.task = Some(supervisory_task.clone());
+        event.details = Some(summary.clone());
+        self.emit_event(event);
+
+        let _ = append_shim_event_log(
+            &self.config.project_root,
+            name,
+            &format!("<- supervisory stall detected: {summary}"),
+        );
         self.record_orchestrator_action(format!("supervisory stall: {name} — {summary}"));
+
+        let prior_restarts = self.supervisory_stall_restart_count(name)?;
+        let restart_count = prior_restarts + 1;
+        let max_restarts = self.config.team_config.workflow_policy.max_stall_restarts;
+        let escalation_target = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == name)
+            .and_then(|member| member.reports_to.clone());
+
+        if prior_restarts >= max_restarts && escalation_target.is_some() {
+            let escalation_key = format!("stall-escalation::{name}");
+            let on_cooldown = self
+                .intervention_cooldowns
+                .get(&escalation_key)
+                .is_some_and(|last| last.elapsed() < CONTEXT_RESTART_COOLDOWN);
+            if on_cooldown {
+                return Ok(());
+            }
+
+            self.handle_shim_cold_respawn(name, reason)?;
+            self.intervention_cooldowns
+                .insert(escalation_key, std::time::Instant::now());
+
+            if let Some(manager) = escalation_target
+                && let Err(error) = self.queue_message(
+                    "daemon",
+                    &manager,
+                    &format!(
+                        "{name} stalled repeatedly while marked working ({summary}). Please intervene directly."
+                    ),
+                )
+            {
+                warn!(
+                    member = name,
+                    manager = manager.as_str(),
+                    error = %error,
+                    "failed to escalate supervisory stall"
+                );
+            }
+
+            self.record_task_escalated(name, supervisory_task.clone(), Some(reason));
+            self.record_agent_restarted(
+                name,
+                supervisory_task,
+                SUPERVISORY_STALL_ESCALATED_REASON,
+                restart_count,
+            );
+            return Ok(());
+        }
+
+        self.handle_shim_cold_respawn(name, reason)?;
+        self.intervention_cooldowns
+            .insert(format!("stall-restart::{name}"), std::time::Instant::now());
+        self.record_agent_restarted(name, supervisory_task, reason, restart_count);
         Ok(())
+    }
+
+    fn supervisory_stall_restart_count(&self, name: &str) -> anyhow::Result<u32> {
+        let events_path = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let supervisory_task = format!("supervisory::{name}");
+        let count = crate::team::events::read_events(&events_path)?
+            .into_iter()
+            .filter(|event| event.event == "agent_restarted")
+            .filter(|event| event.role.as_deref() == Some(name))
+            .filter(|event| event.task.as_deref() == Some(supervisory_task.as_str()))
+            .filter(|event| event.reason.as_deref() == Some(SUPERVISORY_STALLED_REASON))
+            .count() as u32;
+        Ok(count)
     }
 }
 
