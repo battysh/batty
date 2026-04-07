@@ -61,7 +61,9 @@ impl TeamDaemon {
             .members
             .iter()
             .find(|member| member.name == member_name)
-            .is_some_and(|member| matches!(member.role_type, RoleType::Architect | RoleType::Manager))
+            .is_some_and(|member| {
+                matches!(member.role_type, RoleType::Architect | RoleType::Manager)
+            })
     }
 
     pub(in crate::team) fn member_ready_for_delivery(&self, member_name: &str) -> bool {
@@ -1525,9 +1527,10 @@ mod tests {
         );
         handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
         daemon.shim_handles.insert("manager".to_string(), handle);
-        daemon
-            .states
-            .insert("manager".to_string(), crate::team::standup::MemberState::Idle);
+        daemon.states.insert(
+            "manager".to_string(),
+            crate::team::standup::MemberState::Idle,
+        );
 
         daemon.deliver_inbox_messages().unwrap();
 
@@ -1547,7 +1550,11 @@ mod tests {
             other => panic!("expected SendMessage, got {other:?}"),
         }
 
-        assert!(inbox::pending_messages(&root, "manager").unwrap().is_empty());
+        assert!(
+            inbox::pending_messages(&root, "manager")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
