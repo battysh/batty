@@ -69,6 +69,11 @@ At 04:46 EDT on April 7, 2026, a follow-up architect loop narrowed the current r
 - `cargo test` failed compiling `src/team/delivery/verification.rs` because a `TeamDaemon` test fixture omitted the newer `discord_bot`, `discord_event_cursor`, and `recent_escalations` fields
 - task `#520` was re-queued to `todo`, but the task file initially retained `claimed_by: worker-2`, confirming claim metadata can survive a status rollback unless the board is reconciled explicitly
 
+At 05:05 EDT on April 7, 2026, another architect review loop reproduced the same rollback drift on a different task:
+
+- task `#536` was sent from `review` back to `todo`, but the task file again retained `claimed_by: worker-2` after the rollback
+- the stale claim had to be cleared manually, confirming the claim/status reconciliation bug is broader than the earlier `#520` incident
+
 ### Known Failure Modes (Fixed)
 
 These were all discovered and fixed during the nether_earth stabilization session:

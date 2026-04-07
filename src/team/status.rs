@@ -65,7 +65,12 @@ pub(crate) struct AgentHealthSummary {
     pub(crate) restart_count: u32,
     pub(crate) context_exhaustion_count: u32,
     pub(crate) delivery_failure_count: u32,
+<<<<<<< HEAD
     pub(crate) supervisory_digest_count: u32,
+=======
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) stall_reason: Option<String>,
+>>>>>>> 98c53c9 (Surface stalled supervisory lanes before architect and manager automation goes blind)
     pub(crate) task_elapsed_secs: Option<u64>,
     pub(crate) backend_health: crate::agent::BackendHealth,
 }
@@ -426,11 +431,22 @@ pub(crate) fn agent_health_by_member(
     }
 
     let mut restart_events = HashMap::<String, u32>::new();
+    let mut latest_supervisory_action_ts = HashMap::<String, u64>::new();
+    let mut latest_stall_reason = HashMap::<String, (u64, String)>::new();
     let mut latest_assignment_ts = HashMap::<String, u64>::new();
     let mut latest_assignment_ts_by_task = HashMap::<(String, u32), u64>::new();
     match events::read_events(&team_events_path(project_root)) {
         Ok(events) => {
             for event in events {
+                if event.event == "message_routed"
+                    && let Some(from) = event.from.as_deref()
+                {
+                    latest_supervisory_action_ts
+                        .entry(from.to_string())
+                        .and_modify(|ts| *ts = (*ts).max(event.ts))
+                        .or_insert(event.ts);
+                }
+
                 let Some(role) = event.role.as_deref() else {
                     continue;
                 };
@@ -460,11 +476,19 @@ pub(crate) fn agent_health_by_member(
                             .or_default()
                             .delivery_failure_count += 1;
                     }
+<<<<<<< HEAD
                     "supervisory_digest_emitted" => {
                         health_by_member
                             .entry(role.to_string())
                             .or_default()
                             .supervisory_digest_count += 1;
+=======
+                    "stall_detected" => {
+                        if let Some(reason) = event.reason.as_deref() {
+                            latest_stall_reason
+                                .insert(role.to_string(), (event.ts, reason.to_string()));
+                        }
+>>>>>>> 98c53c9 (Surface stalled supervisory lanes before architect and manager automation goes blind)
                     }
                     "task_assigned" => {
                         latest_assignment_ts.insert(role.to_string(), event.ts);
@@ -503,6 +527,16 @@ pub(crate) fn agent_health_by_member(
     for (member, event_count) in restart_events {
         let health = health_by_member.entry(member).or_default();
         health.restart_count = health.restart_count.max(event_count);
+    }
+
+    for (member, (stall_ts, reason)) in latest_stall_reason {
+        let cleared_at = latest_supervisory_action_ts
+            .get(&member)
+            .copied()
+            .unwrap_or(0);
+        if stall_ts > cleared_at {
+            health_by_member.entry(member).or_default().stall_reason = Some(reason);
+        }
     }
 
     let now = now_unix();
@@ -727,8 +761,13 @@ pub(crate) fn format_agent_health_summary(health: &AgentHealthSummary) -> String
     if health.delivery_failure_count > 0 {
         parts.push(format!("d{}", health.delivery_failure_count));
     }
+<<<<<<< HEAD
     if health.supervisory_digest_count > 0 {
         parts.push(format!("sd{}", health.supervisory_digest_count));
+=======
+    if let Some(reason) = health.stall_reason.as_deref() {
+        parts.push(format!("s:{}", summarize_stall_reason(reason)));
+>>>>>>> 98c53c9 (Surface stalled supervisory lanes before architect and manager automation goes blind)
     }
     if let Some(task_elapsed_secs) = health.task_elapsed_secs {
         parts.push(format!("t{}", format_health_duration(task_elapsed_secs)));
@@ -738,6 +777,15 @@ pub(crate) fn format_agent_health_summary(health: &AgentHealthSummary) -> String
         "-".to_string()
     } else {
         parts.join(" ")
+    }
+}
+
+fn summarize_stall_reason(reason: &str) -> &str {
+    match reason {
+        "supervisory_shim_activity_only" => "shim-only",
+        "supervisory_status_only_output" => "status-only",
+        "supervisory_no_actionable_progress" => "no-progress",
+        _ => reason,
     }
 }
 
@@ -2139,7 +2187,11 @@ mod tests {
                     restart_count: 1,
                     context_exhaustion_count: 0,
                     delivery_failure_count: 0,
+<<<<<<< HEAD
                     supervisory_digest_count: 0,
+=======
+                    stall_reason: None,
+>>>>>>> 98c53c9 (Surface stalled supervisory lanes before architect and manager automation goes blind)
                     task_elapsed_secs: None,
                     backend_health: crate::agent::BackendHealth::default(),
                 },
@@ -2164,7 +2216,11 @@ mod tests {
                     restart_count: 0,
                     context_exhaustion_count: 1,
                     delivery_failure_count: 1,
+<<<<<<< HEAD
                     supervisory_digest_count: 0,
+=======
+                    stall_reason: None,
+>>>>>>> 98c53c9 (Surface stalled supervisory lanes before architect and manager automation goes blind)
                     task_elapsed_secs: None,
                     backend_health: crate::agent::BackendHealth::default(),
                 },
@@ -2655,7 +2711,11 @@ mod tests {
                         restart_count: 1,
                         context_exhaustion_count: 0,
                         delivery_failure_count: 0,
+<<<<<<< HEAD
                         supervisory_digest_count: 0,
+=======
+                        stall_reason: None,
+>>>>>>> 98c53c9 (Surface stalled supervisory lanes before architect and manager automation goes blind)
                         task_elapsed_secs: Some(30),
                         backend_health: crate::agent::BackendHealth::default(),
                     },
@@ -2823,12 +2883,20 @@ mod tests {
             restart_count: 2,
             context_exhaustion_count: 1,
             delivery_failure_count: 3,
+<<<<<<< HEAD
             supervisory_digest_count: 1,
+=======
+            stall_reason: Some("supervisory_shim_activity_only".to_string()),
+>>>>>>> 98c53c9 (Surface stalled supervisory lanes before architect and manager automation goes blind)
             task_elapsed_secs: Some(750),
             backend_health: crate::agent::BackendHealth::default(),
         });
 
+<<<<<<< HEAD
         assert_eq!(summary, "r2 c1 d3 sd1 t12m");
+=======
+        assert_eq!(summary, "r2 c1 d3 s:shim-only t12m");
+>>>>>>> 98c53c9 (Surface stalled supervisory lanes before architect and manager automation goes blind)
         assert_eq!(
             format_agent_health_summary(&AgentHealthSummary::default()),
             "-"
@@ -2878,9 +2946,42 @@ mod tests {
         assert_eq!(eng_1.restart_count, 2);
         assert_eq!(eng_1.context_exhaustion_count, 1);
         assert_eq!(eng_1.delivery_failure_count, 1);
+<<<<<<< HEAD
         assert_eq!(eng_1.supervisory_digest_count, 1);
+=======
+        assert!(eng_1.stall_reason.is_none());
+>>>>>>> 98c53c9 (Surface stalled supervisory lanes before architect and manager automation goes blind)
         assert!(eng_1.task_elapsed_secs.unwrap() >= 600);
         assert_eq!(health.get("eng-2").unwrap(), &AgentHealthSummary::default());
+    }
+
+    #[test]
+    fn agent_health_by_member_clears_supervisory_stall_after_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events_path = team_events_path(tmp.path());
+        let mut sink = EventSink::new(&events_path).unwrap();
+
+        let mut stalled = TeamEvent::stall_detected_with_reason(
+            "lead",
+            None,
+            300,
+            Some("supervisory_shim_activity_only"),
+        );
+        stalled.ts = now_unix().saturating_sub(30);
+        sink.emit(stalled).unwrap();
+
+        let health = agent_health_by_member(tmp.path(), &[manager("lead")]);
+        assert_eq!(
+            health.get("lead").unwrap().stall_reason.as_deref(),
+            Some("supervisory_shim_activity_only")
+        );
+
+        let mut routed = TeamEvent::message_routed("lead", "eng-1");
+        routed.ts = now_unix().saturating_sub(10);
+        sink.emit(routed).unwrap();
+
+        let cleared = agent_health_by_member(tmp.path(), &[manager("lead")]);
+        assert_eq!(cleared.get("lead").unwrap().stall_reason, None);
     }
 
     #[test]

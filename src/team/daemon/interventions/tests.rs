@@ -52,6 +52,31 @@ fn enter_idle_epoch(daemon: &mut TeamDaemon, member: &str) {
     );
 }
 
+fn insert_working_shim_handle(
+    daemon: &mut TeamDaemon,
+    member: &str,
+    working_secs: u64,
+    last_activity_secs: u64,
+) {
+    let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+    let mut channel = crate::shim::protocol::Channel::new(parent);
+    channel
+        .set_read_timeout(Some(Duration::from_millis(5)))
+        .unwrap();
+    let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+        member.to_string(),
+        channel,
+        999,
+        "claude".to_string(),
+        "claude".to_string(),
+        std::path::PathBuf::from("/tmp/test"),
+    );
+    handle.apply_state_change(crate::shim::protocol::ShimState::Working);
+    handle.state_changed_at = Instant::now() - Duration::from_secs(working_secs);
+    handle.last_activity_at = Some(Instant::now() - Duration::from_secs(last_activity_secs));
+    daemon.shim_handles.insert(member.to_string(), handle);
+}
+
 fn expire_triage_cooldown(daemon: &mut TeamDaemon, member: &str) {
     daemon.intervention_cooldowns.insert(
         format!("triage::{member}"),
@@ -661,6 +686,39 @@ fn maybe_intervene_manager_dispatch_gap_respects_cooldown_until_signature_refire
 }
 
 #[test]
+fn supervisory_manager_shim_chatter_still_trips_dispatch_gap() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Working)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("lead", "%999997")
+        .with_board_task(191, "active-task", "in-progress", Some("eng-1"))
+        .with_board_task(192, "open-task", "todo", None);
+    let mut daemon = harness.build_daemon().unwrap();
+    let threshold = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .stall_threshold_secs;
+    insert_working_shim_handle(&mut daemon, "lead", threshold + 10, 1);
+
+    daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+    assert_eq!(
+        daemon.pending_delivery_queue.get("lead").map(Vec::len),
+        Some(1)
+    );
+    let events =
+        crate::team::events::read_events(&crate::team::team_events_path(harness.project_root()))
+            .unwrap();
+    assert!(events.iter().any(|event| {
+        event.event == "stall_detected"
+            && event.role.as_deref() == Some("lead")
+            && event.reason.as_deref() == Some("supervisory_shim_activity_only")
+    }));
+}
+
+#[test]
 fn maybe_intervene_architect_utilization_queues_for_underloaded_architect() {
     let harness = intervention_team_harness()
         .with_member_state("architect", MemberState::Idle)
@@ -759,6 +817,39 @@ fn maybe_intervene_architect_utilization_respects_cooldown_until_signature_refir
     let pending = harness.pending_inbox_messages("architect").unwrap();
     assert_eq!(pending.len(), 1);
     assert!(pending[0].body.contains("#193 (todo) open-task-2"));
+}
+
+#[test]
+fn supervisory_architect_recent_action_clears_utilization_stall_signal() {
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Working)
+        .with_member_state("lead", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("architect", "%999996")
+        .with_board_task(191, "active-task", "in-progress", Some("eng-1"))
+        .with_board_task(192, "open-task", "backlog", None);
+    let mut daemon = harness.build_daemon().unwrap();
+    let threshold = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .stall_threshold_secs;
+    insert_working_shim_handle(&mut daemon, "architect", threshold + 10, 1);
+
+    let events_path = crate::team::team_events_path(harness.project_root());
+    let mut sink = crate::team::events::EventSink::new(&events_path).unwrap();
+    let mut routed = crate::team::events::TeamEvent::message_routed("architect", "lead");
+    routed.ts = crate::team::now_unix().saturating_sub(1);
+    sink.emit(routed).unwrap();
+
+    daemon.maybe_intervene_architect_utilization().unwrap();
+
+    assert!(daemon.pending_delivery_queue.get("architect").is_none());
+    let events = crate::team::events::read_events(&events_path).unwrap();
+    assert!(!events.iter().any(|event| {
+        event.event == "stall_detected" && event.role.as_deref() == Some("architect")
+    }));
 }
 
 #[test]
