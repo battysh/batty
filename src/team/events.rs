@@ -555,10 +555,20 @@ impl TeamEvent {
     }
 
     pub fn stall_detected(role: &str, task: Option<u32>, stall_duration_secs: u64) -> Self {
+        Self::stall_detected_with_reason(role, task, stall_duration_secs, None)
+    }
+
+    pub fn stall_detected_with_reason(
+        role: &str,
+        task: Option<u32>,
+        stall_duration_secs: u64,
+        reason: Option<&str>,
+    ) -> Self {
         Self {
             role: Some(role.into()),
             task: task.map(|id| id.to_string()),
             uptime_secs: Some(stall_duration_secs),
+            reason: reason.map(str::to_string),
             ..Self::base("stall_detected")
         }
     }
@@ -1839,6 +1849,20 @@ mod tests {
         assert_eq!(event.role.as_deref(), Some("eng-1-1"));
         assert!(event.task.is_none());
         assert_eq!(event.uptime_secs, Some(600));
+    }
+
+    #[test]
+    fn stall_detected_event_with_reason_records_heuristic() {
+        let event = TeamEvent::stall_detected_with_reason(
+            "lead",
+            None,
+            300,
+            Some("supervisory_shim_activity_only"),
+        );
+        assert_eq!(
+            event.reason.as_deref(),
+            Some("supervisory_shim_activity_only")
+        );
     }
 
     #[test]

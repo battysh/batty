@@ -54,16 +54,23 @@ impl TeamDaemon {
                 .members
                 .iter()
                 .find(|member| member.name == name)
+                .cloned()
             else {
                 continue;
             };
             if member.role_type != RoleType::Manager {
                 continue;
             }
-            if !self.is_member_idle(&name) {
+            let stall_threshold = self.config.team_config.workflow_policy.stall_threshold_secs;
+            let supervisory_stalled = self.is_supervisory_lane_stalled(&name, stall_threshold);
+            if !self.is_member_idle(&name) && !supervisory_stalled {
                 continue;
             }
-            if !self.ready_for_idle_automation(&inbox_root, &name) {
+            if supervisory_stalled {
+                let reason = self.supervisory_progress_signal(&name, stall_threshold);
+                self.record_supervisory_stall_reason(&name, stall_threshold, reason.stall_reason());
+            }
+            if !supervisory_stalled && !self.ready_for_idle_automation(&inbox_root, &name) {
                 continue;
             }
 
@@ -150,7 +157,7 @@ impl TeamDaemon {
             }
 
             let text = self.build_manager_dispatch_gap_message(
-                member,
+                &member,
                 &idle_active_reports,
                 &idle_unassigned_reports,
                 &unassigned_open_tasks,
