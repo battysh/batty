@@ -357,6 +357,48 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         VerificationPhase::Verifying,
     );
 
+    // SCOPE ENFORCEMENT: reject completions that modify protected files.
+    // Engineers should never modify docs, planning, config, or README.
+    // These are architect/human-owned. Prevents the #563-style scope overreach
+    // where engineers delete critical files during implementation tasks.
+    let out_of_scope = check_protected_file_violations(
+        &worktree_dir,
+        daemon.is_multi_repo,
+        &daemon.sub_repo_names,
+    );
+    if !out_of_scope.is_empty() {
+        let violation_list = out_of_scope.join(", ");
+        warn!(
+            engineer,
+            task_id,
+            files = %violation_list,
+            "completion rejected: engineer modified protected files outside task scope"
+        );
+        daemon.record_orchestrator_action(format!(
+            "scope violation: {engineer} modified protected files: {violation_list} — reverting out-of-scope changes"
+        ));
+        // Revert the out-of-scope files to main's version
+        for file in &out_of_scope {
+            let _ = std::process::Command::new("git")
+                .args(["checkout", "main", "--", file])
+                .current_dir(&worktree_dir)
+                .output();
+        }
+        // Auto-commit the revert so the engineer's next attempt is clean
+        let _ = std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&worktree_dir)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args([
+                "commit",
+                "-m",
+                "auto: revert out-of-scope file modifications",
+            ])
+            .current_dir(&worktree_dir)
+            .output();
+    }
+
     if total_commits > 0 {
         record_verification_evidence(
             daemon,
@@ -1087,6 +1129,66 @@ fn load_previous_test_results(board_dir: &Path, task_id: u32) -> Result<Option<T
     let task_path = crate::team::task_cmd::find_task_path(board_dir, task_id)?;
     let metadata = crate::team::board::read_workflow_metadata(&task_path)?;
     Ok(metadata.test_results)
+}
+
+/// Check if an engineer's diff includes modifications to protected files.
+/// Protected files are docs, planning, config, and other architect/human-owned paths
+/// that engineers should never modify during implementation tasks.
+fn check_protected_file_violations(
+    worktree_dir: &Path,
+    is_multi_repo: bool,
+    sub_repo_names: &[String],
+) -> Vec<String> {
+    let protected_prefixes = [
+        "planning/",
+        "docs/",
+        "CLAUDE.md",
+        "AGENTS.md",
+        "README.md",
+        "CHANGELOG.md",
+        "CONTRIBUTING.md",
+        ".batty/team_config/batty_architect.md",
+        ".batty/team_config/batty_manager.md",
+        ".batty/team_config/team.yaml",
+    ];
+
+    let output = if is_multi_repo {
+        // For multi-repo, check each sub-repo
+        let mut all_files = Vec::new();
+        for repo in sub_repo_names {
+            let repo_dir = worktree_dir.join(repo);
+            if let Ok(out) = std::process::Command::new("git")
+                .args(["diff", "--name-only", "main..HEAD"])
+                .current_dir(&repo_dir)
+                .output()
+            {
+                let files = String::from_utf8_lossy(&out.stdout);
+                all_files.extend(files.lines().map(|l| l.to_string()));
+            }
+        }
+        all_files
+    } else {
+        match std::process::Command::new("git")
+            .args(["diff", "--name-only", "main..HEAD"])
+            .current_dir(worktree_dir)
+            .output()
+        {
+            Ok(out) => String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(|l| l.to_string())
+                .collect(),
+            Err(_) => return Vec::new(),
+        }
+    };
+
+    output
+        .into_iter()
+        .filter(|file| {
+            protected_prefixes
+                .iter()
+                .any(|prefix| file.starts_with(prefix) || file == *prefix)
+        })
+        .collect()
 }
 
 fn detect_flaky_failures(
