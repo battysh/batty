@@ -46,12 +46,18 @@ const INBOX_STALE_MESSAGE_AGE: Duration = Duration::from_secs(600);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OrchestratorOnlyReason {
     SupervisoryRecovery,
+    Nudge,
+    StatusQuery,
+    StandupRequest,
 }
 
 impl OrchestratorOnlyReason {
     fn as_str(self) -> &'static str {
         match self {
             Self::SupervisoryRecovery => "supervisory recovery",
+            Self::Nudge => "nudge",
+            Self::StatusQuery => "status query",
+            Self::StandupRequest => "standup request",
         }
     }
 }
@@ -107,20 +113,9 @@ fn format_batched_message(messages: &[inbox::InboxMessage]) -> String {
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OrchestratorOnlyReason {
-    Nudge,
-    StatusQuery,
-    StandupRequest,
-}
-
 impl OrchestratorOnlyReason {
     fn label(self) -> &'static str {
-        match self {
-            Self::Nudge => "nudge",
-            Self::StatusQuery => "status query",
-            Self::StandupRequest => "standup request",
-        }
+        self.as_str()
     }
 }
 
@@ -222,6 +217,32 @@ impl TeamDaemon {
             return Some(OrchestratorOnlyReason::StandupRequest);
         }
 
+        // Supervisory recovery messages for architect/manager roles
+        let is_supervisory = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == recipient)
+            .is_some_and(|member| {
+                matches!(member.role_type, RoleType::Architect | RoleType::Manager)
+            });
+        if is_supervisory {
+            let lower = body.trim().to_ascii_lowercase();
+            let is_supervisory_stall_notice = lower
+                .starts_with("batty restarted you after a supervisory stall.")
+                || lower.starts_with(
+                    "batty detected repeated supervisory stalls and escalated for manual attention.",
+                );
+            let is_restart_notice = lower.starts_with("restarted after ")
+                && lower.contains("resume from the current worktree state");
+            let is_context_pressure_nudge = lower.starts_with("context pressure is high")
+                && lower.contains("move directly to commands and edits");
+
+            if is_supervisory_stall_notice || is_restart_notice || is_context_pressure_nudge {
+                return Some(OrchestratorOnlyReason::SupervisoryRecovery);
+            }
+        }
+
         None
     }
 
@@ -295,6 +316,27 @@ impl TeamDaemon {
                     recipient,
                     cached
                 ));
+            }
+            OrchestratorOnlyReason::SupervisoryRecovery => {
+                self.record_orchestrator_action(format!(
+                    "notification isolation: kept {} notice for {} from {} in orchestrator log ({preview})",
+                    reason.label(),
+                    recipient,
+                    from
+                ));
+                if self.config.team_config.orchestrator_enabled() {
+                    let plain_path = crate::team::orchestrator_log_path(&self.config.project_root);
+                    let ansi_path =
+                        crate::team::orchestrator_ansi_log_path(&self.config.project_root);
+                    let _ = crate::team::daemon::telemetry::append_orchestrator_log_line(
+                        &plain_path,
+                        &ansi_path,
+                        &format!(
+                            "delivery: supervisory recovery notice for {} from {} ({preview})",
+                            recipient, from
+                        ),
+                    );
+                }
             }
         }
     }
@@ -587,71 +629,7 @@ impl TeamDaemon {
         Ok(MessageDelivery::InboxQueued)
     }
 
-    fn orchestrator_only_reason(
-        &self,
-        recipient: &str,
-        body: &str,
-    ) -> Option<OrchestratorOnlyReason> {
-        let is_supervisory = self
-            .config
-            .members
-            .iter()
-            .find(|member| member.name == recipient)
-            .is_some_and(|member| {
-                matches!(member.role_type, RoleType::Architect | RoleType::Manager)
-            });
-        if !is_supervisory {
-            return None;
-        }
-
-        let trimmed = body.trim();
-        let lower = trimmed.to_ascii_lowercase();
-        let is_supervisory_stall_notice = lower
-            .starts_with("batty restarted you after a supervisory stall.")
-            || lower.starts_with(
-                "batty detected repeated supervisory stalls and escalated for manual attention.",
-            );
-        let is_restart_notice = lower.starts_with("restarted after ")
-            && lower.contains("resume from the current worktree state");
-        let is_context_pressure_nudge = lower.starts_with("context pressure is high")
-            && lower.contains("move directly to commands and edits");
-
-        (is_supervisory_stall_notice || is_restart_notice || is_context_pressure_nudge)
-            .then_some(OrchestratorOnlyReason::SupervisoryRecovery)
-    }
-
-    fn record_orchestrator_only_message(
-        &self,
-        from: &str,
-        recipient: &str,
-        body: &str,
-        reason: OrchestratorOnlyReason,
-    ) {
-        if !self.config.team_config.orchestrator_enabled() {
-            return;
-        }
-
-        let plain_path = crate::team::orchestrator_log_path(&self.config.project_root);
-        let ansi_path = crate::team::orchestrator_ansi_log_path(&self.config.project_root);
-        let message = format!(
-            "delivery: kept {} notice for {} from {} in orchestrator log ({})",
-            reason.as_str(),
-            recipient,
-            from,
-            shim_log_preview(body)
-        );
-        if let Err(error) = crate::team::daemon::telemetry::append_orchestrator_log_line(
-            &plain_path,
-            &ansi_path,
-            &message,
-        ) {
-            warn!(
-                log = %plain_path.display(),
-                error = %error,
-                "failed to append orchestrator-only delivery log"
-            );
-        }
-    }
+    // Second orchestrator_only_reason removed — merged into the first definition above.
 
     pub(in crate::team) fn drain_legacy_command_queue(&mut self) -> Result<()> {
         let queue_path = message::command_queue_path(&self.config.project_root);

@@ -107,7 +107,6 @@ pub(super) enum MessageDelivery {
     OrchestratorLogged,
     InboxQueued,
     DeferredPending,
-    OrchestratorLogged,
     SkippedUnknownRecipient,
 }
 
