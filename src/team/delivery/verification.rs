@@ -60,7 +60,12 @@ impl TeamDaemon {
 
         self.failed_deliveries
             .push(FailedDelivery::new(recipient, from, body));
-        self.record_delivery_failed(recipient, from, "message delivery failed after retries");
+        self.record_delivery_failed_with_details(
+            recipient,
+            from,
+            "message delivery failed after retries",
+            None,
+        );
     }
 
     pub(in crate::team) fn clear_failed_delivery(
