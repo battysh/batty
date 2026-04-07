@@ -93,6 +93,23 @@ fn reset_claimed_worktree_to_base(work_dir: &std::path::Path, base_branch: &str)
 }
 
 impl TeamDaemon {
+    pub(in crate::team) fn deliver_automation_nudge(
+        &mut self,
+        recipient: &str,
+        body: &str,
+    ) -> Result<MessageDelivery> {
+        if self.config.team_config.orchestrator_enabled() {
+            let summary = body
+                .lines()
+                .find_map(normalized_context_line)
+                .unwrap_or_else(|| "automation nudge".to_string());
+            self.record_orchestrator_action(format!("diverted nudge for {recipient}: {summary}"));
+            return Ok(MessageDelivery::OrchestratorLogged);
+        }
+
+        self.queue_daemon_message(recipient, body)
+    }
+
     pub(super) fn maybe_manage_task_claim_ttls(&mut self) -> Result<()> {
         let tasks_dir = self.board_dir().join("tasks");
         if !tasks_dir.exists() {
@@ -665,7 +682,7 @@ impl TeamDaemon {
                      Please review or escalate.",
                     task.id, age, nudge_threshold,
                 );
-                let _ = self.queue_daemon_message(reviewer, &msg);
+                let _ = self.deliver_automation_nudge(reviewer, &msg);
                 self.record_orchestrator_action(format!(
                     "review_nudge_sent: task #{} -> {reviewer}",
                     task.id,

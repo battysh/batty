@@ -72,6 +72,32 @@ pub(crate) struct AgentHealthSummary {
     pub(crate) backend_health: crate::agent::BackendHealth,
 }
 
+impl AgentHealthSummary {
+    pub(crate) fn record_supervisory_digest(&mut self) {
+        self.supervisory_digest_count += 1;
+    }
+
+    pub(crate) fn record_supervisory_stall(&mut self, reason: Option<&str>, summary: Option<&str>) {
+        self.stall_reason = reason.map(str::to_string);
+        self.stall_summary = summary.map(str::to_string);
+    }
+
+    pub(crate) fn has_supervisory_warning(&self) -> bool {
+        self.stall_reason.is_some() || self.stall_summary.is_some()
+    }
+
+    pub(crate) fn supervisory_status_token(&self) -> Option<String> {
+        if !self.has_supervisory_warning() {
+            return None;
+        }
+
+        Some(match self.stall_reason.as_deref() {
+            Some(reason) => format!("stall:{reason}"),
+            None => "stall".to_string(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 struct PersistedDaemonHealthState {
     #[serde(default)]
@@ -466,7 +492,30 @@ pub(crate) fn agent_health_by_member(
                         health_by_member
                             .entry(role.to_string())
                             .or_default()
-                            .supervisory_digest_count += 1;
+                            .record_supervisory_digest();
+                    }
+                    "stall_detected" => {
+                        let is_supervisory = event
+                            .task
+                            .as_deref()
+                            .is_some_and(|task| task.starts_with("supervisory::"))
+                            || event
+                                .reason
+                                .as_deref()
+                                .is_some_and(|reason| reason.starts_with("supervisory_"));
+                        if is_supervisory {
+                            let fallback_summary = fallback_supervisory_stall_summary(
+                                event.reason.as_deref(),
+                                event.uptime_secs,
+                            );
+                            health_by_member
+                                .entry(role.to_string())
+                                .or_default()
+                                .record_supervisory_stall(
+                                    event.reason.as_deref(),
+                                    event.details.as_deref().or(fallback_summary.as_deref()),
+                                );
+                        }
                     }
                     "task_assigned" => {
                         latest_assignment_ts.insert(role.to_string(), event.ts);
@@ -732,6 +781,9 @@ pub(crate) fn format_agent_health_summary(health: &AgentHealthSummary) -> String
     if health.supervisory_digest_count > 0 {
         parts.push(format!("sd{}", health.supervisory_digest_count));
     }
+    if let Some(supervisory_token) = health.supervisory_status_token() {
+        parts.push(supervisory_token);
+    }
     if let Some(task_elapsed_secs) = health.task_elapsed_secs {
         parts.push(format!("t{}", format_health_duration(task_elapsed_secs)));
     }
@@ -752,6 +804,24 @@ fn format_health_duration(task_elapsed_secs: u64) -> String {
         format!("{}h", task_elapsed_secs / 3_600)
     } else {
         format!("{}d", task_elapsed_secs / 86_400)
+    }
+}
+
+fn fallback_supervisory_stall_summary(
+    reason: Option<&str>,
+    stall_secs: Option<u64>,
+) -> Option<String> {
+    match (reason, stall_secs) {
+        (Some(reason), Some(stall_secs)) => Some(format!(
+            "{reason} after {}",
+            format_health_duration(stall_secs)
+        )),
+        (Some(reason), None) => Some(reason.to_string()),
+        (None, Some(stall_secs)) => Some(format!(
+            "supervisory stall after {}",
+            format_health_duration(stall_secs)
+        )),
+        (None, None) => None,
     }
 }
 
@@ -2846,6 +2916,17 @@ mod tests {
     }
 
     #[test]
+    fn format_agent_health_summary_includes_supervisory_stall_token() {
+        let summary = format_agent_health_summary(&AgentHealthSummary {
+            stall_reason: Some("supervisory_stalled".to_string()),
+            stall_summary: Some("manager stayed in Working for 5m".to_string()),
+            ..AgentHealthSummary::default()
+        });
+
+        assert_eq!(summary, "stall:supervisory_stalled");
+    }
+
+    #[test]
     fn agent_health_by_member_aggregates_events_and_active_task_elapsed() {
         let tmp = tempfile::tempdir().unwrap();
         let events_path = team_events_path(tmp.path());
@@ -2872,6 +2953,13 @@ mod tests {
         digest_emitted.ts = now_unix().saturating_sub(565);
         sink.emit(digest_emitted).unwrap();
 
+        let mut supervisory_stall =
+            TeamEvent::stall_detected_with_reason("eng-1", None, 300, Some("supervisory_stalled"));
+        supervisory_stall.ts = now_unix().saturating_sub(560);
+        supervisory_stall.task = Some("supervisory::eng-1".to_string());
+        supervisory_stall.details = Some("eng-1 stayed in Working for 5m".to_string());
+        sink.emit(supervisory_stall).unwrap();
+
         let daemon_state = serde_json::json!({
             "active_tasks": {"eng-1": 42},
             "retry_counts": {"eng-1": 1}
@@ -2889,6 +2977,11 @@ mod tests {
         assert_eq!(eng_1.context_exhaustion_count, 1);
         assert_eq!(eng_1.delivery_failure_count, 1);
         assert_eq!(eng_1.supervisory_digest_count, 1);
+        assert_eq!(eng_1.stall_reason.as_deref(), Some("supervisory_stalled"));
+        assert_eq!(
+            eng_1.stall_summary.as_deref(),
+            Some("eng-1 stayed in Working for 5m")
+        );
         assert!(eng_1.task_elapsed_secs.unwrap() >= 600);
         assert_eq!(health.get("eng-2").unwrap(), &AgentHealthSummary::default());
     }
