@@ -116,3 +116,21 @@ macOS AppleSystemPolicy (ASP) kills unsigned or stale-signed binaries. Copying o
 - `batty config`: show resolved configuration
 - `batty telegram`: manage Telegram integration and setup
 - `batty completions`: generate shell completions
+
+## Development Priority: Self-Improvement and Stability
+
+Batty is a self-improving system — agents build batty features that make agents more productive. This is the permanent priority order for all work:
+
+1. **Stability** — green tests on main, agents don't crash, worktrees don't go stale, disk stays clean
+2. **Throughput** — tasks flow from todo→done without human intervention, merges land quickly
+3. **Quality** — verification loops prevent empty completions, tests cover new code, docs match shipped features
+4. **Features** — Discord integration, observability, new capabilities only AFTER the above are solid
+
+Every agent working on this project should continuously self-analyze:
+- Is the test suite green? If not, fix it before writing features.
+- Are agents stalling? If so, investigate and create a fix task.
+- Is disk space growing? If build artifacts exceed 10GB, clean up.
+- Are merges causing conflicts? If so, improve the merge pipeline.
+- Are docs aligned with code? If a feature shipped without docs, write them.
+
+**Never just report a problem — create a board task for it.** Narrating issues without creating actionable tasks is the #1 failure mode.
