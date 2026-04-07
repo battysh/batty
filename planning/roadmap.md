@@ -87,6 +87,14 @@ At 05:15 EDT on April 7, 2026, the next architect loop confirmed the red-main br
 - `cargo test` also failed compiling `src/team/openclaw_contract.rs` because that contract still expects a stale `stall_summary` field instead of the current `AgentHealthSummary` shape
 - re-queuing stale tasks `#536` and `#540` required `--claim`, and both task files still retained `claimed_by` metadata after the rollback until it was cleared manually, confirming the claim/status reconciliation bug also affects `in-progress -> todo` recovery paths
 
+At 05:23 EDT on April 7, 2026, another architect loop re-verified `main` after the local review commits landed:
+
+- `cargo fmt --check` still passed
+- `cargo test` failed compiling `src/team/delivery/verification.rs` because the retry path still calls the removed `record_delivery_failed` helper instead of the newer `record_delivery_failed_with_details` telemetry API
+- `cargo test` still failed compiling `src/team/delivery/routing.rs` and `src/team/test_support.rs` because stale `TeamDaemon` and `ChannelConfig` literals remain outside the shared fixture path
+- `cargo test` still failed compiling `src/team/status.rs` and `src/team/openclaw_contract.rs` because `AgentHealthSummary` initializers and contract mapping are still split between the older stall-summary shape and the newer supervisory-digest fields
+- review tasks `#536` and `#540` were re-queued to `todo`, and `kanban-md move ... todo --claim <worker>` again preserved `claimed_by` metadata until it was cleared manually
+
 ### Known Failure Modes (Fixed)
 
 These were all discovered and fixed during the nether_earth stabilization session:
