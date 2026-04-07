@@ -96,10 +96,33 @@ const EXHAUSTION_PATTERNS: &[&str] = &[
     "prompt is too long",
 ];
 
-/// Check if text contains known context exhaustion phrases.
+/// Check if text contains known context exhaustion phrases (hard failure).
 pub fn detect_context_exhausted(text: &str) -> bool {
     let lower = text.to_lowercase();
     EXHAUSTION_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
+// ---------------------------------------------------------------------------
+// Context approaching-limit detection (early warning)
+// ---------------------------------------------------------------------------
+
+const CONTEXT_APPROACHING_PATTERNS: &[&str] = &[
+    "automatically compress prior messages",
+    "context window is approaching",
+    "approaching context limit",
+    "context is getting large",
+    "conversation history has been compressed",
+    "messages were compressed",
+    "running low on context",
+    "nearing the context limit",
+];
+
+/// Check if text contains signals that the context window is under pressure
+/// but not yet fully exhausted. Returns true for early-warning patterns
+/// (e.g. automatic compression notifications from Claude).
+pub fn detect_context_approaching_limit(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    CONTEXT_APPROACHING_PATTERNS.iter().any(|p| lower.contains(p))
 }
 
 const TEST_COMMAND_PATTERNS: &[&str] = &[
@@ -253,6 +276,25 @@ mod tests {
     fn context_exhaustion_not_detected_for_normal_text() {
         assert!(!detect_context_exhausted("Writing function to parse YAML"));
         assert!(!detect_context_exhausted("context manager initialized"));
+    }
+
+    #[test]
+    fn context_approaching_limit_detected() {
+        assert!(detect_context_approaching_limit(
+            "The system will automatically compress prior messages in your conversation"
+        ));
+        assert!(detect_context_approaching_limit(
+            "conversation history has been compressed to save space"
+        ));
+        assert!(detect_context_approaching_limit(
+            "Context window is approaching its maximum capacity"
+        ));
+    }
+
+    #[test]
+    fn context_approaching_not_detected_for_normal_text() {
+        assert!(!detect_context_approaching_limit("context manager initialized"));
+        assert!(!detect_context_approaching_limit("compression algorithm works"));
     }
 
     #[test]
