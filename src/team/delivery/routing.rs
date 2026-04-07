@@ -43,6 +43,19 @@ fn shim_log_preview(body: &str) -> String {
 const INBOX_DEDUP_WINDOW: Duration = Duration::from_secs(300);
 const INBOX_STALE_MESSAGE_AGE: Duration = Duration::from_secs(600);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrchestratorOnlyReason {
+    SupervisoryRecovery,
+}
+
+impl OrchestratorOnlyReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SupervisoryRecovery => "supervisory recovery",
+        }
+    }
+}
+
 fn message_batch_priority(message: &inbox::InboxMessage) -> u8 {
     let upper = message.body.to_ascii_uppercase();
     if upper.contains("URGENT") || upper.contains("ESCALAT") {
@@ -483,6 +496,11 @@ impl TeamDaemon {
         recipient: &str,
         body: &str,
     ) -> Result<MessageDelivery> {
+        if let Some(reason) = self.orchestrator_only_reason(recipient, body) {
+            self.record_orchestrator_only_message(from, recipient, body, reason);
+            return Ok(MessageDelivery::OrchestratorLogged);
+        }
+
         if let Some(channel) = self.channels.get(recipient) {
             let _ = channel;
             return self.deliver_channel_message(from, recipient, body);
@@ -567,6 +585,72 @@ impl TeamDaemon {
         let msg = inbox::InboxMessage::new_send(from, recipient, body);
         let _ = self.queue_inbox_message(&msg)?;
         Ok(MessageDelivery::InboxQueued)
+    }
+
+    fn orchestrator_only_reason(
+        &self,
+        recipient: &str,
+        body: &str,
+    ) -> Option<OrchestratorOnlyReason> {
+        let is_supervisory = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == recipient)
+            .is_some_and(|member| {
+                matches!(member.role_type, RoleType::Architect | RoleType::Manager)
+            });
+        if !is_supervisory {
+            return None;
+        }
+
+        let trimmed = body.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        let is_supervisory_stall_notice = lower
+            .starts_with("batty restarted you after a supervisory stall.")
+            || lower.starts_with(
+                "batty detected repeated supervisory stalls and escalated for manual attention.",
+            );
+        let is_restart_notice = lower.starts_with("restarted after ")
+            && lower.contains("resume from the current worktree state");
+        let is_context_pressure_nudge = lower.starts_with("context pressure is high")
+            && lower.contains("move directly to commands and edits");
+
+        (is_supervisory_stall_notice || is_restart_notice || is_context_pressure_nudge)
+            .then_some(OrchestratorOnlyReason::SupervisoryRecovery)
+    }
+
+    fn record_orchestrator_only_message(
+        &self,
+        from: &str,
+        recipient: &str,
+        body: &str,
+        reason: OrchestratorOnlyReason,
+    ) {
+        if !self.config.team_config.orchestrator_enabled() {
+            return;
+        }
+
+        let plain_path = crate::team::orchestrator_log_path(&self.config.project_root);
+        let ansi_path = crate::team::orchestrator_ansi_log_path(&self.config.project_root);
+        let message = format!(
+            "delivery: kept {} notice for {} from {} in orchestrator log ({})",
+            reason.as_str(),
+            recipient,
+            from,
+            shim_log_preview(body)
+        );
+        if let Err(error) = crate::team::daemon::telemetry::append_orchestrator_log_line(
+            &plain_path,
+            &ansi_path,
+            &message,
+        ) {
+            warn!(
+                log = %plain_path.display(),
+                error = %error,
+                "failed to append orchestrator-only delivery log"
+            );
+        }
     }
 
     pub(in crate::team) fn drain_legacy_command_queue(&mut self) -> Result<()> {
@@ -2087,6 +2171,73 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let daemon = failed_delivery_test_daemon(&tmp);
         assert_eq!(daemon.resolve_role_name("unknown-member"), "unknown-member");
+    }
+
+    #[test]
+    fn queue_daemon_message_routes_supervisory_recovery_notice_to_orchestrator_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+
+        let result = daemon
+            .queue_daemon_message(
+                "manager",
+                "Batty restarted you after a supervisory stall.\nmanager stayed in Working for 600s without progress\n\nResume from the current worktree state, review pending inbox items, and continue without repeating completed work.",
+            )
+            .unwrap();
+
+        assert_eq!(result, MessageDelivery::OrchestratorLogged);
+        assert!(
+            inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "manager")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(daemon.pending_delivery_queue.get("manager").is_none());
+    }
+
+    #[test]
+    fn deliver_message_keeps_actionable_supervisory_work_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        daemon
+            .config
+            .pane_map
+            .insert("manager".to_string(), "%123".to_string());
+
+        let (parent_sock, child_sock) = crate::shim::protocol::socketpair().unwrap();
+        let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+        let mut child_channel = crate::shim::protocol::Channel::new(child_sock);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "manager".to_string(),
+            parent_channel,
+            12345,
+            "claude".to_string(),
+            "claude".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("manager".to_string(), handle);
+        daemon.states.insert(
+            "manager".to_string(),
+            crate::team::standup::MemberState::Idle,
+        );
+
+        let body = "Task #42 for eng-1 stalled 2 times (no output). Batty restarted it 1 time(s) already and will not restart again automatically.\nTask: investigate the deadlock\nNext step: decide whether to split the task, redirect the engineer, or intervene directly.";
+        let result = daemon.deliver_message("daemon", "manager", body).unwrap();
+
+        assert_eq!(result, MessageDelivery::LivePane);
+        child_channel
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+        match cmd {
+            crate::shim::protocol::Command::SendMessage {
+                from, body: sent, ..
+            } => {
+                assert_eq!(from, "daemon");
+                assert_eq!(sent, body);
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
     }
 
     // --- Pending delivery queue tests (Task #276) ---

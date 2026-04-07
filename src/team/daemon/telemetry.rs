@@ -621,7 +621,7 @@ impl TeamDaemon {
     }
 }
 
-pub(super) fn append_orchestrator_log_line(
+pub(crate) fn append_orchestrator_log_line(
     plain_path: &Path,
     ansi_path: &Path,
     message: &str,

@@ -1466,6 +1466,9 @@ mod tests {
             "BATTY_BINARY_PATH",
             fake_bin.join("batty").to_string_lossy().as_ref(),
         );
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "architect").unwrap();
+        inbox::init_inbox(&inbox_root, "manager").unwrap();
 
         let mut daemon = TestDaemonBuilder::new(tmp.path())
             .members(vec![
@@ -1505,6 +1508,16 @@ mod tests {
                 daemon
                     .intervention_cooldowns
                     .contains_key(&format!("stall-restart::{member_name}"))
+            );
+            assert!(
+                daemon.pending_delivery_queue.get(member_name).is_none(),
+                "supervisory recovery chatter should stay out of {member_name}'s pending PTY queue"
+            );
+            assert!(
+                inbox::pending_messages(&inbox_root, member_name)
+                    .unwrap()
+                    .is_empty(),
+                "supervisory recovery chatter should not be queued into {member_name}'s inbox"
             );
         }
 

@@ -107,6 +107,7 @@ pub(super) enum MessageDelivery {
     OrchestratorLogged,
     InboxQueued,
     DeferredPending,
+    OrchestratorLogged,
     SkippedUnknownRecipient,
 }
 
@@ -160,6 +161,10 @@ mod tests {
         );
         assert_ne!(
             MessageDelivery::InboxQueued,
+            MessageDelivery::OrchestratorLogged
+        );
+        assert_ne!(
+            MessageDelivery::OrchestratorLogged,
             MessageDelivery::SkippedUnknownRecipient
         );
         assert_eq!(MessageDelivery::Channel, MessageDelivery::Channel);

@@ -99,7 +99,7 @@ mod state;
 #[path = "telegram_bridge.rs"]
 mod telegram_bridge;
 #[path = "daemon/telemetry.rs"]
-mod telemetry;
+pub(crate) mod telemetry;
 #[path = "daemon/verification.rs"]
 pub(crate) mod verification;
 
