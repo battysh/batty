@@ -66,6 +66,8 @@ pub(crate) struct AgentHealthSummary {
     pub(crate) context_exhaustion_count: u32,
     pub(crate) delivery_failure_count: u32,
     pub(crate) task_elapsed_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) stall_summary: Option<String>,
     pub(crate) backend_health: crate::agent::BackendHealth,
 }
 
@@ -454,6 +456,20 @@ pub(crate) fn agent_health_by_member(
                                 .map(|health| health.restart_count.max(restart_count))
                                 .unwrap_or(restart_count);
                         }
+                        if event
+                            .reason
+                            .as_deref()
+                            .is_some_and(|reason| reason.contains("stall"))
+                        {
+                            let current = health_by_member
+                                .get(role)
+                                .and_then(|health| health.stall_summary.clone());
+                            health_by_member
+                                .entry(role.to_string())
+                                .or_default()
+                                .stall_summary =
+                                Some(stall_summary_with_action("restart", current.as_deref()));
+                        }
                     }
                     "context_exhausted" => {
                         health_by_member
@@ -466,6 +482,39 @@ pub(crate) fn agent_health_by_member(
                             .entry(role.to_string())
                             .or_default()
                             .delivery_failure_count += 1;
+                    }
+                    "stall_detected" => {
+                        let summary = event
+                            .details
+                            .clone()
+                            .or_else(|| {
+                                event
+                                    .uptime_secs
+                                    .map(|secs| format!("stalled in working state for {secs}s"))
+                            })
+                            .or_else(|| event.reason.clone());
+                        if let Some(summary) = summary {
+                            health_by_member
+                                .entry(role.to_string())
+                                .or_default()
+                                .stall_summary = Some(summary);
+                        }
+                    }
+                    "task_escalated" => {
+                        if event
+                            .reason
+                            .as_deref()
+                            .is_some_and(|reason| reason.contains("stall"))
+                        {
+                            let current = health_by_member
+                                .get(role)
+                                .and_then(|health| health.stall_summary.clone());
+                            health_by_member
+                                .entry(role.to_string())
+                                .or_default()
+                                .stall_summary =
+                                Some(stall_summary_with_action("escalated", current.as_deref()));
+                        }
                     }
                     "task_assigned" => {
                         latest_assignment_ts.insert(role.to_string(), event.ts);
@@ -728,6 +777,9 @@ pub(crate) fn format_agent_health_summary(health: &AgentHealthSummary) -> String
     if health.delivery_failure_count > 0 {
         parts.push(format!("d{}", health.delivery_failure_count));
     }
+    if let Some(stall_summary) = health.stall_summary.as_deref() {
+        parts.push(format!("s:{}", compact_stall_summary(stall_summary)));
+    }
     if let Some(task_elapsed_secs) = health.task_elapsed_secs {
         parts.push(format!("t{}", format_health_duration(task_elapsed_secs)));
     }
@@ -748,6 +800,22 @@ fn format_health_duration(task_elapsed_secs: u64) -> String {
         format!("{}h", task_elapsed_secs / 3_600)
     } else {
         format!("{}d", task_elapsed_secs / 86_400)
+    }
+}
+
+fn stall_summary_with_action(action: &str, summary: Option<&str>) -> String {
+    match summary.map(str::trim).filter(|summary| !summary.is_empty()) {
+        Some(summary) => format!("{action}: {summary}"),
+        None => action.to_string(),
+    }
+}
+
+fn compact_stall_summary(summary: &str) -> String {
+    let normalized = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.len() <= 36 {
+        normalized
+    } else {
+        format!("{}...", normalized[..36].trim_end())
     }
 }
 
@@ -2170,6 +2238,7 @@ mod tests {
                     context_exhaustion_count: 0,
                     delivery_failure_count: 0,
                     task_elapsed_secs: None,
+                    stall_summary: None,
                     backend_health: crate::agent::BackendHealth::default(),
                 },
                 health_summary: "r1".to_string(),
@@ -2194,6 +2263,7 @@ mod tests {
                     context_exhaustion_count: 1,
                     delivery_failure_count: 1,
                     task_elapsed_secs: None,
+                    stall_summary: None,
                     backend_health: crate::agent::BackendHealth::default(),
                 },
                 health_summary: "c1 d1".to_string(),
@@ -2715,6 +2785,7 @@ mod tests {
                         context_exhaustion_count: 0,
                         delivery_failure_count: 0,
                         task_elapsed_secs: Some(30),
+                        stall_summary: None,
                         backend_health: crate::agent::BackendHealth::default(),
                     },
                     health_summary: "r1 t30s".to_string(),
@@ -2882,13 +2953,51 @@ mod tests {
             context_exhaustion_count: 1,
             delivery_failure_count: 3,
             task_elapsed_secs: Some(750),
+            stall_summary: Some(
+                "restart: manager stayed in Working for 600s without progress".to_string(),
+            ),
             backend_health: crate::agent::BackendHealth::default(),
         });
 
-        assert_eq!(summary, "r2 c1 d3 t12m");
+        assert_eq!(
+            summary,
+            "r2 c1 d3 s:restart: manager stayed in Working f... t12m"
+        );
         assert_eq!(
             format_agent_health_summary(&AgentHealthSummary::default()),
             "-"
+        );
+    }
+
+    #[test]
+    fn agent_health_by_member_surfaces_supervisory_stall_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events_path = team_events_path(tmp.path());
+        let mut sink = EventSink::new(&events_path).unwrap();
+
+        let mut detected = TeamEvent::stall_detected("manager", None, 600);
+        detected.reason = Some("supervisory_stalled".to_string());
+        detected.details = Some("manager stayed in Working for 600s without progress".to_string());
+        sink.emit(detected).unwrap();
+        sink.emit(TeamEvent::agent_restarted(
+            "manager",
+            "supervisory::manager",
+            "supervisory_stalled",
+            1,
+        ))
+        .unwrap();
+        sink.emit(TeamEvent::task_escalated(
+            "manager",
+            "supervisory::manager",
+            Some("supervisory_stalled"),
+        ))
+        .unwrap();
+
+        let health = agent_health_by_member(tmp.path(), &[manager("manager")]);
+        let manager = health.get("manager").unwrap();
+        assert_eq!(
+            manager.stall_summary.as_deref(),
+            Some("escalated: restart: manager stayed in Working for 600s without progress")
         );
     }
 
