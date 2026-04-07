@@ -34,11 +34,10 @@ The architect receives a periodic nudge to:
 
 When default `cargo test` is red on `main`, feature and experiment lanes stay in `backlog`.
 That includes Discord/Telegram walk-away work and OMX/clawhip study tasks. As of April 7, 2026,
-`cargo fmt --check` is green on `main` again, but the default `cargo test` path regressed with
-28 failing tests concentrated in stale-worktree reconciliation plus `poll_shim`/`tmux` restart
-coverage. The hard backlog gate is therefore back on until the default test suite is green
-again. Promotions back to `todo` should stay deliberate and must not displace the active
-stabilization regressions below.
+the default verification path is green on `main` again: both `cargo fmt --check` and
+`cargo test` passed during the latest architect review cycle. The hard backlog gate is therefore
+lifted for default-suite regressions, but promotions back to `todo` should stay deliberate and
+must not displace the active stabilization lanes below.
 
 ### Known Failure Modes (Fixed)
 
@@ -82,26 +81,24 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 
 Daemon-driven board replenishment is now in place. The tact engine detects idle-worker starvation, composes a structured planning prompt from roadmap and board state, routes it to the architect, and creates board tasks automatically.
 
-The verification and reopen loop is healthier than it was before the reopen automation landed,
-but on April 7, 2026 the default verification path regressed again: `cargo fmt --check` passes
-while `cargo test` currently fails with 28 tests, led by
-`reconcile_stale_worktrees_rebases_clean_base_worktree_after_main_advances` and a broader
-`poll_shim`/`tmux` poison cascade. The stale red-build repair lane has to stay active again,
-and baseline verification moves back to the top of the stabilization stack beside supervisory
-stall detection.
+The verification and reopen loop is healthier than it was before the reopen automation landed.
+On April 7, 2026 the architect re-verified the default path on `main` and both
+`cargo fmt --check` and `cargo test` passed again. Baseline verification therefore moves from
+"restore green" back to "keep green" while supervisory stall detection, false-review rejection,
+delivery hardening, and context-hygiene follow-up remain active.
 
 Next hardening work is about execution quality rather than backlog creation:
-- Restore a green default `cargo test` path on `main`
+- Keep the default `cargo test` path green on `main`
 - Harden architect/manager shim stall detection and recovery
 - Keep notifications and status chatter out of agent context windows
 - Harden failed-delivery retry and false-review detection under live daemon runs
 - Keep reopen/failure task creation structured and duplicate-free
 - Add proactive context-exhaustion restarts with handoff summaries
 
-The old "board empties because nobody creates tasks" failure mode stays closed, but "main is red
-by default" is open again until the current regression cluster is repaired. Active roadmap
-attention is therefore split between restoring default verification and continuing the supervision,
-merge/review correctness, and context-hygiene hardening work.
+The old "board empties because nobody creates tasks" failure mode stays closed, and the default
+verification lane is green again on `main`. Active roadmap attention is therefore on preserving
+that green baseline while continuing the supervision, merge/review correctness, delivery, and
+context-hygiene hardening work.
 
 ---
 
