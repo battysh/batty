@@ -37,6 +37,7 @@ pub(super) struct FailedDelivery {
     pub(super) from: String,
     pub(super) body: String,
     pub(super) attempts: u32,
+    pub(super) repeated_failures: u32,
     pub(super) last_attempt: Instant,
 }
 
@@ -47,6 +48,7 @@ impl FailedDelivery {
             from: from.to_string(),
             body: body.to_string(),
             attempts: 1,
+            repeated_failures: 1,
             last_attempt: Instant::now(),
         }
     }
@@ -61,6 +63,40 @@ impl FailedDelivery {
 
     fn has_attempts_remaining(&self) -> bool {
         self.attempts < FAILED_DELIVERY_MAX_ATTEMPTS
+    }
+
+    fn mark_retry_attempt(&mut self, now: Instant) {
+        self.attempts = self.attempts.saturating_add(1);
+        self.last_attempt = now;
+    }
+
+    fn record_repeat_failure(&mut self) {
+        self.repeated_failures = self.repeated_failures.saturating_add(1);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FailedDeliveryEscalationReason {
+    MissingShim,
+    NotReady,
+    PermanentFailure,
+}
+
+impl FailedDeliveryEscalationReason {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingShim => "missing_shim",
+            Self::NotReady => "not_ready",
+            Self::PermanentFailure => "permanent_failure",
+        }
+    }
+
+    pub(super) fn operator_summary(self) -> &'static str {
+        match self {
+            Self::MissingShim => "recipient has no live shim handle",
+            Self::NotReady => "recipient never became ready for recovery delivery",
+            Self::PermanentFailure => "shim delivery kept failing for the recipient",
+        }
     }
 }
 
@@ -109,6 +145,7 @@ mod tests {
         assert_eq!(delivery.from, "manager");
         assert_eq!(delivery.body, "Please retry this.");
         assert_eq!(delivery.attempts, 1);
+        assert_eq!(delivery.repeated_failures, 1);
         assert_eq!(delivery.message_marker(), "--- Message from manager ---");
         assert!(delivery.has_attempts_remaining());
     }
@@ -170,6 +207,16 @@ mod tests {
         assert!(delivery.has_attempts_remaining());
         delivery.attempts = FAILED_DELIVERY_MAX_ATTEMPTS;
         assert!(!delivery.has_attempts_remaining());
+    }
+
+    #[test]
+    fn failed_delivery_repeat_failure_counter_is_tracked_without_touching_retry_time() {
+        let mut delivery = FailedDelivery::new("eng-1", "manager", "test");
+        let first_attempt = delivery.last_attempt;
+        delivery.record_repeat_failure();
+
+        assert_eq!(delivery.repeated_failures, 2);
+        assert_eq!(delivery.last_attempt, first_attempt);
     }
 
     #[test]

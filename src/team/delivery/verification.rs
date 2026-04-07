@@ -5,7 +5,8 @@ use tracing::{debug, info, warn};
 
 use super::{
     DELIVERY_VERIFICATION_CAPTURE_LINES, DELIVERY_VERIFICATION_CAPTURE_LINES_RECENTLY_READY,
-    FailedDelivery, capture_contains_message_marker, is_agent_ready, message_delivery_marker,
+    FailedDelivery, FailedDeliveryEscalationReason, capture_contains_message_marker,
+    is_agent_ready, message_delivery_marker,
 };
 use crate::team::config::RoleType;
 use crate::team::daemon::TeamDaemon;
@@ -51,16 +52,35 @@ impl TeamDaemon {
         from: &str,
         body: &str,
     ) {
-        if let Some(existing) = self.failed_deliveries.iter_mut().find(|delivery| {
-            delivery.recipient == recipient && delivery.from == from && delivery.body == body
-        }) {
-            existing.last_attempt = Instant::now();
+        if let Some(details) = self
+            .failed_deliveries
+            .iter_mut()
+            .find(|delivery| {
+                delivery.recipient == recipient && delivery.from == from && delivery.body == body
+            })
+            .map(|existing| {
+                existing.record_repeat_failure();
+                Self::failed_delivery_signal_details(existing, "retry_pending")
+            })
+        {
+            self.record_delivery_failed_with_details(
+                recipient,
+                from,
+                "message delivery failed again while already queued",
+                Some(&details),
+            );
             return;
         }
 
-        self.failed_deliveries
-            .push(FailedDelivery::new(recipient, from, body));
-        self.record_delivery_failed(recipient, from, "message delivery failed after retries");
+        let delivery = FailedDelivery::new(recipient, from, body);
+        let details = Self::failed_delivery_signal_details(&delivery, "retry_pending");
+        self.failed_deliveries.push(delivery);
+        self.record_delivery_failed_with_details(
+            recipient,
+            from,
+            "message delivery failed after retries",
+            Some(&details),
+        );
     }
 
     pub(in crate::team) fn clear_failed_delivery(
@@ -104,34 +124,79 @@ impl TeamDaemon {
             })
     }
 
+    fn failed_delivery_signal_details(delivery: &FailedDelivery, queue_action: &str) -> String {
+        format!(
+            "classification=delivery_recovery attempts={} repeated_failures={} queue_action={queue_action} marker={}",
+            delivery.attempts,
+            delivery.repeated_failures,
+            delivery.message_marker()
+        )
+    }
+
+    fn failed_delivery_escalation_details(
+        delivery: &FailedDelivery,
+        reason: FailedDeliveryEscalationReason,
+        escalation_target: Option<&str>,
+    ) -> String {
+        format!(
+            "classification={} attempts={} repeated_failures={} queue_action=cleared escalation_target={} marker={}",
+            reason.as_str(),
+            delivery.attempts,
+            delivery.repeated_failures,
+            escalation_target.unwrap_or("none"),
+            delivery.message_marker()
+        )
+    }
+
     pub(in crate::team) fn escalate_failed_delivery(
         &mut self,
         delivery: &FailedDelivery,
+        reason: FailedDeliveryEscalationReason,
     ) -> Result<()> {
         let Some(manager) = self.failed_delivery_escalation_recipient(&delivery.recipient) else {
+            let details = Self::failed_delivery_escalation_details(delivery, reason, None);
+            self.record_delivery_failed_with_details(
+                &delivery.recipient,
+                &delivery.from,
+                reason.operator_summary(),
+                Some(&details),
+            );
             warn!(
                 recipient = %delivery.recipient,
                 from = %delivery.from,
+                classification = reason.as_str(),
                 "failed delivery exhausted retries without escalation target"
             );
             return Ok(());
         };
 
+        let details = Self::failed_delivery_escalation_details(delivery, reason, Some(&manager));
         let body = format!(
-            "Live message delivery failed after {} attempts.\nRecipient: {}\nFrom: {}\nMarker: {}\nMessage body:\n{}",
+            "Live message delivery failed after {} attempts.\nReason: {}\nRecipient: {}\nFrom: {}\nRepeated failures observed: {}\nMarker: {}\nMessage body:\n{}",
             delivery.attempts,
+            reason.operator_summary(),
             delivery.recipient,
             delivery.from,
+            delivery.repeated_failures,
             delivery.message_marker(),
             delivery.body
         );
+        let root = inbox::inboxes_root(&self.config.project_root);
         let msg = inbox::InboxMessage::new_send("daemon", &manager, &body);
-        let _ = self.queue_inbox_message(&msg)?;
+        inbox::deliver_to_inbox(&root, &msg)?;
+        self.record_message_routed("daemon", &manager);
+        self.record_delivery_failed_with_details(
+            &delivery.recipient,
+            &delivery.from,
+            reason.operator_summary(),
+            Some(&details),
+        );
         warn!(
             recipient = %delivery.recipient,
             from = %delivery.from,
             escalation_target = %manager,
             attempts = delivery.attempts,
+            classification = reason.as_str(),
             "failed delivery escalated to manager inbox"
         );
         Ok(())
@@ -150,13 +215,26 @@ impl TeamDaemon {
                 continue;
             }
 
+            delivery.mark_retry_attempt(now);
+
             if !self.member_ready_for_delivery(&delivery.recipient) {
-                self.failed_deliveries.push(delivery);
+                warn!(
+                    recipient = %delivery.recipient,
+                    from = %delivery.from,
+                    attempts = delivery.attempts,
+                    "recipient still not ready for failed-delivery recovery"
+                );
+                if delivery.has_attempts_remaining() {
+                    self.failed_deliveries.push(delivery);
+                } else {
+                    self.escalate_failed_delivery(
+                        &delivery,
+                        FailedDeliveryEscalationReason::NotReady,
+                    )?;
+                }
                 continue;
             }
 
-            delivery.attempts += 1;
-            delivery.last_attempt = now;
             info!(
                 recipient = %delivery.recipient,
                 from = %delivery.from,
@@ -165,48 +243,38 @@ impl TeamDaemon {
             );
 
             // Retry via shim channel
-            let delivered = if let Some(handle) = self.shim_handles.get_mut(&delivery.recipient) {
-                match handle.send_message(&delivery.from, &delivery.body) {
-                    Ok(()) => {
-                        handle.apply_state_change(crate::shim::protocol::ShimState::Working);
-                        true
+            let failure_reason =
+                if let Some(handle) = self.shim_handles.get_mut(&delivery.recipient) {
+                    match handle.send_message(&delivery.from, &delivery.body) {
+                        Ok(()) => {
+                            handle.apply_state_change(crate::shim::protocol::ShimState::Working);
+                            None
+                        }
+                        Err(error) => {
+                            warn!(
+                                recipient = %delivery.recipient,
+                                from = %delivery.from,
+                                error = %error,
+                                "shim retry delivery failed"
+                            );
+                            Some(FailedDeliveryEscalationReason::PermanentFailure)
+                        }
                     }
-                    Err(error) => {
-                        warn!(
-                            recipient = %delivery.recipient,
-                            from = %delivery.from,
-                            error = %error,
-                            "shim retry delivery failed"
-                        );
-                        false
-                    }
-                }
-            } else {
-                false
-            };
+                } else {
+                    Some(FailedDeliveryEscalationReason::MissingShim)
+                };
 
-            if delivered {
+            if failure_reason.is_none() {
                 continue;
             }
 
             if delivery.has_attempts_remaining() {
                 self.failed_deliveries.push(delivery);
             } else {
-                // Don't escalate if the agent is still starting — it hasn't
-                // had a chance to accept messages yet. Keep retrying.
-                let agent_still_starting = self
-                    .watchers
-                    .get(&delivery.recipient)
-                    .is_some_and(|w| !w.is_ready_for_delivery());
-                if agent_still_starting {
-                    debug!(
-                        recipient = %delivery.recipient,
-                        "agent still starting; suppressing escalation"
-                    );
-                    self.failed_deliveries.push(delivery);
-                } else {
-                    self.escalate_failed_delivery(&delivery)?;
-                }
+                self.escalate_failed_delivery(
+                    &delivery,
+                    failure_reason.expect("failure reason checked above"),
+                )?;
             }
         }
 
@@ -430,6 +498,7 @@ mod tests {
     use super::super::{
         DELIVERY_VERIFICATION_CAPTURE_LINES, DELIVERY_VERIFICATION_CAPTURE_LINES_RECENTLY_READY,
         FAILED_DELIVERY_MAX_ATTEMPTS, FAILED_DELIVERY_RETRY_DELAY, FailedDelivery,
+        FailedDeliveryEscalationReason,
     };
     use crate::team::config::OrchestratorPosition;
     use crate::team::config::RoleType;
@@ -489,8 +558,6 @@ mod tests {
             intervention_cooldowns: HashMap::new(),
             channels: HashMap::new(),
             nudges: HashMap::new(),
-            discord_bot: None,
-            discord_event_cursor: 0,
             telegram_bot: None,
             failure_tracker: FailureTracker::new(20),
             event_sink: EventSink::new(&tmp.path().join("events.jsonl")).unwrap(),
@@ -513,7 +580,6 @@ mod tests {
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
-            recent_escalations: HashMap::new(),
             telemetry_db: None,
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
@@ -604,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_delivery_emits_single_health_event_per_unique_message() {
+    fn failed_delivery_repeat_record_emits_durable_signal_without_duplicating_queue_entry() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
 
@@ -616,9 +682,21 @@ mod tests {
             .into_iter()
             .filter(|event| event.event == "delivery_failed")
             .collect::<Vec<_>>();
-        assert_eq!(delivery_failed.len(), 1);
-        assert_eq!(delivery_failed[0].role.as_deref(), Some("eng-1"));
-        assert_eq!(delivery_failed[0].from.as_deref(), Some("manager"));
+        assert_eq!(daemon.failed_deliveries.len(), 1);
+        assert_eq!(daemon.failed_deliveries[0].repeated_failures, 2);
+        assert_eq!(delivery_failed.len(), 2);
+        assert_eq!(delivery_failed[1].role.as_deref(), Some("eng-1"));
+        assert_eq!(delivery_failed[1].from.as_deref(), Some("manager"));
+        assert_eq!(
+            delivery_failed[1].reason.as_deref(),
+            Some("message delivery failed again while already queued")
+        );
+        assert!(
+            delivery_failed[1]
+                .details
+                .as_deref()
+                .is_some_and(|details| details.contains("queue_action=retry_pending"))
+        );
     }
 
     #[test]
@@ -786,13 +864,12 @@ mod tests {
 
         daemon.record_failed_delivery("eng-1", "manager", "test msg");
         let first_attempt_time = daemon.failed_deliveries[0].last_attempt;
-        std::thread::sleep(Duration::from_millis(10));
         daemon.record_failed_delivery("eng-1", "manager", "test msg");
 
         // Should still have only one entry
         assert_eq!(daemon.failed_deliveries.len(), 1);
-        // But last_attempt should be updated
-        assert!(daemon.failed_deliveries[0].last_attempt >= first_attempt_time);
+        assert_eq!(daemon.failed_deliveries[0].last_attempt, first_attempt_time);
+        assert_eq!(daemon.failed_deliveries[0].repeated_failures, 2);
     }
 
     #[test]
@@ -903,7 +980,9 @@ mod tests {
         let mut daemon = failed_delivery_test_daemon(&tmp);
         let delivery = FailedDelivery::new("eng-1", "architect", "critical update");
 
-        daemon.escalate_failed_delivery(&delivery).unwrap();
+        daemon
+            .escalate_failed_delivery(&delivery, FailedDeliveryEscalationReason::PermanentFailure)
+            .unwrap();
 
         let root = inbox::inboxes_root(tmp.path());
         // eng-1 reports to manager
@@ -911,6 +990,11 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].from, "daemon");
         assert!(messages[0].body.contains("Live message delivery failed"));
+        assert!(
+            messages[0]
+                .body
+                .contains("Reason: shim delivery kept failing for the recipient")
+        );
         assert!(messages[0].body.contains("Recipient: eng-1"));
         assert!(messages[0].body.contains("From: architect"));
         assert!(messages[0].body.contains("critical update"));
@@ -923,7 +1007,9 @@ mod tests {
         let delivery = FailedDelivery::new("orphan", "ghost", "lost message");
 
         // Should not panic or error — just warns
-        daemon.escalate_failed_delivery(&delivery).unwrap();
+        daemon
+            .escalate_failed_delivery(&delivery, FailedDeliveryEscalationReason::MissingShim)
+            .unwrap();
     }
 
     // --- Retry failed deliveries ---
@@ -972,6 +1058,26 @@ mod tests {
         let messages = inbox::pending_messages(&root, "manager").unwrap();
         assert_eq!(messages.len(), 1);
         assert!(messages[0].body.contains("Live message delivery failed"));
+        assert!(
+            messages[0]
+                .body
+                .contains("Reason: recipient has no live shim handle")
+        );
+        let events = crate::team::events::read_events(&tmp.path().join("events.jsonl")).unwrap();
+        let exhausted = events
+            .into_iter()
+            .filter(|event| {
+                event.event == "delivery_failed"
+                    && event.reason.as_deref() == Some("recipient has no live shim handle")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(exhausted.len(), 1);
+        assert!(
+            exhausted[0]
+                .details
+                .as_deref()
+                .is_some_and(|details| details.contains("classification=missing_shim"))
+        );
     }
 
     // --- Verify message content in pane ---
@@ -997,13 +1103,13 @@ mod tests {
     // --- Escalation suppression for starting agents ---
 
     #[test]
-    fn escalation_skipped_for_starting_agents() {
+    fn exhausted_not_ready_delivery_is_escalated_and_cleared() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
 
         // Agent watcher is present but not yet confirmed ready.
-        let watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
-        assert!(!watcher.is_ready_for_delivery());
+        let mut watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        watcher.activate();
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
         // Build a delivery targeting eng-1 that has used all its retry attempts.
@@ -1015,20 +1121,25 @@ mod tests {
 
         daemon.retry_failed_deliveries().unwrap();
 
-        // Agent is not ready → delivery pushed back to queue at the readiness check.
-        // Escalation should NOT have happened — architect inbox must be empty.
         let root = inbox::inboxes_root(tmp.path());
-        let architect_inbox = inbox::pending_messages(&root, "architect").unwrap();
+        let manager_inbox = inbox::pending_messages(&root, "manager").unwrap();
+        assert_eq!(manager_inbox.len(), 1);
         assert!(
-            architect_inbox.is_empty(),
-            "no escalation expected while agent is starting"
+            manager_inbox[0]
+                .body
+                .contains("Reason: recipient never became ready for recovery delivery")
         );
-        // Delivery should still be in the retry queue.
-        assert_eq!(
-            daemon.failed_deliveries.len(),
-            1,
-            "failed delivery must stay in queue for starting agent"
-        );
+        assert!(daemon.failed_deliveries.is_empty());
+        let events = crate::team::events::read_events(&tmp.path().join("events.jsonl")).unwrap();
+        assert!(events.into_iter().any(|event| {
+            event.event == "delivery_failed"
+                && event.reason.as_deref()
+                    == Some("recipient never became ready for recovery delivery")
+                && event
+                    .details
+                    .as_deref()
+                    .is_some_and(|details| details.contains("classification=not_ready"))
+        }));
     }
 
     #[test]
@@ -1057,6 +1168,60 @@ mod tests {
         assert!(
             !manager_inbox.is_empty(),
             "failed delivery for ready agent must be escalated"
+        );
+    }
+
+    #[test]
+    fn successful_retry_clears_failed_delivery_state_without_double_escalation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        daemon.record_failed_delivery("eng-1", "manager", "recover me");
+        daemon.failed_deliveries[0].last_attempt =
+            Instant::now() - FAILED_DELIVERY_RETRY_DELAY - Duration::from_secs(1);
+
+        let mut watcher = crate::team::watcher::SessionWatcher::new("%9999999", "eng-1", 300, None);
+        watcher.confirm_ready();
+        daemon.watchers.insert("eng-1".to_string(), watcher);
+
+        let (parent_sock, child_sock) = crate::shim::protocol::socketpair().unwrap();
+        let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+        let mut child_channel = crate::shim::protocol::Channel::new(child_sock);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "eng-1".to_string(),
+            parent_channel,
+            12345,
+            "codex".to_string(),
+            "codex".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("eng-1".to_string(), handle);
+
+        daemon.retry_failed_deliveries().unwrap();
+
+        assert!(daemon.failed_deliveries.is_empty());
+        let root = inbox::inboxes_root(tmp.path());
+        let manager_inbox = inbox::pending_messages(&root, "manager").unwrap();
+        assert!(manager_inbox.is_empty());
+
+        let cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+        match cmd {
+            crate::shim::protocol::Command::SendMessage { from, body, .. } => {
+                assert_eq!(from, "manager");
+                assert_eq!(body, "recover me");
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+
+        let events = crate::team::events::read_events(&tmp.path().join("events.jsonl")).unwrap();
+        let delivery_failed = events
+            .into_iter()
+            .filter(|event| event.event == "delivery_failed")
+            .collect::<Vec<_>>();
+        assert_eq!(delivery_failed.len(), 1);
+        assert_eq!(
+            delivery_failed[0].reason.as_deref(),
+            Some("message delivery failed after retries")
         );
     }
 
