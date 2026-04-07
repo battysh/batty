@@ -2,6 +2,84 @@
 
 All notable changes to Batty are documented here.
 
+## 0.10.0 — 2026-04-07
+
+Self-improving agent teams: auto-dispatch, auto-merge, stall recovery, per-worktree
+build isolation, and release-documentation cleanup. This release turns the happy
+path into a daemon-owned loop instead of a human-operated relay race.
+
+### Highlights
+
+- **Auto-dispatch enabled by default** — idle engineers pull from `todo` without
+  waiting for manual manager intervention.
+- **Auto-merge on green** — low-risk engineer branches now merge through a serial
+  queue when tests and policy checks pass.
+- **Claude stall detection and restart** — shim health checks catch mid-turn
+  stalls and restart unhealthy agents before they block the pipeline.
+- **Per-worktree Cargo targets** — engineer worktrees no longer fight over build
+  locks or duplicate multi-gigabyte artifact trees.
+
+### Throughput
+
+- `board.auto_dispatch: true` is now the default team posture.
+- Review bottlenecks are reduced by a daemon-owned auto-merge path for small,
+  low-risk diffs.
+- Worktree reuse keeps each engineer on a stable checkout while creating fresh
+  task branches for each assignment.
+- Claim TTL policy now reclaims stale ownership automatically instead of letting
+  forgotten tasks sit in `in-progress`.
+- Smart rebase behavior reduces additive-only merge conflicts during engineer
+  branch recovery.
+
+### Reliability
+
+- Claude SDK stdout timeout and shim health polling detect dead air before an
+  agent burns hours in a false-working state.
+- Restart backoff limits repeated restart churn while still recovering from
+  recoverable stalls.
+- Pending delivery and inbox retry paths preserve messages when shim delivery
+  fails instead of silently dropping work.
+- Stale nudge suppression avoids bothering engineers who do not currently own a
+  task.
+- OAuth-friendly launch posture clears stale API-key assumptions and aligns
+  Claude and Codex setup with current CLI auth flows.
+
+### Role Prompts
+
+- Architect prompt now emphasizes board health, merge authority, and immediate
+  review draining.
+- Manager prompt is aligned to next-task dispatch and escalation instead of
+  passive narration.
+- Engineer prompt enforces anti-narration behavior and concrete commit/test
+  discipline.
+
+### Configuration
+
+- `workflow_policy.auto_merge.enabled: true`
+- `board.auto_dispatch: true`
+- `workflow_policy.claim_ttl.default_secs: 1800`
+- `workflow_policy.claim_ttl.critical_secs: 900`
+- `automation.intervention_idle_grace_secs: 60`
+- Per-role `posture` and `model_class` fields in `team.yaml`
+- `workflow_policy.context_handoff_enabled: true`
+- `workflow_policy.verification.*` for daemon-owned test/retry loops
+
+### Documentation
+
+- README rewritten around the v0.10.0 operating model and quick start.
+- Added handbook-style `docs/cli-reference.md` and `docs/config-reference.md`
+  pages that explain the current workflow surface.
+- Getting started, roadmap, and planning architecture docs now match the
+  shipped daemon behavior.
+
+### Tests
+
+- 3,000+ tests passing across runtime, workflow, and regression suites.
+- Delivery retry behavior is covered so failed shim sends cannot regress
+  silently.
+- Auto-merge, dispatch, and worktree stabilization paths gained deeper coverage
+  during the v0.10.0 cycle.
+
 ## 0.9.0 — 2026-04-05
 
 Clean-room re-implementation engine, narration quality gates, dispatch
