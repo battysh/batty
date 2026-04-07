@@ -11,7 +11,7 @@ use crate::team::daemon::verification::run_automatic_verification;
 use crate::team::merge::{MergeLock, MergeOutcome, merge_engineer_branch};
 use crate::team::task_loop::read_task_title;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MergeRequest {
     pub task_id: u32,
     pub engineer: String,
@@ -19,6 +19,11 @@ pub(crate) struct MergeRequest {
     pub worktree_dir: PathBuf,
     pub queued_at: Instant,
     pub test_passed: bool,
+    pub should_post_merge_verify: bool,
+    pub test_duration_ms: u64,
+    pub confidence: f64,
+    pub files_changed: usize,
+    pub lines_changed: usize,
 }
 
 #[allow(dead_code)]
@@ -176,12 +181,13 @@ impl TeamDaemon {
 
         match merge_engineer_branch(self.project_root(), &request.engineer)? {
             MergeOutcome::Success => {
-                if self
-                    .config
-                    .team_config
-                    .workflow_policy
-                    .auto_merge
-                    .post_merge_verify
+                if request.should_post_merge_verify
+                    && self
+                        .config
+                        .team_config
+                        .workflow_policy
+                        .auto_merge
+                        .post_merge_verify
                 {
                     let verification_policy = &self.config.team_config.workflow_policy.verification;
                     let test_command = verification_policy.test_command.as_deref().or(self
@@ -219,6 +225,27 @@ impl TeamDaemon {
                     &board_dir_str,
                     request,
                     manager_name.as_deref(),
+                );
+                if let Err(error) = crate::team::merge::record_merge_test_timing(
+                    self,
+                    request.task_id,
+                    &request.engineer,
+                    &request.branch,
+                    request.test_duration_ms,
+                ) {
+                    warn!(
+                        engineer = request.engineer,
+                        task_id = request.task_id,
+                        error = %error,
+                        "failed to record merge test timing"
+                    );
+                }
+                self.record_task_auto_merged(
+                    &request.engineer,
+                    request.task_id,
+                    request.confidence,
+                    request.files_changed,
+                    request.lines_changed,
                 );
 
                 if let Some(ref manager_name) = manager_name {
@@ -461,6 +488,11 @@ mod tests {
             worktree_dir: PathBuf::from("/tmp/worktree"),
             queued_at: Instant::now(),
             test_passed: true,
+            should_post_merge_verify: true,
+            test_duration_ms: 1,
+            confidence: 0.95,
+            files_changed: 1,
+            lines_changed: 1,
         }
     }
 
@@ -564,6 +596,11 @@ mod tests {
             worktree_dir: worktree_dir.clone(),
             queued_at: Instant::now(),
             test_passed: true,
+            should_post_merge_verify: true,
+            test_duration_ms: 1,
+            confidence: 0.95,
+            files_changed: 1,
+            lines_changed: 1,
         });
 
         daemon.process_merge_queue().unwrap();
@@ -621,6 +658,11 @@ mod tests {
             worktree_dir: worktree_dir,
             queued_at: Instant::now(),
             test_passed: true,
+            should_post_merge_verify: true,
+            test_duration_ms: 1,
+            confidence: 0.95,
+            files_changed: 1,
+            lines_changed: 1,
         });
 
         daemon.process_merge_queue().unwrap();

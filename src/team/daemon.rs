@@ -115,7 +115,7 @@ use self::interventions::OwnedTaskInterventionState;
 use self::launcher::{
     duplicate_claude_session_ids, load_launch_state, member_session_tracker_config,
 };
-pub(crate) use self::merge_queue::MergeQueue;
+pub(crate) use self::merge_queue::{MergeQueue, MergeRequest};
 pub use self::state::load_dispatch_queue_snapshot;
 #[cfg(test)]
 use self::state::{
@@ -996,6 +996,16 @@ impl TeamDaemon {
     #[cfg(test)]
     pub(super) fn set_member_state_for_test(&mut self, engineer: &str, state: MemberState) {
         self.states.insert(engineer.to_string(), state);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queued_merge_count_for_test(&self) -> usize {
+        self.merge_queue.queued_len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn process_merge_queue_for_test(&mut self) -> Result<()> {
+        self.process_merge_queue()
     }
 
     pub(super) fn increment_retry(&mut self, engineer: &str) -> u32 {
