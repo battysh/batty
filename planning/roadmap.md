@@ -30,6 +30,13 @@ The architect receives a periodic nudge to:
 5. Fix the root cause in batty code if found
 6. Restart nether_earth with the fix and verify recovery
 
+### Backlog Discipline
+
+When default `cargo test` is red on `main`, feature and experiment lanes stay in `backlog`.
+That includes Discord/Telegram walk-away work and OMX/clawhip study tasks. They can return to
+`todo` only after the default verification path is green again and the active stabilization
+regressions are closed.
+
 ### Known Failure Modes (Fixed)
 
 These were all discovered and fixed during the nether_earth stabilization session:
