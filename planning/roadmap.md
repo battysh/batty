@@ -69,7 +69,7 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 | Issue | Status | Priority |
 |---|---|---|
 | Verification loop is still open after agent completion | Need daemon-run test/fix/retry cycle before merge | Critical |
-| `cargo test` on `main` is still red in the default verification environment because 15 tmux runtime tests fail session/pane setup with `No such file or directory` in `src/tmux.rs` | Immediate mainline repair is tracked in `#528`, with broader tmux capability/reopen-card hardening staying in `#527` so default verification is green again | Critical |
+| `cargo test` on `main` is still red in the default verification environment because 26 tests fail: 24 `tmux::tests::*` cases now panic with `PoisonError` in `src/tmux.rs`, and 2 daemon `poll_shim` regressions remain open | Immediate mainline repair is tracked in `#528`; keep all feature and rollout lanes gated in `backlog` until the default verification path is green again | Critical |
 | Architect and manager stalls are less visible than engineer stalls | Non-engineer shim stall detection still needs hardening | Critical |
 | Manager inbox noise buries actionable work | Needs batching and signal-first routing | Critical |
 | Auto-merge path is not yet proven end-to-end | Review handoff and merge trigger need production verification | Critical |
@@ -80,7 +80,7 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 
 Daemon-driven board replenishment is now in place. The tact engine detects idle-worker starvation, composes a structured planning prompt from roadmap and board state, routes it to the architect, and creates board tasks automatically.
 
-The highest-friction runtime path is still verification/reopen handling: a fresh `cargo test` run in this environment fails 15 tmux tests with `No such file or directory`, and the work is now split between `#528` for immediate mainline repair and `#527` for broader tmux/reopen-card hardening.
+The highest-friction runtime path is still verification/reopen handling: a fresh `cargo test` run in this environment fails 26 tests, with 24 `tmux::tests::*` panicking on `PoisonError` in `src/tmux.rs` plus 2 daemon `poll_shim` regressions. `#528` remains the active mainline repair lane, and non-stability work stays gated in `backlog` until default verification is green again.
 
 Next hardening work is about execution quality rather than backlog creation:
 - Close the completion loop with automatic test, retry, and escalation behavior
