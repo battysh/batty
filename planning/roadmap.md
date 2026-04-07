@@ -56,6 +56,13 @@ On April 7, 2026, architect verification regained a clean baseline:
 - the default suite still emitted 4 dead-code warnings in `src/team/tact/parser.rs`
 - multiple worktree, merge, and supervision tests exceeded 60 seconds before completing
 
+Later on April 7, 2026, a fresh architect loop found the baseline had regressed:
+
+- `cargo fmt --check` still passed
+- `cargo test` failed at compile time in `src/team/delivery/routing.rs` and `src/team/delivery/verification.rs`
+- the root tree carried partial supervisory-delivery edits while engineer worktrees remained on older completed-task branches
+- board state showed a worker simultaneously claiming multiple in-progress tasks, indicating claim/worktree reconciliation drift still exists under recovery paths
+
 ### Known Failure Modes (Fixed)
 
 These were all discovered and fixed during the nether_earth stabilization session:
@@ -87,9 +94,10 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 
 | Issue | Status | Priority |
 | --- | --- | --- |
-| Default verification is green again, but unattended confidence still needs warning cleanup and shorter long-tail test runtime | Active validation | Critical |
+| Default verification regained a clean baseline, but April 7, 2026 follow-up verification found `main` red again due to partial delivery integration left in the root tree | Active validation | Critical |
 | Architect and manager stalls are less visible than engineer stalls | Needs broader non-engineer stall heuristics | Critical |
 | Manager inbox noise still buries the most actionable review and dispatch items | Needs batching and signal-first routing | Critical |
+| Claim ownership, `active_tasks`, and worktree branch state can still drift after recovery, allowing a worker to appear on multiple in-progress tasks while its worktree stays on an old branch | Needs stronger reconciliation hardening | Critical |
 | Auto-merge needs more production mileage on heterogeneous diffs | Needs wider dogfooding | High |
 | Context exhaustion recovery is reactive; proactive restart/handoff remains open | Planned | Medium |
 | Release automation still ends at local verification instead of a fully automated publish flow | Planned | Medium |
