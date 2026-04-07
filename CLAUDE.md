@@ -1,115 +1,130 @@
-# Batty — Agent Instructions
+<!-- AUTONOMY DIRECTIVE — DO NOT REMOVE -->
+YOU ARE AN AUTONOMOUS CODING AGENT. EXECUTE TASKS TO COMPLETION WITHOUT ASKING FOR PERMISSION.
+DO NOT STOP TO ASK "SHOULD I PROCEED?" — PROCEED. DO NOT WAIT FOR CONFIRMATION ON OBVIOUS NEXT STEPS.
+IF BLOCKED, TRY AN ALTERNATIVE APPROACH. ONLY ASK WHEN TRULY AMBIGUOUS OR DESTRUCTIVE.
+<!-- END AUTONOMY DIRECTIVE -->
 
-## What Is This Project
+# Batty — OMX Orchestrated Development
 
-Batty is a hierarchical agent command system for software development. It runs a small team of agents inside tmux, routes messages between roles, tracks work on a shared Markdown board, and keeps the whole run visible in the terminal.
+You are working on **Batty**, a hierarchical agent command system for software development, written in Rust.
 
-See `planning/architecture.md` for the system design and `planning/dev-philosophy.md` for development principles.
+## Project Context
+
+Batty reads a kanban board (kanban-md), dispatches tasks to coding agents, supervises them through shim-owned PTYs, gates on tests, and merges results. It runs inside tmux with an architect→manager→engineer hierarchy.
+
+Key docs: `planning/architecture.md`, `planning/roadmap.md`, `planning/dev-philosophy.md`, `CLAUDE.md`.
+
+## Task Board — Your Work Source
+
+**All tasks live on the kanban-md board.** Before starting any work, check the board:
+
+```bash
+# See all tasks
+kanban-md list --dir .batty/team_config/board
+
+# See todo tasks (your pickup queue)
+kanban-md list --dir .batty/team_config/board --status todo
+
+# See what's in progress
+kanban-md list --dir .batty/team_config/board --status in-progress
+
+# Read a specific task
+kanban-md show <task-id> --dir .batty/team_config/board
+
+# Claim a task
+kanban-md pick --claim worker-N --move in-progress --dir .batty/team_config/board
+
+# Mark done when complete
+kanban-md move <task-id> done --dir .batty/team_config/board
+```
+
+**Priority order:** critical > high > medium > low. Always pick the highest-priority unblocked todo task.
+
+**Focus tags:** Tasks tagged `orchestration-loop` are the current experiment priority. Tasks tagged `experiment` are research/learning tasks.
 
 ## Tech Stack
 
-- **Language:** Rust
-- **CLI framework:** clap
-- **Terminal runtime:** tmux (pane layout, display-only surfaces when shim mode is active, session persistence)
-- **Agent shim:** PTY-owning subprocess per agent, screen classification, structured socketpair protocol (`src/shim/`)
-- **PTY support:** portable-pty (used by shim runtime for agent PTY management)
+- **Language:** Rust (edition 2024, MSRV 1.85)
+- **CLI framework:** clap 4 (derive)
 - **Async runtime:** tokio
-- **Config format:** YAML (`.batty/team_config/team.yaml`)
-- **Board format:** Markdown tasks with YAML frontmatter
-- **Execution logs:** JSON lines
+- **Terminal runtime:** tmux
+- **Agent shim:** PTY-owning subprocess per agent (`src/shim/`)
+- **Config:** YAML (`.batty/team_config/team.yaml`)
+- **Board:** Markdown tasks with YAML frontmatter (kanban-md)
+- **Logs:** JSON lines (`.batty/team_config/events.jsonl`)
 
 ## Project Structure
 
-```text
-src/               # Rust source
-  shim/            # Agent shim runtime (PTY, state classifier, protocol, chat)
-docs/              # User and reference documentation
-assets/            # Static assets (images, demos)
-scripts/           # Utility scripts
-planning/          # Architecture, roadmap, philosophy docs
-.agents/           # Codex agent rules/skills
-.claude/           # Claude agent rules/skills
-.batty/
-  team_config/
-    team.yaml      # Team topology, routing, layout, timing
-    *.md           # Role prompts used to launch architect/manager/engineer agents
-    board/         # Shared task board and task files
-    events.jsonl   # Team event log
+```
+src/               # Rust source (~2500 tests)
+  team/            # Core team modules (daemon, config, hierarchy, layout, etc.)
+  shim/            # Agent shim runtime (PTY, state classifier, protocol)
+  agent/           # Claude/Codex/Kiro adapters
+  cli.rs           # Clap CLI
+  tmux.rs          # Core tmux ops
+  worktree.rs      # Git worktree lifecycle
+docs/              # User documentation
+planning/          # Architecture, roadmap, philosophy
+.batty/            # Runtime state, config, board
 ```
 
-## Development Principles
+## Key Source Modules
 
-- **Compose, don't monolith.** Use existing CLI tools where possible.
-- **Markdown as backend.** Keep state human-readable and git-versioned.
-- **Minimal code.** Build the smallest thing that works.
-- **No premature abstraction.** Prefer obvious code over clever indirection.
-- **Test what matters.** Focus on tmux supervision, message routing, board state, and prompt handling.
-- **Extensive unit tests.** Every module gets `#[cfg(test)]` coverage for happy paths, edge cases, and failures. Run `cargo test` before committing. If a task adds code, it adds tests.
+| Module | File | Responsibility |
+|--------|------|----------------|
+| Daemon | `src/team/daemon.rs` | Agent spawning, polling loop, state machine |
+| Task loop | `src/team/task_loop.rs` | Auto-dispatch, test gating, merge queue |
+| Config | `src/team/config.rs` | YAML parsing, validation |
+| Completion | `src/team/completion.rs` | Structured completion packets |
+| Board | `src/team/board.rs` | Kanban board operations |
+| Workflow | `src/team/workflow.rs` | Task lifecycle state model |
+| Nudge | `src/team/nudge.rs` | Dependency-aware nudges |
+| Shim | `src/shim/` | PTY ownership, classifier, protocol |
 
-## Test Categories
+## Development Rules
 
-Tests are split into **unit** and **integration**:
+1. **Every change gets tests.** Add tests in `#[cfg(test)] mod tests` at the bottom of each file.
+2. **Run `cargo test` before reporting done.** All tests must pass.
+3. **Run `cargo fmt`** before committing.
+4. **Keep it minimal.** Don't add features beyond the task scope.
+5. **No premature abstraction.** Three similar lines is fine.
+6. **Commit early and often.** `git add -A && git commit -m "<area>: <what changed>"`.
+7. **Build + codesign after changes:** `cargo build --release && cp target/release/batty ~/.cargo/bin/batty && codesign --force --sign - ~/.cargo/bin/batty`
 
-- **Unit tests** (`cargo test`): ~2,509 tests that run without tmux. Safe for CI without a tmux server.
-- **Integration tests** (`cargo test --features integration`): 56 tmux-dependent tests gated behind the `integration` Cargo feature. These require a running tmux server.
+## Verification Protocol
 
-## Monitoring
+Before marking any task done:
 
-- **Telemetry:** SQLite database at `.batty/telemetry.db` — events, agent metrics, task metrics, session summaries
-- **Grafana:** `batty grafana setup` installs Grafana + SQLite plugin, provisions datasource and imports the bundled 34-panel dashboard
-- **Dashboard panels:** stat counters, health gauges, hourly time series (with gap-filling for outages), pie charts, tables
+1. `cargo fmt` — code is formatted
+2. `cargo test` — all tests pass (currently ~2500 tests)
+3. `git diff --stat` — verify you have real changes, not just narration
+4. `git add -A && git commit -m "<area>: <description>"` — committed
+5. `git log --oneline -3` — verify commits exist
 
-Integration tests use `#[cfg_attr(not(feature = "integration"), ignore)]`. Without the feature flag, they are automatically skipped.
+**Zero commits = not done. Zero test changes = not done.**
 
-## Key Dependencies
+## Working on Branches
 
-```toml
-[dependencies]
-clap = { version = "4", features = ["derive"] }
-clap_complete = "4"
-portable-pty = "0.8"
-term_size = "0.3"
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
-toml = "0.8"
-regex = "1"
-anyhow = "1"
-thiserror = "2"
-ctrlc = "3"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-ureq = { version = "2", features = ["json"] }
-```
-
-## Building & Installing
-
-After building, always re-sign the binary before running from `~/.cargo/bin`:
+Create a branch per task to avoid conflicts with other workers:
 
 ```bash
-cargo build --release
-cp target/release/batty ~/.cargo/bin/batty
-codesign --force --sign - ~/.cargo/bin/batty
+git checkout -b worker-N/task-<id>
+# ... do work ...
+git add -A && git commit -m "feat: <description>"
 ```
 
-macOS AppleSystemPolicy (ASP) kills unsigned or stale-signed binaries. Copying over an existing binary invalidates the cached ad-hoc signature, causing ASP to SIGKILL it. `codesign --force --sign -` re-signs with a fresh ad-hoc signature.
+## OMX Workflow Integration
 
-## CLI Commands
+When running under `$team` or `$ralph`:
+- Pick tasks from the kanban-md board, not from free-form prompts
+- Report progress by updating task status on the board
+- Mark tasks done only after verification passes
+- If blocked, move task back to todo and document the blocker
 
-- `batty init`: bootstrap Batty assets for a repo
-- `batty start`: start the team runtime
-- `batty stop`: stop the active team runtime
-- `batty attach`: attach to a running tmux session
-- `batty status`: show team/runtime status
-- `batty send`: send a message to another role
-- `batty assign`: assign work to an engineer
-- `batty inbox`: show queued messages for a role
-- `batty read`: read a message or inbox entry
-- `batty ack`: acknowledge a message
-- `batty board`: open the shared board
-- `batty merge`: merge completed work back to the main branch
-- `batty validate`: validate team configuration and runtime prerequisites
-- `batty config`: show resolved configuration
-- `batty telegram`: manage Telegram integration and setup
-- `batty completions`: generate shell completions
+## clawhip Event Reporting
+
+If clawhip is running, events are emitted automatically via OMX hooks. Key events:
+- `session.started` — worker began
+- `session.blocked` — worker hit a blocker
+- `session.finished` — worker completed task
+- `test-started` / `test-finished` / `test-failed` — test lifecycle
