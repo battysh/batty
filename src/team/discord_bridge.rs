@@ -147,12 +147,18 @@ impl TeamDaemon {
         let Some(config) = discord_channel_config(&self.config.team_config) else {
             return Ok(());
         };
+
+        // Skip noisy daemon internals — only send events humans care about.
+        if is_noise_event(event) {
+            return Ok(());
+        }
+
         let Some(channel_id) = event_channel_id(config, event) else {
             return Ok(());
         };
 
-        let title = event_title(event);
-        let description = event_description(event);
+        let title = friendly_event_title(event);
+        let description = friendly_event_description(event);
         let color = event_color(event);
         bot.send_embed(channel_id, &title, &description, color)
     }
@@ -182,6 +188,22 @@ fn event_channel_id<'a>(config: &'a ChannelConfig, event: &TeamEvent) -> Option<
     }
 }
 
+/// Events that are daemon internals — not interesting to a human reading Discord.
+fn is_noise_event(event: &TeamEvent) -> bool {
+    matches!(
+        event.event.as_str(),
+        "daemon_heartbeat"
+            | "message_routed"
+            | "state_reconciliation"
+            | "task_claim_extended"
+            | "task_claim_progress"
+            | "task_claim_warning"
+            | "loop_step_error"
+            | "worktree_refreshed"
+            | "board_task_archived"
+    )
+}
+
 fn is_attention_event(event: &TeamEvent) -> bool {
     let name = event.event.as_str();
     name.contains("error")
@@ -189,65 +211,153 @@ fn is_attention_event(event: &TeamEvent) -> bool {
         || name.contains("panic")
         || name.contains("escalat")
         || name.contains("blocked")
+        || name == "stall_detected"
 }
 
 fn is_agent_event(event: &TeamEvent) -> bool {
     matches!(
         event.event.as_str(),
-        "daemon_started"
+        "agent_spawned"
+            | "daemon_started"
             | "daemon_stopped"
-            | "daemon_reloading"
-            | "daemon_reloaded"
             | "context_exhausted"
-    ) || event.event.starts_with("agent_")
+            | "stall_detected"
+            | "narration_rejection"
+            | "pattern_detected"
+    )
 }
 
-fn event_title(event: &TeamEvent) -> String {
-    event.event.replace('_', " ")
+/// Human-readable title with emoji — makes Discord scannable.
+fn friendly_event_title(event: &TeamEvent) -> String {
+    let role_prefix = event
+        .role
+        .as_deref()
+        .or(event.from.as_deref())
+        .map(|r| match r {
+            "architect" => "🏗️ Architect",
+            "manager" => "📋 Manager",
+            r if r.starts_with("eng") => "🔧 Engineer",
+            _ => "⚙️ System",
+        })
+        .unwrap_or("⚙️ System");
+
+    let action = match event.event.as_str() {
+        "task_assigned" => "📌 Task Assigned",
+        "task_claim_created" => "✋ Task Claimed",
+        "task_escalated" => "🚨 Task Escalated",
+        "task_stale" => "⏰ Task Stale",
+        "verification_phase_changed" => "🔍 Verification Update",
+        "verification_evidence_collected" => "✅ Tests Passed",
+        "agent_spawned" => "🚀 Agent Started",
+        "daemon_started" => "🟢 Batty Started",
+        "daemon_stopped" => "🔴 Batty Stopped",
+        "stall_detected" => "🚧 Agent Stalled",
+        "context_exhausted" => "💾 Context Exhausted",
+        "narration_rejection" => "🚫 Narration Rejected",
+        "auto_doctor_action" => "🩺 Auto-Doctor",
+        "pattern_detected" => "📊 Pattern Detected",
+        other => return format!("{role_prefix} — {}", other.replace('_', " ")),
+    };
+
+    format!("{role_prefix} — {action}")
 }
 
-fn event_description(event: &TeamEvent) -> String {
-    let mut lines = Vec::new();
-    if let Some(role) = &event.role {
-        lines.push(format!("Role: {role}"));
-    }
-    if let Some(task) = &event.task {
-        lines.push(format!("Task: {task}"));
-    }
-    if let Some(from) = &event.from {
-        lines.push(format!("From: {from}"));
-    }
-    if let Some(to) = &event.to {
-        lines.push(format!("To: {to}"));
-    }
-    if let Some(recipient) = &event.recipient {
-        lines.push(format!("Recipient: {recipient}"));
-    }
-    if let Some(reason) = &event.reason {
-        lines.push(format!("Reason: {reason}"));
-    }
-    if let Some(step) = &event.step {
-        lines.push(format!("Step: {step}"));
-    }
-    if let Some(error) = &event.error {
-        lines.push(format!("Error: {error}"));
-    }
-    if let Some(details) = &event.details {
-        lines.push(format!("Details: {details}"));
-    }
-    if let Some(backend) = &event.backend {
-        lines.push(format!("Backend: {backend}"));
-    }
-    if let Some(success) = event.success {
-        lines.push(format!("Success: {success}"));
-    }
-    if let Some(uptime_secs) = event.uptime_secs {
-        lines.push(format!("Uptime: {uptime_secs}s"));
-    }
-    if lines.is_empty() {
-        format!("Timestamp: {}", event.ts)
-    } else {
-        lines.join("\n")
+/// Rich description with the actual content people want to read.
+fn friendly_event_description(event: &TeamEvent) -> String {
+    match event.event.as_str() {
+        "task_assigned" => {
+            let engineer = event.to.as_deref().unwrap_or("?");
+            let task = event.task.as_deref().unwrap_or("unknown task");
+            // Show first 200 chars of the task — the actual work being assigned
+            let preview = if task.len() > 200 {
+                format!(
+                    "{}...",
+                    &task[..task
+                        .char_indices()
+                        .take_while(|&(i, _)| i < 200)
+                        .last()
+                        .map(|(i, c)| i + c.len_utf8())
+                        .unwrap_or(200)]
+                )
+            } else {
+                task.to_string()
+            };
+            format!("**{engineer}** picked up:\n>>> {preview}")
+        }
+        "task_claim_created" => {
+            let role = event.role.as_deref().unwrap_or("?");
+            let task = event.task.as_deref().unwrap_or("?");
+            format!("**{role}** claimed task **#{task}**")
+        }
+        "task_escalated" => {
+            let from = event.from.as_deref().unwrap_or("?");
+            let reason = event.reason.as_deref().unwrap_or("no reason given");
+            let task = event.task.as_deref().unwrap_or("?");
+            format!("**{from}** escalated **#{task}**\n> {reason}")
+        }
+        "task_stale" => {
+            let role = event.role.as_deref().unwrap_or("?");
+            let task = event.task.as_deref().unwrap_or("?");
+            let reason = event.reason.as_deref().unwrap_or("no progress");
+            format!("**{role}** on **#{task}** — {reason}")
+        }
+        "verification_phase_changed" => {
+            let step = event.step.as_deref().unwrap_or("?");
+            let task = event.task.as_deref().unwrap_or("?");
+            format!("Task **#{task}** → **{step}**")
+        }
+        "verification_evidence_collected" => {
+            let task = event.task.as_deref().unwrap_or("?");
+            let details = event.details.as_deref().unwrap_or("tests passed");
+            format!("Task **#{task}** — {details}")
+        }
+        "agent_spawned" => {
+            let role = event.role.as_deref().unwrap_or("?");
+            let backend = event.backend.as_deref().unwrap_or("?");
+            format!("**{role}** launched on **{backend}**")
+        }
+        "daemon_started" => {
+            let uptime = event
+                .uptime_secs
+                .map(|s| format!(" (uptime: {s}s)"))
+                .unwrap_or_default();
+            format!("Team is running{uptime}")
+        }
+        "daemon_stopped" => "Team session ended".to_string(),
+        "stall_detected" => {
+            let role = event.role.as_deref().unwrap_or("?");
+            let reason = event.reason.as_deref().unwrap_or("unresponsive");
+            format!("**{role}** appears stuck — {reason}")
+        }
+        "context_exhausted" => {
+            let role = event.role.as_deref().unwrap_or("?");
+            format!("**{role}** hit context limit — restarting with handoff")
+        }
+        "narration_rejection" => {
+            let role = event.role.as_deref().unwrap_or("?");
+            format!("**{role}** tried to narrate instead of code — rejected, retrying")
+        }
+        "auto_doctor_action" => {
+            let details = event.details.as_deref().unwrap_or("board maintenance");
+            format!("{details}")
+        }
+        _ => {
+            // Fallback: show whatever fields are populated, but concisely
+            let mut parts = Vec::new();
+            if let Some(details) = &event.details {
+                parts.push(details.clone());
+            } else if let Some(reason) = &event.reason {
+                parts.push(reason.clone());
+            }
+            if let Some(task) = &event.task {
+                parts.push(format!("Task: #{task}"));
+            }
+            if parts.is_empty() {
+                event.event.replace('_', " ")
+            } else {
+                parts.join(" — ")
+            }
+        }
     }
 }
 
