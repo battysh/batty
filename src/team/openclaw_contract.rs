@@ -1098,15 +1098,7 @@ fn member_health(row: &status::TeamStatusRow) -> MemberHealth {
     ) || row.state == "crashed"
     {
         MemberHealth::Unhealthy
-    } else if row.health.restart_count > 0
-        || row.health.context_exhaustion_count > 0
-        || row.health.delivery_failure_count > 0
-        || row.health.has_supervisory_warning()
-        || matches!(
-            row.health.backend_health,
-            crate::agent::BackendHealth::Degraded
-        )
-    {
+    } else if row.health.has_operator_warning() {
         MemberHealth::Warning
     } else {
         MemberHealth::Healthy
@@ -1303,6 +1295,34 @@ mod tests {
             Some("eng-1 stayed in Working for 5m (timeout=60s)")
         );
         assert_eq!(status.members[1].review_task_ids, vec!["43".to_string()]);
+    }
+
+    #[test]
+    fn member_health_warns_on_supervisory_stall_only() {
+        let row = status::TeamStatusRow {
+            name: "eng-1".to_string(),
+            role: "engineer".to_string(),
+            role_type: "engineer".to_string(),
+            agent: Some("codex".to_string()),
+            reports_to: Some("manager".to_string()),
+            state: "working".to_string(),
+            pending_inbox: 0,
+            triage_backlog: 0,
+            active_owned_tasks: Vec::new(),
+            review_owned_tasks: Vec::new(),
+            signal: None,
+            runtime_label: Some("working".to_string()),
+            worktree_staleness: None,
+            health: status::AgentHealthSummary {
+                stall_reason: Some("supervisory_stalled".to_string()),
+                stall_summary: Some("eng-1 stayed in Working for 5m".to_string()),
+                ..status::AgentHealthSummary::default()
+            },
+            health_summary: "stall:supervisory_stalled".to_string(),
+            eta: "-".to_string(),
+        };
+
+        assert_eq!(member_health(&row), MemberHealth::Warning);
     }
 
     #[test]

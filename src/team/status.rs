@@ -86,6 +86,14 @@ impl AgentHealthSummary {
         self.stall_reason.is_some() || self.stall_summary.is_some()
     }
 
+    pub(crate) fn has_operator_warning(&self) -> bool {
+        self.restart_count > 0
+            || self.context_exhaustion_count > 0
+            || self.delivery_failure_count > 0
+            || self.has_supervisory_warning()
+            || !self.backend_health.is_healthy()
+    }
+
     pub(crate) fn supervisory_status_token(&self) -> Option<String> {
         if !self.has_supervisory_warning() {
             return None;
@@ -1145,12 +1153,7 @@ pub(crate) fn build_team_status_health(
         rows.iter().filter(|row| row.role_type != "User").collect();
     let mut unhealthy_members = member_rows
         .iter()
-        .filter(|row| {
-            row.health.restart_count > 0
-                || row.health.context_exhaustion_count > 0
-                || row.health.delivery_failure_count > 0
-                || !row.health.backend_health.is_healthy()
-        })
+        .filter(|row| row.health.has_operator_warning())
         .map(|row| row.name.clone())
         .collect::<Vec<_>>();
     unhealthy_members.sort();
@@ -3093,6 +3096,35 @@ mod tests {
         }];
         let health = build_team_status_health(&rows, true, false);
         assert_eq!(health.unhealthy_members, vec!["eng-bad".to_string()]);
+    }
+
+    #[test]
+    fn build_team_status_health_counts_supervisory_stall_warning() {
+        let rows = vec![TeamStatusRow {
+            name: "eng-stalled".to_string(),
+            role: "engineer".to_string(),
+            role_type: "Engineer".to_string(),
+            agent: Some("codex".to_string()),
+            reports_to: Some("manager".to_string()),
+            state: "working".to_string(),
+            pending_inbox: 0,
+            triage_backlog: 0,
+            active_owned_tasks: Vec::new(),
+            review_owned_tasks: Vec::new(),
+            signal: None,
+            runtime_label: Some("working".to_string()),
+            worktree_staleness: None,
+            health: AgentHealthSummary {
+                stall_reason: Some("supervisory_stalled".to_string()),
+                stall_summary: Some("eng-stalled stayed in Working for 5m".to_string()),
+                ..AgentHealthSummary::default()
+            },
+            health_summary: "stall:supervisory_stalled".to_string(),
+            eta: "-".to_string(),
+        }];
+
+        let health = build_team_status_health(&rows, true, false);
+        assert_eq!(health.unhealthy_members, vec!["eng-stalled".to_string()]);
     }
 
     // --- SQLite telemetry migration tests ---
