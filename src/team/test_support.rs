@@ -177,11 +177,15 @@ pub(crate) fn setup_fake_claude(tmp: &tempfile::TempDir, member_name: &str) -> (
 
     let fake_log = tmp.path().join(format!("{member_name}-fake-claude.log"));
     let fake_claude = fake_bin.join("claude");
+    if let Some(parent) = fake_log.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
     std::fs::write(
         &fake_claude,
         format!(
-            "#!/bin/bash\nprintf '%s\\n' \"$*\" >> '{}'\nsleep 5\n",
-            fake_log.display()
+            "#!/bin/bash\nmkdir -p '{}'\nprintf '%s\\n' \"$*\" >> '{}'\nsleep 5\n",
+            fake_log.parent().unwrap().display(),
+            fake_log.display(),
         ),
     )
     .unwrap();
@@ -210,11 +214,15 @@ pub(crate) fn setup_fake_backend(
 
     let fake_log = tmp.path().join(log_name);
     let fake_program = fake_bin.join(program);
+    if let Some(parent) = fake_log.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
     std::fs::write(
         &fake_program,
         format!(
-            "#!/bin/bash\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
-            fake_log.display()
+            "#!/bin/bash\nmkdir -p '{}'\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+            fake_log.parent().unwrap().display(),
+            fake_log.display(),
         ),
     )
     .unwrap();
