@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::warn;
 
-use super::TaskSpec;
+use super::{GeneratedTask, TaskSpec};
 use crate::task::load_tasks_from_dir;
 
 #[derive(Debug, Deserialize)]
@@ -112,6 +112,31 @@ fn build_create_task_args(spec: &TaskSpec) -> Vec<String> {
     args
 }
 
+fn normalize_generated_text(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    let mut last_was_space = false;
+
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch);
+            last_was_space = false;
+        } else if !last_was_space {
+            normalized.push(' ');
+            last_was_space = true;
+        }
+    }
+
+    normalized.trim().to_string()
+}
+
+fn normalize_generated_title(title: &str) -> String {
+    normalize_generated_text(title)
+}
+
+fn normalize_generated_body(body: &str) -> String {
+    normalize_generated_text(body)
+}
+
 fn normalize_reopen_title(title: &str) -> String {
     let mut normalized = String::with_capacity(title.len());
     let mut last_was_space = false;
@@ -158,6 +183,37 @@ fn existing_open_reopen_titles(board_dir: &Path) -> std::collections::HashSet<St
         .collect()
 }
 
+fn generated_task_equivalence_key(task: &GeneratedTask) -> String {
+    let mut tags = task
+        .tags
+        .iter()
+        .map(|tag| normalize_generated_text(tag))
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>();
+    tags.sort();
+    tags.dedup();
+
+    let priority = task
+        .priority
+        .as_deref()
+        .map(normalize_generated_text)
+        .unwrap_or_default();
+    let depends_on = task
+        .depends_on
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+
+    format!(
+        "{}|{}|{}|{}",
+        normalize_generated_body(&task.body),
+        priority,
+        tags.join(","),
+        depends_on
+    )
+}
+
 fn looks_like_raw_test_log(body: &str) -> bool {
     let has_running_header = body.lines().any(|line| {
         let trimmed = line.trim();
@@ -176,7 +232,9 @@ fn looks_like_raw_test_log(body: &str) -> bool {
             || trimmed.contains("No such file or directory")
     });
 
-    (has_running_header && test_line_count >= 3) || (test_line_count >= 5 && has_failure_marker)
+    (has_running_header && has_failure_marker && test_line_count >= 1)
+        || (has_running_header && test_line_count >= 3)
+        || (test_line_count >= 5 && has_failure_marker)
 }
 
 fn summarize_reopen_body(body: &str) -> String {
@@ -226,14 +284,91 @@ fn summarize_reopen_body(body: &str) -> String {
     summary
 }
 
-fn sanitize_task_spec(spec: &TaskSpec) -> TaskSpec {
-    let mut sanitized = spec.clone();
-    sanitized.body = if is_reopen_title(&spec.title) && looks_like_raw_test_log(&spec.body) {
-        summarize_reopen_body(&spec.body)
-    } else {
-        spec.body.trim().to_string()
-    };
-    sanitized
+fn sanitize_generated_task(spec: &GeneratedTask) -> Option<GeneratedTask> {
+    let title = spec.title.trim();
+    let body = spec.body.trim();
+
+    if title.is_empty() {
+        warn!("rejecting generated task with empty title");
+        return None;
+    }
+    if body.is_empty() {
+        warn!(title, "rejecting generated task with empty body");
+        return None;
+    }
+    if looks_like_raw_test_log(body) {
+        warn!(title, "rejecting generated task with raw log body");
+        return None;
+    }
+
+    Some(GeneratedTask {
+        title: title.to_string(),
+        body: body.to_string(),
+        priority: spec.priority.as_ref().map(|value| value.trim().to_string()),
+        depends_on: spec.depends_on.clone(),
+        tags: spec.tags.iter().map(|tag| tag.trim().to_string()).collect(),
+    })
+}
+
+pub(crate) fn dedupe_generated_tasks(
+    existing: &[crate::task::Task],
+    proposed: Vec<GeneratedTask>,
+) -> Vec<GeneratedTask> {
+    let mut open_titles = existing
+        .iter()
+        .filter(|task| is_open_task_status(&task.status))
+        .map(|task| normalize_generated_title(&task.title))
+        .filter(|title| !title.is_empty())
+        .collect::<std::collections::HashSet<_>>();
+    let mut open_specs = existing
+        .iter()
+        .filter(|task| is_open_task_status(&task.status))
+        .filter_map(|task| {
+            let body = task.description.trim();
+            if body.is_empty() {
+                return None;
+            }
+            Some(generated_task_equivalence_key(&GeneratedTask {
+                title: task.title.clone(),
+                body: body.to_string(),
+                priority: Some(task.priority.clone()),
+                depends_on: task.depends_on.clone(),
+                tags: task.tags.clone(),
+            }))
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let mut seen_titles = std::collections::HashSet::new();
+    let mut seen_specs = std::collections::HashSet::new();
+    let mut deduped = Vec::with_capacity(proposed.len());
+
+    for task in proposed {
+        let title_key = normalize_generated_title(&task.title);
+        let spec_key = generated_task_equivalence_key(&task);
+        let duplicate_title = !title_key.is_empty()
+            && (!seen_titles.insert(title_key.clone()) || open_titles.contains(&title_key));
+        let duplicate_spec = !spec_key.is_empty()
+            && (!seen_specs.insert(spec_key.clone()) || open_specs.contains(&spec_key));
+
+        if duplicate_title || duplicate_spec {
+            warn!(
+                title = %task.title,
+                duplicate_title,
+                duplicate_spec,
+                "suppressing duplicate generated task"
+            );
+            continue;
+        }
+
+        if !title_key.is_empty() {
+            open_titles.insert(title_key);
+        }
+        if !spec_key.is_empty() {
+            open_specs.insert(spec_key);
+        }
+        deduped.push(task);
+    }
+
+    deduped
 }
 
 fn create_board_tasks_with_program(
@@ -245,15 +380,14 @@ fn create_board_tasks_with_program(
         anyhow::bail!("board directory does not exist: {}", board_dir.display());
     }
 
-    let mut open_reopen_titles = existing_open_reopen_titles(board_dir);
-    let mut created_ids = Vec::with_capacity(specs.len());
-    for spec in specs {
-        let normalized_title = normalize_reopen_title(&spec.title);
-        if is_reopen_title(&spec.title) && open_reopen_titles.contains(&normalized_title) {
-            continue;
-        }
-
-        let sanitized = sanitize_task_spec(spec);
+    let existing_tasks = load_tasks_from_dir(&board_dir.join("tasks")).unwrap_or_default();
+    let generated = specs
+        .iter()
+        .filter_map(sanitize_generated_task)
+        .collect::<Vec<_>>();
+    let deduped = dedupe_generated_tasks(&existing_tasks, generated);
+    let mut created_ids = Vec::with_capacity(deduped.len());
+    for sanitized in deduped {
         let args = build_create_task_args(&sanitized);
         let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let output = crate::team::board_cmd::run_board_with_program(program, board_dir, &arg_refs)
@@ -268,9 +402,6 @@ fn create_board_tasks_with_program(
             .parse::<u32>()
             .with_context(|| format!("invalid task id returned by kanban-md: '{task_id}'"))?;
         created_ids.push(parsed_id);
-        if is_reopen_title(&sanitized.title) {
-            open_reopen_titles.insert(normalized_title);
-        }
     }
     Ok(created_ids)
 }
@@ -530,7 +661,7 @@ No title here."#;
     }
 
     #[test]
-    fn create_board_tasks_sanitizes_reopen_log_dump() {
+    fn create_board_tasks_rejects_raw_log_dump() {
         let tmp = tempfile::tempdir().unwrap();
         let board_dir = tmp.path().join("board");
         std::fs::create_dir_all(board_dir.join("tasks")).unwrap();
@@ -563,22 +694,10 @@ test result: FAILED. 3011 passed; 14 failed; 119 ignored; 0 measured; 0 filtered
         let ids =
             create_board_tasks_with_program(&specs, &board_dir, fake_kanban.to_str().unwrap())
                 .unwrap();
-        assert_eq!(ids, vec![1]);
-
-        let created = std::fs::read_to_string(board_dir.join("tasks").join("001-task.md")).unwrap();
-        assert!(created.contains("Automatic reopen after failed verification."));
-        assert!(created.contains("tmux::tests::split_window_horizontal_creates_new_pane"));
-        assert!(created.contains("No such file or directory"));
-        assert!(!created.contains("running 3144 tests"));
-        assert!(!created.contains("default_mode_is_interactive ... ok"));
+        assert!(ids.is_empty());
 
         let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks")).unwrap();
-        assert_eq!(tasks.len(), 1);
-        assert!(
-            tasks[0]
-                .description
-                .contains("Automatic reopen after failed verification.")
-        );
+        assert!(tasks.is_empty());
     }
 
     #[test]
@@ -611,6 +730,67 @@ test result: FAILED. 3011 passed; 14 failed; 119 ignored; 0 measured; 0 filtered
         let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks")).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, 41);
+    }
+
+    #[test]
+    fn create_board_tasks_skips_duplicate_open_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        std::fs::create_dir_all(board_dir.join("tasks")).unwrap();
+        let fake_kanban = setup_fake_kanban(&tmp).join("kanban-md");
+
+        write_task_file(&board_dir, 41, "Ship planning telemetry", "todo");
+
+        let specs = vec![TaskSpec {
+            title: "Ship planning telemetry".into(),
+            body: "Fresh body that should still be suppressed.".into(),
+            priority: Some("high".into()),
+            depends_on: vec![],
+            tags: vec!["tact".into()],
+        }];
+
+        let ids =
+            create_board_tasks_with_program(&specs, &board_dir, fake_kanban.to_str().unwrap())
+                .unwrap();
+        assert!(ids.is_empty());
+
+        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks")).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, 41);
+    }
+
+    #[test]
+    fn create_board_tasks_skips_equivalent_generated_specs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        std::fs::create_dir_all(board_dir.join("tasks")).unwrap();
+        let fake_kanban = setup_fake_kanban(&tmp).join("kanban-md");
+
+        let specs = vec![
+            TaskSpec {
+                title: "Plan planning telemetry".into(),
+                body: "Record planning cycle events in the orchestrator log.".into(),
+                priority: Some("high".into()),
+                depends_on: vec![],
+                tags: vec!["tact".into(), "telemetry".into()],
+            },
+            TaskSpec {
+                title: "Backfill planning telemetry".into(),
+                body: "Record planning cycle events in the orchestrator log.".into(),
+                priority: Some("high".into()),
+                depends_on: vec![],
+                tags: vec!["telemetry".into(), "tact".into()],
+            },
+        ];
+
+        let ids =
+            create_board_tasks_with_program(&specs, &board_dir, fake_kanban.to_str().unwrap())
+                .unwrap();
+        assert_eq!(ids, vec![1]);
+
+        let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks")).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Plan planning telemetry");
     }
 
     #[test]

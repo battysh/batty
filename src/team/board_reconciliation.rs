@@ -34,6 +34,16 @@ impl Default for ReconciliationOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BoardFinding {
+    ReviewTaskAlreadyMerged {
+        task_id: u32,
+        title: String,
+        reason: String,
+    },
+    ReviewTaskMissingMetadata {
+        task_id: u32,
+        title: String,
+        reasons: Vec<String>,
+    },
     DoneTaskHasUnmergedBranch {
         task_id: u32,
         title: String,
@@ -77,6 +87,16 @@ pub(crate) struct ReconciliationReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AppliedFix {
+    RequeuedReviewTask {
+        task_id: u32,
+        title: String,
+        reasons: Vec<String>,
+    },
+    CompletedMergedReviewTask {
+        task_id: u32,
+        title: String,
+        reason: String,
+    },
     UnblockedTask {
         task_id: u32,
         title: String,
@@ -119,6 +139,33 @@ pub(crate) fn scan_board_health(
     let archive_candidate_ids: HashSet<u32> = archive_candidates.iter().map(|task| task.id).collect();
 
     for task in &tasks {
+        if task.status == "review" {
+            let review_meta = crate::team::workflow::WorkflowMeta {
+                state: crate::team::workflow::TaskState::Review,
+                worktree_path: task.worktree_path.clone(),
+                branch: task.branch.clone(),
+                commit: task.commit.clone(),
+                ..crate::team::workflow::WorkflowMeta::default()
+            };
+            match crate::team::review::validate_review_candidate(project_root, &review_meta)? {
+                crate::team::review::ReviewEligibility::Eligible => {}
+                crate::team::review::ReviewEligibility::AlreadyMerged { reason } => {
+                    findings.push(BoardFinding::ReviewTaskAlreadyMerged {
+                        task_id: task.id,
+                        title: task.title.clone(),
+                        reason,
+                    });
+                }
+                crate::team::review::ReviewEligibility::MissingMetadata { reasons } => {
+                    findings.push(BoardFinding::ReviewTaskMissingMetadata {
+                        task_id: task.id,
+                        title: task.title.clone(),
+                        reasons,
+                    });
+                }
+            }
+        }
+
         if task.status == "blocked"
             && !task.depends_on.is_empty()
             && task
@@ -192,7 +239,9 @@ pub(crate) fn scan_board_health(
                 .filter(|finding| {
                     matches!(
                         finding,
-                        BoardFinding::BlockedTaskResolved { .. }
+                        BoardFinding::ReviewTaskAlreadyMerged { .. }
+                            | BoardFinding::ReviewTaskMissingMetadata { .. }
+                            | BoardFinding::BlockedTaskResolved { .. }
                             | BoardFinding::OrphanedInProgressTask { .. }
                             | BoardFinding::DoneTaskReadyToArchive { .. }
                     )
@@ -238,6 +287,36 @@ pub(crate) fn apply_safe_fixes(board_dir: &Path, report: &ReconciliationReport) 
 
     for finding in &report.findings {
         match finding {
+            BoardFinding::ReviewTaskAlreadyMerged {
+                task_id,
+                title,
+                reason,
+            } => {
+                if crate::team::task_cmd::find_task_path(board_dir, *task_id).is_ok() {
+                    crate::team::task_cmd::transition_task(board_dir, *task_id, "done")?;
+                    fixes.push(AppliedFix::CompletedMergedReviewTask {
+                        task_id: *task_id,
+                        title: title.clone(),
+                        reason: reason.clone(),
+                    });
+                }
+            }
+            BoardFinding::ReviewTaskMissingMetadata {
+                task_id,
+                title,
+                reasons,
+            } => {
+                if crate::team::task_cmd::find_task_path(board_dir, *task_id).is_ok() {
+                    let _ = crate::team::task_cmd::transition_task(board_dir, *task_id, "in-progress");
+                    crate::team::task_cmd::transition_task(board_dir, *task_id, "todo")?;
+                    crate::team::task_cmd::unclaim_task(board_dir, *task_id)?;
+                    fixes.push(AppliedFix::RequeuedReviewTask {
+                        task_id: *task_id,
+                        title: title.clone(),
+                        reasons: reasons.clone(),
+                    });
+                }
+            }
             BoardFinding::BlockedTaskResolved { task_id, title, .. } => {
                 if crate::team::task_cmd::find_task_path(board_dir, *task_id).is_ok() {
                     crate::team::task_cmd::transition_task(board_dir, *task_id, "todo")?;
@@ -281,6 +360,25 @@ pub(crate) fn render_report(report: &ReconciliationReport) -> String {
 
     for finding in &report.findings {
         match finding {
+            BoardFinding::ReviewTaskAlreadyMerged {
+                task_id,
+                title,
+                reason,
+            } => {
+                out.push_str(&format!(
+                    "WARN: task #{task_id} ({title}) is parked in review even though it is already merged ({reason})\n"
+                ));
+            }
+            BoardFinding::ReviewTaskMissingMetadata {
+                task_id,
+                title,
+                reasons,
+            } => {
+                out.push_str(&format!(
+                    "WARN: task #{task_id} ({title}) is parked in review without actionable workflow metadata ({})\n",
+                    reasons.join("; ")
+                ));
+            }
             BoardFinding::DoneTaskHasUnmergedBranch {
                 task_id,
                 title,
@@ -438,6 +536,7 @@ mod tests {
     use super::*;
     use crate::team::test_support::{git_ok, init_git_repo};
     use std::fs;
+    use std::process::Command;
     use tempfile::tempdir;
 
     fn write_task(
@@ -448,6 +547,7 @@ mod tests {
         claimed_by: Option<&str>,
         depends_on: &[u32],
         branch: Option<&str>,
+        commit: Option<&str>,
         worktree_path: Option<&Path>,
         completed: Option<&str>,
     ) {
@@ -469,6 +569,7 @@ mod tests {
             .map(|owner| format!("claimed_by: {owner}\n"))
             .unwrap_or_default();
         let branch = branch.map(|value| format!("branch: {value}\n")).unwrap_or_default();
+        let commit = commit.map(|value| format!("commit: {value}\n")).unwrap_or_default();
         let worktree_path = worktree_path
             .map(|path| format!("worktree_path: {}\n", path.display()))
             .unwrap_or_default();
@@ -478,7 +579,7 @@ mod tests {
         fs::write(
             tasks_dir.join(format!("{id:03}-{title}.md")),
             format!(
-                "---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: high\n{claimed_by}{depends}{branch}{worktree_path}{completed}---\n\nTask body.\n"
+                "---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: high\n{claimed_by}{depends}{branch}{commit}{worktree_path}{completed}---\n\nTask body.\n"
             ),
         )
         .unwrap();
@@ -488,8 +589,8 @@ mod tests {
     fn scan_detects_resolved_blocked_task() {
         let tmp = tempdir().unwrap();
         let repo = init_git_repo(&tmp, "reconcile_blocked");
-        write_task(&repo, 1, "dep", "done", None, &[], None, None, None);
-        write_task(&repo, 2, "blocked", "blocked", None, &[1], None, None, None);
+        write_task(&repo, 1, "dep", "done", None, &[], None, None, None, None);
+        write_task(&repo, 2, "blocked", "blocked", None, &[1], None, None, None, None);
 
         let report = scan_board_health(
             &repo,
@@ -523,6 +624,7 @@ mod tests {
             Some("eng-1/task-2"),
             None,
             None,
+            None,
         );
 
         let report = scan_board_health(
@@ -549,6 +651,7 @@ mod tests {
             "in-progress",
             Some("eng-1"),
             &[],
+            None,
             None,
             None,
             None,
@@ -596,6 +699,7 @@ mod tests {
             Some("eng-1"),
             &[],
             Some("eng-1/task-9"),
+            None,
             Some(&worktree_dir),
             None,
         );
@@ -632,6 +736,7 @@ mod tests {
             &[],
             None,
             None,
+            None,
             Some("2026-04-01T00:00:00Z"),
         );
 
@@ -655,12 +760,103 @@ mod tests {
     }
 
     #[test]
+    fn scan_detects_review_task_already_merged_and_safe_fix_marks_done() {
+        let tmp = tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "reconcile_review_merged");
+        let board_dir = repo.join(".batty").join("team_config").join("board");
+
+        git_ok(&repo, &["checkout", "-b", "eng-1/task-12"]);
+        fs::write(repo.join("src").join("reviewed.rs"), "pub fn reviewed() {}\n").unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(&repo, &["commit", "-m", "review candidate"]);
+        let commit = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        git_ok(&repo, &["checkout", "main"]);
+        git_ok(&repo, &["merge", "--no-ff", "eng-1/task-12", "-m", "merge review candidate"]);
+
+        write_task(
+            &repo,
+            12,
+            "review-merged",
+            "review",
+            Some("eng-1"),
+            &[],
+            Some("eng-1/task-12"),
+            Some(&commit),
+            None,
+            None,
+        );
+
+        let report = scan_board_health(&repo, &board_dir, &ReconciliationOptions::default()).unwrap();
+        assert!(report.findings.iter().any(|finding| matches!(
+            finding,
+            BoardFinding::ReviewTaskAlreadyMerged { task_id: 12, .. }
+        )));
+
+        let applied = apply_safe_fixes(&board_dir, &report).unwrap();
+        assert!(applied.fixes.iter().any(|fix| matches!(
+            fix,
+            AppliedFix::CompletedMergedReviewTask { task_id: 12, .. }
+        )));
+
+        let tasks = load_tasks_from_dir(&board_dir.join("tasks")).unwrap();
+        assert_eq!(tasks.iter().find(|task| task.id == 12).unwrap().status, "done");
+    }
+
+    #[test]
+    fn scan_detects_review_task_missing_metadata_and_requeues_it() {
+        let tmp = tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "reconcile_review_missing");
+        let board_dir = repo.join(".batty").join("team_config").join("board");
+
+        write_task(
+            &repo,
+            13,
+            "review-missing-meta",
+            "review",
+            Some("eng-1"),
+            &[],
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let report = scan_board_health(&repo, &board_dir, &ReconciliationOptions::default()).unwrap();
+        assert!(report.findings.iter().any(|finding| matches!(
+            finding,
+            BoardFinding::ReviewTaskMissingMetadata { task_id: 13, .. }
+        )));
+
+        let applied = apply_safe_fixes(&board_dir, &report).unwrap();
+        assert!(applied.fixes.iter().any(|fix| matches!(
+            fix,
+            AppliedFix::RequeuedReviewTask { task_id: 13, .. }
+        )));
+
+        let tasks = load_tasks_from_dir(&board_dir.join("tasks")).unwrap();
+        let task = tasks.iter().find(|task| task.id == 13).unwrap();
+        assert_eq!(task.status, "todo");
+        assert!(task.claimed_by.is_none());
+        assert!(task.review_owner.is_none());
+    }
+
+    #[test]
     fn apply_safe_fixes_unblocks_requeues_and_archives() {
         let tmp = tempdir().unwrap();
         let repo = init_git_repo(&tmp, "reconcile_apply");
         let board_dir = repo.join(".batty").join("team_config").join("board");
-        write_task(&repo, 1, "dep", "done", None, &[], None, None, None);
-        write_task(&repo, 2, "blocked", "blocked", None, &[1], None, None, None);
+        write_task(&repo, 1, "dep", "done", None, &[], None, None, None, None);
+        write_task(&repo, 2, "blocked", "blocked", None, &[1], None, None, None, None);
         write_task(
             &repo,
             3,
@@ -668,6 +864,7 @@ mod tests {
             "in-progress",
             Some("eng-1"),
             &[],
+            None,
             None,
             None,
             None,
@@ -679,6 +876,7 @@ mod tests {
             "done",
             None,
             &[],
+            None,
             None,
             None,
             Some("2026-04-01T00:00:00Z"),
