@@ -80,6 +80,13 @@ At 05:07 EDT on April 7, 2026, the next root-tree verification found the deliver
 - `cargo test` failed compiling `src/team/delivery/routing.rs` because a `TeamDaemon` test helper there also omitted `discord_bot`, `discord_event_cursor`, and `recent_escalations`
 - the same file also constructed `ChannelConfig` without the newer `agents_channel_id`, `commands_channel_id`, and `events_channel_id` fields, so the green-main task now needs to cover both daemon and config test-builder drift
 
+At 05:15 EDT on April 7, 2026, the next architect loop confirmed the red-main break is broader than delivery fixtures alone:
+
+- `cargo fmt --check` still passed
+- `cargo test` failed compiling `src/team/daemon/health/poll_shim.rs` because `TeamDaemon` no longer exposes the expected `supervisory_stall_summary` and `handle_supervisory_stall` paths there
+- `cargo test` also failed compiling `src/team/openclaw_contract.rs` because that contract still expects a stale `stall_summary` field instead of the current `AgentHealthSummary` shape
+- re-queuing stale tasks `#536` and `#540` required `--claim`, and both task files still retained `claimed_by` metadata after the rollback until it was cleared manually, confirming the claim/status reconciliation bug also affects `in-progress -> todo` recovery paths
+
 ### Known Failure Modes (Fixed)
 
 These were all discovered and fixed during the nether_earth stabilization session:
@@ -111,7 +118,7 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 
 | Issue | Status | Priority |
 | --- | --- | --- |
-| Default verification regained a clean baseline, but April 7, 2026 follow-up verification found `main` red again due to partial delivery integration left in the root tree | Active validation | Critical |
+| Default verification regained a clean baseline, but April 7, 2026 follow-up verification found `main` red again due to partial delivery integration plus a broken supervisory-health contract across `poll_shim`, `status`, and `openclaw_contract` | Active validation | Critical |
 | Architect and manager stalls are less visible than engineer stalls | Needs broader non-engineer stall heuristics | Critical |
 | Manager inbox noise still buries the most actionable review and dispatch items | Needs batching and signal-first routing | Critical |
 | Claim ownership, `active_tasks`, and worktree branch state can still drift after recovery, allowing a worker to appear on multiple in-progress tasks while its worktree stays on an old branch | Needs stronger reconciliation hardening | Critical |
