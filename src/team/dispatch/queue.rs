@@ -323,7 +323,22 @@ impl TeamDaemon {
             let mut selected_task = None;
             let mut least_conflicted: Option<(crate::task::Task, Vec<OverlapConflict>)> = None;
 
+            // Skip overlap check when all engineers use worktrees — conflicts
+            // are handled at merge time (cherry-pick), not dispatch time.
+            let all_engineers_use_worktrees = self
+                .config
+                .team_config
+                .roles
+                .iter()
+                .filter(|r| r.role_type == crate::team::config::RoleType::Engineer)
+                .all(|r| r.use_worktrees);
+
             for task in available_tasks {
+                if all_engineers_use_worktrees {
+                    selected_task = Some(task);
+                    break;
+                }
+
                 let conflicts =
                     find_overlapping_tasks(&task, &in_progress_tasks, self.project_root());
                 if conflicts.is_empty() {
