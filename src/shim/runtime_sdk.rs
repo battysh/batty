@@ -289,10 +289,12 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
 
                     // Track cumulative token usage from result messages.
                     if let Some(ref usage) = msg.usage {
-                        st.cumulative_input_tokens =
-                            st.cumulative_input_tokens.saturating_add(usage.input_tokens);
-                        st.cumulative_output_tokens =
-                            st.cumulative_output_tokens.saturating_add(usage.output_tokens);
+                        st.cumulative_input_tokens = st
+                            .cumulative_input_tokens
+                            .saturating_add(usage.input_tokens);
+                        st.cumulative_output_tokens = st
+                            .cumulative_output_tokens
+                            .saturating_add(usage.output_tokens);
                     }
 
                     // Check for context exhaustion
@@ -335,17 +337,15 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                     // Check for context approaching limit (proactive early warning).
                     // Emit once per session to avoid spamming the daemon.
                     if !st.context_approaching_emitted {
-                        let text_signal = common::detect_context_approaching_limit(
-                            &st.accumulated_response,
-                        );
+                        let text_signal =
+                            common::detect_context_approaching_limit(&st.accumulated_response);
                         if text_signal {
                             st.context_approaching_emitted = true;
                             let input_tokens = st.cumulative_input_tokens;
                             let output_tokens = st.cumulative_output_tokens;
                             drop(st);
                             let _ = evt_channel.send(&Event::ContextApproaching {
-                                message: "Agent output contains context-pressure signals"
-                                    .into(),
+                                message: "Agent output contains context-pressure signals".into(),
                                 input_tokens,
                                 output_tokens,
                             });
@@ -975,6 +975,9 @@ mod tests {
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 0,
             test_failure_iterations: 0,
+            context_approaching_emitted: false,
+            cumulative_input_tokens: 0,
+            cumulative_output_tokens: 0,
         };
         assert_eq!(st.state, ShimState::Idle);
         assert!(st.session_id.is_empty());
@@ -1068,6 +1071,9 @@ mod tests {
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 12,
             test_failure_iterations: 0,
+            context_approaching_emitted: false,
+            cumulative_input_tokens: 0,
+            cumulative_output_tokens: 0,
         }));
 
         let forced = force_stalled_completion(&state, "sdk-test").expect("forced completion");
@@ -1101,6 +1107,9 @@ mod tests {
             }]),
             cumulative_output_bytes: 0,
             test_failure_iterations: 0,
+            context_approaching_emitted: false,
+            cumulative_input_tokens: 0,
+            cumulative_output_tokens: 0,
         }));
 
         let forced = force_stalled_completion(&state, "sdk-test").expect("forced completion");
@@ -1131,6 +1140,9 @@ mod tests {
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 0,
             test_failure_iterations: 0,
+            context_approaching_emitted: false,
+            cumulative_input_tokens: 0,
+            cumulative_output_tokens: 0,
         }));
         let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
         let mut last_keepalive = Instant::now();
@@ -1155,6 +1167,9 @@ mod tests {
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 0,
             test_failure_iterations: 0,
+            context_approaching_emitted: false,
+            cumulative_input_tokens: 0,
+            cumulative_output_tokens: 0,
         }));
         let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
         let mut last_keepalive = Instant::now() - Duration::from_secs(SDK_KEEPALIVE_IDLE_SECS + 1);
@@ -1185,6 +1200,9 @@ mod tests {
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 0,
             test_failure_iterations: 0,
+            context_approaching_emitted: false,
+            cumulative_input_tokens: 0,
+            cumulative_output_tokens: 0,
         }));
         let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
         let mut last_keepalive = Instant::now() - Duration::from_secs(SDK_KEEPALIVE_IDLE_SECS + 1);
