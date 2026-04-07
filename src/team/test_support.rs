@@ -73,6 +73,18 @@ pub(crate) fn git_ok(dir: &Path, args: &[&str]) {
     );
 }
 
+/// Check if a worktree is clean, ignoring batty-managed dirs (.batty/, .cargo/).
+pub(crate) fn assert_worktree_clean(dir: &Path) {
+    let status = git_stdout(
+        dir,
+        &["status", "--porcelain", "--", ".", ":(exclude).batty", ":(exclude).cargo"],
+    );
+    assert!(
+        status.trim().is_empty(),
+        "worktree should be clean (ignoring .batty/.cargo), got: {status}"
+    );
+}
+
 pub(crate) fn git_stdout(dir: &Path, args: &[&str]) -> String {
     let output = git(dir, args);
     assert!(
