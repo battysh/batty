@@ -341,6 +341,9 @@ pub(super) fn architect_utilization_intervention_signature(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::team::test_support::{
+        TestDaemonBuilder, architect_member, engineer_member, manager_member,
+    };
 
     #[test]
     fn utilization_key_uses_utilization_prefix() {
@@ -381,5 +384,29 @@ mod tests {
         let sig =
             architect_utilization_intervention_signature(&[], &[], &["eng-3".to_string()], &[]);
         assert_eq!(sig, "idle-free:eng-3");
+    }
+
+    #[test]
+    fn utilization_message_keeps_batchable_prefix_for_supervisors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let architect = architect_member("architect");
+        let daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect.clone(),
+                manager_member("manager", Some("architect")),
+                engineer_member("eng-1", Some("manager"), false),
+            ])
+            .build();
+
+        let message = daemon.build_architect_utilization_message(
+            &architect,
+            &[],
+            &[],
+            &["eng-1".to_string()],
+            &[],
+        );
+
+        assert!(message.starts_with("Utilization recovery needed:"));
+        assert!(message.contains("Recover throughput now:"));
     }
 }
