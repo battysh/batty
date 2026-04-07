@@ -114,11 +114,23 @@ impl TeamDaemon {
             .cloned()
             .collect();
 
-        for architect in &architect_members {
-            if !self.is_member_idle(&architect.name) {
+        for architect in architect_members {
+            let stall_threshold = self.config.team_config.workflow_policy.stall_threshold_secs;
+            let supervisory_stalled =
+                self.is_supervisory_lane_stalled(&architect.name, stall_threshold);
+            if !self.is_member_idle(&architect.name) && !supervisory_stalled {
                 continue;
             }
-            if !self.ready_for_idle_automation(&inbox_root, &architect.name) {
+            if supervisory_stalled {
+                let reason = self.supervisory_progress_signal(&architect.name, stall_threshold);
+                self.record_supervisory_stall_reason(
+                    &architect.name,
+                    stall_threshold,
+                    reason.stall_reason(),
+                );
+            }
+            if !supervisory_stalled && !self.ready_for_idle_automation(&inbox_root, &architect.name)
+            {
                 continue;
             }
 
@@ -141,7 +153,7 @@ impl TeamDaemon {
             }
 
             let text = self.build_architect_utilization_message(
-                architect,
+                &architect,
                 &working_engineers,
                 &idle_active_engineers,
                 &idle_unassigned_engineers,
