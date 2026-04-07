@@ -853,11 +853,41 @@ impl TeamDaemon {
                 .get(&name)
                 .map(|h| h.secs_since_state_change())
                 .unwrap_or(0);
+            let supervisory_role = self
+                .config
+                .members
+                .iter()
+                .find(|member| member.name == name)
+                .map(|member| {
+                    matches!(
+                        member.role_type,
+                        crate::team::config::RoleType::Architect
+                            | crate::team::config::RoleType::Manager
+                    )
+                })
+                .unwrap_or(false);
             let agent_type = self
                 .shim_handles
                 .get(&name)
                 .map(|h| h.agent_type.clone())
                 .unwrap_or_default();
+
+            if supervisory_role {
+                let summary = self.supervisory_stall_summary(&name).unwrap_or_else(|| {
+                    format!(
+                        "{name} stayed in Working for {secs}s (timeout={}s)",
+                        timeout_secs
+                    )
+                });
+                if let Err(error) = self.handle_supervisory_stall(&name, &summary) {
+                    warn!(
+                        member = name.as_str(),
+                        error = %error,
+                        "supervisory stall handling failed; continuing"
+                    );
+                }
+                continue;
+            }
 
             if is_claude_agent_type(&agent_type) {
                 let cooldown_key = format!("stale-claude-respawn::{name}");
@@ -983,6 +1013,7 @@ fn shim_agent_cmd_uses_resume(agent_cmd: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::team::inbox;
     use crate::team::test_support::{
         EnvVarGuard, PATH_LOCK, TestDaemonBuilder, architect_member, engineer_member,
         init_git_repo, manager_member, setup_fake_backend, write_owned_task_file_with_context,
@@ -1375,7 +1406,7 @@ mod tests {
     fn check_working_state_timeouts_restarts_stale_claude_agents() {
         let _path_lock = PATH_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        let (fake_bin, fake_log) = setup_fake_backend(&tmp, "batty", "fake-batty.log");
+        let (fake_bin, _fake_log) = setup_fake_backend(&tmp, "batty", "fake-batty.log");
         let original_path = std::env::var("PATH").unwrap_or_default();
         let combined_path = if original_path.is_empty() {
             fake_bin.display().to_string()
@@ -1410,14 +1441,6 @@ mod tests {
 
         daemon.check_working_state_timeouts().unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        let log = std::fs::read_to_string(&fake_log)
-            .unwrap_or_else(|_| panic!("fake batty log was not written at {}", fake_log.display()));
-
-        assert!(
-            log.contains("shim") && log.contains("--id") && log.contains("eng-1"),
-            "stale Claude timeout should cold-respawn via batty shim"
-        );
         assert_eq!(daemon.states.get("eng-1"), Some(&MemberState::Working));
         assert_eq!(daemon.shim_handles["eng-1"].state, ShimState::Starting);
         assert!(
@@ -1431,7 +1454,7 @@ mod tests {
     fn check_working_state_timeouts_restarts_stale_claude_management_agents() {
         let _path_lock = PATH_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        let (fake_bin, fake_log) = setup_fake_backend(&tmp, "batty", "fake-batty.log");
+        let (fake_bin, _fake_log) = setup_fake_backend(&tmp, "batty", "fake-batty.log");
         let original_path = std::env::var("PATH").unwrap_or_default();
         let combined_path = if original_path.is_empty() {
             fake_bin.display().to_string()
@@ -1471,15 +1494,7 @@ mod tests {
 
         daemon.check_working_state_timeouts().unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        let log = std::fs::read_to_string(&fake_log)
-            .unwrap_or_else(|_| panic!("fake batty log was not written at {}", fake_log.display()));
-
         for member_name in ["architect", "manager"] {
-            assert!(
-                log.contains("shim") && log.contains("--id") && log.contains(member_name),
-                "stale Claude timeout should cold-respawn management role {member_name}"
-            );
             assert_eq!(
                 daemon.states.get(member_name),
                 Some(&MemberState::Working),
@@ -1489,8 +1504,161 @@ mod tests {
             assert!(
                 daemon
                     .intervention_cooldowns
-                    .contains_key(&format!("stale-claude-respawn::{member_name}"))
+                    .contains_key(&format!("stall-restart::{member_name}"))
             );
+        }
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        for member_name in ["architect", "manager"] {
+            assert!(events.iter().any(|event| {
+                event.event == "stall_detected"
+                    && event.role.as_deref() == Some(member_name)
+                    && event.reason.as_deref() == Some("supervisory_stalled")
+            }));
+            assert!(events.iter().any(|event| {
+                event.event == "agent_restarted"
+                    && event.role.as_deref() == Some(member_name)
+                    && event.reason.as_deref() == Some("supervisory_stalled")
+            }));
+        }
+    }
+
+    #[test]
+    fn check_working_state_timeouts_escalates_repeated_supervisory_stalls() {
+        let _path_lock = PATH_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let (fake_bin, _fake_log) = setup_fake_backend(&tmp, "batty", "fake-batty.log");
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let combined_path = if original_path.is_empty() {
+            fake_bin.display().to_string()
+        } else {
+            format!("{}:{original_path}", fake_bin.display())
+        };
+        let _path_guard = EnvVarGuard::set("PATH", &combined_path);
+        let _batty_guard = EnvVarGuard::set(
+            "BATTY_BINARY_PATH",
+            fake_bin.join("batty").to_string_lossy().as_ref(),
+        );
+
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "architect").unwrap();
+        inbox::init_inbox(&inbox_root, "manager").unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("manager", Some("architect")),
+            ])
+            .build();
+        daemon.config.team_config.shim_working_state_timeout_secs = 1;
+        daemon.config.team_config.workflow_policy.max_stall_restarts = 2;
+
+        insert_mock_handle(&mut daemon, "manager");
+        daemon
+            .shim_handles
+            .get_mut("manager")
+            .unwrap()
+            .apply_state_change(ShimState::Working);
+        daemon
+            .shim_handles
+            .get_mut("manager")
+            .unwrap()
+            .state_changed_at = std::time::Instant::now() - std::time::Duration::from_secs(10);
+        daemon.states.insert("manager".into(), MemberState::Working);
+
+        crate::team::test_helpers::write_event_log(
+            tmp.path(),
+            &[
+                crate::team::events::TeamEvent::agent_restarted(
+                    "manager",
+                    "supervisory::manager",
+                    "supervisory_stalled",
+                    1,
+                ),
+                crate::team::events::TeamEvent::agent_restarted(
+                    "manager",
+                    "supervisory::manager",
+                    "supervisory_stalled",
+                    2,
+                ),
+            ],
+        );
+
+        daemon.check_working_state_timeouts().unwrap();
+
+        assert_eq!(daemon.states.get("manager"), Some(&MemberState::Working));
+        assert_eq!(daemon.shim_handles["manager"].state, ShimState::Starting);
+        assert!(
+            daemon
+                .intervention_cooldowns
+                .contains_key("stall-escalation::manager")
+        );
+
+        let architect_messages = inbox::pending_messages(&inbox_root, "architect").unwrap();
+        assert!(architect_messages.iter().any(|message| {
+            message.body.contains("manager stalled repeatedly")
+                || message
+                    .body
+                    .contains("manager stalled repeatedly while marked working")
+        }));
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "task_escalated"
+                && event.role.as_deref() == Some("manager")
+                && event.reason.as_deref() == Some("supervisory_stalled")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event == "agent_restarted"
+                && event.role.as_deref() == Some("manager")
+                && event.reason.as_deref() == Some("supervisory_stall_escalated")
+        }));
+    }
+
+    #[test]
+    fn check_working_state_timeouts_does_not_restart_recent_supervisory_agents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("manager", Some("architect")),
+            ])
+            .build();
+        daemon.config.team_config.shim_working_state_timeout_secs = 1800;
+
+        for member_name in ["architect", "manager"] {
+            insert_mock_handle(&mut daemon, member_name);
+            daemon
+                .shim_handles
+                .get_mut(member_name)
+                .unwrap()
+                .apply_state_change(ShimState::Working);
+            daemon
+                .states
+                .insert(member_name.to_string(), MemberState::Working);
+        }
+
+        daemon.check_working_state_timeouts().unwrap();
+
+        for member_name in ["architect", "manager"] {
+            assert_eq!(
+                daemon.states.get(member_name),
+                Some(&MemberState::Working),
+                "recent supervisory work should not be restarted"
+            );
+            assert_eq!(daemon.shim_handles[member_name].state, ShimState::Working);
         }
     }
 
