@@ -816,6 +816,8 @@ fn maybe_intervene_triage_backlog_marks_member_working_after_live_delivery() {
         .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
         .build();
 
+    daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+    daemon.config.team_config.orchestrator_pane = true;
     let root = inbox::inboxes_root(tmp.path());
     inbox::init_inbox(&root, "lead").unwrap();
     inbox::init_inbox(&root, "eng-1").unwrap();
@@ -1730,14 +1732,18 @@ fn single_role_topology_nudges_idle_member() {
     let root = inbox::inboxes_root(tmp.path());
     inbox::init_inbox(&root, "solo").unwrap();
 
+    daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+    daemon.config.team_config.orchestrator_pane = true;
     backdate_idle_grace(&mut daemon, "solo");
     daemon.maybe_fire_nudges().unwrap();
 
     let pending = inbox::pending_messages(&root, "solo").unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].from, "daemon");
-    assert!(pending[0].body.contains("Solo mode should keep moving."));
-    assert!(pending[0].body.contains("Idle nudge:"));
+    assert!(pending.is_empty());
+    let orchestrator_log =
+        std::fs::read_to_string(crate::team::orchestrator_log_path(tmp.path())).unwrap();
+    assert!(orchestrator_log.contains("diverted nudge"));
+    assert!(orchestrator_log.contains("solo"));
+    assert!(orchestrator_log.contains("Solo mode should keep moving."));
     assert_eq!(daemon.states.get("solo"), Some(&MemberState::Idle));
     assert!(
         daemon
@@ -2183,6 +2189,7 @@ fn maybe_fire_nudges_keeps_member_idle_when_delivery_falls_back_to_inbox() {
         )]))
         .build();
 
+    daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
     backdate_idle_grace(&mut daemon, "scientist");
     daemon.maybe_fire_nudges().unwrap();
 
@@ -2192,10 +2199,12 @@ fn maybe_fire_nudges_keeps_member_idle_when_delivery_falls_back_to_inbox() {
     assert!(schedule.fired_this_idle);
 
     let messages = inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "scientist").unwrap();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].from, "daemon");
-    assert!(messages[0].body.contains("Please make progress."));
-    assert!(messages[0].body.contains("Idle nudge:"));
+    assert!(messages.is_empty());
+    let orchestrator_log =
+        std::fs::read_to_string(crate::team::orchestrator_log_path(tmp.path())).unwrap();
+    assert!(orchestrator_log.contains("diverted nudge"));
+    assert!(orchestrator_log.contains("scientist"));
+    assert!(orchestrator_log.contains("Please make progress."));
 }
 
 #[test]

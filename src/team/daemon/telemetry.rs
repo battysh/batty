@@ -601,7 +601,7 @@ impl TeamDaemon {
         self.config.team_config.orchestrator_enabled()
     }
 
-    pub(super) fn record_orchestrator_action(&self, action: impl AsRef<str>) {
+    pub(crate) fn record_orchestrator_action(&self, action: impl AsRef<str>) {
         if !self.orchestrator_enabled() {
             return;
         }
