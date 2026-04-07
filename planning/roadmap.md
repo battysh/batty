@@ -95,6 +95,13 @@ At 05:23 EDT on April 7, 2026, another architect loop re-verified `main` after t
 - `cargo test` still failed compiling `src/team/status.rs` and `src/team/openclaw_contract.rs` because `AgentHealthSummary` initializers and contract mapping are still split between the older stall-summary shape and the newer supervisory-digest fields
 - review tasks `#536` and `#540` were re-queued to `todo`, and `kanban-md move ... todo --claim <worker>` again preserved `claimed_by` metadata until it was cleared manually
 
+At 05:28 EDT on April 7, 2026, the next architect loop re-checked both the repo and the daemon log:
+
+- `cargo fmt --check` still passed
+- `cargo test` still failed compiling `src/team/delivery/routing.rs` and `src/team/test_support.rs` on stale `TeamDaemon` / `ChannelConfig` literals, plus `src/team/status.rs` and `src/team/openclaw_contract.rs` on stale `AgentHealthSummary` initializers, confirming `#540` and `#543` remain the active red-main fix lanes
+- board state was idle but not empty: no `in-progress` or `review` tasks, with nine existing `todo` tasks before the loop and a new critical `todo` task `#544` added for the supervisory shim disconnect path
+- `.batty/daemon.log` showed architect/manager stale-Pong recovery escalating into `auto-restarting stale Claude shim`, followed by multiple shim-side `orchestrator disconnected` / `Broken pipe` lines, indicating the supervisory restart path can still collapse control-plane delivery instead of recovering cleanly
+
 ### Known Failure Modes (Fixed)
 
 These were all discovered and fixed during the nether_earth stabilization session:
@@ -130,6 +137,7 @@ These were all discovered and fixed during the nether_earth stabilization sessio
 | Architect and manager stalls are less visible than engineer stalls | Needs broader non-engineer stall heuristics | Critical |
 | Manager inbox noise still buries the most actionable review and dispatch items | Needs batching and signal-first routing | Critical |
 | Claim ownership, `active_tasks`, and worktree branch state can still drift after recovery, allowing a worker to appear on multiple in-progress tasks while its worktree stays on an old branch | Needs stronger reconciliation hardening | Critical |
+| Supervisory shim restarts can still degrade into `orchestrator disconnected` / `Broken pipe` control-plane loss instead of a clean respawn with pending-work replay | Newly observed on April 7, 2026; tracked in task `#544` | Critical |
 | Auto-merge needs more production mileage on heterogeneous diffs | Needs wider dogfooding | High |
 | Context exhaustion recovery is reactive; proactive restart/handoff remains open | Planned | Medium |
 | Release automation still ends at local verification instead of a fully automated publish flow | Planned | Medium |
