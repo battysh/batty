@@ -200,7 +200,7 @@ fn is_noise_event(event: &TeamEvent) -> bool {
             | "task_claim_warning"
             | "loop_step_error"
             | "worktree_refreshed"
-            | "board_task_archived"
+            | "board_task_archived" // dispatch_overlap_skipped is kept — explains why tasks aren't being assigned
     )
 }
 
@@ -290,11 +290,6 @@ fn friendly_event_description(event: &TeamEvent) -> String {
                 format!("**{engineer}** picked up:\n**{title}**\n||{body_preview}||")
             }
         }
-        "task_claim_created" => {
-            let role = event.role.as_deref().unwrap_or("?");
-            let task = event.task.as_deref().unwrap_or("?");
-            format!("**{role}** claimed task **#{task}**")
-        }
         "task_escalated" => {
             let from = event.from.as_deref().unwrap_or("?");
             let reason = event.reason.as_deref().unwrap_or("no reason given");
@@ -306,16 +301,6 @@ fn friendly_event_description(event: &TeamEvent) -> String {
             let task = event.task.as_deref().unwrap_or("?");
             let reason = event.reason.as_deref().unwrap_or("no progress");
             format!("**{role}** on **#{task}** — {reason}")
-        }
-        "verification_phase_changed" => {
-            let step = event.step.as_deref().unwrap_or("?");
-            let task = event.task.as_deref().unwrap_or("?");
-            format!("Task **#{task}** → **{step}**")
-        }
-        "verification_evidence_collected" => {
-            let task = event.task.as_deref().unwrap_or("?");
-            let details = event.details.as_deref().unwrap_or("tests passed");
-            format!("Task **#{task}** — {details}")
         }
         "agent_spawned" => {
             let role = event.role.as_deref().unwrap_or("?");
@@ -343,25 +328,85 @@ fn friendly_event_description(event: &TeamEvent) -> String {
             format!("**{role}** tried to narrate instead of code — rejected, retrying")
         }
         "auto_doctor_action" => {
-            let details = event.details.as_deref().unwrap_or("board maintenance");
-            format!("{details}")
+            let action = event.details.as_deref().unwrap_or("board maintenance");
+            let role = event.role.as_deref().unwrap_or("");
+            let task = event.task.as_deref().unwrap_or("");
+            if !role.is_empty() && !task.is_empty() {
+                format!("Fixed **{role}**'s task **#{task}**: {action}")
+            } else {
+                format!("{action}")
+            }
+        }
+        "dispatch_overlap_skipped" => {
+            let task = event.task.as_deref().unwrap_or("?");
+            let blocking = event.reason.as_deref().unwrap_or("another task");
+            let files = event.details.as_deref().unwrap_or("shared files");
+            format!(
+                "Task **#{task}** can't be assigned yet — it touches the same files as in-progress **#{blocking}**\nConflicting: `{files}`"
+            )
+        }
+        "task_claim_created" => {
+            let role = event.role.as_deref().unwrap_or("?");
+            let task = event.task.as_deref().unwrap_or("?");
+            format!("**{role}** claimed task **#{task}**")
+        }
+        "verification_phase_changed" => {
+            let task = event.task.as_deref().unwrap_or("?");
+            let step = event.step.as_deref().unwrap_or("?");
+            let role = event.role.as_deref().unwrap_or("?");
+            match step {
+                "testing" => format!("**{role}** is running tests for task **#{task}**"),
+                "passed" | "verification_passed" => {
+                    format!("Task **#{task}** passed verification — ready for merge")
+                }
+                "failed" => {
+                    format!("Task **#{task}** failed verification — will retry or escalate")
+                }
+                "retrying" => format!("Task **#{task}** retrying after test failure"),
+                _ => format!("Task **#{task}** → **{step}**"),
+            }
+        }
+        "verification_evidence_collected" => {
+            let task = event.task.as_deref().unwrap_or("?");
+            let details = event.details.as_deref().unwrap_or("evidence collected");
+            format!("Task **#{task}** — {details}")
         }
         _ => {
-            // Fallback: show whatever fields are populated, but concisely
-            let mut parts = Vec::new();
-            if let Some(details) = &event.details {
-                parts.push(details.clone());
-            } else if let Some(reason) = &event.reason {
-                parts.push(reason.clone());
+            // Fallback: construct a human-readable sentence from available fields.
+            // Every event that reaches Discord should answer: "what happened and why should I care?"
+            let verb = event.event.replace('_', " ");
+            let mut sentence = String::new();
+
+            // Who
+            if let Some(role) = event.role.as_deref().or(event.from.as_deref()) {
+                sentence.push_str(&format!("**{role}**"));
             }
-            if let Some(task) = &event.task {
-                parts.push(format!("Task: #{task}"));
-            }
-            if parts.is_empty() {
-                event.event.replace('_', " ")
+
+            // What
+            if sentence.is_empty() {
+                sentence.push_str(&verb);
             } else {
-                parts.join(" — ")
+                sentence.push_str(&format!(": {verb}"));
             }
+
+            // Task context
+            if let Some(task) = &event.task {
+                sentence.push_str(&format!(" on **#{task}**"));
+            }
+
+            // Why / details
+            if let Some(details) = &event.details {
+                sentence.push_str(&format!("\n> {details}"));
+            } else if let Some(reason) = &event.reason {
+                sentence.push_str(&format!("\n> {reason}"));
+            }
+
+            // Error context
+            if let Some(error) = &event.error {
+                sentence.push_str(&format!("\n⚠️ {error}"));
+            }
+
+            sentence
         }
     }
 }
