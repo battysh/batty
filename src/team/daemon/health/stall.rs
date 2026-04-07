@@ -9,6 +9,138 @@ use super::super::*;
 use super::{CONTEXT_RESTART_COOLDOWN, format_checkpoint_section};
 
 impl TeamDaemon {
+    fn stall_restart_cooldown_key(member_name: &str) -> String {
+        format!("stall-restart::{member_name}")
+    }
+
+    fn stall_escalation_cooldown_key(member_name: &str) -> String {
+        format!("stall-escalation::{member_name}")
+    }
+
+    fn supervisory_stall_task_key(member_name: &str) -> String {
+        format!("supervisory::{member_name}")
+    }
+
+    pub(in super::super) fn supervisory_stall_summary(&self, member_name: &str) -> Option<String> {
+        let member = self.config.members.iter().find(|m| m.name == member_name)?;
+        let handle = self.shim_handles.get(member_name)?;
+        let secs = handle.secs_since_state_change();
+        let activity = handle
+            .secs_since_last_activity()
+            .map(|last| format!(", last activity {last}s ago"))
+            .unwrap_or_default();
+        Some(format!(
+            "{} ({}) stayed in Working for {}s{}; output_bytes={}, input_bytes={}",
+            member.name, member.role_name, secs, activity, handle.output_bytes, handle.input_bytes
+        ))
+    }
+
+    pub(in super::super) fn handle_supervisory_stall(
+        &mut self,
+        member_name: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let Some(member) = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let stall_secs = self
+            .shim_handles
+            .get(member_name)
+            .map(|handle| handle.secs_since_state_change())
+            .unwrap_or_default();
+        let summary = self
+            .supervisory_stall_summary(member_name)
+            .unwrap_or_else(|| reason.to_string());
+        let restart_cooldown_key = Self::stall_restart_cooldown_key(member_name);
+        let restart_on_cooldown = self
+            .intervention_cooldowns
+            .get(&restart_cooldown_key)
+            .is_some_and(|last| last.elapsed() < CONTEXT_RESTART_COOLDOWN);
+        if restart_on_cooldown {
+            return Ok(());
+        }
+
+        warn!(
+            member = %member_name,
+            stall_secs,
+            summary = %summary,
+            "supervisory agent stalled in working state"
+        );
+
+        let mut event = TeamEvent::stall_detected(member_name, None, stall_secs);
+        event.reason = Some("supervisory_stalled".to_string());
+        event.details = Some(summary.clone());
+        self.emit_event(event);
+        self.record_orchestrator_action(format!(
+            "stall: detected supervisory stall for {} ({})",
+            member_name, summary
+        ));
+
+        let prior_restarts = self.supervisory_stall_restart_count(member_name)?;
+        let max_restarts = self.config.team_config.workflow_policy.max_stall_restarts;
+        let synthetic_task = Self::supervisory_stall_task_key(member_name);
+
+        if prior_restarts >= max_restarts {
+            let escalation_cooldown_key = Self::stall_escalation_cooldown_key(member_name);
+            let escalation_on_cooldown = self
+                .intervention_cooldowns
+                .get(&escalation_cooldown_key)
+                .is_some_and(|last| last.elapsed() < CONTEXT_RESTART_COOLDOWN);
+            if escalation_on_cooldown {
+                return Ok(());
+            }
+
+            self.escalate_supervisory_stall(&member, &summary, prior_restarts + 1)?;
+            self.handle_shim_cold_respawn(member_name, "supervisory_stall_escalated")?;
+            let notice = format!(
+                "Batty detected repeated supervisory stalls and escalated for manual attention.\n{summary}\n\nResume from the current worktree state, review any pending inbox items, and continue without repeating completed work."
+            );
+            if let Err(error) = self.queue_message("daemon", member_name, &notice) {
+                warn!(
+                    member = %member_name,
+                    error = %error,
+                    "failed to inject supervisory stall escalation notice"
+                );
+            }
+            self.record_agent_restarted(
+                member_name,
+                synthetic_task,
+                "supervisory_stall_escalated",
+                prior_restarts + 1,
+            );
+            self.intervention_cooldowns
+                .insert(escalation_cooldown_key, Instant::now());
+            return Ok(());
+        }
+
+        self.handle_shim_cold_respawn(member_name, "supervisory_stalled")?;
+        let notice = format!(
+            "Batty restarted you after a supervisory stall.\n{summary}\n\nResume from the current worktree state, review pending inbox items, and continue without repeating completed work."
+        );
+        if let Err(error) = self.queue_message("daemon", member_name, &notice) {
+            warn!(
+                member = %member_name,
+                error = %error,
+                "failed to inject supervisory stall restart notice"
+            );
+        }
+        self.record_agent_restarted(
+            member_name,
+            synthetic_task,
+            "supervisory_stalled",
+            prior_restarts + 1,
+        );
+        self.intervention_cooldowns
+            .insert(restart_cooldown_key, Instant::now());
+        Ok(())
+    }
+
     /// Handle a stalled agent — no output change for longer than the configured threshold.
     #[allow(dead_code)]
     pub(in super::super) fn handle_stalled_agent(
@@ -27,7 +159,7 @@ impl TeamDaemon {
             return Ok(());
         };
 
-        let stall_cooldown_key = format!("stall-restart::{member_name}");
+        let stall_cooldown_key = Self::stall_restart_cooldown_key(member_name);
         let on_cooldown = self
             .intervention_cooldowns
             .get(&stall_cooldown_key)
@@ -60,7 +192,7 @@ impl TeamDaemon {
 
         if prior_restarts >= max_restarts {
             // Escalate to manager instead of restarting again.
-            let escalation_key = format!("stall-escalation::{member_name}");
+            let escalation_key = Self::stall_escalation_cooldown_key(member_name);
             let escalation_on_cooldown = self
                 .intervention_cooldowns
                 .get(&escalation_key)
@@ -166,6 +298,55 @@ impl TeamDaemon {
             .filter(|event| event.reason.as_deref() == Some("stalled"))
             .count() as u32;
         Ok(count)
+    }
+
+    fn supervisory_stall_restart_count(&self, member_name: &str) -> Result<u32> {
+        let events_path = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let count = super::super::super::events::read_events(&events_path)?
+            .into_iter()
+            .filter(|event| event.event == "agent_restarted")
+            .filter(|event| event.role.as_deref() == Some(member_name))
+            .filter(|event| event.reason.as_deref() == Some("supervisory_stalled"))
+            .count() as u32;
+        Ok(count)
+    }
+
+    fn escalate_supervisory_stall(
+        &mut self,
+        member: &MemberInstance,
+        summary: &str,
+        restart_count: u32,
+    ) -> Result<()> {
+        let target = member.reports_to.clone().or_else(|| {
+            self.architect_names()
+                .into_iter()
+                .find(|name| name != &member.name)
+        });
+        if let Some(target) = target {
+            let body = format!(
+                "{} stalled repeatedly while marked working.\n{}\n\nBatty already restarted this role {} time(s) and is escalating for manual attention.",
+                member.name,
+                summary,
+                restart_count.saturating_sub(1)
+            );
+            self.queue_message("daemon", &target, &body)?;
+        }
+        self.record_orchestrator_action(format!(
+            "stall: escalated supervisory stall for {} after {} restart(s)",
+            member.name,
+            restart_count.saturating_sub(1)
+        ));
+        self.record_task_escalated(
+            &member.name,
+            Self::supervisory_stall_task_key(&member.name),
+            Some("supervisory_stalled"),
+        );
+        Ok(())
     }
 }
 
