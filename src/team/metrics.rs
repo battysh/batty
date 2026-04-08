@@ -56,6 +56,7 @@ pub struct InProgressTaskSummary {
     pub minutes_in_progress: i64,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_task_cycle_time_record(
     task_id: u32,
     title: impl Into<String>,
