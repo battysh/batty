@@ -9,6 +9,7 @@ use super::config_reload::ConfigReloadMonitor;
 use super::hot_reload::HotReloadMonitor;
 use super::{TeamDaemon, standup, status};
 use crate::team;
+use crate::team::config::RoleType;
 use crate::tmux;
 
 impl TeamDaemon {
@@ -289,6 +290,8 @@ impl TeamDaemon {
 
     /// Send Shutdown to all active shim handles, wait for exit, fall back to Kill.
     fn shutdown_all_shims(&mut self) {
+        self.warn_members_about_shutdown();
+
         if self.shim_handles.is_empty() {
             return;
         }
@@ -372,6 +375,49 @@ impl TeamDaemon {
         for member_name in names {
             let worktree = self.worktree_dir(&member_name);
             self.preserve_worktree_before_restart(&member_name, &worktree, "daemon shutdown");
+        }
+    }
+
+    fn warn_members_about_shutdown(&mut self) {
+        let timeout_secs = self.config.team_config.shim_shutdown_timeout_secs;
+        let recipients: Vec<String> = self
+            .config
+            .members
+            .iter()
+            .filter(|member| member.role_type != RoleType::User)
+            .map(|member| member.name.clone())
+            .collect();
+        if recipients.is_empty() {
+            return;
+        }
+
+        let warning = format!("Shutting down in {timeout_secs}s - commit your work now");
+        info!(
+            recipients = recipients.len(),
+            timeout_secs, "warning members before shutdown"
+        );
+        for recipient in recipients {
+            let delivery_result = if let Some(handle) = self.shim_handles.get_mut(&recipient) {
+                if handle.is_terminal() {
+                    Ok(())
+                } else {
+                    handle.send_message("daemon", &warning)
+                }
+            } else {
+                self.queue_message("daemon", &recipient, &warning)
+            };
+
+            if let Err(error) = delivery_result {
+                warn!(
+                    member = recipient.as_str(),
+                    error = %error,
+                    "failed to send shutdown warning"
+                );
+            }
+        }
+
+        if timeout_secs > 0 {
+            std::thread::sleep(Duration::from_secs(timeout_secs as u64));
         }
     }
 }

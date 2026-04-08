@@ -324,6 +324,7 @@ fn daemon_state_round_trip_preserves_runtime_fields() {
         states: HashMap::from([("eng-1".to_string(), MemberState::Working)]),
         active_tasks: HashMap::from([("eng-1".to_string(), 42)]),
         retry_counts: HashMap::from([("eng-1".to_string(), 2)]),
+        discord_event_cursor: 17,
         dispatch_queue: vec![DispatchQueueEntry {
             engineer: "eng-1".to_string(),
             task_id: 77,
@@ -4139,6 +4140,7 @@ fn save_daemon_state_returns_error_on_readonly_dir() {
             states: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
+            discord_event_cursor: 0,
             dispatch_queue: Vec::new(),
             paused_standups: HashSet::new(),
             last_standup_elapsed_secs: HashMap::new(),

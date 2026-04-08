@@ -28,6 +28,8 @@ pub(super) struct PersistedDaemonState {
     pub active_tasks: HashMap<String, u32>,
     pub retry_counts: HashMap<String, u32>,
     #[serde(default)]
+    pub discord_event_cursor: usize,
+    #[serde(default)]
     pub dispatch_queue: Vec<DispatchQueueEntry>,
     pub paused_standups: HashSet<String>,
     pub last_standup_elapsed_secs: HashMap<String, u64>,
@@ -54,6 +56,7 @@ impl TeamDaemon {
             .collect();
         self.active_tasks = state.active_tasks;
         self.retry_counts = state.retry_counts;
+        self.discord_event_cursor = state.discord_event_cursor;
         self.dispatch_queue = state.dispatch_queue;
         self.paused_standups = state.paused_standups;
         self.last_standup = standup::restore_timer_state(state.last_standup_elapsed_secs);
@@ -87,6 +90,7 @@ impl TeamDaemon {
             states: self.states.clone(),
             active_tasks: self.active_tasks.clone(),
             retry_counts: self.retry_counts.clone(),
+            discord_event_cursor: self.discord_event_cursor,
             dispatch_queue: self.dispatch_queue.clone(),
             paused_standups: self.paused_standups.clone(),
             last_standup_elapsed_secs: standup::snapshot_timer_state(&self.last_standup),
