@@ -579,10 +579,15 @@ impl TeamDaemon {
             return Ok(());
         }
 
-        if self.last_auto_dispatch.elapsed() < Duration::from_secs(10) {
+        let elapsed = self.last_auto_dispatch.elapsed();
+        if elapsed < Duration::from_secs(10) {
             return Ok(());
         }
 
+        debug!(
+            elapsed_secs = elapsed.as_secs(),
+            "auto-dispatch interval elapsed, checking candidates"
+        );
         if let Err(error) = self.enqueue_dispatch_candidates() {
             warn!(error = %error, "failed to enqueue dispatch candidates");
         }

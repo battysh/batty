@@ -4,7 +4,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::TeamDaemon;
 use crate::team::daemon::verification::run_automatic_verification;
@@ -153,7 +153,23 @@ impl MergeQueue {
 impl TeamDaemon {
     pub(super) fn process_merge_queue(&mut self) -> Result<()> {
         let mut merge_queue = std::mem::take(&mut self.merge_queue);
-        let _ = merge_queue.process_next(|request| self.execute_queued_merge(request))?;
+        let queued = merge_queue.queued_len();
+        if queued > 0 || merge_queue.active_task_id().is_some() {
+            debug!(
+                queued,
+                active_task_id = ?merge_queue.active_task_id(),
+                "processing merge queue"
+            );
+        }
+        let event = merge_queue.process_next(|request| self.execute_queued_merge(request))?;
+        if let Some(ref event) = event {
+            info!(
+                task_id = event.task_id,
+                engineer = %event.engineer,
+                outcome = ?event.outcome,
+                "merge queue processed request"
+            );
+        }
         if let Some(status) = merge_queue.take_status_update() {
             self.record_orchestrator_action(status);
         }
@@ -163,6 +179,11 @@ impl TeamDaemon {
 
     #[allow(dead_code)]
     pub(crate) fn enqueue_merge_request(&mut self, request: MergeRequest) {
+        info!(
+            task_id = request.task_id,
+            engineer = %request.engineer,
+            "enqueuing merge request"
+        );
         self.merge_queue.enqueue(request);
     }
 
@@ -731,5 +752,42 @@ mod tests {
             daemon.member_state_for_test("eng-1"),
             Some(MemberState::Working)
         );
+    }
+
+    #[test]
+    fn process_merge_queue_empty_is_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = make_test_daemon(tmp.path(), vec![]);
+        daemon.process_merge_queue().unwrap();
+        assert_eq!(daemon.merge_queue.queued_len(), 0);
+    }
+
+    #[test]
+    fn process_next_returns_event_with_outcome() {
+        let mut queue = MergeQueue::default();
+        queue.enqueue(request(99));
+
+        let event = queue
+            .process_next(|_| Ok(MergeQueueOutcome::Success))
+            .unwrap();
+        assert!(event.is_some());
+        let event = event.unwrap();
+        assert_eq!(event.task_id, 99);
+        assert_eq!(event.engineer, "eng-1");
+        assert!(matches!(event.outcome, MergeQueueOutcome::Success));
+    }
+
+    #[test]
+    fn process_next_returns_conflict_outcome() {
+        let mut queue = MergeQueue::default();
+        queue.enqueue(request(88));
+
+        let event = queue
+            .process_next(|_| Ok(MergeQueueOutcome::Conflict))
+            .unwrap();
+        assert!(event.is_some());
+        let event = event.unwrap();
+        assert_eq!(event.task_id, 88);
+        assert!(matches!(event.outcome, MergeQueueOutcome::Conflict));
     }
 }

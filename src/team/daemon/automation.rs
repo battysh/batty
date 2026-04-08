@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::helpers::MemberWorktreeContext;
 use super::*;
@@ -344,6 +344,7 @@ impl TeamDaemon {
             Vec::new()
         };
         if self.state_reconciliation_audit_due() {
+            debug!("state reconciliation audit due — adopting board-owned tasks");
             self.adopt_board_owned_tasks(&board_tasks);
             self.mark_state_reconciliation_audit();
         }
