@@ -968,6 +968,112 @@ impl TeamEvent {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Structured lifecycle events (typed, schema-versioned)
+// ---------------------------------------------------------------------------
+
+/// Agent session lifecycle phases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLifecycle {
+    Spawning,
+    Ready,
+    Working,
+    Blocked,
+    Idle,
+    Finished,
+    Failed,
+}
+
+/// Task lifecycle phases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskLifecycle {
+    Claimed,
+    InProgress,
+    TestsRunning,
+    TestsPassed,
+    TestsFailed,
+    Review,
+    Merged,
+    Rejected,
+}
+
+/// Merge lifecycle phases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeLifecycle {
+    Started,
+    Conflict,
+    Success,
+}
+
+/// Wrapper enum over all lifecycle event types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "category", content = "phase")]
+pub enum LifecycleEventType {
+    #[serde(rename = "session")]
+    Session(SessionLifecycle),
+    #[serde(rename = "task")]
+    Task(TaskLifecycle),
+    #[serde(rename = "merge")]
+    Merge(MergeLifecycle),
+}
+
+/// A typed, schema-versioned lifecycle event written to events.jsonl.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifecycleEvent {
+    pub schema_version: u32,
+    pub ts: u64,
+    pub event_type: LifecycleEventType,
+    pub agent_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+}
+
+impl LifecycleEvent {
+    /// Current schema version for lifecycle events.
+    pub const SCHEMA_VERSION: u32 = 1;
+
+    /// Create a new lifecycle event with the current timestamp.
+    pub fn new(
+        event_type: LifecycleEventType,
+        agent_name: &str,
+        task_id: Option<u32>,
+        details: Option<String>,
+    ) -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            ts: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            event_type,
+            agent_name: agent_name.to_string(),
+            task_id,
+            details,
+        }
+    }
+}
+
+/// Write a lifecycle event as a JSON line to the given events.jsonl path.
+pub fn emit_lifecycle_event(path: &Path, event: &LifecycleEvent) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open lifecycle event log: {}", path.display()))?;
+    let json = serde_json::to_string(event)?;
+    writeln!(file, "{json}")?;
+    file.flush()?;
+    Ok(())
+}
+
 pub struct EventSink {
     writer: Box<dyn Write + Send>,
     path: PathBuf,
@@ -2143,5 +2249,258 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].event, "daemon_started");
         assert_eq!(events[1].event, "daemon_stopped");
+    }
+
+    // -----------------------------------------------------------------------
+    // Lifecycle event tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn session_lifecycle_serialization_roundtrip() {
+        let variants = [
+            SessionLifecycle::Spawning,
+            SessionLifecycle::Ready,
+            SessionLifecycle::Working,
+            SessionLifecycle::Blocked,
+            SessionLifecycle::Idle,
+            SessionLifecycle::Finished,
+            SessionLifecycle::Failed,
+        ];
+        for variant in &variants {
+            let json = serde_json::to_string(variant).unwrap();
+            let deserialized: SessionLifecycle = serde_json::from_str(&json).unwrap();
+            assert_eq!(*variant, deserialized);
+        }
+    }
+
+    #[test]
+    fn task_lifecycle_serialization_roundtrip() {
+        let variants = [
+            TaskLifecycle::Claimed,
+            TaskLifecycle::InProgress,
+            TaskLifecycle::TestsRunning,
+            TaskLifecycle::TestsPassed,
+            TaskLifecycle::TestsFailed,
+            TaskLifecycle::Review,
+            TaskLifecycle::Merged,
+            TaskLifecycle::Rejected,
+        ];
+        for variant in &variants {
+            let json = serde_json::to_string(variant).unwrap();
+            let deserialized: TaskLifecycle = serde_json::from_str(&json).unwrap();
+            assert_eq!(*variant, deserialized);
+        }
+    }
+
+    #[test]
+    fn merge_lifecycle_serialization_roundtrip() {
+        let variants = [
+            MergeLifecycle::Started,
+            MergeLifecycle::Conflict,
+            MergeLifecycle::Success,
+        ];
+        for variant in &variants {
+            let json = serde_json::to_string(variant).unwrap();
+            let deserialized: MergeLifecycle = serde_json::from_str(&json).unwrap();
+            assert_eq!(*variant, deserialized);
+        }
+    }
+
+    #[test]
+    fn lifecycle_event_serialization_roundtrip() {
+        let event = LifecycleEvent::new(
+            LifecycleEventType::Session(SessionLifecycle::Ready),
+            "eng-1-1",
+            Some(42),
+            Some("agent is ready".into()),
+        );
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: LifecycleEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.schema_version, LifecycleEvent::SCHEMA_VERSION);
+        assert_eq!(deserialized.agent_name, "eng-1-1");
+        assert_eq!(deserialized.task_id, Some(42));
+        assert_eq!(deserialized.details.as_deref(), Some("agent is ready"));
+        assert_eq!(
+            deserialized.event_type,
+            LifecycleEventType::Session(SessionLifecycle::Ready)
+        );
+    }
+
+    #[test]
+    fn lifecycle_event_optional_fields_omitted() {
+        let event = LifecycleEvent::new(
+            LifecycleEventType::Task(TaskLifecycle::Claimed),
+            "eng-1-2",
+            None,
+            None,
+        );
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(!json.contains("task_id"));
+        assert!(!json.contains("details"));
+        assert!(json.contains("\"agent_name\":\"eng-1-2\""));
+    }
+
+    #[test]
+    fn lifecycle_event_type_tagged_serialization() {
+        // Session variant
+        let session = LifecycleEventType::Session(SessionLifecycle::Working);
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(json.contains("\"category\":\"session\""));
+        assert!(json.contains("\"phase\":\"working\""));
+
+        // Task variant
+        let task = LifecycleEventType::Task(TaskLifecycle::TestsRunning);
+        let json = serde_json::to_string(&task).unwrap();
+        assert!(json.contains("\"category\":\"task\""));
+        assert!(json.contains("\"phase\":\"tests_running\""));
+
+        // Merge variant
+        let merge = LifecycleEventType::Merge(MergeLifecycle::Conflict);
+        let json = serde_json::to_string(&merge).unwrap();
+        assert!(json.contains("\"category\":\"merge\""));
+        assert!(json.contains("\"phase\":\"conflict\""));
+    }
+
+    #[test]
+    fn emit_lifecycle_event_writes_to_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("events.jsonl");
+
+        let event = LifecycleEvent::new(
+            LifecycleEventType::Session(SessionLifecycle::Spawning),
+            "eng-1-1",
+            None,
+            Some("starting up".into()),
+        );
+        emit_lifecycle_event(&path, &event).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 1);
+
+        let parsed: LifecycleEvent = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(parsed.agent_name, "eng-1-1");
+        assert_eq!(
+            parsed.event_type,
+            LifecycleEventType::Session(SessionLifecycle::Spawning)
+        );
+    }
+
+    #[test]
+    fn emit_lifecycle_event_appends_multiple() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("events.jsonl");
+
+        let events = [
+            LifecycleEvent::new(
+                LifecycleEventType::Task(TaskLifecycle::Claimed),
+                "eng-1-1",
+                Some(100),
+                None,
+            ),
+            LifecycleEvent::new(
+                LifecycleEventType::Task(TaskLifecycle::InProgress),
+                "eng-1-1",
+                Some(100),
+                None,
+            ),
+            LifecycleEvent::new(
+                LifecycleEventType::Task(TaskLifecycle::TestsPassed),
+                "eng-1-1",
+                Some(100),
+                Some("all 42 tests passed".into()),
+            ),
+        ];
+        for event in &events {
+            emit_lifecycle_event(&path, event).unwrap();
+        }
+
+        let content = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 3);
+
+        let parsed: LifecycleEvent = serde_json::from_str(lines[2]).unwrap();
+        assert_eq!(
+            parsed.event_type,
+            LifecycleEventType::Task(TaskLifecycle::TestsPassed)
+        );
+        assert_eq!(parsed.details.as_deref(), Some("all 42 tests passed"));
+    }
+
+    #[test]
+    fn emit_lifecycle_event_creates_parent_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nested").join("dir").join("events.jsonl");
+
+        let event = LifecycleEvent::new(
+            LifecycleEventType::Merge(MergeLifecycle::Success),
+            "eng-1-3",
+            Some(200),
+            None,
+        );
+        emit_lifecycle_event(&path, &event).unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn lifecycle_event_schema_version_is_one() {
+        let event = LifecycleEvent::new(
+            LifecycleEventType::Session(SessionLifecycle::Failed),
+            "eng-1-1",
+            None,
+            Some("out of context".into()),
+        );
+        assert_eq!(event.schema_version, 1);
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"schema_version\":1"));
+    }
+
+    #[test]
+    fn all_session_variants_snake_case_names() {
+        let expected = [
+            (SessionLifecycle::Spawning, "spawning"),
+            (SessionLifecycle::Ready, "ready"),
+            (SessionLifecycle::Working, "working"),
+            (SessionLifecycle::Blocked, "blocked"),
+            (SessionLifecycle::Idle, "idle"),
+            (SessionLifecycle::Finished, "finished"),
+            (SessionLifecycle::Failed, "failed"),
+        ];
+        for (variant, name) in &expected {
+            let json = serde_json::to_string(variant).unwrap();
+            assert_eq!(json, format!("\"{}\"", name));
+        }
+    }
+
+    #[test]
+    fn all_task_variants_snake_case_names() {
+        let expected = [
+            (TaskLifecycle::Claimed, "claimed"),
+            (TaskLifecycle::InProgress, "in_progress"),
+            (TaskLifecycle::TestsRunning, "tests_running"),
+            (TaskLifecycle::TestsPassed, "tests_passed"),
+            (TaskLifecycle::TestsFailed, "tests_failed"),
+            (TaskLifecycle::Review, "review"),
+            (TaskLifecycle::Merged, "merged"),
+            (TaskLifecycle::Rejected, "rejected"),
+        ];
+        for (variant, name) in &expected {
+            let json = serde_json::to_string(variant).unwrap();
+            assert_eq!(json, format!("\"{}\"", name));
+        }
+    }
+
+    #[test]
+    fn all_merge_variants_snake_case_names() {
+        let expected = [
+            (MergeLifecycle::Started, "started"),
+            (MergeLifecycle::Conflict, "conflict"),
+            (MergeLifecycle::Success, "success"),
+        ];
+        for (variant, name) in &expected {
+            let json = serde_json::to_string(variant).unwrap();
+            assert_eq!(json, format!("\"{}\"", name));
+        }
     }
 }
