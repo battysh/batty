@@ -1116,7 +1116,8 @@ mod tests {
     fn require_tmux_integration() -> bool {
         TMUX_TEST_PATH_GUARD.with(|slot| {
             if slot.borrow().is_none() {
-                *slot.borrow_mut() = Some(PATH_LOCK.lock().unwrap());
+                *slot.borrow_mut() =
+                    Some(PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner()));
             }
         });
         if tmux_available() {

@@ -241,7 +241,7 @@ mod tests {
     #[serial]
     #[cfg_attr(not(feature = "integration"), ignore)]
     fn startup_preflight_respawns_dead_pane_and_bootstraps_board() {
-        let _path_guard = PATH_LOCK.lock().unwrap();
+        let _path_guard = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let session = format!("batty-test-startup-preflight-{}", std::process::id());
         let _ = crate::tmux::kill_session(&session);
 
@@ -323,7 +323,7 @@ mod tests {
     #[serial]
     #[cfg_attr(not(feature = "integration"), ignore)]
     fn startup_preflight_missing_sessions_recover_failed_member_without_respawning_healthy_panes() {
-        let _path_guard = PATH_LOCK.lock().unwrap();
+        let _path_guard = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let session = format!("batty-test-startup-missing-session-{}", std::process::id());
         let _ = crate::tmux::kill_session(&session);
 
