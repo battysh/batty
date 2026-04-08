@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use super::{config, daemon, events, hierarchy, inbox, layout, team_config_path};
 use crate::tmux;
@@ -629,6 +629,7 @@ pub fn run_daemon(project_root: &Path, resume: bool) -> Result<()> {
     match result {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => {
+            error!(error = %e, "daemon exited with error");
             eprintln!("daemon exited with error: {e:#}");
             // Try to log the error event
             if let Ok(mut sink) = events::EventSink::new(&events_path) {
@@ -647,6 +648,7 @@ pub fn run_daemon(project_root: &Path, resume: bool) -> Result<()> {
                     None => "unknown panic".to_string(),
                 },
             };
+            error!(reason = %reason, "daemon panicked");
             eprintln!("daemon panicked: {reason}");
             // Log panic event
             if let Ok(mut sink) = events::EventSink::new(&events_path) {
