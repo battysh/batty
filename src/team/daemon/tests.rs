@@ -728,7 +728,7 @@ fn daemon_lifecycle_happy_path_exercises_decomposed_modules() {
 
 #[test]
 fn preserve_worktree_before_restart_uses_shared_preservation_filters() {
-    let _path_lock = PATH_LOCK.lock().unwrap();
+    let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     let repo = init_git_repo(&tmp, "batty-daemon-preserve");
     let team_config_dir = repo.join(".batty").join("team_config");
@@ -771,7 +771,7 @@ fn preserve_worktree_before_restart_uses_shared_preservation_filters() {
 
 #[test]
 fn preserve_worktree_before_restart_skips_support_files_without_user_changes() {
-    let _path_lock = PATH_LOCK.lock().unwrap();
+    let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     let repo = init_git_repo(&tmp, "batty-daemon-preserve-support");
     let team_config_dir = repo.join(".batty").join("team_config");
@@ -3309,7 +3309,7 @@ fn clean_room_analysis_artifact_stays_readable_to_analysis_and_blocked_from_impl
 fn clean_room_skoolkit_disassembly_supports_z80_and_sna_snapshots() {
     use std::os::unix::fs::PermissionsExt;
 
-    let _path_lock = PATH_LOCK.lock().unwrap();
+    let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     let mut daemon = clean_room_test_daemon(tmp.path());
     let bin_dir = tmp.path().join("bin");
@@ -3395,7 +3395,7 @@ fn clean_room_backend_detection_routes_supported_targets() {
 fn clean_room_ghidra_disassembly_supports_multiple_non_z80_targets() {
     use std::os::unix::fs::PermissionsExt;
 
-    let _path_lock = PATH_LOCK.lock().unwrap();
+    let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     let mut daemon = clean_room_test_daemon(tmp.path());
     let bin_dir = tmp.path().join("bin");

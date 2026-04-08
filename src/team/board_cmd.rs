@@ -429,7 +429,7 @@ mod tests {
     const REAL_KANBAN_MD: &str = "/opt/homebrew/bin/kanban-md";
 
     fn with_process_cwd<T>(cwd: &Path, action: impl FnOnce() -> T) -> T {
-        let _guard = CWD_LOCK.lock().unwrap();
+        let _guard = CWD_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(cwd).unwrap();
         let result = catch_unwind(AssertUnwindSafe(action));

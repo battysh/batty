@@ -640,7 +640,7 @@ mod tests {
     #[test]
     #[serial]
     fn check_backend_health_emits_event_on_transition() {
-        let _path_guard = PATH_LOCK.lock().unwrap();
+        let _path_guard = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
         let (fake_bin, _fake_log) = setup_fake_backend(&tmp, "claude", "health-claude.log");
@@ -677,7 +677,7 @@ mod tests {
     #[test]
     #[serial]
     fn check_backend_health_no_event_when_state_unchanged() {
-        let _path_guard = PATH_LOCK.lock().unwrap();
+        let _path_guard = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
         let (fake_bin, _fake_log) = setup_fake_backend(&tmp, "claude", "health-claude.log");
