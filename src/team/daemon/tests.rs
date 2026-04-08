@@ -3661,6 +3661,7 @@ fn stale_review_daemon(tmp: &tempfile::TempDir) -> TeamDaemon {
         .build()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_aging_task(
     project_root: &Path,
     id: u32,

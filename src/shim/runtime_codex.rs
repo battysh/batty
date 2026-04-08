@@ -331,6 +331,7 @@ pub fn run_codex_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
 
 /// Spawn `codex exec --json ...` and process its JSONL output.
 /// When the subprocess exits, transition back to Idle and drain the queue.
+#[allow(clippy::too_many_arguments)]
 fn run_codex_exec(
     shim_id: &str,
     program: &str,

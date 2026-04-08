@@ -325,10 +325,10 @@ fn parse_test_output(output: &str, results: &TestResults) -> (Vec<String>, Vec<S
             continue;
         }
 
-        if failures.is_empty() && trimmed.starts_with("test ") && trimmed.ends_with("FAILED") {
-            failures.push(trimmed.to_string());
-        } else if failures.is_empty()
-            && (trimmed.starts_with("error:") || trimmed.contains("panicked at"))
+        if failures.is_empty()
+            && (trimmed.starts_with("test ") && trimmed.ends_with("FAILED")
+                || trimmed.starts_with("error:")
+                || trimmed.contains("panicked at"))
         {
             failures.push(trimmed.to_string());
         }

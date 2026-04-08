@@ -1926,7 +1926,7 @@ mod tests {
                     .contains_key(&format!("stall-restart::{member_name}"))
             );
             assert!(
-                daemon.pending_delivery_queue.get(member_name).is_none(),
+                !daemon.pending_delivery_queue.contains_key(member_name),
                 "supervisory recovery chatter should stay out of {member_name}'s pending PTY queue"
             );
             assert!(

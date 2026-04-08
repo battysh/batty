@@ -1470,6 +1470,7 @@ mod tests {
         assert!(!board_dir.join("archive").exists());
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_timed_task(
         board_dir: &Path,
         id: u32,

@@ -331,6 +331,7 @@ pub(crate) fn strip_tmux_style(input: &str) -> String {
     output.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_team_status_rows(
     members: &[MemberInstance],
     session_running: bool,

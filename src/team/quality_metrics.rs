@@ -102,6 +102,7 @@ pub fn commit_frequency(commits: u32, time_to_completion_secs: u64) -> f64 {
     commits as f64 / (time_to_completion_secs as f64 / 3600.0)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_completion_quality_metrics(
     backend: impl Into<String>,
     role: impl Into<String>,

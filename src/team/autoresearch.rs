@@ -136,6 +136,10 @@ impl ResearchLedger {
         self.entries.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     pub fn last_kept_commit(&self) -> Option<&str> {
         self.entries
             .iter()
