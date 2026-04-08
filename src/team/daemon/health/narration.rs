@@ -291,7 +291,7 @@ impl TeamDaemon {
             .unwrap_or_else(|| "Continue the current assignment.".to_string());
         self.prepend_member_nudge(
             member,
-            &format!("Stop narrating. Run the command now.\n{task_context}"),
+            format!("Stop narrating. Run the command now.\n{task_context}"),
         )
     }
 }
@@ -304,7 +304,7 @@ mod tests {
     fn record_and_detect_narration() {
         let mut tracker = NarrationTracker::default();
         let content = "I will explain the next step.";
-        tracker.record_sample("eng-1", &content, AgentType::Claude);
+        tracker.record_sample("eng-1", content, AgentType::Claude);
         for _ in 0..5 {
             tracker.note_breach("eng-1", tracker.is_narrating("eng-1"));
         }
@@ -316,7 +316,7 @@ mod tests {
     fn narration_clears_on_tool_use() {
         let mut tracker = NarrationTracker::default();
         let narrating = "I will explain step one.";
-        tracker.record_sample("eng-1", &narrating, AgentType::Claude);
+        tracker.record_sample("eng-1", narrating, AgentType::Claude);
         assert!(tracker.is_narrating("eng-1"));
 
         let with_tools = format!("{narrating}\n⏺ Bash(cargo test)");
@@ -346,7 +346,7 @@ mod tests {
     fn restart_triggers_after_sustained_narration_post_nudge() {
         let mut tracker = NarrationTracker::default();
         let content = "I should inspect the daemon.";
-        tracker.record_sample("eng-1", &content, AgentType::Codex);
+        tracker.record_sample("eng-1", content, AgentType::Codex);
 
         for _ in 0..5 {
             tracker.note_breach("eng-1", tracker.is_narrating("eng-1"));
@@ -364,7 +364,7 @@ mod tests {
     fn narration_breaker_resets_after_progress() {
         let mut tracker = NarrationTracker::default();
         let narrating = "I should inspect the daemon.";
-        tracker.record_sample("eng-1", &narrating, AgentType::Codex);
+        tracker.record_sample("eng-1", narrating, AgentType::Codex);
         for _ in 0..5 {
             tracker.note_breach("eng-1", true);
         }

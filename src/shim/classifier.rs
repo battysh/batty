@@ -702,7 +702,7 @@ fn token_prefix_score(line_tokens: &[&str], phrase_tokens: &[&str]) -> f32 {
             consumed_chars += phrase_token.len();
             continue;
         }
-        if phrase_token.starts_with(*line_token) && line_token.len() >= 1 {
+        if phrase_token.starts_with(*line_token) && !line_token.is_empty() {
             matched += 1;
             consumed_chars += line_token.len();
             used_prefix = true;

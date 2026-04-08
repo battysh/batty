@@ -601,7 +601,6 @@ mod tests {
             provider_overlay: None,
             reports_to: reports_to.map(|s| s.to_string()),
             use_worktrees: false,
-            ..Default::default()
         }
     }
 
@@ -694,7 +693,6 @@ mod tests {
             provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
-            ..Default::default()
         }];
         let report =
             generate_standup_for(&members[0], &members, &HashMap::new(), &HashMap::new(), 5);

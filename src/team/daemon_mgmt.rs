@@ -223,7 +223,7 @@ fn spawn_detached_process(
     std::thread::sleep(std::time::Duration::from_millis(500));
     match child.try_wait() {
         Ok(Some(status)) => {
-            let _ = std::fs::remove_file(&pid_path);
+            let _ = std::fs::remove_file(pid_path);
             // Read the last few lines of the daemon log for the actual error
             let tail = std::fs::read_to_string(&log_path).ok().and_then(|s| {
                 let lines: Vec<&str> = s.lines().collect();
@@ -255,7 +255,7 @@ fn spawn_detached_process(
         }
     }
 
-    std::fs::write(&pid_path, pid.to_string())
+    std::fs::write(pid_path, pid.to_string())
         .with_context(|| format!("failed to write PID file: {}", pid_path.display()))?;
 
     info!(pid, log = %log_path.display(), process = process_name, "background process spawned");
