@@ -258,9 +258,10 @@ fn extract_test_commands(output: &str) -> Vec<String> {
             || lower.contains("go test")
             || lower.contains("bundle exec rspec")
             || lower.contains("mix test"))
-            && !commands.iter().any(|existing| existing == trimmed) {
-                commands.push(trimmed.to_string());
-            }
+            && !commands.iter().any(|existing| existing == trimmed)
+        {
+            commands.push(trimmed.to_string());
+        }
     }
 
     commands
