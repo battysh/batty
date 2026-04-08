@@ -100,6 +100,7 @@ fn batty_binary() -> String {
 /// processes for this member from previous sessions first.
 ///
 /// Returns an `AgentHandle` holding the parent channel and child PID.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::team) fn spawn_shim(
     member_name: &str,
     agent_type: &str,

@@ -845,7 +845,7 @@ fn supervisory_architect_recent_action_clears_utilization_stall_signal() {
 
     daemon.maybe_intervene_architect_utilization().unwrap();
 
-    assert!(daemon.pending_delivery_queue.get("architect").is_none());
+    assert!(!daemon.pending_delivery_queue.contains_key("architect"));
     let events = crate::team::events::read_events(&events_path).unwrap();
     assert!(!events.iter().any(|event| {
         event.event == "stall_detected" && event.role.as_deref() == Some("architect")

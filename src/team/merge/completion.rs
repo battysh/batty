@@ -111,7 +111,7 @@ fn verification_fix_message(
 }
 
 fn verification_retry_budget(max_iterations: u32) -> u32 {
-    max_iterations.max(1).min(3)
+    max_iterations.clamp(1, 3)
 }
 
 fn verification_outcome_label(phase: &VerificationPhase) -> &'static str {
@@ -529,8 +529,6 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
             narration_count >= 2
         } else if is_zero_commit {
             false
-        } else if !verification_run.passed {
-            verification_state.reached_max_iterations()
         } else {
             verification_state.reached_max_iterations()
         };
@@ -1924,7 +1922,7 @@ mod tests {
             daemon.member_state_for_test("eng-1"),
             Some(MemberState::Idle)
         );
-        assert!(daemon.verification_states.get("eng-1").is_none());
+        assert!(!daemon.verification_states.contains_key("eng-1"));
 
         let engineer_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "eng-1").unwrap();
