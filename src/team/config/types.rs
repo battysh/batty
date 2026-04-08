@@ -1119,7 +1119,7 @@ fn default_shim_shutdown_timeout_secs() -> u32 {
 }
 
 fn default_shim_working_state_timeout_secs() -> u64 {
-    600 // 10 minutes
+    7200 // 2 hours — modern agents work for extended periods
 }
 
 fn default_pending_queue_max_age_secs() -> u64 {
