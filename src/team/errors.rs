@@ -24,7 +24,17 @@ pub enum GitError {
 
 impl GitError {
     pub fn is_transient(&self) -> bool {
-        matches!(self, GitError::Transient { .. })
+        match self {
+            GitError::Transient { .. } => true,
+            GitError::Exec { source, .. } => matches!(
+                source.kind(),
+                std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::WouldBlock
+            ),
+            _ => false,
+        }
     }
 }
 
@@ -343,9 +353,45 @@ mod tests {
     fn git_error_exec_display_includes_command() {
         let error = GitError::Exec {
             command: "git -C /repo merge main".to_string(),
-            source: std::io::Error::new(std::io::ErrorKind::NotFound, "git not found"),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied"),
         };
         assert!(error.to_string().contains("git -C /repo merge main"));
+        assert!(!error.is_transient());
+    }
+
+    #[test]
+    fn git_error_exec_not_found_is_transient() {
+        let error = GitError::Exec {
+            command: "git -C /repo checkout main".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "No such file or directory"),
+        };
+        assert!(error.is_transient());
+    }
+
+    #[test]
+    fn git_error_exec_timed_out_is_transient() {
+        let error = GitError::Exec {
+            command: "git -C /repo fetch".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::TimedOut, "operation timed out"),
+        };
+        assert!(error.is_transient());
+    }
+
+    #[test]
+    fn git_error_exec_interrupted_is_transient() {
+        let error = GitError::Exec {
+            command: "git -C /repo status".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::Interrupted, "signal received"),
+        };
+        assert!(error.is_transient());
+    }
+
+    #[test]
+    fn git_error_exec_permission_denied_is_not_transient() {
+        let error = GitError::Exec {
+            command: "git -C /repo status".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied"),
+        };
         assert!(!error.is_transient());
     }
 
