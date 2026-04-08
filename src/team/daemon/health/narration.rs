@@ -104,6 +104,15 @@ impl NarrationTracker {
 
 impl TeamDaemon {
     pub(in super::super) fn check_narration_loops(&mut self) -> Result<()> {
+        // Narration detection disabled — it was killing agents that were
+        // actively coding (319 uncommitted lines) because they described
+        // their approach in the PTY output alongside real code changes.
+        // The detector can't distinguish "planning then executing" from
+        // "narrating without executing." Re-enable when the detector
+        // checks for actual worktree changes before flagging narration.
+        return Ok(());
+
+        #[allow(unreachable_code)]
         let member_names: Vec<String> = self
             .config
             .members
