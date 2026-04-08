@@ -1014,7 +1014,7 @@ roles:
 #[test]
 #[serial]
 fn verbose_shows_checks_all_pass() {
-    let _path_guard = PATH_LOCK.lock().unwrap();
+    let _path_guard = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     let (claude_bin, _claude_log) = setup_fake_backend(&tmp, "claude", "fake-claude.log");
     let (codex_bin, _codex_log) = setup_fake_backend(&tmp, "codex", "fake-codex.log");
