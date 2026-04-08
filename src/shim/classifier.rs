@@ -504,12 +504,14 @@ fn classify_codex(content: &str) -> Classification {
     for line in &recent_nonempty {
         let trimmed = line.trim();
         if trimmed.starts_with('\u{203A}') {
-            let confidence =
-                if trimmed.strip_prefix('\u{203A}').is_some_and(|r| r.trim().is_empty()) {
-                    1.0
-                } else {
-                    0.92
-                };
+            let confidence = if trimmed
+                .strip_prefix('\u{203A}')
+                .is_some_and(|r| r.trim().is_empty())
+            {
+                1.0
+            } else {
+                0.92
+            };
             return Classification {
                 verdict: ScreenVerdict::AgentIdle,
                 confidence,
