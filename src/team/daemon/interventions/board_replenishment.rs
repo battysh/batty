@@ -269,9 +269,7 @@ impl TeamDaemon {
         }
 
         if member.role_type == RoleType::Architect {
-            message.push_str(&format!(
-                "\n\nACTION REQUIRED: Create concrete tasks from `planning/roadmap.md` and send the manager a structured directive now. This request is rate-limited to once every 15 minutes."
-            ));
+            message.push_str("\n\nACTION REQUIRED: Create concrete tasks from `planning/roadmap.md` and send the manager a structured directive now. This request is rate-limited to once every 15 minutes.");
         }
 
         if let Some(parent) = &member.reports_to {

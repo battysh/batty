@@ -255,7 +255,6 @@ pub(crate) fn architect_member(name: &str) -> MemberInstance {
         provider_overlay: None,
         reports_to: None,
         use_worktrees: false,
-        ..Default::default()
     }
 }
 
@@ -272,7 +271,6 @@ pub(crate) fn manager_member(name: &str, reports_to: Option<&str>) -> MemberInst
         provider_overlay: None,
         reports_to: reports_to.map(str::to_string),
         use_worktrees: false,
-        ..Default::default()
     }
 }
 

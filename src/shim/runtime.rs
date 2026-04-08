@@ -249,7 +249,7 @@ fn extract_test_commands(output: &str) -> Vec<String> {
             continue;
         }
         let lower = trimmed.to_ascii_lowercase();
-        if lower.contains("cargo test")
+        if (lower.contains("cargo test")
             || lower.contains("cargo nextest")
             || lower.contains("pytest")
             || lower.contains("npm test")
@@ -257,12 +257,10 @@ fn extract_test_commands(output: &str) -> Vec<String> {
             || lower.contains("yarn test")
             || lower.contains("go test")
             || lower.contains("bundle exec rspec")
-            || lower.contains("mix test")
-        {
-            if !commands.iter().any(|existing| existing == trimmed) {
+            || lower.contains("mix test"))
+            && !commands.iter().any(|existing| existing == trimmed) {
                 commands.push(trimmed.to_string());
             }
-        }
     }
 
     commands

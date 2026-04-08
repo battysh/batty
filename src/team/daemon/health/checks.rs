@@ -1487,7 +1487,6 @@ mod tests {
             provider_overlay: None,
             reports_to: Some("manager".to_string()),
             use_worktrees: false,
-            ..Default::default()
         };
         let daemon = make_test_daemon(tmp.path(), vec![member.clone()]);
         let prompt = daemon.load_prompt(&member, &config_dir);
@@ -1514,7 +1513,6 @@ mod tests {
             provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
-            ..Default::default()
         };
         let daemon = make_test_daemon(tmp.path(), vec![member.clone()]);
         let prompt = daemon.load_prompt(&member, &config_dir);
@@ -1540,7 +1538,6 @@ mod tests {
             provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
-            ..Default::default()
         };
         let daemon = make_test_daemon(tmp.path(), vec![member.clone()]);
         let prompt = daemon.load_prompt(&member, &config_dir);
@@ -1568,7 +1565,6 @@ mod tests {
             provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
-            ..Default::default()
         };
         let daemon = make_test_daemon(tmp.path(), vec![member.clone()]);
         let prompt = daemon.load_prompt(&member, &config_dir);
@@ -1599,7 +1595,6 @@ mod tests {
             provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
-            ..Default::default()
         };
         let mgr = MemberInstance {
             name: "m".to_string(),
@@ -1613,7 +1608,6 @@ mod tests {
             provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
-            ..Default::default()
         };
         let eng = MemberInstance {
             name: "e".to_string(),
@@ -1627,7 +1621,6 @@ mod tests {
             provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
-            ..Default::default()
         };
         assert_eq!(daemon.load_prompt(&arch, &config_dir), "ARCH");
         assert_eq!(daemon.load_prompt(&mgr, &config_dir), "MGR");

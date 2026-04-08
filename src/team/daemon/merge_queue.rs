@@ -703,7 +703,7 @@ mod tests {
             task_id: 42,
             engineer: "eng-1".to_string(),
             branch: "eng-1/task-42".to_string(),
-            worktree_dir: worktree_dir,
+            worktree_dir,
             queued_at: Instant::now(),
             test_passed: true,
             should_post_merge_verify: true,

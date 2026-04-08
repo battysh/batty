@@ -745,7 +745,6 @@ roles:
             provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
-            ..Default::default()
         }
     }
 
@@ -826,7 +825,6 @@ roles:
             provider_overlay: None,
             reports_to: None,
             use_worktrees: false,
-            ..Default::default()
         };
 
         let pending = std::collections::HashMap::from([

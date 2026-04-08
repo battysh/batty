@@ -266,9 +266,9 @@ fn load_manifest(project_root: &Path) -> Result<VerificationManifest> {
     serde_yaml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))
 }
 
-fn manifest_by_behavior<'a>(
-    manifest: &'a VerificationManifest,
-) -> Result<BTreeMap<&'a str, &'a VerificationCase>> {
+fn manifest_by_behavior(
+    manifest: &VerificationManifest,
+) -> Result<BTreeMap<&str, &VerificationCase>> {
     let mut map = BTreeMap::new();
     for case in &manifest.behaviors {
         if map.insert(case.behavior.as_str(), case).is_some() {

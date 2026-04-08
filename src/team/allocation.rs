@@ -394,7 +394,7 @@ pub fn explain_routing_for_task(
             .iter()
             .all(|breakdown| breakdown.telemetry_completed_tasks >= 5);
     if telemetry_ready || !has_any_telemetry {
-        breakdowns.sort_by(|left, right| compare_breakdowns(left, right));
+        breakdowns.sort_by(compare_breakdowns);
         let chosen_engineer = breakdowns
             .first()
             .map(|breakdown| breakdown.engineer.clone());
@@ -445,7 +445,7 @@ pub fn print_dispatch_explanation(project_root: &Path, task_id: Option<u32>) -> 
     let explanation = explain_routing_for_task(
         &engineers,
         &profiles,
-        &task,
+        task,
         &team_config.workflow_policy.allocation,
     );
 
@@ -541,7 +541,7 @@ fn compare_breakdowns(
         .then_with(|| left.engineer.cmp(&right.engineer))
 }
 
-fn select_dispatch_task<'a>(tasks: &'a [Task], task_id: Option<u32>) -> Option<&'a Task> {
+fn select_dispatch_task(tasks: &[Task], task_id: Option<u32>) -> Option<&Task> {
     if let Some(task_id) = task_id {
         return tasks.iter().find(|task| task.id == task_id);
     }
