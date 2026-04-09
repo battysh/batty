@@ -729,11 +729,24 @@ impl TeamDaemon {
             .iter()
             .map(|task| (task.id, task))
             .collect::<HashMap<_, _>>();
+        let progress_window = Duration::from_secs(
+            self.config
+                .team_config
+                .automation
+                .intervention_cooldown_secs,
+        );
+        let now = Utc::now();
 
         let active_keys: HashSet<String> = report
             .stale_in_progress
             .iter()
             .map(|task| aging_cooldown_key("task_stale", task.task_id))
+            .chain(
+                report
+                    .stale_in_progress
+                    .iter()
+                    .map(|task| aging_cooldown_key("task_checkpoint", task.task_id)),
+            )
             .chain(
                 report
                     .aged_todo
@@ -751,22 +764,77 @@ impl TeamDaemon {
             .retain(|key, _| !key.starts_with("aging::") || active_keys.contains(key));
 
         for task in &report.stale_in_progress {
-            let key = aging_cooldown_key("task_stale", task.task_id);
-            if self.aging_alert_on_cooldown(&key) {
+            let stale_key = aging_cooldown_key("task_stale", task.task_id);
+            let checkpoint_key = aging_cooldown_key("task_checkpoint", task.task_id);
+
+            let owner = task.claimed_by.as_deref().unwrap_or("unassigned");
+            let liveness = tasks_by_id.get(&task.task_id).and_then(|board_task| {
+                self.in_progress_task_liveness(board_task, now, progress_window)
+            });
+
+            if let Some(liveness) = liveness {
+                if liveness.has_live_progress() {
+                    self.intervention_cooldowns.remove(&stale_key);
+                    self.intervention_cooldowns.remove(&checkpoint_key);
+                    continue;
+                }
+
+                if liveness.dirty_worktree {
+                    let checkpoint_sent = self.intervention_cooldowns.contains_key(&checkpoint_key);
+                    if !checkpoint_sent {
+                        let body = format!(
+                            "Task #{} is still in progress and has dirty worktree changes, but the branch has no commits ahead of `main`.\nTask: {}\nNext step: create a checkpoint commit now so Batty does not escalate this lane as stale.\n```\ngit add -A\ngit commit -m \"wip: checkpoint task #{}\"\n```",
+                            task.task_id, task.title, task.task_id
+                        );
+                        let _ = self.queue_daemon_message(owner, &body);
+                        self.record_orchestrator_action(format!(
+                            "aging: requested checkpoint commit for task #{} ({owner})",
+                            task.task_id
+                        ));
+                        self.intervention_cooldowns
+                            .insert(checkpoint_key, Instant::now());
+                        self.intervention_cooldowns.remove(&stale_key);
+                        continue;
+                    }
+                    if self.aging_alert_on_cooldown(&checkpoint_key) {
+                        continue;
+                    }
+                } else {
+                    self.intervention_cooldowns.remove(&checkpoint_key);
+                }
+            }
+
+            if self.aging_alert_on_cooldown(&stale_key) {
                 continue;
             }
 
-            let owner = task.claimed_by.as_deref().unwrap_or("unassigned");
-            let reason = format!(
-                "stale in-progress after {}s with no commits ahead of main",
-                task.age_secs
-            );
+            let (reason_code, reason, manager_reason) = if liveness
+                .is_some_and(|state| state.dirty_worktree)
+            {
+                (
+                    "commit_stale_with_dirty_work",
+                    format!(
+                        "commit stale after {}s with dirty worktree changes and no claim progress during the cooldown window",
+                        task.age_secs
+                    ),
+                    "commit_stale_with_dirty_work",
+                )
+            } else {
+                (
+                    "progress_stale",
+                    format!(
+                        "progress stale after {}s with no commits ahead of main and no claim progress during the cooldown window",
+                        task.age_secs
+                    ),
+                    "progress_stale",
+                )
+            };
             self.emit_event(TeamEvent::task_stale(
                 owner,
                 &task.task_id.to_string(),
                 &reason,
             ));
-            self.record_task_escalated(owner, task.task_id.to_string(), Some("task_stale"));
+            self.record_task_escalated(owner, task.task_id.to_string(), Some(reason_code));
 
             if let Some(recipient) = task
                 .claimed_by
@@ -776,13 +844,14 @@ impl TeamDaemon {
                 .or_else(|| first_manager_name(&self.config.members))
             {
                 let body = format!(
-                    "Task #{} has been in progress for {}s with no commits ahead of `main`.\nTask: {}\nOwner: {}\nNext step: intervene, split the task, or confirm the engineer is still making progress.",
-                    task.task_id, task.age_secs, task.title, owner
+                    "Task #{} has been in progress for {}s with no commits ahead of `main`.\nTask: {}\nOwner: {}\nReason: {}\nNext step: intervene, split the task, or confirm the engineer is still making progress.",
+                    task.task_id, task.age_secs, task.title, owner, manager_reason
                 );
                 let _ = self.queue_daemon_message(&recipient, &body);
             }
 
-            self.intervention_cooldowns.insert(key, Instant::now());
+            self.intervention_cooldowns
+                .insert(stale_key, Instant::now());
         }
 
         for task in &report.aged_todo {
@@ -1551,6 +1620,22 @@ impl TeamDaemon {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InProgressTaskLiveness {
+    dirty_worktree: bool,
+    output_growth: bool,
+    recent_claim_progress: bool,
+    live_progress_type: Option<&'static str>,
+}
+
+impl InProgressTaskLiveness {
+    fn has_live_progress(self) -> bool {
+        self.recent_claim_progress
+            || self.output_growth
+            || matches!(self.live_progress_type, Some("commit"))
+    }
+}
+
 fn aging_cooldown_key(kind: &str, task_id: u32) -> String {
     format!("aging::{kind}::{task_id}")
 }
@@ -1569,6 +1654,12 @@ fn parse_rfc3339_utc(value: &str) -> Option<DateTime<Utc>> {
 }
 
 fn latest_commit_timestamp(work_dir: &std::path::Path) -> Option<DateTime<Utc>> {
+    if crate::team::git_cmd::rev_list_count(work_dir, "main..HEAD")
+        .ok()
+        .is_none_or(|count| count == 0)
+    {
+        return None;
+    }
     let output = std::process::Command::new("git")
         .args(["log", "-1", "--format=%cI"])
         .current_dir(work_dir)
@@ -1615,6 +1706,67 @@ fn task_claim_progress_type(
         return Some("output");
     }
     None
+}
+
+fn task_recent_claim_progress(
+    task: &crate::task::Task,
+    now: DateTime<Utc>,
+    progress_window: Duration,
+) -> bool {
+    let Some(last_progress_at) = task.last_progress_at.as_deref().and_then(parse_rfc3339_utc)
+    else {
+        return false;
+    };
+    let age_secs = now.signed_duration_since(last_progress_at).num_seconds();
+    age_secs >= 0 && age_secs < progress_window.as_secs() as i64
+}
+
+impl TeamDaemon {
+    fn in_progress_task_liveness(
+        &self,
+        task: &crate::task::Task,
+        now: DateTime<Utc>,
+        progress_window: Duration,
+    ) -> Option<InProgressTaskLiveness> {
+        let owner = task.claimed_by.as_deref()?;
+        let work_dir = self.task_progress_work_dir(task)?;
+        let current_output_bytes = self
+            .shim_handles
+            .get(owner)
+            .map(|handle| handle.output_bytes)
+            .unwrap_or(0);
+
+        Some(InProgressTaskLiveness {
+            dirty_worktree: has_claim_progress_worktree_changes(&work_dir),
+            output_growth: current_output_bytes > task.last_output_bytes.unwrap_or(0),
+            recent_claim_progress: task_recent_claim_progress(task, now, progress_window),
+            live_progress_type: task_claim_progress_type(task, &work_dir, current_output_bytes),
+        })
+    }
+
+    fn task_progress_work_dir(&self, task: &crate::task::Task) -> Option<std::path::PathBuf> {
+        if let Some(worktree_path) = task.worktree_path.as_deref() {
+            let path = std::path::PathBuf::from(worktree_path);
+            return Some(if path.is_absolute() {
+                path
+            } else {
+                self.config.project_root.join(path)
+            });
+        }
+
+        let owner = task.claimed_by.as_deref()?;
+        let uses_worktrees = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == owner)
+            .is_none_or(|member| member.use_worktrees);
+        Some(if uses_worktrees {
+            self.worktree_dir(owner)
+        } else {
+            self.config.project_root.clone()
+        })
+    }
 }
 
 #[cfg(test)]

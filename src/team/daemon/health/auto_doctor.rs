@@ -313,6 +313,12 @@ fn task_claim_expiry(task: &crate::task::Task, default_ttl_secs: u64) -> Option<
 }
 
 fn latest_commit_timestamp(work_dir: &std::path::Path) -> Option<DateTime<Utc>> {
+    if crate::team::git_cmd::rev_list_count(work_dir, "main..HEAD")
+        .ok()
+        .is_none_or(|count| count == 0)
+    {
+        return None;
+    }
     let output = std::process::Command::new("git")
         .args(["log", "-1", "--format=%cI"])
         .current_dir(work_dir)
