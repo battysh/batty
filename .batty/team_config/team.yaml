@@ -64,12 +64,13 @@ roles:
       commands_channel_id: "1490930426812829716"
       events_channel_id: "1490930323608047647"
       agents_channel_id: "1490930375822676070"
+      board_channel_id: "1491096253495378070"
       allowed_user_ids: [170281556]
     talks_to: [architect]
 
   - name: architect
     role_type: architect
-    agent: claude 
+    agent: codex
     instances: 1
     prompt: batty_architect.md
     posture: orchestrator
@@ -81,7 +82,7 @@ roles:
 
   - name: manager
     role_type: manager
-    agent: claude
+    agent: codex
     instances: 1
     prompt: batty_manager.md
     posture: orchestrator
@@ -92,7 +93,7 @@ roles:
 
   - name: engineer
     role_type: engineer
-    agent: claude
+    agent: codex
     instances: 3
     prompt: batty_engineer.md
     posture: deep_worker
