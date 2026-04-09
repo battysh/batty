@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use tracing::{info, warn};
 
 use super::{completion, config, discord, hierarchy, inbox, merge, team_config_path, telegram};
@@ -128,7 +128,11 @@ pub(crate) fn detect_sender() -> Option<String> {
         .ok()?;
     if output.status.success() {
         let role = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !role.is_empty() { Some(role) } else { None }
+        if !role.is_empty() {
+            Some(role)
+        } else {
+            None
+        }
     } else {
         None
     }
@@ -227,12 +231,11 @@ fn format_inbox_digest(
     let (entries, raw_count) = inbox::digest_messages(messages);
     let digest_count = entries.len();
 
-    let start = match limit {
-        Some(0) => entries.len(),
-        Some(n) => entries.len().saturating_sub(n),
-        None => 0,
+    let shown = match limit {
+        Some(0) => &entries[..0],
+        Some(n) => &entries[..n.min(entries.len())],
+        None => &entries[..],
     };
-    let shown = &entries[start..];
 
     let mut out = String::new();
 
@@ -756,11 +759,9 @@ roles:
         send_result.unwrap();
 
         let root = inbox::inboxes_root(tmp.path());
-        assert!(
-            inbox::pending_messages(&root, "sam-designer")
-                .unwrap()
-                .is_empty()
-        );
+        assert!(inbox::pending_messages(&root, "sam-designer")
+            .unwrap()
+            .is_empty());
 
         let pending = inbox::pending_messages(&root, "sam-designer-1-1").unwrap();
         assert_eq!(pending.len(), 1);
@@ -1028,7 +1029,45 @@ roles:
         ];
 
         let rendered = format_inbox_digest("manager", &messages, Some(2));
-        // 3 distinct entries (all different categories), limit 2 shows last 2
+        // 3 distinct entries (all different categories), limit 2 shows the
+        // highest-signal entries first.
         assert!(rendered.contains("Showing 2 of 3 entries"));
+        assert!(rendered.contains("ESCALATION"));
+        assert!(rendered.contains("REVIEW"));
+        assert!(!rendered.contains("nudge"));
+    }
+
+    #[test]
+    fn format_inbox_digest_prioritizes_manual_review_notice_over_status_when_limited() {
+        let messages: Vec<_> = vec![
+            (
+                inbox::InboxMessage {
+                    id: "msg1".to_string(),
+                    from: "architect".to_string(),
+                    to: "manager".to_string(),
+                    body: "Status update: triage queue is unchanged.".to_string(),
+                    msg_type: inbox::MessageType::Send,
+                    timestamp: 100,
+                },
+                true,
+            ),
+            (
+                inbox::InboxMessage {
+                    id: "msg2".to_string(),
+                    from: "eng-1".to_string(),
+                    to: "manager".to_string(),
+                    body: "[eng-1] Task #42 passed tests but requires manual review.\nTitle: Inbox routing"
+                        .to_string(),
+                    msg_type: inbox::MessageType::Send,
+                    timestamp: 200,
+                },
+                true,
+            ),
+        ];
+
+        let rendered = format_inbox_digest("manager", &messages, Some(1));
+        assert!(rendered.contains("REVIEW"));
+        assert!(rendered.contains("requires manual review"));
+        assert!(!rendered.contains("Status update: triage queue is unchanged."));
     }
 }
