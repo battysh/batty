@@ -150,12 +150,20 @@ pub struct SdkOutput {
 }
 
 /// Token usage reported in `result` messages.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
 pub struct SdkUsage {
     #[serde(default)]
     pub input_tokens: u64,
     #[serde(default)]
+    pub cached_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
     pub output_tokens: u64,
+    #[serde(default)]
+    pub reasoning_output_tokens: u64,
 }
 
 impl SdkOutput {
@@ -175,6 +183,29 @@ impl SdkOutput {
             .and_then(|r| r.get("tool_use_id"))
             .and_then(|v| v.as_str())
             .map(String::from)
+    }
+
+    pub fn model_name(&self) -> Option<String> {
+        self.message
+            .as_ref()
+            .and_then(|message| message.get("model"))
+            .and_then(|value| value.as_str())
+            .map(String::from)
+    }
+
+    pub fn usage_total_tokens(&self) -> u64 {
+        self.usage.as_ref().map(SdkUsage::total_tokens).unwrap_or(0)
+    }
+}
+
+impl SdkUsage {
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens
+            + self.cached_input_tokens
+            + self.cache_creation_input_tokens
+            + self.cache_read_input_tokens
+            + self.output_tokens
+            + self.reasoning_output_tokens
     }
 }
 
@@ -303,6 +334,14 @@ mod tests {
         assert_eq!(msg.request_id.as_deref(), Some("req-1"));
         assert_eq!(msg.request_subtype().as_deref(), Some("can_use_tool"));
         assert_eq!(msg.request_tool_use_id().as_deref(), Some("tu-1"));
+    }
+
+    #[test]
+    fn parse_result_usage_and_model() {
+        let line = r#"{"type":"result","session_id":"x","usage":{"input_tokens":10,"cached_input_tokens":5,"cache_creation_input_tokens":20,"cache_read_input_tokens":3,"output_tokens":7,"reasoning_output_tokens":2},"message":{"model":"claude-opus-4-6-1m"}}"#;
+        let msg: SdkOutput = serde_json::from_str(line).unwrap();
+        assert_eq!(msg.model_name().as_deref(), Some("claude-opus-4-6-1m"));
+        assert_eq!(msg.usage_total_tokens(), 47);
     }
 
     #[test]
