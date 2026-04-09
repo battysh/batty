@@ -1245,11 +1245,11 @@ impl TeamDaemon {
     fn supervisory_stall_summary(&self, name: &str) -> Option<String> {
         let timeout_secs = self.config.team_config.shim_working_state_timeout_secs;
         let stall_secs = self.shim_handles.get(name)?.secs_since_state_change();
-        let heuristic = self
-            .supervisory_progress_signal(name, timeout_secs)
-            .stall_reason();
+        let signal = self.supervisory_progress_signal(name, timeout_secs);
         Some(format!(
-            "{name} stayed in Working for {stall_secs}s (timeout={timeout_secs}s, heuristic={heuristic})"
+            "{} (timeout={}s)",
+            self.format_supervisory_stall_summary(name, stall_secs, &signal),
+            timeout_secs
         ))
     }
 

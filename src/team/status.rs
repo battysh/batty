@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -11,14 +11,14 @@ use crate::task;
 
 use super::config::{self, RoleType};
 use super::daemon::NudgeSchedule;
-use super::daemon_mgmt::{watchdog_state_path, PersistedWatchdogState};
+use super::daemon_mgmt::{PersistedWatchdogState, watchdog_state_path};
 use super::events;
 use super::hierarchy::MemberInstance;
 use super::inbox;
 use super::standup::MemberState;
 use super::{
-    daemon_state_path, now_unix, pause_marker_path, team_config_dir, team_config_path,
-    team_events_path, TRIAGE_RESULT_FRESHNESS_SECONDS,
+    TRIAGE_RESULT_FRESHNESS_SECONDS, daemon_state_path, now_unix, pause_marker_path,
+    team_config_dir, team_config_path, team_events_path,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -94,14 +94,29 @@ impl AgentHealthSummary {
             || !self.backend_health.is_healthy()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn supervisory_status_token(&self) -> Option<String> {
+        self.supervisory_status_token_for_role(None)
+    }
+
+    pub(crate) fn supervisory_status_token_for_role(
+        &self,
+        role_type: Option<RoleType>,
+    ) -> Option<String> {
         if !self.has_supervisory_warning() {
             return None;
         }
 
+        let role_label = role_type.and_then(supervisory_role_label).or_else(|| {
+            self.stall_reason
+                .as_deref()
+                .and_then(supervisory_role_label_from_reason)
+        });
         Some(match self.stall_reason.as_deref() {
-            Some(reason) => format!("stall:{reason}"),
-            None => "stall".to_string(),
+            Some(reason) => supervisory_status_token(reason, role_label),
+            None => role_label
+                .map(|label| format!("stall:{label}"))
+                .unwrap_or_else(|| "stall".to_string()),
         })
     }
 }
@@ -378,9 +393,15 @@ pub(crate) fn build_team_status_rows(
                 state
             };
 
-            let signal = merge_status_signal(signal, triage_backlog, review_backlog);
             let health = agent_health.get(&member.name).cloned().unwrap_or_default();
-            let health_summary = format_agent_health_summary(&health);
+            let signal = merge_status_signal(
+                signal,
+                health.stall_summary.clone(),
+                triage_backlog,
+                review_backlog,
+            );
+            let health_summary =
+                format_agent_health_summary_for_role(&health, Some(member.role_type));
 
             TeamStatusRow {
                 name: member.name.clone(),
@@ -504,6 +525,10 @@ pub(crate) fn agent_health_by_member(
                             .record_supervisory_digest();
                     }
                     "stall_detected" => {
+                        let role_type = members
+                            .iter()
+                            .find(|member| member.name == role)
+                            .map(|member| member.role_type);
                         let is_supervisory = event
                             .task
                             .as_deref()
@@ -511,11 +536,15 @@ pub(crate) fn agent_health_by_member(
                             || event
                                 .reason
                                 .as_deref()
-                                .is_some_and(|reason| reason.starts_with("supervisory_"));
+                                .is_some_and(is_supervisory_stall_reason)
+                            || role_type.is_some_and(|role_type| {
+                                matches!(role_type, RoleType::Architect | RoleType::Manager)
+                            });
                         if is_supervisory {
                             let fallback_summary = fallback_supervisory_stall_summary(
                                 event.reason.as_deref(),
                                 event.uptime_secs,
+                                role_type,
                             );
                             health_by_member
                                 .entry(role.to_string())
@@ -773,7 +802,15 @@ fn parse_leading_task_id(value: &str) -> Option<u32> {
     (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn format_agent_health_summary(health: &AgentHealthSummary) -> String {
+    format_agent_health_summary_for_role(health, None)
+}
+
+pub(crate) fn format_agent_health_summary_for_role(
+    health: &AgentHealthSummary,
+    role_type: Option<RoleType>,
+) -> String {
     let mut parts = Vec::new();
     if !health.backend_health.is_healthy() {
         parts.push(format!("B:{}", health.backend_health.as_str()));
@@ -790,7 +827,7 @@ pub(crate) fn format_agent_health_summary(health: &AgentHealthSummary) -> String
     if health.supervisory_digest_count > 0 {
         parts.push(format!("sd{}", health.supervisory_digest_count));
     }
-    if let Some(supervisory_token) = health.supervisory_status_token() {
+    if let Some(supervisory_token) = health.supervisory_status_token_for_role(role_type) {
         parts.push(supervisory_token);
     }
     if let Some(task_elapsed_secs) = health.task_elapsed_secs {
@@ -804,7 +841,7 @@ pub(crate) fn format_agent_health_summary(health: &AgentHealthSummary) -> String
     }
 }
 
-fn format_health_duration(task_elapsed_secs: u64) -> String {
+pub(crate) fn format_health_duration(task_elapsed_secs: u64) -> String {
     if task_elapsed_secs < 60 {
         format!("{task_elapsed_secs}s")
     } else if task_elapsed_secs < 3_600 {
@@ -819,15 +856,24 @@ fn format_health_duration(task_elapsed_secs: u64) -> String {
 fn fallback_supervisory_stall_summary(
     reason: Option<&str>,
     stall_secs: Option<u64>,
+    role_type: Option<RoleType>,
 ) -> Option<String> {
+    let role_label = role_type
+        .and_then(supervisory_role_label)
+        .or_else(|| reason.and_then(supervisory_role_label_from_reason))
+        .unwrap_or("supervisory");
     match (reason, stall_secs) {
         (Some(reason), Some(stall_secs)) => Some(format!(
-            "{reason} after {}",
+            "{role_label} stall: {} after {}",
+            supervisory_reason_label(reason),
             format_health_duration(stall_secs)
         )),
-        (Some(reason), None) => Some(reason.to_string()),
+        (Some(reason), None) => Some(format!(
+            "{role_label} stall: {}",
+            supervisory_reason_label(reason)
+        )),
         (None, Some(stall_secs)) => Some(format!(
-            "supervisory stall after {}",
+            "{role_label} stall after {}",
             format_health_duration(stall_secs)
         )),
         (None, None) => None,
@@ -836,6 +882,7 @@ fn fallback_supervisory_stall_summary(
 
 fn merge_status_signal(
     signal: Option<String>,
+    stall_signal: Option<String>,
     triage_backlog: usize,
     review_backlog: usize,
 ) -> Option<String> {
@@ -844,6 +891,9 @@ fn merge_status_signal(
     let mut signals = Vec::new();
     if let Some(existing) = signal {
         signals.push(existing);
+    }
+    if let Some(stall) = stall_signal {
+        signals.push(stall);
     }
     if let Some(triage) = triage_signal {
         signals.push(triage);
@@ -855,6 +905,66 @@ fn merge_status_signal(
         None
     } else {
         Some(signals.join(", "))
+    }
+}
+
+fn supervisory_role_label(role_type: RoleType) -> Option<&'static str> {
+    match role_type {
+        RoleType::Architect => Some("architect"),
+        RoleType::Manager => Some("manager"),
+        _ => None,
+    }
+}
+
+fn supervisory_role_label_from_reason(reason: &str) -> Option<&'static str> {
+    if reason.contains("architect") {
+        Some("architect")
+    } else if reason.contains("manager") {
+        Some("manager")
+    } else {
+        None
+    }
+}
+
+fn is_supervisory_stall_reason(reason: &str) -> bool {
+    reason.starts_with("supervisory_") || reason.contains("architect") || reason.contains("manager")
+}
+
+fn supervisory_status_token(reason: &str, role_label: Option<&str>) -> String {
+    let role_token = match role_label {
+        Some("architect") => "stall:architect",
+        Some("manager") => "stall:manager",
+        _ => "stall",
+    };
+    let detail_token = if reason.ends_with("inbox_batching") {
+        "inbox"
+    } else if reason.ends_with("review_waiting") {
+        "review"
+    } else if reason.ends_with("shim_activity_only") {
+        "shim"
+    } else if reason.ends_with("status_only_output") {
+        "status"
+    } else if reason.ends_with("no_actionable_progress") {
+        "no-progress"
+    } else {
+        "working-timeout"
+    };
+    format!("{role_token}:{detail_token}")
+}
+
+fn supervisory_reason_label(reason: &str) -> &'static str {
+    if reason.ends_with("inbox_batching") {
+        "inbox batching"
+    } else if reason.ends_with("review_waiting") {
+        "review waiting"
+    } else if reason.ends_with("shim_activity_only") {
+        "shim activity only"
+    } else if reason.ends_with("status_only_output") {
+        "status-only output"
+    } else if reason.ends_with("stalled") {
+        "working timeout"
+    } else {
+        "no actionable progress"
     }
 }
 
@@ -2041,6 +2151,22 @@ mod tests {
         }
     }
 
+    fn architect(name: &str) -> MemberInstance {
+        MemberInstance {
+            name: name.to_string(),
+            role_name: name.to_string(),
+            role_type: RoleType::Architect,
+            agent: Some("codex".to_string()),
+            model: None,
+            prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
+            reports_to: None,
+            use_worktrees: false,
+        }
+    }
+
     fn user_member(name: &str) -> MemberInstance {
         MemberInstance {
             name: name.to_string(),
@@ -2157,6 +2283,78 @@ mod tests {
         assert_eq!(
             rows[0].signal.as_deref(),
             Some("nudge paused, needs review (2)")
+        );
+    }
+
+    #[test]
+    fn build_team_status_rows_surfaces_supervisory_stall_signal_and_role_token() {
+        let members = vec![architect("architect"), manager("manager")];
+        let runtime_statuses = HashMap::from([
+            (
+                "architect".to_string(),
+                RuntimeMemberStatus {
+                    state: "working".to_string(),
+                    signal: None,
+                    label: Some("working".to_string()),
+                },
+            ),
+            (
+                "manager".to_string(),
+                RuntimeMemberStatus {
+                    state: "working".to_string(),
+                    signal: Some("nudge paused".to_string()),
+                    label: Some("working".to_string()),
+                },
+            ),
+        ]);
+        let agent_health = HashMap::from([
+            (
+                "architect".to_string(),
+                AgentHealthSummary {
+                    stall_reason: Some(
+                        "supervisory_stalled_architect_no_actionable_progress".to_string(),
+                    ),
+                    stall_summary: Some(
+                        "architect (architect) stalled after 5m: no actionable progress"
+                            .to_string(),
+                    ),
+                    ..AgentHealthSummary::default()
+                },
+            ),
+            (
+                "manager".to_string(),
+                AgentHealthSummary {
+                    stall_reason: Some(
+                        "supervisory_stalled_manager_shim_activity_only".to_string(),
+                    ),
+                    stall_summary: Some(
+                        "manager (manager) stalled after 5m: shim activity only".to_string(),
+                    ),
+                    ..AgentHealthSummary::default()
+                },
+            ),
+        ]);
+
+        let rows = build_team_status_rows(
+            &members,
+            true,
+            &runtime_statuses,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &agent_health,
+        );
+
+        assert_eq!(rows[0].health_summary, "stall:architect:no-progress");
+        assert_eq!(
+            rows[0].signal.as_deref(),
+            Some("architect (architect) stalled after 5m: no actionable progress")
+        );
+        assert_eq!(rows[1].health_summary, "stall:manager:shim");
+        assert_eq!(
+            rows[1].signal.as_deref(),
+            Some("nudge paused, manager (manager) stalled after 5m: shim activity only")
         );
     }
 
@@ -2559,14 +2757,22 @@ mod tests {
     #[test]
     fn merge_status_signal_combines_existing_triage_and_review_signals() {
         assert_eq!(
-            merge_status_signal(Some("nudged".to_string()), 2, 1),
-            Some("nudged, needs triage (2), needs review (1)".to_string())
+            merge_status_signal(
+                Some("nudged".to_string()),
+                Some("manager (manager) stalled after 5m: no actionable progress".to_string()),
+                2,
+                1,
+            ),
+            Some(
+                "nudged, manager (manager) stalled after 5m: no actionable progress, needs triage (2), needs review (1)"
+                    .to_string()
+            )
         );
     }
 
     #[test]
     fn merge_status_signal_returns_none_when_no_signals_exist() {
-        assert_eq!(merge_status_signal(None, 0, 0), None);
+        assert_eq!(merge_status_signal(None, None, 0, 0), None);
     }
 
     #[test]
@@ -2653,10 +2859,12 @@ mod tests {
             active_tasks[0].worktree_path.as_deref(),
             Some(".batty/worktrees/eng-1")
         );
-        assert!(active_tasks[0]
-            .branch
-            .as_deref()
-            .is_some_and(|branch| branch.contains("eng-1")));
+        assert!(
+            active_tasks[0]
+                .branch
+                .as_deref()
+                .is_some_and(|branch| branch.contains("eng-1"))
+        );
         assert!(active_tasks[0].commit.as_deref().is_some());
         assert!(active_tasks[0].test_summary.is_none());
     }
@@ -2946,12 +3154,30 @@ mod tests {
     #[test]
     fn format_agent_health_summary_includes_supervisory_stall_token() {
         let summary = format_agent_health_summary(&AgentHealthSummary {
-            stall_reason: Some("supervisory_stalled".to_string()),
-            stall_summary: Some("manager stayed in Working for 5m".to_string()),
+            stall_reason: Some("supervisory_stalled_manager_no_actionable_progress".to_string()),
+            stall_summary: Some(
+                "lead (manager) stalled after 5m: no actionable progress".to_string(),
+            ),
             ..AgentHealthSummary::default()
         });
 
-        assert_eq!(summary, "stall:supervisory_stalled");
+        assert_eq!(summary, "stall:manager:no-progress");
+    }
+
+    #[test]
+    fn format_agent_health_summary_for_role_includes_supervisory_role_token() {
+        let summary = format_agent_health_summary_for_role(
+            &AgentHealthSummary {
+                stall_reason: Some("supervisory_stalled_manager_shim_activity_only".to_string()),
+                stall_summary: Some(
+                    "lead (manager) stalled after 5m: shim activity only".to_string(),
+                ),
+                ..AgentHealthSummary::default()
+            },
+            Some(RoleType::Manager),
+        );
+
+        assert_eq!(summary, "stall:manager:shim");
     }
 
     #[test]
@@ -2981,11 +3207,16 @@ mod tests {
         digest_emitted.ts = now_unix().saturating_sub(565);
         sink.emit(digest_emitted).unwrap();
 
-        let mut supervisory_stall =
-            TeamEvent::stall_detected_with_reason("eng-1", None, 300, Some("supervisory_stalled"));
+        let mut supervisory_stall = TeamEvent::stall_detected_with_reason(
+            "eng-1",
+            None,
+            300,
+            Some("supervisory_stalled_manager_no_actionable_progress"),
+        );
         supervisory_stall.ts = now_unix().saturating_sub(560);
         supervisory_stall.task = Some("supervisory::eng-1".to_string());
-        supervisory_stall.details = Some("eng-1 stayed in Working for 5m".to_string());
+        supervisory_stall.details =
+            Some("eng-1 (manager) stalled after 5m: no actionable progress".to_string());
         sink.emit(supervisory_stall).unwrap();
 
         let daemon_state = serde_json::json!({
@@ -3005,10 +3236,13 @@ mod tests {
         assert_eq!(eng_1.context_exhaustion_count, 1);
         assert_eq!(eng_1.delivery_failure_count, 1);
         assert_eq!(eng_1.supervisory_digest_count, 1);
-        assert_eq!(eng_1.stall_reason.as_deref(), Some("supervisory_stalled"));
+        assert_eq!(
+            eng_1.stall_reason.as_deref(),
+            Some("supervisory_stalled_manager_no_actionable_progress")
+        );
         assert_eq!(
             eng_1.stall_summary.as_deref(),
-            Some("eng-1 stayed in Working for 5m")
+            Some("eng-1 (manager) stalled after 5m: no actionable progress")
         );
         assert!(eng_1.task_elapsed_secs.unwrap() >= 600);
         assert_eq!(health.get("eng-2").unwrap(), &AgentHealthSummary::default());
@@ -3140,11 +3374,15 @@ mod tests {
             runtime_label: Some("working".to_string()),
             worktree_staleness: None,
             health: AgentHealthSummary {
-                stall_reason: Some("supervisory_stalled".to_string()),
-                stall_summary: Some("eng-stalled stayed in Working for 5m".to_string()),
+                stall_reason: Some(
+                    "supervisory_stalled_manager_no_actionable_progress".to_string(),
+                ),
+                stall_summary: Some(
+                    "eng-stalled (manager) stalled after 5m: no actionable progress".to_string(),
+                ),
                 ..AgentHealthSummary::default()
             },
-            health_summary: "stall:supervisory_stalled".to_string(),
+            health_summary: "stall:manager:no-progress".to_string(),
             eta: "-".to_string(),
         }];
 
