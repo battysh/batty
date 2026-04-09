@@ -3700,8 +3700,36 @@ fn write_aging_task(
     std::fs::write(tasks_dir.join(format!("{id:03}-{title}.md")), content).unwrap();
 }
 
+fn set_aging_claim_progress(
+    project_root: &Path,
+    id: u32,
+    title: &str,
+    last_progress_at: &str,
+    last_output_bytes: u64,
+) {
+    let task_path = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks")
+        .join(format!("{id:03}-{title}.md"));
+    crate::team::task_cmd::update_task_frontmatter(&task_path, |mapping| {
+        crate::team::task_cmd::set_optional_string(
+            mapping,
+            "last_progress_at",
+            Some(last_progress_at),
+        );
+        crate::team::task_cmd::set_optional_u64(
+            mapping,
+            "last_output_bytes",
+            Some(last_output_bytes),
+        );
+    })
+    .unwrap();
+}
+
 #[test]
-fn aging_task_stale_alerts_manager_and_emits_event() {
+fn aging_task_stale_alerts_manager_and_emits_progress_stale_reason() {
     let tmp = tempfile::tempdir().unwrap();
     write_aging_task(
         tmp.path(),
@@ -3719,13 +3747,22 @@ fn aging_task_stale_alerts_manager_and_emits_event() {
 
     daemon.maybe_emit_task_aging_alerts().unwrap();
 
-    let events_path = tmp
-        .path()
-        .join(".batty")
-        .join("team_config")
-        .join("events.jsonl");
-    let events = std::fs::read_to_string(&events_path).unwrap_or_default();
-    assert!(events.contains("\"event\":\"task_stale\""));
+    let events =
+        crate::team::events::read_events(&crate::team::team_events_path(tmp.path())).unwrap();
+    assert!(events.iter().any(|event| {
+        event.event == "task_stale"
+            && event.task.as_deref() == Some("70")
+            && event
+                .reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("progress stale")
+    }));
+    assert!(events.iter().any(|event| {
+        event.event == "task_escalated"
+            && event.task.as_deref() == Some("70")
+            && event.reason.as_deref() == Some("progress_stale")
+    }));
 
     let manager_messages =
         crate::team::inbox::all_messages(&crate::team::inbox::inboxes_root(tmp.path()), "manager")
@@ -3733,8 +3770,163 @@ fn aging_task_stale_alerts_manager_and_emits_event() {
     assert!(
         manager_messages
             .iter()
-            .any(|(msg, _)| msg.body.contains("Task #70 has been in progress"))
+            .any(|(msg, _)| msg.body.contains("Reason: progress_stale"))
     );
+}
+
+#[test]
+fn aging_dirty_lane_with_output_growth_does_not_escalate() {
+    use crate::shim::protocol::socketpair;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "aging_live_output");
+    write_aging_task(
+        &repo,
+        74,
+        "aging-live-output",
+        "in-progress",
+        "high",
+        Some("eng-1"),
+        None,
+        "2026-04-06T06:00:00Z",
+        Some("2026-04-06T06:00:00Z"),
+        Some("2026-04-06T06:00:00Z"),
+    );
+    let stale_progress = (chrono::Utc::now() - chrono::Duration::minutes(20)).to_rfc3339();
+    set_aging_claim_progress(&repo, 74, "aging-live-output", &stale_progress, 0);
+    std::fs::write(
+        repo.join("src").join("live_output.rs"),
+        "pub fn live_output() {}\n",
+    )
+    .unwrap();
+
+    let mut daemon = TestDaemonBuilder::new(repo.as_path())
+        .members(vec![
+            architect_member("architect"),
+            manager_member("manager", Some("architect")),
+            engineer_member("eng-1", Some("manager"), false),
+        ])
+        .build();
+    let (parent_sock, _child_sock) = socketpair().unwrap();
+    let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+        "eng-1".to_string(),
+        crate::shim::protocol::Channel::new(parent_sock),
+        12345,
+        "codex".to_string(),
+        "codex".to_string(),
+        repo.to_path_buf(),
+    );
+    handle.record_output_bytes(128);
+    daemon.shim_handles.insert("eng-1".to_string(), handle);
+
+    daemon.maybe_emit_task_aging_alerts().unwrap();
+
+    let events = crate::team::events::read_events(&crate::team::team_events_path(&repo)).unwrap();
+    assert!(
+        !events.iter().any(|event| {
+            matches!(event.event.as_str(), "task_stale" | "task_escalated")
+                && event.task.as_deref() == Some("74")
+        }),
+        "live dirty/output growth should suppress stale escalation"
+    );
+    let inbox_root = crate::team::inbox::inboxes_root(&repo);
+    assert!(
+        crate::team::inbox::all_messages(&inbox_root, "manager")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        crate::team::inbox::all_messages(&inbox_root, "eng-1")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn aging_dirty_lane_requests_checkpoint_before_escalating() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "aging_checkpoint");
+    write_aging_task(
+        &repo,
+        75,
+        "aging-checkpoint",
+        "in-progress",
+        "high",
+        Some("eng-1"),
+        None,
+        "2026-04-06T06:00:00Z",
+        Some("2026-04-06T06:00:00Z"),
+        Some("2026-04-06T06:00:00Z"),
+    );
+    let stale_progress = (chrono::Utc::now() - chrono::Duration::minutes(20)).to_rfc3339();
+    set_aging_claim_progress(&repo, 75, "aging-checkpoint", &stale_progress, 0);
+    std::fs::write(
+        repo.join("src").join("checkpoint.rs"),
+        "pub fn checkpoint() {}\n",
+    )
+    .unwrap();
+
+    let mut daemon = TestDaemonBuilder::new(repo.as_path())
+        .members(vec![
+            architect_member("architect"),
+            manager_member("manager", Some("architect")),
+            engineer_member("eng-1", Some("manager"), false),
+        ])
+        .build();
+    daemon
+        .config
+        .team_config
+        .automation
+        .intervention_cooldown_secs = 60;
+
+    daemon.maybe_emit_task_aging_alerts().unwrap();
+
+    let events = crate::team::events::read_events(&crate::team::team_events_path(&repo)).unwrap();
+    assert!(
+        !events.iter().any(|event| {
+            matches!(event.event.as_str(), "task_stale" | "task_escalated")
+                && event.task.as_deref() == Some("75")
+        }),
+        "dirty/no-commit lane should checkpoint before escalating"
+    );
+    let inbox_root = crate::team::inbox::inboxes_root(&repo);
+    let engineer_messages = crate::team::inbox::all_messages(&inbox_root, "eng-1").unwrap();
+    assert!(engineer_messages.iter().any(|(msg, _)| {
+        msg.body.contains("create a checkpoint commit now")
+            && msg.body.contains("wip: checkpoint task #75")
+    }));
+    assert!(
+        crate::team::inbox::all_messages(&inbox_root, "manager")
+            .unwrap()
+            .is_empty()
+    );
+
+    daemon.intervention_cooldowns.insert(
+        "aging::task_checkpoint::75".to_string(),
+        Instant::now() - Duration::from_secs(61),
+    );
+    daemon.maybe_emit_task_aging_alerts().unwrap();
+
+    let events = crate::team::events::read_events(&crate::team::team_events_path(&repo)).unwrap();
+    assert!(events.iter().any(|event| {
+        event.event == "task_stale"
+            && event.task.as_deref() == Some("75")
+            && event
+                .reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("dirty worktree changes")
+    }));
+    assert!(events.iter().any(|event| {
+        event.event == "task_escalated"
+            && event.task.as_deref() == Some("75")
+            && event.reason.as_deref() == Some("commit_stale_with_dirty_work")
+    }));
+    let manager_messages = crate::team::inbox::all_messages(&inbox_root, "manager").unwrap();
+    assert!(manager_messages.iter().any(|(msg, _)| {
+        msg.body.contains("Task #75 has been in progress")
+            && msg.body.contains("Reason: commit_stale_with_dirty_work")
+    }));
 }
 
 #[test]
