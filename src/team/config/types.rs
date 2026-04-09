@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Deserializer, de};
+use serde::{de, Deserialize, Deserializer};
 
 use super::super::DEFAULT_EVENT_LOG_MAX_BYTES;
 
@@ -614,6 +614,7 @@ pub enum WorkflowMode {
     Legacy,
     Hybrid,
     WorkflowFirst,
+    BoardFirst,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -632,11 +633,15 @@ impl WorkflowMode {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn workflow_state_primary(self) -> bool {
-        matches!(self, Self::WorkflowFirst)
+        matches!(self, Self::WorkflowFirst | Self::BoardFirst)
     }
 
     pub fn enables_runtime_surface(self) -> bool {
-        matches!(self, Self::Hybrid | Self::WorkflowFirst)
+        matches!(self, Self::Hybrid | Self::WorkflowFirst | Self::BoardFirst)
+    }
+
+    pub fn suppresses_manager_relay(self) -> bool {
+        matches!(self, Self::BoardFirst)
     }
 
     pub fn as_str(self) -> &'static str {
@@ -644,6 +649,7 @@ impl WorkflowMode {
             Self::Legacy => "legacy",
             Self::Hybrid => "hybrid",
             Self::WorkflowFirst => "workflow_first",
+            Self::BoardFirst => "board_first",
         }
     }
 }

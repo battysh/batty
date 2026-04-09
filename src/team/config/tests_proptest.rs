@@ -15,7 +15,7 @@ const VALID_AGENTS: &[&str] = &[
 const VALID_ROLE_TYPES: &[&str] = &["user", "architect", "manager", "engineer"];
 
 /// Valid workflow mode strings for YAML.
-const VALID_WORKFLOW_MODES: &[&str] = &["legacy", "hybrid", "workflow_first"];
+const VALID_WORKFLOW_MODES: &[&str] = &["legacy", "hybrid", "workflow_first", "board_first"];
 
 /// Valid orchestrator position strings for YAML.
 const VALID_ORCH_POSITIONS: &[&str] = &["bottom", "left"];
@@ -204,6 +204,7 @@ proptest! {
             "legacy" => prop_assert_eq!(config.workflow_mode, WorkflowMode::Legacy),
             "hybrid" => prop_assert_eq!(config.workflow_mode, WorkflowMode::Hybrid),
             "workflow_first" => prop_assert_eq!(config.workflow_mode, WorkflowMode::WorkflowFirst),
+            "board_first" => prop_assert_eq!(config.workflow_mode, WorkflowMode::BoardFirst),
             _ => unreachable!(),
         }
     }
