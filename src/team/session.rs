@@ -6,19 +6,17 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
+use serde::Serialize;
 use tracing::{info, warn};
 
-use super::board;
 use super::daemon_mgmt::{
-    force_kill_daemon, request_graceful_daemon_shutdown, resume_marker_path,
-    DAEMON_SHUTDOWN_GRACE_PERIOD,
+    DAEMON_SHUTDOWN_GRACE_PERIOD, force_kill_daemon, request_graceful_daemon_shutdown,
+    resume_marker_path,
 };
-use super::discord::DiscordBot;
 use super::{
     config, estimation, events, hierarchy, now_unix, status, team_config_path, team_events_path,
 };
-use crate::task;
 use crate::tmux;
 
 /// Path to the pause marker file. Presence pauses nudges and standups.
@@ -158,7 +156,7 @@ impl SessionSummary {
     }
 }
 
-fn format_runtime(secs: u64) -> String {
+pub(crate) fn format_runtime(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")
     } else if secs < 3600 {
@@ -174,178 +172,46 @@ fn format_runtime(secs: u64) -> String {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct ShutdownBoardSnapshot {
-    todo: u32,
-    in_progress: u32,
-    review: u32,
+#[derive(Debug, Clone, Serialize)]
+struct ResumeMarkerState {
+    discord_event_cursor: Option<usize>,
 }
 
-fn collect_shutdown_board_snapshot(project_root: &Path) -> Result<ShutdownBoardSnapshot> {
-    let tasks_dir = project_root
-        .join(".batty")
-        .join("team_config")
-        .join("board")
-        .join("tasks");
-    if !tasks_dir.is_dir() {
-        return Ok(ShutdownBoardSnapshot::default());
+fn write_resume_marker(project_root: &Path, discord_event_cursor: Option<usize>) {
+    let marker = resume_marker_path(project_root);
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
-
-    let mut snapshot = ShutdownBoardSnapshot::default();
-    for task in task::load_tasks_from_dir(&tasks_dir)? {
-        match task.status.as_str() {
-            "todo" | "backlog" => snapshot.todo += 1,
-            "in-progress" | "in_progress" => snapshot.in_progress += 1,
-            "review" => snapshot.review += 1,
-            _ => {}
-        }
-    }
-
-    Ok(snapshot)
-}
-
-fn collect_shutdown_test_health(project_root: &Path) -> Result<Option<String>> {
-    let tasks_dir = project_root
-        .join(".batty")
-        .join("team_config")
-        .join("board")
-        .join("tasks");
-    if !tasks_dir.is_dir() {
-        return Ok(None);
-    }
-
-    let mut most_recent: Option<(i64, String)> = None;
-    for task in task::load_tasks_from_dir(&tasks_dir)? {
-        let metadata = board::read_workflow_metadata(&task.source_path)?;
-        let Some(test_health) = format_shutdown_test_health(&metadata) else {
-            continue;
-        };
-        let timestamp = shutdown_task_sort_timestamp(&task);
-        let should_replace = match most_recent.as_ref() {
-            Some((current, _)) => timestamp >= *current,
-            None => true,
-        };
-        if should_replace {
-            most_recent = Some((timestamp, test_health));
-        }
-    }
-
-    Ok(most_recent.map(|(_, summary)| summary))
-}
-
-fn format_shutdown_test_health(metadata: &board::WorkflowMetadata) -> Option<String> {
-    if metadata.tests_run != Some(true) {
-        return None;
-    }
-
-    if let Some(results) = metadata.test_results.as_ref() {
-        if let Some(summary) = results.summary.as_deref() {
-            return Some(summary.to_string());
-        }
-        return Some(if results.failed == 0 {
-            format!(
-                "{} passed, {} failed, {} ignored",
-                results.passed, results.failed, results.ignored
-            )
-        } else {
-            results.failure_summary()
-        });
-    }
-
-    match metadata.tests_passed {
-        Some(true) => Some("tests passed".to_string()),
-        Some(false) => Some("tests failed".to_string()),
-        None => None,
-    }
-}
-
-fn shutdown_task_sort_timestamp(task: &task::Task) -> i64 {
-    task.last_progress_at
-        .as_deref()
-        .or(task.completed.as_deref())
-        .or(task.claimed_at.as_deref())
-        .and_then(parse_rfc3339_timestamp)
-        .unwrap_or(i64::from(task.id))
-}
-
-fn parse_rfc3339_timestamp(value: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|timestamp| timestamp.timestamp())
-}
-
-fn shutdown_discord_config(team_config: &config::TeamConfig) -> Option<&config::ChannelConfig> {
-    team_config
-        .roles
-        .iter()
-        .find(|role| {
-            role.role_type == config::RoleType::User && role.channel.as_deref() == Some("discord")
-        })
-        .and_then(|role| role.channel_config.as_ref())
-}
-
-fn format_shutdown_notice(summary: &SessionSummary, snapshot: ShutdownBoardSnapshot) -> String {
-    format!(
-        "Batty shutting down - {} tasks in-progress, {} in review\nSession summary: {} tasks completed, {} merged, runtime {}",
-        snapshot.in_progress,
-        snapshot.review,
-        summary.tasks_completed,
-        summary.tasks_merged,
-        format_runtime(summary.runtime_secs),
-    )
-}
-
-fn format_shutdown_summary(
-    summary: &SessionSummary,
-    snapshot: ShutdownBoardSnapshot,
-    test_health: Option<&str>,
-) -> String {
-    let test_health = test_health.unwrap_or("unavailable");
-    format!(
-        "Session ended: {} tasks completed, {} merged, runtime {}\nBoard snapshot: {} in-progress, {} todo, {} review\nTest health: {}",
-        summary.tasks_completed,
-        summary.tasks_merged,
-        format_runtime(summary.runtime_secs),
-        snapshot.in_progress,
-        snapshot.todo,
-        snapshot.review,
-        test_health,
-    )
-}
-
-fn send_discord_shutdown_notice(team_config: &config::TeamConfig, notice: &str) {
-    let Some(channel_config) = shutdown_discord_config(team_config) else {
-        return;
+    let payload = ResumeMarkerState {
+        discord_event_cursor,
     };
-    let Some(bot) = DiscordBot::from_config(channel_config) else {
-        return;
-    };
-    if let Err(error) = bot.send_plain_message(bot.commands_channel_id(), notice) {
-        warn!(error = %error, "failed to send pre-shutdown Discord notice");
+    if let Ok(rendered) = serde_json::to_string(&payload) {
+        let _ = std::fs::write(&marker, rendered);
+    } else {
+        let _ = std::fs::write(&marker, "");
     }
 }
 
-fn send_discord_shutdown_summary(team_config: &config::TeamConfig, summary: &str) {
-    let Some(channel_config) = shutdown_discord_config(team_config) else {
-        return;
-    };
-    let Some(channel_id) = channel_config.events_channel_id.as_deref() else {
-        return;
-    };
-    let Some(bot) = DiscordBot::from_config(channel_config) else {
-        return;
-    };
-    if let Err(error) = bot.send_plain_message(channel_id, summary) {
-        warn!(error = %error, "failed to send post-shutdown Discord summary");
-    }
+fn graceful_shutdown_wait(team_config: &config::TeamConfig) -> Duration {
+    let requested = Duration::from_secs(
+        team_config.workflow_policy.graceful_shutdown_timeout_secs
+            + u64::from(team_config.shim_shutdown_timeout_secs)
+            + 5,
+    );
+    std::cmp::max(DAEMON_SHUTDOWN_GRACE_PERIOD, requested)
 }
 
-fn daemon_stop_timeout(team_config: &config::TeamConfig) -> Duration {
-    Duration::from_secs(
-        (team_config.shim_shutdown_timeout_secs as u64)
-            .saturating_mul(2)
-            .saturating_add(DAEMON_SHUTDOWN_GRACE_PERIOD.as_secs()),
-    )
+#[derive(Debug, serde::Deserialize)]
+struct PersistedDiscordCursor {
+    #[serde(default)]
+    discord_event_cursor: usize,
+}
+
+fn persisted_discord_event_cursor(project_root: &Path) -> Option<usize> {
+    let path = super::daemon_state_path(project_root);
+    let content = std::fs::read_to_string(path).ok()?;
+    let state: PersistedDiscordCursor = serde_json::from_str(&content).ok()?;
+    Some(state.discord_event_cursor)
 }
 
 /// Compute session summary from the event log.
@@ -392,57 +258,42 @@ pub fn stop_team(project_root: &Path) -> Result<()> {
         bail!("no team config found at {}", config_path.display());
     }
     let team_config = config::TeamConfig::load(&config_path)?;
+    let primary_session = format!("batty-{}", team_config.name);
 
-    // Compute session summary before shutting down (events log is still available).
-    let summary = compute_session_summary(project_root);
-    let board_snapshot = collect_shutdown_board_snapshot(project_root).unwrap_or_else(|error| {
-        warn!(error = %error, "failed to collect shutdown board snapshot");
-        ShutdownBoardSnapshot::default()
-    });
-    let test_health = collect_shutdown_test_health(project_root).unwrap_or_else(|error| {
-        warn!(error = %error, "failed to collect shutdown test health");
-        None
-    });
-
-    if let Some(summary) = summary.as_ref() {
-        let notice = format_shutdown_notice(summary, board_snapshot);
-        send_discord_shutdown_notice(&team_config, &notice);
+    let pre_summary = compute_session_summary(project_root);
+    let pre_snapshot = super::daemon::build_shutdown_snapshot(project_root, pre_summary.as_ref());
+    if let Err(error) = super::daemon::send_discord_shutdown_notice(&team_config, &pre_snapshot) {
+        warn!(error = %error, "failed to send Discord shutdown notice");
     }
 
     // Write resume marker before tearing down — agents have sessions to continue
-    let marker = resume_marker_path(project_root);
-    if let Some(parent) = marker.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    std::fs::write(&marker, "").ok();
+    write_resume_marker(project_root, None);
 
     // Ask the daemon to persist a final clean snapshot before the tmux session is torn down.
-    if !request_graceful_daemon_shutdown(project_root, daemon_stop_timeout(&team_config)) {
+    if !request_graceful_daemon_shutdown(project_root, graceful_shutdown_wait(&team_config)) {
         warn!("daemon did not stop gracefully; forcing shutdown");
         force_kill_daemon(project_root);
     }
 
-    let primary_session = Some(format!("batty-{}", &team_config.name));
-
     // Kill only the session belonging to this project
-    match &primary_session {
-        Some(session) if tmux::session_exists(session) => {
-            tmux::kill_session(session)?;
-            info!(session = %session, "team session stopped");
-        }
-        Some(session) => {
-            info!(session = %session, "no running session to stop");
-        }
-        None => {
-            bail!("no team config found at {}", config_path.display());
-        }
+    if tmux::session_exists(&primary_session) {
+        tmux::kill_session(&primary_session)?;
+        info!(session = %primary_session, "team session stopped");
+    } else {
+        info!(session = %primary_session, "no running session to stop");
     }
 
+    let final_summary = compute_session_summary(project_root);
+    let final_snapshot =
+        super::daemon::build_shutdown_snapshot(project_root, final_summary.as_ref());
+    if let Err(error) = super::daemon::send_discord_shutdown_summary(&team_config, &final_snapshot)
+    {
+        warn!(error = %error, "failed to send Discord shutdown summary");
+    }
+    write_resume_marker(project_root, persisted_discord_event_cursor(project_root));
+
     // Print session summary after teardown.
-    if let Some(summary) = summary {
-        let shutdown_summary =
-            format_shutdown_summary(&summary, board_snapshot, test_health.as_deref());
-        send_discord_shutdown_summary(&team_config, &shutdown_summary);
+    if let Some(summary) = final_summary {
         println!();
         println!("{}", summary.display());
     }
@@ -778,13 +629,13 @@ pub fn validate_team(project_root: &Path, verbose: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::team::TRIAGE_RESULT_FRESHNESS_SECONDS;
     use crate::team::config::RoleType;
     use crate::team::hierarchy;
     use crate::team::inbox;
     use crate::team::status;
     use crate::team::team_config_dir;
     use crate::team::team_config_path;
-    use crate::team::TRIAGE_RESULT_FRESHNESS_SECONDS;
     use serial_test::serial;
 
     #[test]
@@ -1524,171 +1375,68 @@ roles:
     }
 
     #[test]
-    fn shutdown_board_snapshot_counts_todo_active_and_review() {
+    fn write_resume_marker_persists_discord_cursor() {
         let tmp = tempfile::tempdir().unwrap();
-        let tasks_dir = tmp
-            .path()
-            .join(".batty")
-            .join("team_config")
-            .join("board")
-            .join("tasks");
-        std::fs::create_dir_all(&tasks_dir).unwrap();
 
-        std::fs::write(
-            tasks_dir.join("001-backlog.md"),
-            r#"---
-id: 1
-title: backlog task
-status: backlog
-priority: medium
----
+        write_resume_marker(tmp.path(), Some(17));
 
-backlog
-"#,
-        )
-        .unwrap();
-        std::fs::write(
-            tasks_dir.join("002-todo.md"),
-            r#"---
-id: 2
-title: todo task
-status: todo
-priority: medium
----
-
-todo
-"#,
-        )
-        .unwrap();
-        std::fs::write(
-            tasks_dir.join("003-progress.md"),
-            r#"---
-id: 3
-title: progress task
-status: in-progress
-priority: medium
----
-
-progress
-"#,
-        )
-        .unwrap();
-        std::fs::write(
-            tasks_dir.join("004-review.md"),
-            r#"---
-id: 4
-title: review task
-status: review
-priority: medium
----
-
-review
-"#,
-        )
-        .unwrap();
-
-        let project_root = tasks_dir
-            .ancestors()
-            .nth(4)
-            .expect("project root ancestor should exist");
-        let snapshot = collect_shutdown_board_snapshot(project_root).unwrap();
+        let marker = resume_marker_path(tmp.path());
+        let payload = std::fs::read_to_string(marker).unwrap();
         assert_eq!(
-            snapshot,
-            ShutdownBoardSnapshot {
-                todo: 2,
-                in_progress: 1,
-                review: 1,
-            }
+            payload,
+            serde_json::json!({ "discord_event_cursor": 17 }).to_string()
         );
     }
 
     #[test]
-    fn shutdown_test_health_uses_most_recent_progress_timestamp() {
+    fn persisted_discord_event_cursor_reads_saved_state() {
         let tmp = tempfile::tempdir().unwrap();
-        let tasks_dir = tmp
-            .path()
-            .join(".batty")
-            .join("team_config")
-            .join("board")
-            .join("tasks");
-        std::fs::create_dir_all(&tasks_dir).unwrap();
-
+        let state_path = crate::team::daemon_state_path(tmp.path());
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         std::fs::write(
-            tasks_dir.join("001-old.md"),
-            r#"---
-id: 1
-title: old test run
-status: review
-priority: medium
-last_progress_at: 2026-04-07T10:00:00Z
-tests_run: true
-tests_passed: true
-test_results:
-  framework: cargo
-  passed: 12
-  failed: 0
-  ignored: 0
-  failures: []
-  summary: "test result: ok. 12 passed; 0 failed; 0 ignored;"
----
-
-old
-"#,
-        )
-        .unwrap();
-        std::fs::write(
-            tasks_dir.join("002-new.md"),
-            r#"---
-id: 2
-title: new test run
-status: in-progress
-priority: medium
-last_progress_at: 2026-04-08T11:00:00Z
-tests_run: true
-tests_passed: false
-test_results:
-  framework: cargo
-  passed: 11
-  failed: 1
-  ignored: 0
-  failures:
-    - test_name: daemon::tests::shutdown
-      message: assertion failed
-  summary: "test result: FAILED. 11 passed; 1 failed; 0 ignored;"
----
-
-new
-"#,
+            &state_path,
+            serde_json::json!({
+                "clean_shutdown": true,
+                "saved_at": 123,
+                "discord_event_cursor": 29,
+                "states": {},
+                "active_tasks": {},
+                "retry_counts": {},
+                "dispatch_queue": [],
+                "paused_standups": [],
+                "last_standup_elapsed_secs": {},
+                "nudge_state": {},
+                "pipeline_starvation_fired": false,
+                "optional_subsystem_backoff": {},
+                "optional_subsystem_disabled_remaining_secs": {}
+            })
+            .to_string(),
         )
         .unwrap();
 
-        let health = collect_shutdown_test_health(tmp.path()).unwrap();
-        assert_eq!(
-            health.as_deref(),
-            Some("test result: FAILED. 11 passed; 1 failed; 0 ignored;")
-        );
+        assert_eq!(persisted_discord_event_cursor(tmp.path()), Some(29));
     }
 
     #[test]
-    fn shutdown_summary_format_includes_board_and_test_health() {
-        let summary = SessionSummary {
-            tasks_completed: 5,
-            tasks_merged: 3,
-            runtime_secs: 8100,
-        };
-        let snapshot = ShutdownBoardSnapshot {
-            todo: 4,
-            in_progress: 2,
-            review: 1,
-        };
+    fn graceful_shutdown_wait_includes_commit_window_and_shim_timeout() {
+        let mut team_config: config::TeamConfig = serde_yaml::from_str(
+            r#"
+name: test-team
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+    instances: 1
+    talks_to: [manager]
+"#,
+        )
+        .unwrap();
+        team_config.workflow_policy.graceful_shutdown_timeout_secs = 30;
+        team_config.shim_shutdown_timeout_secs = 10;
 
         assert_eq!(
-            format_shutdown_summary(
-                &summary,
-                snapshot,
-                Some("test result: ok. 8 passed; 0 failed; 0 ignored;")
-            ),
-            "Session ended: 5 tasks completed, 3 merged, runtime 2h 15m\nBoard snapshot: 2 in-progress, 4 todo, 1 review\nTest health: test result: ok. 8 passed; 0 failed; 0 ignored;"
+            graceful_shutdown_wait(&team_config),
+            Duration::from_secs(45)
         );
     }
 
