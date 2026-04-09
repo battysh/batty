@@ -544,6 +544,19 @@ impl TeamDaemon {
         ));
     }
 
+    pub(crate) fn record_supervisory_digest_emitted(
+        &mut self,
+        member_name: &str,
+        total_messages: u32,
+        duplicates_suppressed: u32,
+    ) {
+        self.emit_event(TeamEvent::supervisory_digest_emitted(
+            member_name,
+            total_messages,
+            duplicates_suppressed,
+        ));
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn record_barrier_artifact_created(
         &mut self,
@@ -780,14 +793,14 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::team::LOG_ROTATION_BYTES;
     use crate::team::config::{
         AutomationConfig, BoardConfig, OrchestratorPosition, RoleDef, StandupConfig, TeamConfig,
         WorkflowMode, WorkflowPolicy,
     };
-    use crate::team::events::{EventSink, read_events};
+    use crate::team::events::{read_events, EventSink};
     use crate::team::failure_patterns::FailureTracker;
-    use crate::team::test_helpers::{RecordingChannel, daemon_config_with_roles};
+    use crate::team::test_helpers::{daemon_config_with_roles, RecordingChannel};
+    use crate::team::LOG_ROTATION_BYTES;
     use regex::Regex;
     use serial_test::serial;
 
@@ -1133,12 +1146,11 @@ mod tests {
 
         assert!(malformed_path.is_dir());
         assert!(malformed_ansi_path.is_dir());
-        assert!(
-            !tmp.path()
-                .join(".batty")
-                .join("orchestrator.log.1")
-                .exists()
-        );
+        assert!(!tmp
+            .path()
+            .join(".batty")
+            .join("orchestrator.log.1")
+            .exists());
     }
 
     #[test]
