@@ -23,5 +23,6 @@ site/
 
 # Batty runtime — live directory, not versioned
 .batty/
+.batty-target/
 .omx/
 .codex/
