@@ -900,6 +900,8 @@ pub struct ChannelConfig {
     pub agents_channel_id: Option<String>,
     #[serde(default)]
     pub commands_channel_id: Option<String>,
+    #[serde(default)]
+    pub board_channel_id: Option<String>,
 }
 
 #[derive(Deserialize)]

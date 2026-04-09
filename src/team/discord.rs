@@ -90,7 +90,7 @@ impl DiscordBot {
             "content": truncate_for_discord(text, MAX_CONTENT_LEN),
             "allowed_mentions": { "parse": [] }
         });
-        self.post_message(channel_id, &body)
+        self.post_message(channel_id, &body).map(|_| ())
     }
 
     pub fn send_embed(
@@ -108,7 +108,7 @@ impl DiscordBot {
             }],
             "allowed_mentions": { "parse": [] }
         });
-        self.post_message(channel_id, &body)
+        self.post_message(channel_id, &body).map(|_| ())
     }
 
     pub fn send_command_reply(&self, text: &str) -> Result<()> {
@@ -138,6 +138,90 @@ impl DiscordBot {
     pub fn get_channel(&self, channel_id: &str) -> Result<ChannelSummary> {
         let json = self.get_json(&format!("{DISCORD_API_BASE}/channels/{channel_id}"))?;
         parse_channel_response(&json)
+    }
+
+    pub fn create_message(&self, channel_id: &str, body: &serde_json::Value) -> Result<String> {
+        self.post_message(channel_id, body)
+    }
+
+    pub fn edit_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        body: &serde_json::Value,
+    ) -> Result<()> {
+        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}");
+        let response = ureq::request("PATCH", &url)
+            .set("Authorization", &format!("Bot {}", self.bot_token))
+            .set("Content-Type", "application/json")
+            .send_string(&body.to_string());
+
+        match response {
+            Ok(resp) => {
+                debug!(
+                    status = resp.status(),
+                    channel_id, message_id, "Discord message edited"
+                );
+                Ok(())
+            }
+            Err(ureq::Error::Status(status, response)) => {
+                let detail = response.into_string().unwrap_or_default();
+                warn!(
+                    status,
+                    detail = %detail,
+                    channel_id,
+                    message_id,
+                    "Discord edit failed"
+                );
+                bail!("Discord edit failed with status {status}: {detail}");
+            }
+            Err(ureq::Error::Transport(error)) => {
+                warn!(
+                    error = %error,
+                    channel_id,
+                    message_id,
+                    "Discord edit transport failed"
+                );
+                bail!("Discord edit transport failed: {error}");
+            }
+        }
+    }
+
+    pub fn pin_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
+        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/pins/{message_id}");
+        let response = ureq::request("PUT", &url)
+            .set("Authorization", &format!("Bot {}", self.bot_token))
+            .call();
+
+        match response {
+            Ok(resp) => {
+                debug!(
+                    status = resp.status(),
+                    channel_id, message_id, "Discord message pinned"
+                );
+                Ok(())
+            }
+            Err(ureq::Error::Status(status, response)) => {
+                let detail = response.into_string().unwrap_or_default();
+                warn!(
+                    status,
+                    detail = %detail,
+                    channel_id,
+                    message_id,
+                    "Discord pin failed"
+                );
+                bail!("Discord pin failed with status {status}: {detail}");
+            }
+            Err(ureq::Error::Transport(error)) => {
+                warn!(
+                    error = %error,
+                    channel_id,
+                    message_id,
+                    "Discord pin transport failed"
+                );
+                bail!("Discord pin transport failed: {error}");
+            }
+        }
     }
 
     pub fn poll_commands(&mut self) -> Result<Vec<InboundMessage>> {
@@ -195,7 +279,7 @@ impl DiscordBot {
         }
     }
 
-    fn post_message(&self, channel_id: &str, body: &serde_json::Value) -> Result<()> {
+    fn post_message(&self, channel_id: &str, body: &serde_json::Value) -> Result<String> {
         let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
         let response = ureq::post(&url)
             .set("Authorization", &format!("Bot {}", self.bot_token))
@@ -204,11 +288,16 @@ impl DiscordBot {
 
         match response {
             Ok(resp) => {
-                debug!(
-                    status = resp.status(),
-                    channel_id, "Discord message accepted"
-                );
-                Ok(())
+                let json: serde_json::Value = resp
+                    .into_json()
+                    .context("failed to parse Discord post-message response")?;
+                let message_id = json
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| anyhow!("Discord post-message response missing id"))?
+                    .to_string();
+                debug!(channel_id, message_id, "Discord message accepted");
+                Ok(message_id)
             }
             Err(ureq::Error::Status(status, response)) => {
                 let detail = response.into_string().unwrap_or_default();

@@ -1,14 +1,23 @@
 //! Discord bridge orchestration for the daemon poll loop.
 
-use anyhow::{Context, Result, anyhow, bail};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, bail, Context, Result};
+use chrono::{DateTime, Local, Utc};
 use tracing::{debug, info, warn};
 
 use super::telegram_bridge::TelegramCommand;
 use super::*;
+use crate::task::{load_tasks_from_dir, Task};
 use crate::team::config::{ChannelConfig, RoleType, TeamConfig};
-use crate::team::discord::{DiscordBot, color_for_role};
-use crate::team::events::{TeamEvent, read_events};
+use crate::team::discord::{color_for_role, DiscordBot};
+use crate::team::events::{read_events, TeamEvent};
 use crate::team::inbox;
+
+const DISCORD_BOARD_SYNC_INTERVAL: Duration = Duration::from_secs(30);
+const DISCORD_BOARD_SYNC_KEY: &str = "discord::board_sync";
+const DISCORD_BOARD_MAX_SECTION_LINES: usize = 8;
 
 pub(super) fn build_discord_bot(team_config: &TeamConfig) -> Option<DiscordBot> {
     team_config
@@ -23,6 +32,7 @@ impl TeamDaemon {
     pub(super) fn process_discord_queue(&mut self) -> Result<()> {
         self.poll_discord()?;
         self.sync_discord_events()?;
+        self.sync_discord_board();
         self.deliver_user_channel_inbox()
     }
 
@@ -161,6 +171,365 @@ impl TeamDaemon {
         let description = friendly_event_description(event);
         let color = event_color(event);
         bot.send_embed(channel_id, &title, &description, color)
+    }
+
+    fn sync_discord_board(&mut self) {
+        let Some(bot) = self.discord_bot.as_ref() else {
+            return;
+        };
+        let Some(config) = discord_channel_config(&self.config.team_config) else {
+            return;
+        };
+        let Some(channel_id) = config.board_channel_id.as_deref() else {
+            return;
+        };
+        if self
+            .intervention_cooldowns
+            .get(DISCORD_BOARD_SYNC_KEY)
+            .is_some_and(|last| last.elapsed() < DISCORD_BOARD_SYNC_INTERVAL)
+        {
+            return;
+        }
+
+        let body = match build_board_message_body(
+            &self.config.project_root,
+            &self.config.members,
+            &self.states,
+            &self.backend_health,
+        ) {
+            Ok(body) => body,
+            Err(error) => {
+                warn!(error = %error, "failed to build Discord board payload");
+                self.intervention_cooldowns
+                    .insert(DISCORD_BOARD_SYNC_KEY.to_string(), Instant::now());
+                return;
+            }
+        };
+
+        let board_message_id_path = discord_board_message_id_path(&self.config.project_root);
+        let stored_message_id = read_discord_board_message_id(&board_message_id_path);
+
+        match stored_message_id {
+            Some(message_id) => {
+                if let Err(error) = bot.edit_message(channel_id, &message_id, &body) {
+                    warn!(
+                        channel_id,
+                        message_id,
+                        error = %error,
+                        "failed to edit Discord board message; will retry next cycle"
+                    );
+                }
+            }
+            None => match bot.create_message(channel_id, &body) {
+                Ok(message_id) => {
+                    if let Err(error) =
+                        write_discord_board_message_id(&board_message_id_path, &message_id)
+                    {
+                        warn!(error = %error, "failed to persist Discord board message id");
+                    }
+                    if let Err(error) = bot.pin_message(channel_id, &message_id) {
+                        warn!(
+                            channel_id,
+                            message_id,
+                            error = %error,
+                            "failed to pin Discord board message"
+                        );
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        channel_id,
+                        error = %error,
+                        "failed to create Discord board message; will retry next cycle"
+                    );
+                }
+            },
+        }
+
+        self.intervention_cooldowns
+            .insert(DISCORD_BOARD_SYNC_KEY.to_string(), Instant::now());
+    }
+}
+
+fn discord_board_message_id_path(project_root: &Path) -> PathBuf {
+    project_root.join(".batty").join("discord_board_msg.txt")
+}
+
+fn read_discord_board_message_id(path: &Path) -> Option<String> {
+    let value = std::fs::read_to_string(path).ok()?;
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn write_discord_board_message_id(path: &Path, message_id: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    std::fs::write(path, format!("{message_id}\n"))
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn build_board_message_body(
+    project_root: &Path,
+    members: &[MemberInstance],
+    states: &HashMap<String, MemberState>,
+    backend_health: &HashMap<String, crate::agent::BackendHealth>,
+) -> Result<serde_json::Value> {
+    let board_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board");
+    let tasks = load_tasks_from_dir(&board_dir.join("tasks"))?;
+    let now_local = Local::now();
+
+    let in_progress = summarize_in_progress_tasks(&tasks);
+    let todo = summarize_todo_tasks(&tasks);
+    let review = summarize_review_tasks(&tasks);
+    let done_today = count_done_today(&tasks, now_local);
+    let health_footer = build_health_footer(members, states, backend_health);
+
+    let embeds = vec![
+        serde_json::json!({
+            "title": "Batty Board",
+            "description": format!(
+                "Live board dashboard for {}. Updates every 30 seconds.",
+                project_root.display()
+            ),
+            "color": 0x334155u32,
+        }),
+        serde_json::json!({
+            "title": format!("In Progress ({})", in_progress.total),
+            "description": in_progress.rendered,
+            "color": 0xE74C3Cu32,
+        }),
+        serde_json::json!({
+            "title": format!("Todo ({})", todo.total),
+            "description": todo.rendered,
+            "color": 0x3498DBu32,
+        }),
+        serde_json::json!({
+            "title": format!("Review ({})", review.total),
+            "description": review.rendered,
+            "color": 0xE67E22u32,
+            "footer": {
+                "text": format!(
+                    "Done today: {} | {} | Updated {}",
+                    done_today,
+                    health_footer,
+                    now_local.format("%Y-%m-%d %H:%M:%S %Z")
+                )
+            }
+        }),
+    ];
+
+    Ok(serde_json::json!({
+        "content": "",
+        "embeds": embeds,
+        "allowed_mentions": { "parse": [] }
+    }))
+}
+
+struct BoardSection {
+    total: usize,
+    rendered: String,
+}
+
+fn summarize_in_progress_tasks(tasks: &[Task]) -> BoardSection {
+    let mut tasks = tasks
+        .iter()
+        .filter(|task| matches!(task.status.as_str(), "in-progress" | "in_progress"))
+        .collect::<Vec<_>>();
+    tasks.sort_by_key(|task| (priority_rank(&task.priority), task.id));
+
+    let lines = tasks
+        .iter()
+        .take(DISCORD_BOARD_MAX_SECTION_LINES)
+        .map(|task| {
+            let owner = task.claimed_by.as_deref().unwrap_or("unclaimed");
+            let elapsed = task
+                .claimed_at
+                .as_deref()
+                .and_then(format_elapsed_since_rfc3339)
+                .unwrap_or_else(|| "-".to_string());
+            format!(
+                "#{} {} {} · {} · {}",
+                task.id,
+                priority_icon(&task.priority),
+                task.title,
+                owner,
+                elapsed
+            )
+        })
+        .collect::<Vec<_>>();
+
+    BoardSection {
+        total: tasks.len(),
+        rendered: render_section_lines(lines, tasks.len()),
+    }
+}
+
+fn summarize_todo_tasks(tasks: &[Task]) -> BoardSection {
+    let mut tasks = tasks
+        .iter()
+        .filter(|task| matches!(task.status.as_str(), "todo" | "backlog"))
+        .collect::<Vec<_>>();
+    tasks.sort_by_key(|task| (priority_rank(&task.priority), task.id));
+
+    let lines = tasks
+        .iter()
+        .take(DISCORD_BOARD_MAX_SECTION_LINES)
+        .map(|task| {
+            format!(
+                "#{} {} {} · {}",
+                task.id,
+                priority_icon(&task.priority),
+                task.title,
+                task.priority
+            )
+        })
+        .collect::<Vec<_>>();
+
+    BoardSection {
+        total: tasks.len(),
+        rendered: render_section_lines(lines, tasks.len()),
+    }
+}
+
+fn summarize_review_tasks(tasks: &[Task]) -> BoardSection {
+    let mut tasks = tasks
+        .iter()
+        .filter(|task| task.status == "review")
+        .collect::<Vec<_>>();
+    tasks.sort_by_key(|task| (priority_rank(&task.priority), task.id));
+
+    let lines = tasks
+        .iter()
+        .take(DISCORD_BOARD_MAX_SECTION_LINES)
+        .map(|task| {
+            let owner = task.review_owner.as_deref().unwrap_or("unassigned");
+            format!(
+                "#{} {} {} · {}",
+                task.id,
+                priority_icon(&task.priority),
+                task.title,
+                owner
+            )
+        })
+        .collect::<Vec<_>>();
+
+    BoardSection {
+        total: tasks.len(),
+        rendered: render_section_lines(lines, tasks.len()),
+    }
+}
+
+fn render_section_lines(lines: Vec<String>, total: usize) -> String {
+    if lines.is_empty() {
+        return "None".to_string();
+    }
+
+    let shown = lines.len();
+    let mut rendered = lines.join("\n");
+    if total > shown {
+        rendered.push_str(&format!("\n... +{} more", total - shown));
+    }
+    rendered
+}
+
+fn build_health_footer(
+    members: &[MemberInstance],
+    states: &HashMap<String, MemberState>,
+    backend_health: &HashMap<String, crate::agent::BackendHealth>,
+) -> String {
+    let (architect_active, architect_total) =
+        role_activity_counts(members, states, RoleType::Architect);
+    let (manager_active, manager_total) = role_activity_counts(members, states, RoleType::Manager);
+    let (engineer_active, engineer_total) =
+        role_activity_counts(members, states, RoleType::Engineer);
+    let unhealthy = backend_health
+        .values()
+        .filter(|health| !health.is_healthy())
+        .count();
+
+    format!(
+        "Architects: {}/{} active | Managers: {}/{} active | Engineers: {}/{} active | Backend warnings: {}",
+        architect_active,
+        architect_total,
+        manager_active,
+        manager_total,
+        engineer_active,
+        engineer_total,
+        unhealthy
+    )
+}
+
+fn role_activity_counts(
+    members: &[MemberInstance],
+    states: &HashMap<String, MemberState>,
+    role_type: RoleType,
+) -> (usize, usize) {
+    let members = members
+        .iter()
+        .filter(|member| member.role_type == role_type)
+        .collect::<Vec<_>>();
+    let active = members
+        .iter()
+        .filter(|member| states.get(&member.name) == Some(&MemberState::Working))
+        .count();
+    (active, members.len())
+}
+
+fn count_done_today(tasks: &[Task], now: DateTime<Local>) -> usize {
+    let today = now.date_naive();
+    tasks
+        .iter()
+        .filter(|task| task.status == "done")
+        .filter_map(|task| task.completed.as_deref())
+        .filter_map(|completed| DateTime::parse_from_rfc3339(completed).ok())
+        .filter(|completed| completed.with_timezone(&Local).date_naive() == today)
+        .count()
+}
+
+fn format_elapsed_since_rfc3339(value: &str) -> Option<String> {
+    let parsed = DateTime::parse_from_rfc3339(value).ok()?;
+    let elapsed = Utc::now().signed_duration_since(parsed.with_timezone(&Utc));
+    if elapsed.num_seconds() < 0 {
+        return None;
+    }
+    let secs = elapsed.num_seconds() as u64;
+    Some(format_duration_compact(secs))
+}
+
+fn format_duration_compact(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3_600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3_600)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
+}
+
+fn priority_rank(priority: &str) -> u8 {
+    match priority.to_ascii_lowercase().as_str() {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        "low" => 3,
+        _ => 4,
+    }
+}
+
+fn priority_icon(priority: &str) -> &'static str {
+    match priority.to_ascii_lowercase().as_str() {
+        "critical" => "⚡",
+        "high" => "🔧",
+        "medium" => "📐",
+        "low" => "📝",
+        _ => "•",
     }
 }
 
@@ -590,6 +959,7 @@ mod tests {
             events_channel_id: Some("events".into()),
             agents_channel_id: Some("agents".into()),
             commands_channel_id: Some("commands".into()),
+            board_channel_id: Some("board".into()),
         };
 
         let mut error_event = TeamEvent::loop_step_error("poll", "boom");
@@ -601,5 +971,87 @@ mod tests {
 
         let board_event = TeamEvent::task_assigned("eng-1", "Task #42");
         assert_eq!(event_channel_id(&config, &board_event), Some("events"));
+    }
+
+    #[test]
+    fn discord_board_message_id_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = discord_board_message_id_path(tmp.path());
+        write_discord_board_message_id(&path, "123456789").unwrap();
+        assert_eq!(
+            read_discord_board_message_id(&path).as_deref(),
+            Some("123456789")
+        );
+    }
+
+    #[test]
+    fn build_board_message_body_renders_sections_and_footer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&board_dir).unwrap();
+        std::fs::write(
+            board_dir.join("561-live-board.md"),
+            format!(
+                "---\nid: 561\ntitle: Live board sync\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclaimed_at: {}\nclass: standard\n---\n\nTask.\n",
+                Utc::now().to_rfc3339()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            board_dir.join("562-board-todo.md"),
+            "---\nid: 562\ntitle: Board todo\nstatus: todo\npriority: critical\nclass: standard\n---\n\nTask.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            board_dir.join("563-board-review.md"),
+            "---\nid: 563\ntitle: Board review\nstatus: review\npriority: medium\nreview_owner: lead\nclass: standard\n---\n\nTask.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            board_dir.join("564-board-done.md"),
+            format!(
+                "---\nid: 564\ntitle: Board done\nstatus: done\npriority: low\ncompleted: {}\nclass: standard\n---\n\nTask.\n",
+                Local::now().to_rfc3339()
+            ),
+        )
+        .unwrap();
+
+        let members = vec![
+            crate::team::harness::architect_member("architect"),
+            crate::team::harness::manager_member("lead", Some("architect")),
+            crate::team::harness::engineer_member("eng-1", Some("lead"), false),
+        ];
+        let states = HashMap::from([
+            ("architect".to_string(), MemberState::Idle),
+            ("lead".to_string(), MemberState::Idle),
+            ("eng-1".to_string(), MemberState::Working),
+        ]);
+        let backend_health =
+            HashMap::from([("eng-1".to_string(), crate::agent::BackendHealth::Healthy)]);
+
+        let body =
+            build_board_message_body(tmp.path(), &members, &states, &backend_health).unwrap();
+        let embeds = body["embeds"].as_array().unwrap();
+        assert_eq!(embeds.len(), 4);
+        assert_eq!(embeds[0]["title"].as_str(), Some("Batty Board"));
+        assert_eq!(embeds[1]["title"].as_str(), Some("In Progress (1)"));
+        assert!(embeds[1]["description"]
+            .as_str()
+            .unwrap_or("")
+            .contains("#561"));
+        assert_eq!(embeds[2]["title"].as_str(), Some("Todo (1)"));
+        assert!(embeds[2]["description"]
+            .as_str()
+            .unwrap_or("")
+            .contains("critical"));
+        assert_eq!(embeds[3]["title"].as_str(), Some("Review (1)"));
+        let footer = embeds[3]["footer"]["text"].as_str().unwrap_or("");
+        assert!(footer.contains("Done today: 1"));
+        assert!(footer.contains("Engineers: 1/1 active"));
     }
 }

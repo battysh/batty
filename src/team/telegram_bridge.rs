@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use tracing::{debug, info, warn};
 
 use super::*;
@@ -1462,6 +1462,7 @@ mod tests {
                 events_channel_id: None,
                 agents_channel_id: None,
                 commands_channel_id: None,
+                board_channel_id: None,
             }),
             nudge_interval_secs: None,
             receives_standup: None,

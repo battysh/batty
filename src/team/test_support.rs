@@ -592,7 +592,7 @@ pub(crate) fn backdate_idle_grace(daemon: &mut TeamDaemon, member_name: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{TestDaemonBuilder, test_channel_config};
+    use super::{test_channel_config, TestDaemonBuilder};
 
     #[test]
     fn test_daemon_builder_initializes_delivery_runtime_fields() {
@@ -614,6 +614,7 @@ mod tests {
         assert!(config.allowed_user_ids.is_empty());
         assert!(config.bot_token.is_none());
         assert!(config.agents_channel_id.is_none());
+        assert!(config.board_channel_id.is_none());
         assert!(config.commands_channel_id.is_none());
         assert!(config.events_channel_id.is_none());
     }
