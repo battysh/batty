@@ -151,30 +151,125 @@ impl TeamDaemon {
 }
 
 /// Count total inserted + deleted lines from uncommitted changes in a worktree.
-/// Runs `git diff --numstat` (unstaged) + `git diff --cached --numstat` (staged).
+/// Excludes transient `.batty-target` artifacts and ignores staged-delete +
+/// identical-untracked-file mismatches for the same path.
 fn uncommitted_diff_lines(worktree: &std::path::Path) -> Result<usize> {
-    let mut total = 0usize;
-    for extra_args in [&["--numstat"] as &[&str], &["--cached", "--numstat"]] {
-        let output = std::process::Command::new("git")
-            .arg("diff")
-            .args(extra_args)
-            .current_dir(worktree)
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .output()
-            .with_context(|| format!("failed to run git diff in {}", worktree.display()))?;
-        if !output.status.success() {
+    let output = std::process::Command::new("git")
+        .args([
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            ".",
+            ":(exclude).batty-target",
+        ])
+        .current_dir(worktree)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+        .with_context(|| format!("failed to run git status in {}", worktree.display()))?;
+    if !output.status.success() {
+        anyhow::bail!("git status failed in {}", worktree.display());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut entries: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for line in stdout.lines() {
+        if line.len() < 4 {
             continue;
         }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let mut parts = line.split_whitespace();
-            let added: usize = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-            let removed: usize = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-            total += added + removed;
+        let status = line[..2].to_string();
+        let path = line[3..].to_string();
+        entries.entry(path).or_default().push(status);
+    }
+
+    let mut total = 0usize;
+    for (path, statuses) in entries {
+        if statuses.iter().any(|status| status == "D ")
+            && statuses.iter().any(|status| status == "??")
+            && tracked_blob_hash(worktree, &path).as_deref()
+                == untracked_blob_hash(worktree, &path).as_deref()
+        {
+            continue;
         }
+
+        if statuses.iter().any(|status| status == "??") {
+            total += count_file_lines(&worktree.join(&path))?;
+        }
+
+        total += diff_numstat_lines(worktree, false, &path)?;
+        total += diff_numstat_lines(worktree, true, &path)?;
+    }
+
+    Ok(total)
+}
+
+fn diff_numstat_lines(worktree: &std::path::Path, cached: bool, path: &str) -> Result<usize> {
+    let mut command = std::process::Command::new("git");
+    command.arg("diff");
+    if cached {
+        command.arg("--cached");
+    }
+    command
+        .args(["--numstat", "--", path])
+        .current_dir(worktree)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE");
+    let output = command
+        .output()
+        .with_context(|| format!("failed to run git diff for {}", path))?;
+    if !output.status.success() {
+        return Ok(0);
+    }
+
+    let mut total = 0usize;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut parts = line.split_whitespace();
+        let added: usize = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let removed: usize = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        total += added + removed;
     }
     Ok(total)
+}
+
+fn tracked_blob_hash(worktree: &std::path::Path, path: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", &format!("HEAD:{path}")])
+        .current_dir(worktree)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn untracked_blob_hash(worktree: &std::path::Path, path: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["hash-object", path])
+        .current_dir(worktree)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn count_file_lines(path: &std::path::Path) -> Result<usize> {
+    let content = std::fs::read(path)
+        .with_context(|| format!("failed to read untracked file {}", path.display()))?;
+    if content.is_empty() {
+        return Ok(0);
+    }
+    let text = String::from_utf8_lossy(&content);
+    let lines = text.lines().count();
+    Ok(lines.max(1))
 }
 
 #[cfg(test)]

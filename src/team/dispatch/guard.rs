@@ -33,6 +33,16 @@ impl TeamDaemon {
             return Ok(());
         };
 
+        // Suppress repeated escalations for the same task+engineer pair.
+        // Without this, auto-dispatch re-queues the entry with fresh
+        // validation_failures on every poll cycle, creating an infinite
+        // escalation→drop→re-queue→escalation message flood.
+        let escalation_key = format!("dispatch-fail:{}:{}", entry.task_id, entry.engineer);
+        let cooldown = std::time::Duration::from_secs(900); // 15 minutes
+        if self.suppress_recent_escalation(escalation_key, cooldown) {
+            return Ok(());
+        }
+
         let body = format!(
             "Dispatch queue entry failed validation too many times.\nEngineer: {}\nTask #{}: {}\nFailures: {}\nLast failure: {}",
             entry.engineer, entry.task_id, entry.task_title, entry.validation_failures, detail
@@ -142,6 +152,43 @@ mod tests {
         assert!(messages[0].body.contains("Dispatch queue entry failed"));
         assert!(messages[0].body.contains("eng-1"));
         assert!(messages[0].body.contains("worktree dirty"));
+    }
+
+    #[test]
+    fn escalate_suppresses_repeated_messages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+            ])
+            .build();
+
+        let entry = DispatchQueueEntry {
+            engineer: "eng-1".to_string(),
+            task_id: 42,
+            task_title: "Test task".to_string(),
+            queued_at: 0,
+            validation_failures: 3,
+            last_failure: Some("worktree dirty".to_string()),
+        };
+
+        // First call sends a message
+        daemon
+            .escalate_dispatch_queue_entry(&entry, "worktree dirty")
+            .unwrap();
+        // Second call is suppressed (same task+engineer within cooldown)
+        daemon
+            .escalate_dispatch_queue_entry(&entry, "worktree dirty")
+            .unwrap();
+
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        let messages = inbox::pending_messages(&inbox_root, "mgr").unwrap();
+        assert_eq!(
+            messages.len(),
+            1,
+            "repeated escalation for same task+engineer should be suppressed"
+        );
     }
 
     #[test]

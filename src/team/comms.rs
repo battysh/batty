@@ -317,6 +317,7 @@ mod tests {
             events_channel_id: None,
             agents_channel_id: None,
             commands_channel_id: None,
+            board_channel_id: None,
         };
         // Without bot_token (and assuming env var is not set), falls back to CLI channel.
         if std::env::var("BATTY_TELEGRAM_BOT_TOKEN").is_err() {
@@ -335,6 +336,7 @@ mod tests {
             events_channel_id: None,
             agents_channel_id: None,
             commands_channel_id: None,
+            board_channel_id: None,
         };
         let ch = channel_from_config("telegram", &config).unwrap();
         assert_eq!(ch.channel_type(), "telegram-native");
@@ -350,6 +352,7 @@ mod tests {
             events_channel_id: None,
             agents_channel_id: None,
             commands_channel_id: None,
+            board_channel_id: None,
         };
         // Only assert CLI fallback when the env var is also absent.
         if std::env::var("BATTY_TELEGRAM_BOT_TOKEN").is_err() {
@@ -368,6 +371,7 @@ mod tests {
             events_channel_id: None,
             agents_channel_id: None,
             commands_channel_id: None,
+            board_channel_id: None,
         };
         match channel_from_config("slack", &config) {
             Err(e) => assert!(e.to_string().contains("unsupported")),
@@ -385,6 +389,7 @@ mod tests {
             events_channel_id: Some("100".into()),
             agents_channel_id: Some("200".into()),
             commands_channel_id: Some("300".into()),
+            board_channel_id: None,
         };
         let ch = channel_from_config("discord", &config).unwrap();
         assert_eq!(ch.channel_type(), "discord");
@@ -395,12 +400,10 @@ mod tests {
         let ch = TelegramChannel::new("12345".into(), "/nonexistent/binary".into());
         let result = ch.send("hello");
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("failed to execute")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("failed to execute"));
     }
 
     #[test]

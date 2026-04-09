@@ -1099,6 +1099,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn uncommitted_diff_lines_ignores_batty_target_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".batty-target")).unwrap();
+        init_bare_git_repo(&repo);
+
+        std::fs::write(repo.join("hello.txt"), "line1\n").unwrap();
+        git_ok(&repo, &["add", "hello.txt"]);
+        git_ok(&repo, &["commit", "-m", "init"]);
+
+        std::fs::write(
+            repo.join(".batty-target").join("build.log"),
+            "artifact\nartifact\nartifact\n",
+        )
+        .unwrap();
+
+        let lines = super::super::uncommitted_diff_lines(&repo).unwrap();
+        assert_eq!(lines, 0, ".batty-target should be ignored, got {lines}");
+    }
+
+    #[test]
+    fn uncommitted_diff_lines_skips_staged_delete_with_identical_untracked_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".cargo")).unwrap();
+        init_bare_git_repo(&repo);
+
+        let path = repo.join(".cargo").join("config.toml");
+        std::fs::write(&path, "[build]\ntarget-dir = \"shared\"\n").unwrap();
+        git_ok(&repo, &["add", ".cargo/config.toml"]);
+        git_ok(&repo, &["commit", "-m", "init"]);
+
+        git_ok(&repo, &["rm", "--cached", ".cargo/config.toml"]);
+        std::fs::write(&path, "[build]\ntarget-dir = \"shared\"\n").unwrap();
+
+        let lines = super::super::uncommitted_diff_lines(&repo).unwrap();
+        assert_eq!(
+            lines, 0,
+            "identical staged-delete/untracked-copy mismatch should not count, got {lines}"
+        );
+    }
+
     fn make_uncommitted_warn_daemon(tmp: &tempfile::TempDir, threshold: usize) -> TeamDaemon {
         let repo = tmp.path();
         let team_config_dir = repo.join(".batty").join("team_config");
