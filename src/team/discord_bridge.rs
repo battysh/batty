@@ -3,21 +3,32 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Local, Utc};
 use tracing::{debug, info, warn};
 
 use super::telegram_bridge::TelegramCommand;
 use super::*;
-use crate::task::{load_tasks_from_dir, Task};
+use crate::task::{Task, load_tasks_from_dir};
 use crate::team::config::{ChannelConfig, RoleType, TeamConfig};
-use crate::team::discord::{color_for_role, DiscordBot};
-use crate::team::events::{read_events, TeamEvent};
+use crate::team::discord::{DiscordBot, color_for_role};
+use crate::team::events::{TeamEvent, read_events};
 use crate::team::inbox;
 
 const DISCORD_BOARD_SYNC_INTERVAL: Duration = Duration::from_secs(30);
 const DISCORD_BOARD_SYNC_KEY: &str = "discord::board_sync";
 const DISCORD_BOARD_MAX_SECTION_LINES: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiscordShutdownSnapshot {
+    pub(crate) tasks_completed: u32,
+    pub(crate) tasks_merged: u32,
+    pub(crate) runtime_secs: Option<u64>,
+    pub(crate) in_progress: usize,
+    pub(crate) todo: usize,
+    pub(crate) review: usize,
+    pub(crate) last_test_health: String,
+}
 
 pub(super) fn build_discord_bot(team_config: &TeamConfig) -> Option<DiscordBot> {
     team_config
@@ -545,6 +556,93 @@ fn is_telemetry_only_event(event: &TeamEvent) -> bool {
     )
 }
 
+pub(crate) fn build_shutdown_snapshot(
+    project_root: &Path,
+    summary: Option<&crate::team::session::SessionSummary>,
+) -> DiscordShutdownSnapshot {
+    let board_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board");
+    let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks")).unwrap_or_default();
+
+    DiscordShutdownSnapshot {
+        tasks_completed: summary.map(|summary| summary.tasks_completed).unwrap_or(0),
+        tasks_merged: summary.map(|summary| summary.tasks_merged).unwrap_or(0),
+        runtime_secs: summary.map(|summary| summary.runtime_secs),
+        in_progress: tasks
+            .iter()
+            .filter(|task| matches!(task.status.as_str(), "in-progress" | "in_progress"))
+            .count(),
+        todo: tasks
+            .iter()
+            .filter(|task| matches!(task.status.as_str(), "todo" | "backlog"))
+            .count(),
+        review: tasks.iter().filter(|task| task.status == "review").count(),
+        last_test_health: latest_test_health(&tasks),
+    }
+}
+
+pub(crate) fn send_discord_shutdown_notice(
+    team_config: &TeamConfig,
+    snapshot: &DiscordShutdownSnapshot,
+) -> Result<()> {
+    let Some(bot) = build_discord_bot(team_config) else {
+        return Ok(());
+    };
+    let Some(config) = discord_channel_config(team_config) else {
+        return Ok(());
+    };
+    let Some(channel_id) = config.commands_channel_id.as_deref() else {
+        return Ok(());
+    };
+
+    let runtime = snapshot
+        .runtime_secs
+        .map(crate::team::session::format_runtime)
+        .unwrap_or_else(|| "unknown".to_string());
+    let description = format!(
+        "{} tasks in-progress, {} in review\nTasks completed: {}\nMerged: {}\nRuntime: {}",
+        snapshot.in_progress,
+        snapshot.review,
+        snapshot.tasks_completed,
+        snapshot.tasks_merged,
+        runtime
+    );
+    bot.send_embed(channel_id, "🔴 Batty shutting down", &description, 0xDC2626)
+}
+
+pub(crate) fn send_discord_shutdown_summary(
+    team_config: &TeamConfig,
+    snapshot: &DiscordShutdownSnapshot,
+) -> Result<()> {
+    let Some(bot) = build_discord_bot(team_config) else {
+        return Ok(());
+    };
+    let Some(config) = discord_channel_config(team_config) else {
+        return Ok(());
+    };
+    let Some(channel_id) = config.events_channel_id.as_deref() else {
+        return Ok(());
+    };
+
+    let runtime = snapshot
+        .runtime_secs
+        .map(crate::team::session::format_runtime)
+        .unwrap_or_else(|| "unknown".to_string());
+    let description = format!(
+        "{} tasks completed, {} merged, runtime {}\nBoard: {} in-progress, {} todo, {} review\nTest health: {}",
+        snapshot.tasks_completed,
+        snapshot.tasks_merged,
+        runtime,
+        snapshot.in_progress,
+        snapshot.todo,
+        snapshot.review,
+        snapshot.last_test_health
+    );
+    bot.send_embed(channel_id, "Session ended", &description, 0x2563EB)
+}
+
 fn discord_channel_config(team_config: &TeamConfig) -> Option<&ChannelConfig> {
     team_config
         .roles
@@ -814,6 +912,31 @@ fn event_color(event: &TeamEvent) -> u32 {
     }
 }
 
+fn latest_test_health(tasks: &[Task]) -> String {
+    let mut tasks = tasks.iter().collect::<Vec<_>>();
+    tasks.sort_by(|left, right| right.last_progress_at.cmp(&left.last_progress_at));
+
+    for task in tasks {
+        let Ok(metadata) = crate::team::board::read_workflow_metadata(&task.source_path) else {
+            continue;
+        };
+        if let Some(results) = metadata.test_results {
+            return format!(
+                "{}: {} passed, {} failed, {} ignored",
+                results.framework, results.passed, results.failed, results.ignored
+            );
+        }
+        if metadata.tests_passed == Some(true) {
+            return "tests passing".to_string();
+        }
+        if metadata.tests_run == Some(true) && metadata.tests_passed == Some(false) {
+            return "tests failing".to_string();
+        }
+    }
+
+    "unknown".to_string()
+}
+
 fn parse_discord_command(text: &str) -> Result<Option<TelegramCommand>> {
     let trimmed = text.trim();
     if !trimmed.starts_with('$') {
@@ -1052,18 +1175,67 @@ mod tests {
         assert_eq!(embeds.len(), 4);
         assert_eq!(embeds[0]["title"].as_str(), Some("Batty Board"));
         assert_eq!(embeds[1]["title"].as_str(), Some("In Progress (1)"));
-        assert!(embeds[1]["description"]
-            .as_str()
-            .unwrap_or("")
-            .contains("#561"));
+        assert!(
+            embeds[1]["description"]
+                .as_str()
+                .unwrap_or("")
+                .contains("#561")
+        );
         assert_eq!(embeds[2]["title"].as_str(), Some("Todo (1)"));
-        assert!(embeds[2]["description"]
-            .as_str()
-            .unwrap_or("")
-            .contains("critical"));
+        assert!(
+            embeds[2]["description"]
+                .as_str()
+                .unwrap_or("")
+                .contains("critical")
+        );
         assert_eq!(embeds[3]["title"].as_str(), Some("Review (1)"));
         let footer = embeds[3]["footer"]["text"].as_str().unwrap_or("");
         assert!(footer.contains("Done today: 1"));
         assert!(footer.contains("Engineers: 1/1 active"));
+    }
+
+    #[test]
+    fn build_shutdown_snapshot_counts_board_state_and_test_health() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&board_dir).unwrap();
+        std::fs::write(
+            board_dir.join("567-stop.md"),
+            format!(
+                "---\nid: 567\ntitle: Stop flow\nstatus: in-progress\npriority: high\nlast_progress_at: {}\nclass: standard\ntests_run: true\ntests_passed: true\ntest_results:\n  framework: cargo\n  passed: 12\n  failed: 0\n  ignored: 1\n  failures: []\n---\n\nTask.\n",
+                Local::now().to_rfc3339()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            board_dir.join("568-review.md"),
+            "---\nid: 568\ntitle: Review flow\nstatus: review\npriority: medium\nclass: standard\n---\n\nTask.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            board_dir.join("569-todo.md"),
+            "---\nid: 569\ntitle: Todo flow\nstatus: todo\npriority: low\nclass: standard\n---\n\nTask.\n",
+        )
+        .unwrap();
+
+        let summary = crate::team::session::SessionSummary {
+            tasks_completed: 5,
+            tasks_merged: 3,
+            runtime_secs: 3600,
+        };
+        let snapshot = build_shutdown_snapshot(tmp.path(), Some(&summary));
+
+        assert_eq!(snapshot.tasks_completed, 5);
+        assert_eq!(snapshot.tasks_merged, 3);
+        assert_eq!(snapshot.runtime_secs, Some(3600));
+        assert_eq!(snapshot.in_progress, 1);
+        assert_eq!(snapshot.todo, 1);
+        assert_eq!(snapshot.review, 1);
+        assert!(snapshot.last_test_health.contains("cargo: 12 passed"));
     }
 }

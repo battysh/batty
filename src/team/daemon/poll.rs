@@ -296,6 +296,12 @@ impl TeamDaemon {
             return;
         }
 
+        let warning_secs = self
+            .config
+            .team_config
+            .workflow_policy
+            .graceful_shutdown_timeout_secs;
+        self.warn_agents_of_shutdown(warning_secs);
         self.preserve_work_before_shutdown();
 
         let timeout_secs = self.config.team_config.shim_shutdown_timeout_secs;
@@ -361,6 +367,48 @@ impl TeamDaemon {
             unsafe {
                 libc::kill(*pid as i32, libc::SIGKILL);
             }
+        }
+    }
+
+    fn warn_agents_of_shutdown(&mut self, warning_secs: u64) {
+        let body = format!("Shutting down in {warning_secs}s — commit your work now");
+        let mut delivered = 0usize;
+
+        for (member_name, handle) in self.shim_handles.iter_mut() {
+            if handle.is_terminal() || !handle.is_ready() {
+                debug!(
+                    member = member_name.as_str(),
+                    state = %handle.state,
+                    "skipping shutdown warning because agent is not ready for live delivery"
+                );
+                continue;
+            }
+
+            match handle.send_message("daemon", &body) {
+                Ok(()) => {
+                    delivered += 1;
+                    let _ = crate::team::append_shim_event_log(
+                        &self.config.project_root,
+                        member_name,
+                        &format!("-> daemon: {body}"),
+                    );
+                }
+                Err(error) => {
+                    warn!(
+                        member = member_name.as_str(),
+                        error = %error,
+                        "failed to send live shutdown warning"
+                    );
+                }
+            }
+        }
+
+        info!(
+            warning_secs,
+            delivered, "sent live shutdown warning to ready agents"
+        );
+        if warning_secs > 0 {
+            std::thread::sleep(Duration::from_secs(warning_secs));
         }
     }
 

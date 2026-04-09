@@ -4329,10 +4329,10 @@ fn save_daemon_state_returns_error_on_readonly_dir() {
         let state = PersistedDaemonState {
             clean_shutdown: false,
             saved_at: 0,
+            discord_event_cursor: 0,
             states: HashMap::new(),
             active_tasks: HashMap::new(),
             retry_counts: HashMap::new(),
-            discord_event_cursor: 0,
             dispatch_queue: Vec::new(),
             paused_standups: HashSet::new(),
             last_standup_elapsed_secs: HashMap::new(),

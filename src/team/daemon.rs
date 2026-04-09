@@ -103,6 +103,9 @@ pub(crate) mod telemetry;
 #[path = "daemon/verification.rs"]
 pub(crate) mod verification;
 
+pub(crate) use self::discord_bridge::{
+    build_shutdown_snapshot, send_discord_shutdown_notice, send_discord_shutdown_summary,
+};
 #[cfg(test)]
 use self::dispatch::normalized_assignment_dir;
 pub(crate) use self::error_handling::{optional_subsystem_for_step, optional_subsystem_names};

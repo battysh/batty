@@ -48,6 +48,7 @@ impl TeamDaemon {
         };
 
         self.states = state.states;
+        self.discord_event_cursor = self.discord_event_cursor.max(state.discord_event_cursor);
         self.idle_started_at = self
             .states
             .iter()
