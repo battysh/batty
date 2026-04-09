@@ -10,10 +10,10 @@ use super::*;
 use crate::team::config::WorkflowMode;
 use crate::team::daemon::interventions::dispatch::manager_dispatch_intervention_key;
 use crate::team::daemon::interventions::utilization::architect_utilization_intervention_key;
-use crate::team::harness::{TestHarness, architect_member, engineer_member, manager_member};
+use crate::team::harness::{architect_member, engineer_member, manager_member, TestHarness};
 use crate::team::inbox::{self, InboxMessage};
-use crate::team::test_support::TestDaemonBuilder;
 use crate::team::test_support::write_board_task_file;
+use crate::team::test_support::TestDaemonBuilder;
 
 fn triage_harness() -> TestHarness {
     TestHarness::new()
@@ -237,17 +237,29 @@ fn maybe_intervene_triage_backlog_queues_expected_message_for_idle_manager() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].from, "architect");
     assert!(pending[0].body.contains("Triage backlog detected"));
-    assert!(
-        pending[0]
-            .body
-            .contains("1 delivered direct-report result packet")
-    );
+    assert!(pending[0]
+        .body
+        .contains("1 delivered direct-report result packet"));
     assert!(pending[0].body.contains("Reports in scope: eng-1, eng-2."));
     assert!(pending[0].body.contains("batty inbox lead"));
     assert!(pending[0].body.contains("batty read lead <ref>"));
     assert!(pending[0].body.contains("batty send eng-1"));
     assert!(pending[0].body.contains("batty assign eng-1"));
     assert!(pending[0].body.contains("batty send architect"));
+}
+
+#[test]
+fn maybe_intervene_triage_backlog_skips_in_board_first_mode() {
+    let harness =
+        triage_harness().with_inbox_message("lead", delivered_result("eng-1", "done"), true);
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.config.team_config.workflow_mode = WorkflowMode::BoardFirst;
+
+    enter_idle_epoch(&mut daemon, "lead");
+    daemon.maybe_intervene_triage_backlog().unwrap();
+
+    assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+    assert!(!daemon.triage_interventions.contains_key("lead"));
 }
 
 #[test]
@@ -354,11 +366,9 @@ fn maybe_intervene_triage_backlog_updates_count_when_new_report_arrives() {
 
     let pending = harness.pending_inbox_messages("lead").unwrap();
     assert_eq!(pending.len(), 1);
-    assert!(
-        pending[0]
-            .body
-            .contains("2 delivered direct-report result packet")
-    );
+    assert!(pending[0]
+        .body
+        .contains("2 delivered direct-report result packet"));
     assert!(pending[0].body.contains("Reports in scope: eng-1, eng-2."));
 }
 
@@ -374,11 +384,9 @@ fn maybe_intervene_owned_tasks_queues_task_message_for_idle_engineer() {
     let pending = harness.pending_inbox_messages("eng-1").unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].from, "lead");
-    assert!(
-        pending[0]
-            .body
-            .contains("Owned active task backlog detected")
-    );
+    assert!(pending[0]
+        .body
+        .contains("Owned active task backlog detected"));
     assert!(pending[0].body.contains("Task #191"));
     assert!(pending[0].body.contains("batty send lead"));
 
@@ -438,12 +446,10 @@ fn maybe_intervene_owned_tasks_escalates_to_manager_after_threshold() {
     assert!(lead_pending[0].body.contains("Stuck task escalation"));
     assert!(lead_pending[0].body.contains("eng-1"));
     assert!(lead_pending[0].body.contains("Task #191"));
-    assert!(
-        daemon
-            .owned_task_interventions
-            .get("eng-1")
-            .is_some_and(|state| state.escalation_sent)
-    );
+    assert!(daemon
+        .owned_task_interventions
+        .get("eng-1")
+        .is_some_and(|state| state.escalation_sent));
 }
 
 #[test]
@@ -470,12 +476,10 @@ fn maybe_intervene_owned_tasks_only_escalates_once_per_signature() {
 
     let lead_pending = harness.pending_inbox_messages("lead").unwrap();
     assert_eq!(lead_pending.len(), 1);
-    assert!(
-        daemon
-            .owned_task_interventions
-            .get("eng-1")
-            .is_some_and(|state| state.escalation_sent)
-    );
+    assert!(daemon
+        .owned_task_interventions
+        .get("eng-1")
+        .is_some_and(|state| state.escalation_sent));
 }
 
 #[test]
@@ -623,11 +627,47 @@ fn maybe_intervene_manager_dispatch_gap_queues_for_idle_lead() {
     assert!(pending[0].body.contains("eng-1 on #191"));
     assert!(pending[0].body.contains("eng-2"));
     assert!(pending[0].body.contains("batty assign eng-2"));
-    assert!(
-        daemon
-            .owned_task_interventions
-            .contains_key("dispatch::lead")
+    assert!(daemon
+        .owned_task_interventions
+        .contains_key("dispatch::lead"));
+}
+
+#[test]
+fn maybe_intervene_manager_dispatch_gap_skips_in_board_first_mode() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("lead", "%999997");
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.config.team_config.workflow_mode = WorkflowMode::BoardFirst;
+
+    enter_idle_epoch(&mut daemon, "lead");
+    write_board_task_file(
+        harness.project_root(),
+        191,
+        "active-task",
+        "in-progress",
+        Some("eng-1"),
+        &[],
+        None,
     );
+    write_board_task_file(
+        harness.project_root(),
+        192,
+        "open-task",
+        "todo",
+        None,
+        &[],
+        None,
+    );
+
+    daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+    assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+    assert!(!daemon
+        .owned_task_interventions
+        .contains_key("dispatch::lead"));
 }
 
 #[test]
@@ -740,11 +780,9 @@ fn maybe_intervene_architect_utilization_queues_for_underloaded_architect() {
     assert!(pending[0].body.contains("eng-1 on #191"));
     assert!(pending[0].body.contains("eng-2"));
     assert!(pending[0].body.contains("Task #192"));
-    assert!(
-        daemon
-            .owned_task_interventions
-            .contains_key("utilization::architect")
-    );
+    assert!(daemon
+        .owned_task_interventions
+        .contains_key("utilization::architect"));
 }
 
 #[test]
@@ -766,12 +804,10 @@ fn maybe_intervene_architect_utilization_dedupes_same_signature() {
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_architect_utilization().unwrap();
 
-    assert!(
-        harness
-            .pending_inbox_messages("architect")
-            .unwrap()
-            .is_empty()
-    );
+    assert!(harness
+        .pending_inbox_messages("architect")
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -802,12 +838,10 @@ fn maybe_intervene_architect_utilization_respects_cooldown_until_signature_refir
     // Second call should be blocked by cooldown despite new signature
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_architect_utilization().unwrap();
-    assert!(
-        harness
-            .pending_inbox_messages("architect")
-            .unwrap()
-            .is_empty()
-    );
+    assert!(harness
+        .pending_inbox_messages("architect")
+        .unwrap()
+        .is_empty());
 
     // Expire cooldown and re-enter idle (first intervention marked architect working)
     expire_utilization_cooldown(&mut daemon, "utilization::architect");
@@ -864,35 +898,27 @@ fn maybe_intervene_board_replenishment_fires_when_todo_below_threshold_and_idle_
     let mut daemon = harness.build_daemon().unwrap();
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_board_replenishment().unwrap();
-    assert!(
-        harness
-            .pending_inbox_messages("architect")
-            .unwrap()
-            .is_empty()
-    );
+    assert!(harness
+        .pending_inbox_messages("architect")
+        .unwrap()
+        .is_empty());
 
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_board_replenishment().unwrap();
     let pending = harness.pending_inbox_messages("architect").unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].from, "daemon");
-    assert!(
-        pending[0]
-            .body
-            .contains("Board needs replenishment: 1 idle engineers, 0 todo tasks.")
-    );
-    assert!(
-        pending[0]
-            .body
-            .contains("Current board summary: done=0, in-progress=1, todo=0.")
-    );
+    assert!(pending[0]
+        .body
+        .contains("Board needs replenishment: 1 idle engineers, 0 todo tasks."));
+    assert!(pending[0]
+        .body
+        .contains("Current board summary: done=0, in-progress=1, todo=0."));
     assert!(pending[0].body.contains("Idle engineers: eng-2."));
     assert!(pending[0].body.contains("planning/roadmap.md"));
-    assert!(
-        daemon
-            .owned_task_interventions
-            .contains_key("replenishment::architect")
-    );
+    assert!(daemon
+        .owned_task_interventions
+        .contains_key("replenishment::architect"));
 }
 
 #[test]
@@ -920,12 +946,10 @@ fn maybe_intervene_board_replenishment_respects_cooldown() {
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_board_replenishment().unwrap();
 
-    assert!(
-        harness
-            .pending_inbox_messages("architect")
-            .unwrap()
-            .is_empty()
-    );
+    assert!(harness
+        .pending_inbox_messages("architect")
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -972,11 +996,9 @@ fn maybe_intervene_board_replenishment_includes_optional_context_file() {
     let pending = harness.pending_inbox_messages("architect").unwrap();
     assert_eq!(pending.len(), 1);
     assert!(pending[0].body.contains("Replenishment context:"));
-    assert!(
-        pending[0]
-            .body
-            .contains("Prioritize launch-blocking tasks first.")
-    );
+    assert!(pending[0]
+        .body
+        .contains("Prioritize launch-blocking tasks first."));
     assert!(pending[0].body.contains("Avoid docs-only filler."));
 }
 
@@ -994,17 +1016,13 @@ fn maybe_intervene_board_replenishment_does_not_fire_when_all_engineers_busy() {
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_board_replenishment().unwrap();
 
-    assert!(
-        harness
-            .pending_inbox_messages("architect")
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        !daemon
-            .owned_task_interventions
-            .contains_key("replenishment::architect")
-    );
+    assert!(harness
+        .pending_inbox_messages("architect")
+        .unwrap()
+        .is_empty());
+    assert!(!daemon
+        .owned_task_interventions
+        .contains_key("replenishment::architect"));
 }
 
 #[test]
@@ -1021,12 +1039,10 @@ fn maybe_intervene_board_replenishment_does_not_fire_when_todo_is_sufficient() {
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_board_replenishment().unwrap();
 
-    assert!(
-        harness
-            .pending_inbox_messages("architect")
-            .unwrap()
-            .is_empty()
-    );
+    assert!(harness
+        .pending_inbox_messages("architect")
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -1047,12 +1063,10 @@ fn maybe_intervene_board_replenishment_respects_board_toggle() {
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_board_replenishment().unwrap();
 
-    assert!(
-        harness
-            .pending_inbox_messages("architect")
-            .unwrap()
-            .is_empty()
-    );
+    assert!(harness
+        .pending_inbox_messages("architect")
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -1276,12 +1290,10 @@ fn multi_intervention_cycle_exact_owned_cooldown_boundary_still_allows_parallel_
     );
     assert_eq!(harness.pending_inbox_messages("lead").unwrap().len(), 1);
     assert_eq!(harness.pending_inbox_messages("eng-1").unwrap().len(), 1);
-    assert!(
-        harness
-            .pending_inbox_messages("lead-review")
-            .unwrap()
-            .is_empty()
-    );
+    assert!(harness
+        .pending_inbox_messages("lead-review")
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -2351,12 +2363,10 @@ fn utilization_not_fire_when_disabled() {
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_architect_utilization().unwrap();
 
-    assert!(
-        harness
-            .pending_inbox_messages("architect")
-            .unwrap()
-            .is_empty()
-    );
+    assert!(harness
+        .pending_inbox_messages("architect")
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -2441,12 +2451,10 @@ fn pause_marker_suppresses_utilization() {
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_architect_utilization().unwrap();
 
-    assert!(
-        harness
-            .pending_inbox_messages("architect")
-            .unwrap()
-            .is_empty()
-    );
+    assert!(harness
+        .pending_inbox_messages("architect")
+        .unwrap()
+        .is_empty());
 }
 
 // ─── nudge disabled marker tests ─────────────────────────────────────────────
@@ -2525,12 +2533,10 @@ fn nudge_disabled_marker_suppresses_utilization() {
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_architect_utilization().unwrap();
 
-    assert!(
-        harness
-            .pending_inbox_messages("architect")
-            .unwrap()
-            .is_empty()
-    );
+    assert!(harness
+        .pending_inbox_messages("architect")
+        .unwrap()
+        .is_empty());
 }
 
 // ─── cleanup / edge case tests ────────────────────────────────────────────────
@@ -2648,12 +2654,10 @@ fn utilization_does_not_fire_when_half_engineers_working() {
     daemon.maybe_intervene_architect_utilization().unwrap();
 
     // Half the engineers (1 of 2) are working → above threshold → no intervention
-    assert!(
-        harness
-            .pending_inbox_messages("architect")
-            .unwrap()
-            .is_empty()
-    );
+    assert!(harness
+        .pending_inbox_messages("architect")
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -2669,12 +2673,10 @@ fn utilization_does_not_fire_when_no_engineers() {
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_architect_utilization().unwrap();
 
-    assert!(
-        harness
-            .pending_inbox_messages("architect")
-            .unwrap()
-            .is_empty()
-    );
+    assert!(harness
+        .pending_inbox_messages("architect")
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -2859,17 +2861,13 @@ fn suppress_starvation_when_all_engineers_have_tasks() {
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_board_replenishment().unwrap();
 
-    assert!(
-        harness
-            .pending_inbox_messages("architect")
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        !daemon
-            .owned_task_interventions
-            .contains_key("replenishment::architect")
-    );
+    assert!(harness
+        .pending_inbox_messages("architect")
+        .unwrap()
+        .is_empty());
+    assert!(!daemon
+        .owned_task_interventions
+        .contains_key("replenishment::architect"));
 }
 
 #[test]
@@ -2912,17 +2910,13 @@ fn suppress_utilization_when_all_loaded() {
     enter_idle_epoch(&mut daemon, "architect");
     daemon.maybe_intervene_architect_utilization().unwrap();
 
-    assert!(
-        harness
-            .pending_inbox_messages("architect")
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        !daemon
-            .owned_task_interventions
-            .contains_key("utilization::architect")
-    );
+    assert!(harness
+        .pending_inbox_messages("architect")
+        .unwrap()
+        .is_empty());
+    assert!(!daemon
+        .owned_task_interventions
+        .contains_key("utilization::architect"));
 }
 
 #[test]

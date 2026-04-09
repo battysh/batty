@@ -10,6 +10,14 @@ use super::super::*;
 
 impl TeamDaemon {
     pub(in super::super) fn maybe_intervene_triage_backlog(&mut self) -> Result<()> {
+        if self
+            .config
+            .team_config
+            .workflow_mode
+            .suppresses_manager_relay()
+        {
+            return Ok(());
+        }
         if !self.config.team_config.automation.triage_interventions {
             return Ok(());
         }

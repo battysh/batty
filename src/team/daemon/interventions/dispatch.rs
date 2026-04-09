@@ -8,7 +8,7 @@ use anyhow::Result;
 use tracing::{info, warn};
 
 use super::super::*;
-use super::{OwnedTaskInterventionState, task_needs_owned_intervention};
+use super::{task_needs_owned_intervention, OwnedTaskInterventionState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReportDispatchSnapshot {
@@ -19,6 +19,14 @@ struct ReportDispatchSnapshot {
 
 impl TeamDaemon {
     pub(in super::super) fn maybe_intervene_manager_dispatch_gap(&mut self) -> Result<()> {
+        if self
+            .config
+            .team_config
+            .workflow_mode
+            .suppresses_manager_relay()
+        {
+            return Ok(());
+        }
         if !self
             .config
             .team_config

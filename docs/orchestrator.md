@@ -20,24 +20,26 @@ The orchestrator runs inside the main daemon loop. On each pass it can:
 
 The orchestrator is only considered enabled when both of these are true:
 
-- `workflow_mode` is `hybrid` or `workflow_first`
+- `workflow_mode` is `hybrid`, `workflow_first`, or `board_first`
 - `orchestrator_pane` is `true`
 
 If either condition is false, the legacy runtime still works, but the explicit orchestrator pane/log surface is off.
 
 ## Workflow Modes
 
-Batty supports three rollout modes:
+Batty supports four rollout modes:
 
 - `legacy`: preserves the older runtime behavior. Use this for existing teams that are not yet relying on workflow metadata as the control surface.
 - `hybrid`: enables the orchestrator surface while keeping legacy behavior available. This is the safest migration mode for active teams.
 - `workflow_first`: treats workflow state as the primary operating model. Use this when your board, review flow, and intervention expectations are already aligned with the orchestrator.
+- `board_first`: treats the board as the primary coordination protocol and suppresses manager relay prompts that can be derived from board state. Use this when auto-dispatch and direct board ownership should drive execution while managers stay focused on review and escalation.
 
 Practical guidance:
 
 - choose `legacy` for backward compatibility
 - choose `hybrid` for most real migrations
 - choose `workflow_first` only when you want the board and workflow metadata to drive operations by default
+- choose `board_first` when you want the board to drive assignment and recovery without routing dispatch or triage through the manager inbox
 
 ## Auto-Dispatch
 
@@ -274,7 +276,7 @@ The orchestrator-related `team.yaml` keys are spread across root config, board c
 
 | Key                     | Meaning                                                                        |
 | ----------------------- | ------------------------------------------------------------------------------ |
-| `workflow_mode`         | Chooses `legacy`, `hybrid`, or `workflow_first`.                               |
+| `workflow_mode`         | Chooses `legacy`, `hybrid`, `workflow_first`, or `board_first`.                |
 | `orchestrator_pane`     | Enables the dedicated orchestrator surface when the workflow mode supports it. |
 | `orchestrator_position` | Places the orchestrator pane at `bottom` or `left`.                            |
 | `automation_sender`     | Optional visible sender name for daemon-generated intervention messages.       |
@@ -355,4 +357,4 @@ automation:
   intervention_idle_grace_secs: 180
 ```
 
-Start in `hybrid`, watch the orchestrator log, and only move to `workflow_first` once the board, review flow, and intervention prompts match how the team already works.
+Start in `hybrid`, watch the orchestrator log, and then move to `board_first` or `workflow_first` once the board, review flow, and intervention prompts match how the team already works.

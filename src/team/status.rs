@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -11,14 +11,14 @@ use crate::task;
 
 use super::config::{self, RoleType};
 use super::daemon::NudgeSchedule;
-use super::daemon_mgmt::{PersistedWatchdogState, watchdog_state_path};
+use super::daemon_mgmt::{watchdog_state_path, PersistedWatchdogState};
 use super::events;
 use super::hierarchy::MemberInstance;
 use super::inbox;
 use super::standup::MemberState;
 use super::{
-    TRIAGE_RESULT_FRESHNESS_SECONDS, daemon_state_path, now_unix, pause_marker_path,
-    team_config_dir, team_config_path, team_events_path,
+    daemon_state_path, now_unix, pause_marker_path, team_config_dir, team_config_path,
+    team_events_path, TRIAGE_RESULT_FRESHNESS_SECONDS,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1760,7 +1760,9 @@ pub(crate) fn workflow_metrics_enabled(config_path: &Path) -> bool {
         let line = line.trim();
         matches!(
             line,
-            "workflow_mode: hybrid" | "workflow_mode: workflow_first"
+            "workflow_mode: hybrid"
+                | "workflow_mode: workflow_first"
+                | "workflow_mode: board_first"
         )
     })
 }
@@ -2431,6 +2433,30 @@ mod tests {
     }
 
     #[test]
+    fn workflow_metrics_section_returns_formatted_metrics_for_board_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let team_config_dir = tmp.path().join(".batty").join("team_config");
+        fs::create_dir_all(&team_config_dir).unwrap();
+        fs::write(
+            team_config_dir.join("team.yaml"),
+            "team: test\nworkflow_mode: board_first\n",
+        )
+        .unwrap();
+        write_board_task(
+            tmp.path(),
+            "001-runnable.md",
+            "id: 1\ntitle: Runnable\nstatus: todo\npriority: high\n",
+        );
+
+        let (formatted, metrics) =
+            workflow_metrics_section(tmp.path(), &[engineer("eng-1")]).unwrap();
+
+        assert!(formatted.contains("Workflow Metrics"));
+        assert!(formatted.contains("Runnable: 1"));
+        assert_eq!(metrics.runnable_count, 1);
+    }
+
+    #[test]
     fn build_team_status_json_report_serializes_machine_readable_json() {
         let report = build_team_status_json_report(TeamStatusJsonReportInput {
             team: "test".to_string(),
@@ -2627,12 +2653,10 @@ mod tests {
             active_tasks[0].worktree_path.as_deref(),
             Some(".batty/worktrees/eng-1")
         );
-        assert!(
-            active_tasks[0]
-                .branch
-                .as_deref()
-                .is_some_and(|branch| branch.contains("eng-1"))
-        );
+        assert!(active_tasks[0]
+            .branch
+            .as_deref()
+            .is_some_and(|branch| branch.contains("eng-1")));
         assert!(active_tasks[0].commit.as_deref().is_some());
         assert!(active_tasks[0].test_summary.is_none());
     }
