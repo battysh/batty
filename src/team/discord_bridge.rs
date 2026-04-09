@@ -140,6 +140,10 @@ impl TeamDaemon {
             if sent >= batch_limit {
                 break;
             }
+            if is_telemetry_only_event(event) {
+                sent += 1;
+                continue;
+            }
             if let Err(error) = self.send_discord_event(event) {
                 tracing::warn!(error = %error, "discord event send failed; will retry next cycle");
                 break;
@@ -150,27 +154,28 @@ impl TeamDaemon {
         Ok(())
     }
 
-    fn send_discord_event(&self, event: &TeamEvent) -> Result<()> {
+    fn send_discord_event(&mut self, event: &TeamEvent) -> Result<()> {
         let Some(bot) = self.discord_bot.as_ref() else {
             return Ok(());
         };
         let Some(config) = discord_channel_config(&self.config.team_config) else {
             return Ok(());
         };
-
         // Skip noisy daemon internals — only send events humans care about.
         if is_noise_event(event) {
             return Ok(());
         }
 
-        let Some(channel_id) = event_channel_id(config, event) else {
+        let Some(channel_id) = event_channel_id(config, event).map(str::to_string) else {
             return Ok(());
         };
 
         let title = friendly_event_title(event);
         let description = friendly_event_description(event);
         let color = event_color(event);
-        bot.send_embed(channel_id, &title, &description, color)
+        bot.send_embed(&channel_id, &title, &description, color)?;
+        self.record_discord_event_sent(&channel_id, &event.event);
+        Ok(())
     }
 
     fn sync_discord_board(&mut self) {
@@ -531,6 +536,13 @@ fn priority_icon(priority: &str) -> &'static str {
         "low" => "📝",
         _ => "•",
     }
+}
+
+fn is_telemetry_only_event(event: &TeamEvent) -> bool {
+    matches!(
+        event.event.as_str(),
+        "discord_event_sent" | "notification_delivery_sample"
+    )
 }
 
 fn discord_channel_config(team_config: &TeamConfig) -> Option<&ChannelConfig> {

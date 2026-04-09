@@ -157,23 +157,41 @@ impl TeamEvent {
     }
 
     pub fn daemon_started() -> Self {
-        Self::base("daemon_started")
+        Self {
+            action_type: Some("session_lifecycle".into()),
+            session_running: Some(true),
+            ..Self::base("daemon_started")
+        }
     }
 
     pub fn daemon_reloading() -> Self {
-        Self::base("daemon_reloading")
+        Self {
+            action_type: Some("session_lifecycle".into()),
+            session_running: Some(true),
+            ..Self::base("daemon_reloading")
+        }
     }
 
     pub fn daemon_reloaded() -> Self {
-        Self::base("daemon_reloaded")
+        Self {
+            action_type: Some("session_lifecycle".into()),
+            session_running: Some(true),
+            ..Self::base("daemon_reloaded")
+        }
     }
 
     pub fn daemon_stopped() -> Self {
-        Self::base("daemon_stopped")
+        Self {
+            action_type: Some("session_lifecycle".into()),
+            session_running: Some(false),
+            ..Self::base("daemon_stopped")
+        }
     }
 
     pub fn daemon_stopped_with_reason(reason: &str, uptime_secs: u64) -> Self {
         Self {
+            action_type: Some("session_lifecycle".into()),
+            session_running: Some(false),
             reason: Some(reason.into()),
             uptime_secs: Some(uptime_secs),
             ..Self::base("daemon_stopped")
@@ -615,6 +633,30 @@ impl TeamEvent {
             from: Some(from.into()),
             to: Some(to.into()),
             ..Self::base("message_routed")
+        }
+    }
+
+    pub fn discord_event_sent(channel: &str, source_event: &str) -> Self {
+        Self {
+            action_type: Some("notification".into()),
+            recipient: Some(channel.into()),
+            reason: Some(source_event.into()),
+            ..Self::base("discord_event_sent")
+        }
+    }
+
+    pub fn notification_delivery_sample(
+        from: &str,
+        to: &str,
+        latency_secs: u64,
+        isolation_mode: &str,
+    ) -> Self {
+        Self {
+            action_type: Some(isolation_mode.into()),
+            from: Some(from.into()),
+            to: Some(to.into()),
+            uptime_secs: Some(latency_secs),
+            ..Self::base("notification_delivery_sample")
         }
     }
 

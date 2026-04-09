@@ -525,6 +525,25 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::message_routed(from, to));
     }
 
+    pub(crate) fn record_discord_event_sent(&mut self, channel: &str, source_event: &str) {
+        self.emit_event(TeamEvent::discord_event_sent(channel, source_event));
+    }
+
+    pub(crate) fn record_notification_delivery_sample(
+        &mut self,
+        from: &str,
+        to: &str,
+        latency_secs: u64,
+        isolation_mode: &str,
+    ) {
+        self.emit_event(TeamEvent::notification_delivery_sample(
+            from,
+            to,
+            latency_secs,
+            isolation_mode,
+        ));
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn record_barrier_artifact_created(
         &mut self,

@@ -162,14 +162,14 @@
             "type": "frser-sqlite-datasource",
             "uid": "batty-telemetry"
           },
-          "queryText": "SELECT COUNT(*) as value FROM events WHERE event_type='message_routed';",
+          "queryText": "SELECT COALESCE(SUM(discord_events_sent), 0) as value FROM session_summary;",
           "queryType": "table",
-          "rawQueryText": "SELECT COUNT(*) as value FROM events WHERE event_type='message_routed';",
-          "rawSql": "SELECT COUNT(*) as value FROM events WHERE event_type='message_routed';",
+          "rawQueryText": "SELECT COALESCE(SUM(discord_events_sent), 0) as value FROM session_summary;",
+          "rawSql": "SELECT COALESCE(SUM(discord_events_sent), 0) as value FROM session_summary;",
           "refId": "A"
         }
       ],
-      "title": "Messages Routed",
+      "title": "Discord Events Sent",
       "type": "stat"
     },
     {
@@ -202,14 +202,14 @@
             "type": "frser-sqlite-datasource",
             "uid": "batty-telemetry"
           },
-          "queryText": "SELECT COUNT(*) as value FROM events WHERE event_type='member_crashed';",
+          "queryText": "SELECT COUNT(*) as value FROM task_metrics tm WHERE tm.completed_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM events e WHERE e.task_id = tm.task_id AND e.event_type IN ('task_auto_merged', 'task_manual_merged', 'task_reworked') AND e.timestamp >= tm.completed_at);",
           "queryType": "table",
-          "rawQueryText": "SELECT COUNT(*) as value FROM events WHERE event_type='member_crashed';",
-          "rawSql": "SELECT COUNT(*) as value FROM events WHERE event_type='member_crashed';",
+          "rawQueryText": "SELECT COUNT(*) as value FROM task_metrics tm WHERE tm.completed_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM events e WHERE e.task_id = tm.task_id AND e.event_type IN ('task_auto_merged', 'task_manual_merged', 'task_reworked') AND e.timestamp >= tm.completed_at);",
+          "rawSql": "SELECT COUNT(*) as value FROM task_metrics tm WHERE tm.completed_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM events e WHERE e.task_id = tm.task_id AND e.event_type IN ('task_auto_merged', 'task_manual_merged', 'task_reworked') AND e.timestamp >= tm.completed_at);",
           "refId": "A"
         }
       ],
-      "title": "Agent Crashes",
+      "title": "Merge Queue Depth",
       "type": "stat"
     },
     {
@@ -304,14 +304,14 @@
             "type": "frser-sqlite-datasource",
             "uid": "batty-telemetry"
           },
-          "queryText": "SELECT ROUND(100.0 * (1.0 - CAST((SELECT COUNT(*) FROM events WHERE event_type='delivery_failed') AS REAL) / MAX(1, (SELECT COUNT(*) FROM events WHERE event_type='message_routed'))), 1) as value;",
+          "queryText": "SELECT ROUND(1.0 * SUM(notification_latency_total_secs) / NULLIF(SUM(notification_latency_samples), 0), 1) as value FROM session_summary;",
           "queryType": "table",
-          "rawQueryText": "SELECT ROUND(100.0 * (1.0 - CAST((SELECT COUNT(*) FROM events WHERE event_type='delivery_failed') AS REAL) / MAX(1, (SELECT COUNT(*) FROM events WHERE event_type='message_routed'))), 1) as value;",
-          "rawSql": "SELECT ROUND(100.0 * (1.0 - CAST((SELECT COUNT(*) FROM events WHERE event_type='delivery_failed') AS REAL) / MAX(1, (SELECT COUNT(*) FROM events WHERE event_type='message_routed'))), 1) as value;",
+          "rawQueryText": "SELECT ROUND(1.0 * SUM(notification_latency_total_secs) / NULLIF(SUM(notification_latency_samples), 0), 1) as value FROM session_summary;",
+          "rawSql": "SELECT ROUND(1.0 * SUM(notification_latency_total_secs) / NULLIF(SUM(notification_latency_samples), 0), 1) as value FROM session_summary;",
           "refId": "A"
         }
       ],
-      "title": "Delivery Success Rate",
+      "title": "Notification Delivery Latency",
       "type": "gauge"
     },
     {
@@ -1231,10 +1231,10 @@
             "type": "frser-sqlite-datasource",
             "uid": "batty-telemetry"
           },
-          "queryText": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE((SELECT MIN(timestamp) / 3600 FROM events WHERE event_type='parity_updated'), strftime('%s', 'now') / 3600)\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events WHERE event_type='parity_updated')\n), parity AS (\n  SELECT timestamp / 3600 AS hr, AVG(load) AS rate FROM events WHERE event_type='parity_updated' GROUP BY hr\n) SELECT h * 3600 AS time, COALESCE(parity.rate, 0.0) AS verification_pass_rate FROM hours LEFT JOIN parity ON hours.h = parity.hr ORDER BY time;",
+          "queryText": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE((SELECT MIN(started_at) / 3600 FROM session_summary), strftime('%s', 'now') / 3600)\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < COALESCE((SELECT MAX(started_at) / 3600 FROM session_summary), strftime('%s', 'now') / 3600)\n), summary AS (\n  SELECT (started_at / 3600) * 3600 AS hour_start,\n         SUM(verification_passes) AS passes,\n         SUM(verification_failures) AS failures\n  FROM session_summary\n  GROUP BY 1\n) SELECT h * 3600 AS time,\n         CASE\n           WHEN COALESCE(summary.passes, 0) + COALESCE(summary.failures, 0) = 0 THEN 100.0\n           ELSE ROUND(100.0 * COALESCE(summary.passes, 0) / (COALESCE(summary.passes, 0) + COALESCE(summary.failures, 0)), 1)\n         END AS verification_pass_rate\nFROM hours\nLEFT JOIN summary ON hours.h * 3600 = summary.hour_start\nORDER BY time;",
           "queryType": "table",
-          "rawQueryText": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE((SELECT MIN(timestamp) / 3600 FROM events WHERE event_type='parity_updated'), strftime('%s', 'now') / 3600)\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events WHERE event_type='parity_updated')\n), parity AS (\n  SELECT timestamp / 3600 AS hr, AVG(load) AS rate FROM events WHERE event_type='parity_updated' GROUP BY hr\n) SELECT h * 3600 AS time, COALESCE(parity.rate, 0.0) AS verification_pass_rate FROM hours LEFT JOIN parity ON hours.h = parity.hr ORDER BY time;",
-          "rawSql": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE((SELECT MIN(timestamp) / 3600 FROM events WHERE event_type='parity_updated'), strftime('%s', 'now') / 3600)\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < (SELECT COALESCE(MAX(timestamp) / 3600, strftime('%s', 'now') / 3600) FROM events WHERE event_type='parity_updated')\n), parity AS (\n  SELECT timestamp / 3600 AS hr, AVG(load) AS rate FROM events WHERE event_type='parity_updated' GROUP BY hr\n) SELECT h * 3600 AS time, COALESCE(parity.rate, 0.0) AS verification_pass_rate FROM hours LEFT JOIN parity ON hours.h = parity.hr ORDER BY time;",
+          "rawQueryText": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE((SELECT MIN(started_at) / 3600 FROM session_summary), strftime('%s', 'now') / 3600)\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < COALESCE((SELECT MAX(started_at) / 3600 FROM session_summary), strftime('%s', 'now') / 3600)\n), summary AS (\n  SELECT (started_at / 3600) * 3600 AS hour_start,\n         SUM(verification_passes) AS passes,\n         SUM(verification_failures) AS failures\n  FROM session_summary\n  GROUP BY 1\n) SELECT h * 3600 AS time,\n         CASE\n           WHEN COALESCE(summary.passes, 0) + COALESCE(summary.failures, 0) = 0 THEN 100.0\n           ELSE ROUND(100.0 * COALESCE(summary.passes, 0) / (COALESCE(summary.passes, 0) + COALESCE(summary.failures, 0)), 1)\n         END AS verification_pass_rate\nFROM hours\nLEFT JOIN summary ON hours.h * 3600 = summary.hour_start\nORDER BY time;",
+          "rawSql": "WITH RECURSIVE hours(h) AS (\n  SELECT COALESCE((SELECT MIN(started_at) / 3600 FROM session_summary), strftime('%s', 'now') / 3600)\n  UNION ALL\n  SELECT h + 1 FROM hours WHERE h < COALESCE((SELECT MAX(started_at) / 3600 FROM session_summary), strftime('%s', 'now') / 3600)\n), summary AS (\n  SELECT (started_at / 3600) * 3600 AS hour_start,\n         SUM(verification_passes) AS passes,\n         SUM(verification_failures) AS failures\n  FROM session_summary\n  GROUP BY 1\n) SELECT h * 3600 AS time,\n         CASE\n           WHEN COALESCE(summary.passes, 0) + COALESCE(summary.failures, 0) = 0 THEN 100.0\n           ELSE ROUND(100.0 * COALESCE(summary.passes, 0) / (COALESCE(summary.passes, 0) + COALESCE(summary.failures, 0)), 1)\n         END AS verification_pass_rate\nFROM hours\nLEFT JOIN summary ON hours.h * 3600 = summary.hour_start\nORDER BY time;",
           "refId": "A",
           "timeColumns": [
             "time"

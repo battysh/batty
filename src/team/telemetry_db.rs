@@ -86,7 +86,13 @@ fn init_schema(conn: &Connection) -> Result<()> {
             ended_at        INTEGER,
             tasks_completed INTEGER NOT NULL DEFAULT 0,
             total_merges    INTEGER NOT NULL DEFAULT 0,
-            total_events    INTEGER NOT NULL DEFAULT 0
+            total_events    INTEGER NOT NULL DEFAULT 0,
+            discord_events_sent INTEGER NOT NULL DEFAULT 0,
+            verification_passes INTEGER NOT NULL DEFAULT 0,
+            verification_failures INTEGER NOT NULL DEFAULT 0,
+            notification_isolations INTEGER NOT NULL DEFAULT 0,
+            notification_latency_total_secs INTEGER NOT NULL DEFAULT 0,
+            notification_latency_samples INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS test_case_metrics (
@@ -125,6 +131,30 @@ fn init_schema(conn: &Connection) -> Result<()> {
     );
     let _ = conn.execute(
         "ALTER TABLE task_metrics ADD COLUMN handoff_successes INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE session_summary ADD COLUMN discord_events_sent INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE session_summary ADD COLUMN verification_passes INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE session_summary ADD COLUMN verification_failures INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE session_summary ADD COLUMN notification_isolations INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE session_summary ADD COLUMN notification_latency_total_secs INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE session_summary ADD COLUMN notification_latency_samples INTEGER NOT NULL DEFAULT 0",
         [],
     );
     Ok(())
@@ -371,6 +401,47 @@ fn update_metrics_for_event(conn: &Connection, event: &TeamEvent) -> Result<()> 
                 params![session_id, event.ts as i64],
             )?;
         }
+        "discord_event_sent" => {
+            conn.execute(
+                "UPDATE session_summary SET discord_events_sent = discord_events_sent + 1
+                 WHERE rowid = (SELECT rowid FROM session_summary ORDER BY started_at DESC LIMIT 1)",
+                [],
+            )?;
+        }
+        "auto_merge_post_verify_result" => match event.success {
+            Some(true) => {
+                conn.execute(
+                    "UPDATE session_summary SET verification_passes = verification_passes + 1
+                     WHERE rowid = (SELECT rowid FROM session_summary ORDER BY started_at DESC LIMIT 1)",
+                    [],
+                )?;
+            }
+            Some(false) => {
+                conn.execute(
+                    "UPDATE session_summary SET verification_failures = verification_failures + 1
+                     WHERE rowid = (SELECT rowid FROM session_summary ORDER BY started_at DESC LIMIT 1)",
+                    [],
+                )?;
+            }
+            None => {}
+        },
+        "inbox_message_deduplicated" | "inbox_batch_delivered" => {
+            conn.execute(
+                "UPDATE session_summary SET notification_isolations = notification_isolations + 1
+                 WHERE rowid = (SELECT rowid FROM session_summary ORDER BY started_at DESC LIMIT 1)",
+                [],
+            )?;
+        }
+        "notification_delivery_sample" => {
+            let latency_secs = event.uptime_secs.unwrap_or(0) as i64;
+            conn.execute(
+                "UPDATE session_summary
+                 SET notification_latency_total_secs = notification_latency_total_secs + ?1,
+                     notification_latency_samples = notification_latency_samples + 1
+                 WHERE rowid = (SELECT rowid FROM session_summary ORDER BY started_at DESC LIMIT 1)",
+                params![latency_secs],
+            )?;
+        }
         // Fix #4: Set ended_at on latest session when daemon stops.
         // Both daemon_stopped() and daemon_stopped_with_reason() use "daemon_stopped" as event name.
         "daemon_stopped" => {
@@ -437,11 +508,19 @@ pub struct SessionSummaryRow {
     pub tasks_completed: i64,
     pub total_merges: i64,
     pub total_events: i64,
+    pub discord_events_sent: i64,
+    pub verification_passes: i64,
+    pub verification_failures: i64,
+    pub notification_isolations: i64,
+    pub notification_latency_total_secs: i64,
+    pub notification_latency_samples: i64,
 }
 
 pub fn query_session_summaries(conn: &Connection) -> Result<Vec<SessionSummaryRow>> {
     let mut stmt = conn.prepare(
-        "SELECT session_id, started_at, ended_at, tasks_completed, total_merges, total_events
+        "SELECT session_id, started_at, ended_at, tasks_completed, total_merges, total_events,
+                discord_events_sent, verification_passes, verification_failures,
+                notification_isolations, notification_latency_total_secs, notification_latency_samples
          FROM session_summary ORDER BY started_at DESC LIMIT 20",
     )?;
     let rows = stmt
@@ -453,6 +532,12 @@ pub fn query_session_summaries(conn: &Connection) -> Result<Vec<SessionSummaryRo
                 tasks_completed: row.get(3)?,
                 total_merges: row.get(4)?,
                 total_events: row.get(5)?,
+                discord_events_sent: row.get(6)?,
+                verification_passes: row.get(7)?,
+                verification_failures: row.get(8)?,
+                notification_isolations: row.get(9)?,
+                notification_latency_total_secs: row.get(10)?,
+                notification_latency_samples: row.get(11)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -982,6 +1067,24 @@ pub fn query_review_metrics(conn: &Connection) -> Result<ReviewMetricsRow> {
         post_merge_verify_fail_count,
         post_merge_verify_skip_count,
     })
+}
+
+pub fn query_merge_queue_depth(conn: &Connection) -> Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*)
+         FROM task_metrics tm
+         WHERE tm.completed_at IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1
+               FROM events e
+               WHERE e.task_id = tm.task_id
+                 AND e.event_type IN ('task_auto_merged', 'task_manual_merged', 'task_reworked')
+                 AND e.timestamp >= tm.completed_at
+           )",
+        [],
+        |row| row.get(0),
+    )
+    .context("failed to query merge queue depth")
 }
 
 #[cfg(test)]
@@ -1715,6 +1818,65 @@ mod tests {
 
         let summaries = query_session_summaries(&conn).unwrap();
         assert_eq!(summaries[0].ended_at, Some(5000));
+    }
+
+    #[test]
+    fn session_summary_tracks_discord_verification_and_notification_counters() {
+        let conn = open_in_memory().unwrap();
+        insert_event(&conn, &TeamEvent::daemon_started()).unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::discord_event_sent("events", "task_completed"),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::auto_merge_post_verify_result("eng-1", "42", Some(true), "passed", None),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::auto_merge_post_verify_result("eng-1", "43", Some(false), "failed", None),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::inbox_message_deduplicated("manager", "eng-1", 0xfeed),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::notification_delivery_sample("daemon", "manager", 12, "digest"),
+        )
+        .unwrap();
+
+        let summaries = query_session_summaries(&conn).unwrap();
+        assert_eq!(summaries[0].discord_events_sent, 1);
+        assert_eq!(summaries[0].verification_passes, 1);
+        assert_eq!(summaries[0].verification_failures, 1);
+        assert_eq!(summaries[0].notification_isolations, 1);
+        assert_eq!(summaries[0].notification_latency_total_secs, 12);
+        assert_eq!(summaries[0].notification_latency_samples, 1);
+    }
+
+    #[test]
+    fn merge_queue_depth_counts_completed_tasks_awaiting_merge() {
+        let conn = open_in_memory().unwrap();
+        let mut started = TeamEvent::daemon_started();
+        started.ts = 100;
+        insert_event(&conn, &started).unwrap();
+
+        let mut completed = TeamEvent::task_completed("eng-1", Some("42"));
+        completed.ts = 200;
+        insert_event(&conn, &completed).unwrap();
+
+        assert_eq!(query_merge_queue_depth(&conn).unwrap(), 1);
+
+        let mut merged = TeamEvent::task_auto_merged("eng-1", "42", 0.9, 2, 10);
+        merged.ts = 250;
+        insert_event(&conn, &merged).unwrap();
+
+        assert_eq!(query_merge_queue_depth(&conn).unwrap(), 0);
     }
 
     // --- Fix #5: idle_polls / working_polls updated ---

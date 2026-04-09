@@ -621,6 +621,7 @@ impl TeamDaemon {
                         );
                         info!(from, to = recipient, "delivered message via shim channel");
                         self.record_message_routed(from, recipient);
+                        self.record_notification_delivery_sample(from, recipient, 0, "live");
                         self.mark_member_working(recipient);
                         return Ok(MessageDelivery::LivePane);
                     }
@@ -974,6 +975,12 @@ impl TeamDaemon {
                     );
                 } else {
                     self.record_message_routed(&msg.from, name);
+                    self.record_notification_delivery_sample(
+                        &msg.from,
+                        name,
+                        msg.age().as_secs(),
+                        "inbox",
+                    );
                 }
 
                 std::thread::sleep(Duration::from_secs(1));
@@ -1037,6 +1044,12 @@ impl TeamDaemon {
                 );
             } else {
                 self.record_message_routed(&message.from, member_name);
+                self.record_notification_delivery_sample(
+                    &message.from,
+                    member_name,
+                    message.age().as_secs(),
+                    "batched",
+                );
             }
         }
 
@@ -1113,6 +1126,12 @@ impl TeamDaemon {
                 );
             } else {
                 self.record_message_routed(&message.from, member_name);
+                self.record_notification_delivery_sample(
+                    &message.from,
+                    member_name,
+                    message.age().as_secs(),
+                    "digest",
+                );
                 flushed_ids.push(message.id.clone());
             }
         }
