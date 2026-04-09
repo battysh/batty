@@ -112,15 +112,12 @@ impl CodexCliAdapter {
         // We use a simple sleep loop as a placeholder process — the actual
         // codex exec calls are made by the runtime_codex module.
         //
-        // But we need a process that stays alive so the shim doesn't exit.
-        // Use `cat` which blocks on stdin indefinitely (stdin is /dev/null
-        // so it exits immediately — but that's fine, the Codex runtime
-        // doesn't need a persistent process).
-        //
-        // Actually, the Codex runtime handles its own subprocess spawning,
-        // so the launch command is just a sentinel that exits immediately.
-        // The runtime is designed for spawn-per-message, not persistent process.
-        "exec sleep infinity".to_string()
+        // Codex SDK uses spawn-per-message — the runtime handles subprocess
+        // spawning. The launch script just needs a sentinel process that stays
+        // alive so the shim doesn't exit.
+        // Use `sleep 2147483647` (max 32-bit seconds ≈ 68 years) instead of
+        // `sleep infinity` — macOS sleep(1) doesn't support "infinity".
+        "exec sleep 2147483647".to_string()
     }
 }
 
@@ -166,6 +163,19 @@ mod tests {
         let adapter = CodexCliAdapter::new(None);
         assert_eq!(adapter.format_input("y"), "y\n");
         assert_eq!(adapter.format_input("yes"), "yes\n");
+    }
+
+    #[test]
+    fn sdk_launch_command_uses_portable_sleep() {
+        // Regression: macOS sleep(1) doesn't support "infinity".
+        // The sentinel must use a numeric argument.
+        let adapter = CodexCliAdapter::new(None);
+        let cmd = adapter.sdk_launch_command(None);
+        assert!(
+            !cmd.contains("infinity"),
+            "sleep infinity is not portable to macOS — use a numeric value"
+        );
+        assert!(cmd.contains("sleep"), "sentinel must use sleep");
     }
 
     #[test]
