@@ -196,28 +196,27 @@ batty grafana status
 
 ## 9. Optional: Discord Control Surface (Recommended)
 
-Discord gives you three dedicated channels for monitoring your team from your phone:
+Discord gives you three dedicated channels for monitoring your team from your phone.
 
-1. Add a `channel: discord` user role to `team.yaml`:
+1. Create a Discord bot at https://discord.com/developers/applications and invite it to your server with Send Messages permission.
 
-```yaml
-roles:
-  - name: human
-    role_type: user
-    channel: discord
-    channel_config:
-      bot_token: "${BATTY_DISCORD_TOKEN}"
-      commands_channel_id: "your-commands-channel-id"
-      events_channel_id: "your-events-channel-id"
-      agents_channel_id: "your-agents-channel-id"
-      allowed_user_ids: ["your-discord-user-id"]
+2. Create three channels: `#batty-commands`, `#batty-events`, `#batty-agents`.
+
+3. Run the setup wizard:
+
+```sh
+batty discord
 ```
 
-2. Create a Discord bot at https://discord.com/developers/applications and invite it to your server with Send Messages permission.
+The wizard validates the bot token, lets you pick the server and channels, prompts for allowed Discord user IDs, writes the resulting `channel: discord` user role into `team.yaml`, and sends test messages to all three channels. It also reads `BATTY_DISCORD_BOT_TOKEN` if you already exported the token.
 
-3. Create three channels: `#batty-commands`, `#batty-events`, `#batty-agents`.
+4. Verify the connection later with:
 
-4. Start batty and use Discord:
+```sh
+batty discord status
+```
+
+5. Start batty and use Discord:
    - Type `$go` to launch the full team
    - Type `$status` for a board overview
    - Type `$board` to see todo tasks

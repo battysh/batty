@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
-use super::{completion, config, hierarchy, inbox, merge, team_config_path, telegram};
+use super::{completion, config, discord, hierarchy, inbox, merge, team_config_path, telegram};
 
 const INBOX_BODY_PREVIEW_CHARS: usize = 140;
 
@@ -467,6 +467,16 @@ pub fn merge_worktree(project_root: &Path, engineer: &str) -> Result<()> {
 /// Run the interactive Telegram setup wizard.
 pub fn setup_telegram(project_root: &Path) -> Result<()> {
     telegram::setup_telegram(project_root)
+}
+
+/// Run the interactive Discord setup wizard.
+pub fn setup_discord(project_root: &Path) -> Result<()> {
+    discord::setup_discord(project_root)
+}
+
+/// Show Discord connection health from the current team config.
+pub fn discord_status(project_root: &Path) -> Result<()> {
+    discord::discord_status(project_root)
 }
 
 #[cfg(test)]
