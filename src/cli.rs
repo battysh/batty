@@ -214,6 +214,12 @@ pub enum Command {
         command: GrafanaCommand,
     },
 
+    /// Configure Discord human communication
+    Discord {
+        #[command(subcommand)]
+        command: Option<DiscordCommand>,
+    },
+
     /// Set up Telegram bot for human communication
     Telegram,
 
@@ -463,6 +469,14 @@ pub enum GrafanaCommand {
     Status,
     /// Open the Grafana dashboard in the default browser
     Open,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DiscordCommand {
+    /// Run the interactive Discord setup wizard
+    Setup,
+    /// Show the current Discord connection health
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1854,6 +1868,23 @@ mod tests {
     fn telegram_subcommand_parses() {
         let cli = Cli::parse_from(["batty", "telegram"]);
         assert!(matches!(cli.command, Command::Telegram));
+    }
+
+    #[test]
+    fn discord_subcommand_defaults_to_setup_flow() {
+        let cli = Cli::parse_from(["batty", "discord"]);
+        assert!(matches!(cli.command, Command::Discord { command: None }));
+    }
+
+    #[test]
+    fn discord_status_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "discord", "status"]);
+        assert!(matches!(
+            cli.command,
+            Command::Discord {
+                command: Some(DiscordCommand::Status)
+            }
+        ));
     }
 
     #[test]

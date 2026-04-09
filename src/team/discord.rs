@@ -4,10 +4,13 @@
 //! polling, keeping the implementation aligned with the existing Telegram
 //! bridge's blocking request model.
 
+use std::io::{self, Write as IoWrite};
+use std::path::Path;
+
 use anyhow::{Context, Result, anyhow, bail};
 use tracing::{debug, warn};
 
-use super::config::ChannelConfig;
+use super::config::{ChannelConfig, RoleType, TeamConfig};
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const MAX_EMBED_TITLE_LEN: usize = 256;
@@ -21,6 +24,26 @@ pub struct InboundMessage {
     pub channel_id: String,
     pub from_user_id: i64,
     pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BotIdentity {
+    pub user_id: String,
+    pub username: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuildSummary {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelSummary {
+    pub id: String,
+    pub name: String,
+    pub kind: u8,
+    pub position: i64,
 }
 
 /// Blocking Discord Bot API client.
@@ -97,6 +120,26 @@ impl DiscordBot {
         self.send_embed(channel_id, &title, &description, color)
     }
 
+    pub fn validate_token(&self) -> Result<BotIdentity> {
+        let json = self.get_json(&format!("{DISCORD_API_BASE}/users/@me"))?;
+        parse_bot_identity(&json)
+    }
+
+    pub fn list_guilds(&self) -> Result<Vec<GuildSummary>> {
+        let json = self.get_json(&format!("{DISCORD_API_BASE}/users/@me/guilds"))?;
+        parse_guilds_response(&json)
+    }
+
+    pub fn list_guild_channels(&self, guild_id: &str) -> Result<Vec<ChannelSummary>> {
+        let json = self.get_json(&format!("{DISCORD_API_BASE}/guilds/{guild_id}/channels"))?;
+        parse_channels_response(&json)
+    }
+
+    pub fn get_channel(&self, channel_id: &str) -> Result<ChannelSummary> {
+        let json = self.get_json(&format!("{DISCORD_API_BASE}/channels/{channel_id}"))?;
+        parse_channel_response(&json)
+    }
+
     pub fn poll_commands(&mut self) -> Result<Vec<InboundMessage>> {
         let url = match &self.last_message_id {
             Some(last_id) => format!(
@@ -135,6 +178,23 @@ impl DiscordBot {
         Ok(messages)
     }
 
+    fn get_json(&self, url: &str) -> Result<serde_json::Value> {
+        let response = ureq::get(url)
+            .set("Authorization", &format!("Bot {}", self.bot_token))
+            .call();
+
+        match response {
+            Ok(resp) => resp.into_json().context("failed to parse Discord response"),
+            Err(ureq::Error::Status(status, response)) => {
+                let detail = response.into_string().unwrap_or_default();
+                bail!("Discord request failed with status {status}: {detail}");
+            }
+            Err(ureq::Error::Transport(error)) => {
+                bail!("Discord request transport failed: {error}");
+            }
+        }
+    }
+
     fn post_message(&self, channel_id: &str, body: &serde_json::Value) -> Result<()> {
         let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
         let response = ureq::post(&url)
@@ -161,6 +221,174 @@ impl DiscordBot {
             }
         }
     }
+}
+
+pub fn setup_discord(project_root: &Path) -> Result<()> {
+    let config_path = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("team.yaml");
+    if !config_path.exists() {
+        bail!(
+            "no team config found at {}; run `batty init` first",
+            config_path.display()
+        );
+    }
+
+    println!("Discord Bot Setup");
+    println!("=================\n");
+
+    println!("Step 1: Bot Token");
+    println!("  Create a Discord bot in the Developer Portal and copy the bot token.");
+    println!("  You can also export BATTY_DISCORD_BOT_TOKEN before running this wizard.\n");
+    let bot_token = prompt_discord_token()?;
+    let setup_bot = DiscordBot::new(bot_token.clone(), Vec::new(), String::new());
+    let identity = setup_bot.validate_token()?;
+    println!(
+        "Bot validated: {} ({})\n",
+        identity.username, identity.user_id
+    );
+
+    println!("Step 2: Pick A Server");
+    let guilds = setup_bot.list_guilds()?;
+    if guilds.is_empty() {
+        bail!("the bot is not in any Discord servers; invite it first, then retry");
+    }
+    let guild_index = prompt_choice(
+        "Select a server",
+        &guilds.iter().map(|g| g.name.clone()).collect::<Vec<_>>(),
+    )?;
+    let guild = &guilds[guild_index];
+    println!("Selected server: {}\n", guild.name);
+
+    println!("Step 3: Pick Channels");
+    let channels = setup_bot.list_guild_channels(&guild.id)?;
+    if channels.is_empty() {
+        bail!("no text channels found in '{}'", guild.name);
+    }
+    let commands_channel = prompt_channel_choice("commands", &channels, &[])?;
+    let events_channel =
+        prompt_channel_choice("events", &channels, &[commands_channel.id.as_str()])?;
+    let agents_channel = prompt_channel_choice(
+        "agents",
+        &channels,
+        &[commands_channel.id.as_str(), events_channel.id.as_str()],
+    )?;
+    println!();
+
+    println!("Step 4: Allowed User IDs");
+    println!("  Enter one or more Discord user IDs, separated by commas.");
+    let allowed_user_ids = prompt_user_ids()?;
+
+    println!("Step 5: Test Messages");
+    let bot = DiscordBot::new(
+        bot_token.clone(),
+        allowed_user_ids.clone(),
+        commands_channel.id.clone(),
+    );
+    send_setup_test_messages(
+        &bot,
+        &commands_channel,
+        &events_channel,
+        &agents_channel,
+        &guild.name,
+    )?;
+    println!("Test messages sent to all selected channels.\n");
+
+    update_team_yaml_for_discord(
+        &config_path,
+        &bot_token,
+        &commands_channel.id,
+        &events_channel.id,
+        &agents_channel.id,
+        &allowed_user_ids,
+    )?;
+
+    println!("Discord configured successfully.");
+    println!("Restart the daemon with: batty stop && batty start");
+    Ok(())
+}
+
+pub fn discord_status(project_root: &Path) -> Result<()> {
+    let config_path = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("team.yaml");
+    if !config_path.exists() {
+        bail!(
+            "no team config found at {}; run `batty init` first",
+            config_path.display()
+        );
+    }
+
+    let team_config = TeamConfig::load(&config_path)?;
+    let Some(role) = team_config.roles.iter().find(|role| {
+        role.role_type == RoleType::User && role.channel.as_deref() == Some("discord")
+    }) else {
+        println!("Discord is not configured in team.yaml.");
+        return Ok(());
+    };
+
+    let Some(channel_config) = role.channel_config.as_ref() else {
+        bail!("Discord user role exists but channel_config is missing");
+    };
+    let Some(bot) = DiscordBot::from_config(channel_config) else {
+        bail!("Discord is configured but bot token or commands channel is missing");
+    };
+
+    let identity = bot.validate_token()?;
+    let commands = channel_config
+        .commands_channel_id
+        .as_deref()
+        .map(|id| bot.get_channel(id))
+        .transpose()?;
+    let events = channel_config
+        .events_channel_id
+        .as_deref()
+        .map(|id| bot.get_channel(id))
+        .transpose()?;
+    let agents = channel_config
+        .agents_channel_id
+        .as_deref()
+        .map(|id| bot.get_channel(id))
+        .transpose()?;
+
+    println!("Discord Status");
+    println!("==============");
+    println!("Role: {}", role.name);
+    println!("Bot: {} ({})", identity.username, identity.user_id);
+    println!(
+        "Allowed Users: {}",
+        channel_config
+            .allowed_user_ids
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!(
+        "Commands: {}",
+        commands
+            .as_ref()
+            .map(format_channel_label)
+            .unwrap_or_else(|| "not configured".to_string())
+    );
+    println!(
+        "Events: {}",
+        events
+            .as_ref()
+            .map(format_channel_label)
+            .unwrap_or_else(|| "not configured".to_string())
+    );
+    println!(
+        "Agents: {}",
+        agents
+            .as_ref()
+            .map(format_channel_label)
+            .unwrap_or_else(|| "not configured".to_string())
+    );
+    println!("Health: ok");
+    Ok(())
 }
 
 pub(super) fn outbound_embed_parts(message: &str) -> (String, String, u32) {
@@ -272,9 +500,384 @@ fn parse_messages_response(
     Ok((inbound, latest_message_id.map(|(_, id)| id)))
 }
 
+fn parse_bot_identity(json: &serde_json::Value) -> Result<BotIdentity> {
+    let user_id = json
+        .get("id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("Discord identity missing id"))?;
+    let username = json
+        .get("username")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("Discord identity missing username"))?;
+
+    Ok(BotIdentity {
+        user_id: user_id.to_string(),
+        username: username.to_string(),
+    })
+}
+
+fn parse_guilds_response(json: &serde_json::Value) -> Result<Vec<GuildSummary>> {
+    let guilds = json
+        .as_array()
+        .ok_or_else(|| anyhow!("Discord guilds response was not an array"))?;
+
+    let mut parsed = guilds
+        .iter()
+        .filter_map(|guild| {
+            Some(GuildSummary {
+                id: guild.get("id")?.as_str()?.to_string(),
+                name: guild.get("name")?.as_str()?.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    parsed.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(parsed)
+}
+
+fn parse_channels_response(json: &serde_json::Value) -> Result<Vec<ChannelSummary>> {
+    let channels = json
+        .as_array()
+        .ok_or_else(|| anyhow!("Discord channels response was not an array"))?;
+
+    let mut parsed = channels
+        .iter()
+        .filter_map(parse_channel_value)
+        .filter(|channel| matches!(channel.kind, 0 | 5))
+        .collect::<Vec<_>>();
+    parsed.sort_by(|left, right| {
+        left.position
+            .cmp(&right.position)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(parsed)
+}
+
+fn parse_channel_response(json: &serde_json::Value) -> Result<ChannelSummary> {
+    parse_channel_value(json).ok_or_else(|| anyhow!("Discord channel response missing fields"))
+}
+
+fn parse_channel_value(json: &serde_json::Value) -> Option<ChannelSummary> {
+    Some(ChannelSummary {
+        id: json.get("id")?.as_str()?.to_string(),
+        name: json.get("name")?.as_str()?.to_string(),
+        kind: json
+            .get("type")?
+            .as_u64()
+            .and_then(|value| u8::try_from(value).ok())?,
+        position: json
+            .get("position")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0),
+    })
+}
+
+fn prompt_discord_token() -> Result<String> {
+    if let Ok(token) = std::env::var("BATTY_DISCORD_BOT_TOKEN")
+        && !token.trim().is_empty()
+    {
+        println!("Found BATTY_DISCORD_BOT_TOKEN in the environment.");
+        if prompt_yes_no("Use the environment token? [Y/n]: ", true)? {
+            return Ok(token);
+        }
+        println!();
+    }
+
+    loop {
+        let token = prompt("Enter your Discord bot token: ")?;
+        if token.is_empty() {
+            println!("Token cannot be empty. Try again.\n");
+            continue;
+        }
+        return Ok(token);
+    }
+}
+
+fn prompt_user_ids() -> Result<Vec<i64>> {
+    loop {
+        let input = prompt("Enter allowed Discord user IDs (comma-separated): ")?;
+        let ids = input
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                part.parse::<i64>()
+                    .with_context(|| format!("invalid Discord user id '{part}'"))
+            })
+            .collect::<Result<Vec<_>>>();
+        match ids {
+            Ok(ids) if !ids.is_empty() => return Ok(ids),
+            Ok(_) => println!("Enter at least one Discord user ID.\n"),
+            Err(error) => println!("{error}\n"),
+        }
+    }
+}
+
+fn prompt_choice(prompt_text: &str, options: &[String]) -> Result<usize> {
+    println!("{prompt_text}:");
+    for (index, option) in options.iter().enumerate() {
+        println!("  {}) {}", index + 1, option);
+    }
+
+    loop {
+        let input = prompt("Enter number: ")?;
+        match input.parse::<usize>() {
+            Ok(choice) if (1..=options.len()).contains(&choice) => return Ok(choice - 1),
+            _ => println!("Invalid selection. Try again.\n"),
+        }
+    }
+}
+
+fn prompt_channel_choice<'a>(
+    label: &str,
+    channels: &'a [ChannelSummary],
+    taken_ids: &[&str],
+) -> Result<&'a ChannelSummary> {
+    println!("Select the #{label} channel:");
+    let options = channels
+        .iter()
+        .map(format_channel_label)
+        .collect::<Vec<_>>();
+
+    loop {
+        let index = prompt_choice("Available channels", &options)?;
+        let channel = &channels[index];
+        if taken_ids.iter().any(|taken| *taken == channel.id) {
+            println!("That channel is already assigned. Pick a different one.\n");
+            continue;
+        }
+        return Ok(channel);
+    }
+}
+
+fn format_channel_label(channel: &ChannelSummary) -> String {
+    format!("#{} ({})", channel.name, channel.id)
+}
+
+fn send_setup_test_messages(
+    bot: &DiscordBot,
+    commands: &ChannelSummary,
+    events: &ChannelSummary,
+    agents: &ChannelSummary,
+    guild_name: &str,
+) -> Result<()> {
+    bot.send_plain_message(
+        &commands.id,
+        &format!("Batty Discord setup complete for {guild_name}. Commands channel verified."),
+    )?;
+    bot.send_plain_message(
+        &events.id,
+        &format!("Batty Discord setup complete for {guild_name}. Events channel verified."),
+    )?;
+    bot.send_plain_message(
+        &agents.id,
+        &format!("Batty Discord setup complete for {guild_name}. Agents channel verified."),
+    )?;
+    Ok(())
+}
+
+fn update_team_yaml_for_discord(
+    path: &Path,
+    bot_token: &str,
+    commands_channel_id: &str,
+    events_channel_id: &str,
+    agents_channel_id: &str,
+    allowed_user_ids: &[i64],
+) -> Result<()> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&content)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+
+    let roles = doc
+        .get_mut("roles")
+        .and_then(|value| value.as_sequence_mut())
+        .ok_or_else(|| anyhow!("no 'roles' sequence in team.yaml"))?;
+
+    let user_role = roles.iter_mut().find(|role| {
+        role.get("role_type")
+            .and_then(|value| value.as_str())
+            .map(|role_type| role_type == "user")
+            .unwrap_or(false)
+    });
+
+    if let Some(role) = user_role {
+        role["channel"] = serde_yaml::Value::String("discord".into());
+        if role.get("channel_config").is_none()
+            && let Some(role_map) = role.as_mapping_mut()
+        {
+            role_map.insert(
+                serde_yaml::Value::String("channel_config".into()),
+                serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            );
+        }
+
+        let channel_config = &mut role["channel_config"];
+        let mapping = channel_config
+            .as_mapping_mut()
+            .ok_or_else(|| anyhow!("channel_config must be a mapping"))?;
+        mapping.remove(&serde_yaml::Value::String("target".into()));
+        mapping.remove(&serde_yaml::Value::String("provider".into()));
+        mapping.insert(
+            "bot_token".into(),
+            serde_yaml::Value::String(bot_token.into()),
+        );
+        mapping.insert(
+            "commands_channel_id".into(),
+            serde_yaml::Value::String(commands_channel_id.into()),
+        );
+        mapping.insert(
+            "events_channel_id".into(),
+            serde_yaml::Value::String(events_channel_id.into()),
+        );
+        mapping.insert(
+            "agents_channel_id".into(),
+            serde_yaml::Value::String(agents_channel_id.into()),
+        );
+        mapping.insert(
+            "allowed_user_ids".into(),
+            serde_yaml::Value::Sequence(
+                allowed_user_ids
+                    .iter()
+                    .copied()
+                    .map(|id| serde_yaml::Value::Number(serde_yaml::Number::from(id)))
+                    .collect(),
+            ),
+        );
+    } else {
+        let mut new_role = serde_yaml::Mapping::new();
+        new_role.insert("name".into(), "human".into());
+        new_role.insert("role_type".into(), "user".into());
+        new_role.insert("channel".into(), "discord".into());
+
+        let mut channel_config = serde_yaml::Mapping::new();
+        channel_config.insert(
+            "bot_token".into(),
+            serde_yaml::Value::String(bot_token.into()),
+        );
+        channel_config.insert(
+            "commands_channel_id".into(),
+            serde_yaml::Value::String(commands_channel_id.into()),
+        );
+        channel_config.insert(
+            "events_channel_id".into(),
+            serde_yaml::Value::String(events_channel_id.into()),
+        );
+        channel_config.insert(
+            "agents_channel_id".into(),
+            serde_yaml::Value::String(agents_channel_id.into()),
+        );
+        channel_config.insert(
+            "allowed_user_ids".into(),
+            serde_yaml::Value::Sequence(
+                allowed_user_ids
+                    .iter()
+                    .copied()
+                    .map(|id| serde_yaml::Value::Number(serde_yaml::Number::from(id)))
+                    .collect(),
+            ),
+        );
+        new_role.insert(
+            "channel_config".into(),
+            serde_yaml::Value::Mapping(channel_config),
+        );
+        new_role.insert(
+            "talks_to".into(),
+            serde_yaml::Value::Sequence(vec!["architect".into()]),
+        );
+        roles.push(serde_yaml::Value::Mapping(new_role));
+    }
+
+    let output = serde_yaml::to_string(&doc)?;
+    std::fs::write(path, output).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn prompt(message: &str) -> Result<String> {
+    print!("{message}");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_string())
+}
+
+fn prompt_yes_no(message: &str, default_yes: bool) -> Result<bool> {
+    let input = prompt(message)?;
+    if input.is_empty() {
+        return Ok(default_yes);
+    }
+    Ok(matches!(input.chars().next(), Some('y' | 'Y')))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_bot_identity_extracts_username_and_id() {
+        let json = serde_json::json!({
+            "id": "123456789012345678",
+            "username": "batty-bot"
+        });
+
+        let identity = parse_bot_identity(&json).unwrap();
+        assert_eq!(identity.user_id, "123456789012345678");
+        assert_eq!(identity.username, "batty-bot");
+    }
+
+    #[test]
+    fn parse_guilds_response_sorts_by_name() {
+        let json = serde_json::json!([
+            {"id": "2", "name": "Zulu"},
+            {"id": "1", "name": "Alpha"}
+        ]);
+
+        let guilds = parse_guilds_response(&json).unwrap();
+        assert_eq!(
+            guilds,
+            vec![
+                GuildSummary {
+                    id: "1".into(),
+                    name: "Alpha".into(),
+                },
+                GuildSummary {
+                    id: "2".into(),
+                    name: "Zulu".into(),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_channels_response_filters_non_text_channels() {
+        let json = serde_json::json!([
+            {"id": "10", "name": "voice", "type": 2, "position": 0},
+            {"id": "11", "name": "commands", "type": 0, "position": 2},
+            {"id": "12", "name": "events", "type": 5, "position": 1}
+        ]);
+
+        let channels = parse_channels_response(&json).unwrap();
+        assert_eq!(
+            channels,
+            vec![
+                ChannelSummary {
+                    id: "12".into(),
+                    name: "events".into(),
+                    kind: 5,
+                    position: 1,
+                },
+                ChannelSummary {
+                    id: "11".into(),
+                    name: "commands".into(),
+                    kind: 0,
+                    position: 2,
+                }
+            ]
+        );
+    }
 
     #[test]
     fn outbound_embed_parts_extracts_sender_header() {
@@ -350,5 +953,79 @@ mod tests {
         assert_eq!(messages[0].text, "first");
         assert_eq!(messages[1].text, "second");
         assert_eq!(latest_message_id.as_deref(), Some("1009"));
+    }
+
+    #[test]
+    fn update_team_yaml_for_discord_updates_existing_user_role() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("team.yaml");
+        std::fs::write(
+            &path,
+            r#"
+name: test-team
+roles:
+  - name: human
+    role_type: user
+    channel: telegram
+    channel_config:
+      target: "placeholder"
+      provider: openclaw
+    talks_to: [architect]
+"#,
+        )
+        .unwrap();
+
+        update_team_yaml_for_discord(
+            &path,
+            "discord-token",
+            "cmd-1",
+            "evt-1",
+            "agt-1",
+            &[111, 222],
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("channel: discord"));
+        assert!(content.contains("discord-token"));
+        assert!(content.contains("commands_channel_id: cmd-1"));
+        assert!(content.contains("events_channel_id: evt-1"));
+        assert!(content.contains("agents_channel_id: agt-1"));
+        assert!(!content.contains("target: placeholder"));
+        assert!(!content.contains("provider: openclaw"));
+    }
+
+    #[test]
+    fn update_team_yaml_for_discord_creates_user_role_if_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("team.yaml");
+        std::fs::write(
+            &path,
+            r#"
+name: test-team
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+"#,
+        )
+        .unwrap();
+
+        update_team_yaml_for_discord(&path, "discord-token", "cmd-1", "evt-1", "agt-1", &[111])
+            .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("name: human"));
+        assert!(content.contains("role_type: user"));
+        assert!(content.contains("channel: discord"));
+        assert!(content.contains("commands_channel_id: cmd-1"));
+    }
+
+    #[test]
+    fn setup_discord_bails_without_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = setup_discord(tmp.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("batty init"));
     }
 }

@@ -2,8 +2,8 @@ use anyhow::{Context, Result, bail};
 use batty_cli::{
     agent,
     cli::{
-        self, AutoMergeAction, BoardCommand, Cli, Command, DepsFormatArg, GrafanaCommand,
-        InboxCommand, NudgeCommand, OpenClawCommand, OpenClawEventTopicArg,
+        self, AutoMergeAction, BoardCommand, Cli, Command, DepsFormatArg, DiscordCommand,
+        GrafanaCommand, InboxCommand, NudgeCommand, OpenClawCommand, OpenClawEventTopicArg,
         OpenClawFollowUpCommand, ProjectCommand, ResearchCommand, ResearchFormatArg,
         ResearchKeepPolicyArg, ReviewDispositionArg, TaskCommand, TaskStateArg,
     },
@@ -1493,6 +1493,11 @@ fn main() -> Result<()> {
         Command::GrafanaWebhook { project_root, port } => {
             team::grafana::run_alert_webhook(std::path::Path::new(&project_root), port)?;
         }
+
+        Command::Discord { command } => match command.unwrap_or(DiscordCommand::Setup) {
+            DiscordCommand::Setup => team::setup_discord(&root)?,
+            DiscordCommand::Status => team::discord_status(&root)?,
+        },
 
         Command::Telegram => {
             team::setup_telegram(&root)?;
