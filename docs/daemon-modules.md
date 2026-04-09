@@ -67,6 +67,13 @@ The extracted modules below keep that loop readable without changing the daemon'
 - Replaced in monolithic daemon: the entire "engineer says done" control path, including merge failure escalation and post-merge cleanup.
 - Called from daemon flow: `poll_watchers()` when an engineer completion event is detected.
 
+### `src/team/daemon/merge_queue.rs`
+
+- Responsibility: serial queue execution for daemon-owned auto-merges after completion handling accepts a task for unattended merge.
+- Key entrypoints: `TeamDaemon::process_merge_queue`, `TeamDaemon::enqueue_merge_request`, `TeamDaemon::execute_queued_merge`, `MergeQueueOutcome`.
+- Supported outcomes are intentionally heterogeneous per request: `Success`, `Conflict`, `Reverted`, and `Failed`. Operators should evaluate each task independently instead of expecting one queue drain to end in a uniform result.
+- Called from daemon flow: each poll loop after completion handling has queued mergeable work.
+
 ### `src/team/status.rs`
 
 - Responsibility: runtime/member status synthesis, inbox and triage counts, owned-task summaries, workflow metrics, and pane-label formatting.

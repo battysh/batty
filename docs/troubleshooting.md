@@ -115,6 +115,34 @@ batty merge eng-1-1                    # attempt merge
 
 If conflicts occur, resolve them manually in the worktree directory, then complete the merge.
 
+## Auto-merge outcomes differ between tasks
+
+**Cause:** This is expected. Batty's auto-merge path has multiple supported
+outcomes per task, so a batch of green completions can split across `done`,
+`review`, retry, revert, or escalation.
+
+Start with:
+
+```sh
+batty board summary
+batty inbox manager
+batty metrics
+```
+
+Then interpret the result per task:
+
+1. If the task moved to `review`, Batty decided the diff was not safe for
+   unattended merge. Common reasons are large diffs, config changes, migration
+   changes, or an explicit per-task override.
+1. If the engineer was told to retry after a rebase conflict, resolve the
+   conflict in the engineer worktree and let them complete the task again.
+1. If the manager received a "failed post-merge verification on main and was
+   reverted" message, treat that as a real rollback. Inspect the failing output,
+   create follow-up work, and do not assume the change is still on `main`.
+1. If the manager received "passed tests but could not be merged to main", the
+   queue could not finish the merge safely. Clean the main worktree if needed,
+   retry manually, or redirect the engineer.
+
 ## Telegram messages are not arriving
 
 **Cause:** The bot token, allowed user ID, or Telegram chat bootstrap step is incomplete.

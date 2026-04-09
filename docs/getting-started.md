@@ -176,6 +176,28 @@ batty queue
 batty metrics
 ```
 
+Auto-merge outcomes are intentionally heterogeneous. A green completion can lead to
+different operator-visible states depending on the diff, the merge result, and
+post-merge verification on `main`:
+
+- `review`: Batty routed the task to manual review because the diff was too risky
+  to merge unattended, a per-task override disabled auto-merge, or diff analysis
+  fell back conservatively.
+- `done`: the merge queue merged the branch to `main`; managers receive a
+  completion message and Batty emits `task_auto_merged`.
+- `in-progress` with the engineer re-paged: Batty hit a rebase conflict and asked
+  the engineer to fix the worktree, then retry.
+- `blocked` or escalated: Batty exhausted conflict retries or could not complete
+  the merge safely and handed the next action back to the manager.
+- merged then reverted: the queue merged the branch, but post-merge verification
+  on `main` failed, so Batty reset `main`, notified the engineer and manager, and
+  intentionally did not emit `task_auto_merged`.
+
+When several tasks finish close together, expect mixed outcomes in the same run.
+Check `batty board summary` for state changes, `batty inbox manager` for the
+queue's explanation of each task, and `batty metrics` if you want the review and
+auto-merge counters.
+
 ## 8. Monitor A Running Team
 
 These are the everyday operational commands:
