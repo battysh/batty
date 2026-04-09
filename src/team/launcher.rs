@@ -618,7 +618,9 @@ pub(super) fn write_launch_script(
             "codex" | "codex-cli" => {
                 // Codex SDK uses spawn-per-message — the runtime handles subprocess
                 // spawning. The launch script just needs a sentinel process.
-                "exec sleep infinity".to_string()
+                // Use `sleep 2147483647` (max 32-bit seconds ≈ 68 years) instead
+                // of `sleep infinity` — macOS sleep(1) doesn't support "infinity".
+                "exec sleep 2147483647".to_string()
             }
             "kiro" | "kiro-cli" => {
                 // Kiro SDK uses ACP (JSON-RPC 2.0) protocol.
@@ -1258,6 +1260,41 @@ mod tests {
         assert!(!content.contains("exec codex"));
         let agents = std::fs::read_to_string(&agents_path).unwrap();
         assert!(agents.contains("role context"));
+    }
+
+    #[test]
+    fn launch_script_codex_sdk_mode_uses_portable_sleep() {
+        // Regression: macOS sleep(1) doesn't support "infinity".
+        let tmp = tempfile::tempdir().unwrap();
+        let work_dir = tmp.path().join("wt");
+        std::fs::create_dir_all(&work_dir).unwrap();
+
+        write_launch_script(
+            "eng-sdk",
+            "codex",
+            &default_claude_auth(),
+            "role context",
+            Some("role context"),
+            &work_dir,
+            tmp.path(),
+            false,
+            false,
+            None,
+            true, // sdk_mode = true
+        )
+        .unwrap();
+        let project_slug = tmp.path().file_name().unwrap().to_string_lossy();
+        let script_path =
+            std::env::temp_dir().join(format!("batty-launch-{project_slug}-eng-sdk.sh"));
+        let content = std::fs::read_to_string(&script_path).unwrap();
+        assert!(
+            !content.contains("sleep infinity"),
+            "sleep infinity is not portable to macOS"
+        );
+        assert!(
+            content.contains("exec sleep"),
+            "SDK mode codex needs a sentinel sleep process"
+        );
     }
 
     #[test]
