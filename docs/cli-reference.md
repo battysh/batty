@@ -68,6 +68,8 @@ exhaustive clap-generated output, see [reference/cli.md](reference/cli.md).
 | `batty export-template` | Export current team config as a reusable template |
 | `batty export-run` | Snapshot runtime state for debugging |
 | `batty completions <shell>` | Generate shell completions |
+| `batty discord` | Configure Discord human communication |
+| `batty discord status` | Validate current Discord connection health |
 | `batty telegram` | Configure Telegram human communication |
 
 ## Typical Day-One Flow
