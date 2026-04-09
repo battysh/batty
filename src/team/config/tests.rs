@@ -89,6 +89,7 @@ roles:
       events_channel_id: "1490930323608047647"
       agents_channel_id: "1490930375822676070"
       commands_channel_id: "1490930426812829716"
+      board_channel_id: "1491096253495378070"
       allowed_user_ids: ["170281556", 170281557]
     talks_to: [architect]
   - name: architect
@@ -108,6 +109,10 @@ roles:
     assert_eq!(
         channel_config.commands_channel_id.as_deref(),
         Some("1490930426812829716")
+    );
+    assert_eq!(
+        channel_config.board_channel_id.as_deref(),
+        Some("1491096253495378070")
     );
     assert_eq!(channel_config.allowed_user_ids, vec![170281556, 170281557]);
 }
