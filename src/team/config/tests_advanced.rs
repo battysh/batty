@@ -636,10 +636,10 @@ fn parse_auto_merge_policy_defaults() {
     let config: TeamConfig = serde_yaml::from_str(minimal_yaml()).unwrap();
     let am = &config.workflow_policy.auto_merge;
     assert!(am.enabled);
-    assert_eq!(am.max_diff_lines, 200);
-    assert_eq!(am.max_files_changed, 5);
-    assert_eq!(am.max_modules_touched, 2);
-    assert_eq!(am.confidence_threshold, 0.8);
+    assert_eq!(am.max_diff_lines, 2000);
+    assert_eq!(am.max_files_changed, 30);
+    assert_eq!(am.max_modules_touched, 10);
+    assert_eq!(am.confidence_threshold, 0.0);
     assert!(am.require_tests_pass);
     assert!(am.post_merge_verify);
     assert!(!am.sensitive_paths.is_empty());

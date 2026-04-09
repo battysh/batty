@@ -390,7 +390,8 @@ mod tests {
                 );
                 assert!(reasons.iter().any(|r| r.contains("migration")));
                 assert!(reasons.iter().any(|r| r.contains("unsafe")));
-                assert!(reasons.iter().any(|r| r.contains("modules")));
+                // modules gate relaxed (max=10), so 3 modules won't trigger
+                // but sensitive paths, config changes still should
             }
             _ => panic!("should be ManualReview"),
         }
@@ -463,15 +464,10 @@ mod tests {
             AutoMergeDecision::AutoMerge { .. }
         ));
 
-        // Multi-module diff → low confidence → manual review
-        let risky = make_diff(6, 150, 100, &["team", "cli", "tmux"]);
-        let confidence = compute_merge_confidence(&risky, &policy);
-        assert!(
-            confidence < policy.confidence_threshold,
-            "risky diff confidence {} should be below threshold {}",
-            confidence,
-            policy.confidence_threshold
-        );
+        // Unsafe + sensitive paths → manual review regardless of threshold
+        let mut risky = make_diff(6, 150, 100, &["team", "cli", "tmux"]);
+        risky.has_unsafe = true;
+        risky.sensitive_files = vec!["Cargo.toml".to_string()];
         assert!(matches!(
             should_auto_merge(&risky, &policy, true),
             AutoMergeDecision::ManualReview { .. }
