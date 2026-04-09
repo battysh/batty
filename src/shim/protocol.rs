@@ -111,6 +111,8 @@ pub enum Event {
         input_tokens: u64,
         #[serde(default)]
         output_tokens: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_usage_pct: Option<u8>,
     },
     Pong,
     Warning {
@@ -566,6 +568,7 @@ mod tests {
             uptime_secs: 61,
             input_tokens: 5000,
             output_tokens: 1200,
+            context_usage_pct: Some(84),
         };
         sender.send(&evt).unwrap();
         let received: Event = receiver.recv::<Event>().unwrap().unwrap();
@@ -575,11 +578,13 @@ mod tests {
                 uptime_secs,
                 input_tokens,
                 output_tokens,
+                context_usage_pct,
             } => {
                 assert_eq!(output_bytes, 123_456);
                 assert_eq!(uptime_secs, 61);
                 assert_eq!(input_tokens, 5000);
                 assert_eq!(output_tokens, 1200);
+                assert_eq!(context_usage_pct, Some(84));
             }
             _ => panic!("wrong variant"),
         }

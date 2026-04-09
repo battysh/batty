@@ -534,6 +534,7 @@ impl TeamDaemon {
             Event::SessionStats {
                 output_bytes,
                 uptime_secs,
+                context_usage_pct,
                 ..
             } => {
                 if let Some(handle) = self.shim_handles.get_mut(member_name) {
@@ -542,9 +543,16 @@ impl TeamDaemon {
                 let _ = append_shim_event_log(
                     &self.config.project_root,
                     member_name,
-                    &format!("<- stats output_bytes={output_bytes} uptime_secs={uptime_secs}"),
+                    &format!(
+                        "<- stats output_bytes={output_bytes} uptime_secs={uptime_secs} context_usage_pct={context_usage_pct:?}"
+                    ),
                 );
-                self.handle_context_pressure_stats(member_name, output_bytes, uptime_secs)?;
+                self.handle_context_pressure_stats(
+                    member_name,
+                    output_bytes,
+                    uptime_secs,
+                    context_usage_pct,
+                )?;
             }
 
             Event::Warning { message, idle_secs } => {
@@ -1512,6 +1520,7 @@ mod tests {
                 uptime_secs: 42,
                 input_tokens: 0,
                 output_tokens: 0,
+                context_usage_pct: None,
             })
             .unwrap();
         child.send(&Event::Pong).unwrap();

@@ -1,19 +1,23 @@
 //! Proactive context-pressure tracking based on output growth plus agent behavior.
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
+use serde_json::Value;
 use tracing::{debug, warn};
 
 use super::super::*;
-use crate::team::watcher::CodexQualitySignals;
+use crate::team::watcher::{CodexQualitySignals, discover_claude_session_file};
 
 const WARNING_PERCENT: u64 = 70;
 const NUDGE_PERCENT: u64 = 90;
-const RESTART_AFTER_OVER_THRESHOLD_POLLS: u32 = 2;
-const CLAUDE_PROACTIVE_CONTEXT_BYTES: u64 = 200_000;
 const CLAUDE_PROACTIVE_RESTART_PCT: u64 = 80;
+const CLAUDE_DEFAULT_CONTEXT_LIMIT_TOKENS: u64 = 200_000;
+const CLAUDE_ONE_MILLION_CONTEXT_LIMIT_TOKENS: u64 = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextPressureAction {
@@ -36,6 +40,7 @@ struct ContextPressureInputs {
     tool_failure_message: Option<String>,
     shim_failure_count: u32,
     secs_since_last_commit: Option<u64>,
+    proactive_context_usage_pct: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,7 +48,7 @@ struct ContextPressureState {
     last_output_bytes: u64,
     warning_emitted: bool,
     nudge_sent: bool,
-    over_threshold_polls: u32,
+    over_threshold_since: Option<Instant>,
     shim_failure_count: u32,
 }
 
@@ -75,7 +80,7 @@ impl ContextPressureTracker {
 
     pub(super) fn mark_not_working(&mut self, member: &str) {
         if let Some(state) = self.members.get_mut(member) {
-            state.over_threshold_polls = 0;
+            state.over_threshold_since = None;
         }
     }
 
@@ -97,7 +102,7 @@ impl ContextPressureTracker {
         inputs: &ContextPressureInputs,
         is_working: bool,
         restart_delay_secs: u64,
-        _now: Instant,
+        now: Instant,
     ) -> (u64, Vec<ContextPressureAction>) {
         let warn_at = self.threshold.saturating_mul(WARNING_PERCENT) / 100;
         let nudge_at = self.threshold.saturating_mul(NUDGE_PERCENT) / 100;
@@ -109,11 +114,17 @@ impl ContextPressureTracker {
         state.last_output_bytes = inputs.output_bytes;
 
         if !is_working {
-            state.over_threshold_polls = 0;
+            state.over_threshold_since = None;
             return (0, Vec::new());
         }
 
         let score = compute_pressure_score(inputs, self.threshold_bytes);
+        let score =
+            if inputs.proactive_context_usage_pct.unwrap_or(0) >= CLAUDE_PROACTIVE_RESTART_PCT {
+                score.max(self.threshold)
+            } else {
+                score
+            };
         let mut actions = Vec::new();
         if score >= warn_at && !state.warning_emitted {
             state.warning_emitted = true;
@@ -130,12 +141,12 @@ impl ContextPressureTracker {
         }
 
         if score >= self.threshold {
-            state.over_threshold_polls = state.over_threshold_polls.saturating_add(1);
-            if state.over_threshold_polls >= RESTART_AFTER_OVER_THRESHOLD_POLLS {
+            let since = state.over_threshold_since.get_or_insert(now);
+            if now.duration_since(*since) >= Duration::from_secs(restart_delay_secs.max(1)) {
                 actions.push(ContextPressureAction::Restart);
             }
         } else {
-            state.over_threshold_polls = 0;
+            state.over_threshold_since = None;
         }
 
         (score, actions)
@@ -192,6 +203,72 @@ fn compute_pressure_score(inputs: &ContextPressureInputs, threshold_bytes: u64) 
     score
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClaudeUsageSnapshot {
+    model: Option<String>,
+    used_tokens: u64,
+}
+
+fn parse_latest_claude_usage_snapshot(path: &Path) -> Result<Option<ClaudeUsageSnapshot>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut model = None;
+    let mut used_tokens = 0;
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some(message) = entry.get("message") else {
+            continue;
+        };
+        if let Some(value) = message.get("model").and_then(Value::as_str) {
+            model = Some(value.to_string());
+        }
+        let Some(usage) = message.get("usage") else {
+            continue;
+        };
+
+        used_tokens += json_u64(usage.get("input_tokens"));
+        used_tokens += json_u64(usage.get("cached_input_tokens"));
+        used_tokens += json_u64(usage.get("cache_creation_input_tokens"));
+        used_tokens += json_u64(usage.get("cache_read_input_tokens"));
+        used_tokens += json_u64(usage.get("output_tokens"));
+        used_tokens += json_u64(usage.get("reasoning_output_tokens"));
+    }
+
+    if model.is_none() && used_tokens == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(ClaudeUsageSnapshot { model, used_tokens }))
+}
+
+fn json_u64(value: Option<&Value>) -> u64 {
+    value.and_then(Value::as_u64).unwrap_or(0)
+}
+
+fn claude_context_limit_tokens(model: Option<&str>) -> u64 {
+    let normalized = model.unwrap_or_default().to_ascii_lowercase();
+    if normalized.contains("1m") {
+        CLAUDE_ONE_MILLION_CONTEXT_LIMIT_TOKENS
+    } else {
+        CLAUDE_DEFAULT_CONTEXT_LIMIT_TOKENS
+    }
+}
+
+fn default_claude_projects_root() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+        .join(".claude")
+        .join("projects")
+}
+
 fn should_force_restart(inputs: &ContextPressureInputs, restart_delay_secs: u64) -> bool {
     let restart_delay_secs = restart_delay_secs.max(1);
     inputs.session_uptime_secs >= restart_delay_secs
@@ -208,6 +285,7 @@ impl TeamDaemon {
         member_name: &str,
         output_bytes: u64,
         uptime_secs: u64,
+        proactive_context_usage_pct: Option<u8>,
     ) -> Result<()> {
         if output_bytes == 0 && uptime_secs >= ZERO_OUTPUT_THRESHOLD_SECS {
             if self.shim_handles.contains_key(member_name) {
@@ -227,22 +305,6 @@ impl TeamDaemon {
         }
 
         let is_working = self.states.get(member_name) == Some(&MemberState::Working);
-        if is_working && self.should_proactively_restart_claude_for_context(member_name) {
-            let estimated_context_bytes = self.estimated_context_bytes(member_name);
-            warn!(
-                member = %member_name,
-                estimated_context_bytes,
-                threshold_bytes = CLAUDE_PROACTIVE_CONTEXT_BYTES,
-                "Claude agent exceeded proactive context threshold"
-            );
-            self.record_orchestrator_action(format!(
-                "health: proactive Claude restart for {} at {} estimated context bytes",
-                member_name, estimated_context_bytes
-            ));
-            self.handle_context_pressure_restart(member_name)?;
-            self.context_pressure_tracker.clear_member(member_name);
-            return Ok(());
-        }
         let threshold = self
             .config
             .team_config
@@ -253,7 +315,12 @@ impl TeamDaemon {
             .team_config
             .workflow_policy
             .context_pressure_restart_delay_secs;
-        let inputs = self.context_pressure_inputs(member_name, output_bytes, uptime_secs);
+        let inputs = self.context_pressure_inputs(
+            member_name,
+            output_bytes,
+            uptime_secs,
+            proactive_context_usage_pct.map(u64::from),
+        );
         let (score, actions) = self.context_pressure_tracker.observe_at(
             member_name,
             &inputs,
@@ -273,6 +340,7 @@ impl TeamDaemon {
                         member = %member_name,
                         task_id,
                         output_bytes,
+                        proactive_context_usage_pct = inputs.proactive_context_usage_pct,
                         pressure_score = score,
                         threshold,
                         uptime_secs,
@@ -286,8 +354,8 @@ impl TeamDaemon {
                         output_bytes,
                     );
                     self.record_orchestrator_action(format!(
-                        "health: context pressure warning for {} (score={}/{}, output_bytes={})",
-                        member_name, score, threshold, output_bytes
+                        "health: context pressure warning for {} (score={}/{}, output_bytes={}, proactive_context_usage_pct={:?})",
+                        member_name, score, threshold, output_bytes, inputs.proactive_context_usage_pct
                     ));
                 }
                 ContextPressureAction::Nudge => {
@@ -313,8 +381,8 @@ impl TeamDaemon {
                         }
                     }
                     self.record_orchestrator_action(format!(
-                        "health: nudged {} to wrap up under context pressure (score={}/{})",
-                        member_name, score, threshold
+                        "health: nudged {} to wrap up under context pressure (score={}/{}, proactive_context_usage_pct={:?})",
+                        member_name, score, threshold, inputs.proactive_context_usage_pct
                     ));
                 }
                 ContextPressureAction::Restart => {
@@ -332,8 +400,8 @@ impl TeamDaemon {
                         );
                     }
                     self.record_orchestrator_action(format!(
-                        "health: restarted {} after sustained context pressure (score={}/{})",
-                        member_name, score, threshold
+                        "health: restarted {} after sustained context pressure (score={}/{}, proactive_context_usage_pct={:?})",
+                        member_name, score, threshold, inputs.proactive_context_usage_pct
                     ));
                     self.context_pressure_tracker.clear_member(member_name);
                 }
@@ -348,6 +416,7 @@ impl TeamDaemon {
         member_name: &str,
         output_bytes: u64,
         uptime_secs: u64,
+        proactive_context_usage_pct: Option<u64>,
     ) -> ContextPressureInputs {
         let quality = self
             .current_codex_quality_signals(member_name)
@@ -367,6 +436,8 @@ impl TeamDaemon {
                 .context_pressure_tracker
                 .shim_failure_count(member_name),
             secs_since_last_commit: self.secs_since_last_commit(member_name),
+            proactive_context_usage_pct: proactive_context_usage_pct
+                .or_else(|| self.proactive_claude_context_usage_pct(member_name)),
         }
     }
 
@@ -417,28 +488,30 @@ impl TeamDaemon {
         Some(now.saturating_sub(commit_ts))
     }
 
-    pub(super) fn estimated_context_bytes(&self, member_name: &str) -> u64 {
-        self.shim_handles
-            .get(member_name)
-            .map(|handle| handle.output_bytes.saturating_add(handle.input_bytes))
-            .unwrap_or_default()
-    }
-
-    fn should_proactively_restart_claude_for_context(&self, member_name: &str) -> bool {
+    fn proactive_claude_context_usage_pct(&self, member_name: &str) -> Option<u64> {
         let Some(member) = self
             .config
             .members
             .iter()
             .find(|member| member.name == member_name)
         else {
-            return false;
+            return None;
         };
         let agent_name = member.agent.as_deref().unwrap_or("claude");
         if agent_name != "claude" {
-            return false;
+            return None;
         }
-        self.estimated_context_bytes(member_name)
-            >= CLAUDE_PROACTIVE_CONTEXT_BYTES.saturating_mul(CLAUDE_PROACTIVE_RESTART_PCT) / 100
+        let work_dir = self.member_work_dir(member);
+        let session_file =
+            discover_claude_session_file(&default_claude_projects_root(), &work_dir, None)
+                .ok()
+                .flatten()?;
+        let snapshot = parse_latest_claude_usage_snapshot(&session_file)
+            .ok()
+            .flatten()?;
+        let limit_tokens =
+            claude_context_limit_tokens(member.model.as_deref().or(snapshot.model.as_deref()));
+        Some(snapshot.used_tokens.saturating_mul(100) / limit_tokens.max(1))
     }
 }
 
@@ -449,7 +522,7 @@ mod tests {
     fn backdate_score(tracker: &mut ContextPressureTracker, member: &str, output_bytes: u64) {
         let state = tracker.members.entry(member.to_string()).or_default();
         state.last_output_bytes = output_bytes;
-        state.over_threshold_polls = 1;
+        state.over_threshold_since = Some(Instant::now() - Duration::from_secs(121));
     }
 
     fn pressure_inputs() -> ContextPressureInputs {
@@ -466,6 +539,7 @@ mod tests {
             tool_failure_message: None,
             shim_failure_count: 0,
             secs_since_last_commit: Some(2_000),
+            proactive_context_usage_pct: None,
         }
     }
 
@@ -491,6 +565,7 @@ mod tests {
             tool_failure_message: None,
             shim_failure_count: 0,
             secs_since_last_commit: Some(60),
+            proactive_context_usage_pct: None,
         };
         assert!(compute_pressure_score(&inputs, 512_000) < 30);
     }
@@ -523,6 +598,7 @@ mod tests {
             tool_failure_message: None,
             shim_failure_count: 0,
             secs_since_last_commit: Some(120),
+            proactive_context_usage_pct: None,
         };
 
         let (score, actions) = tracker.observe_at("eng-1", &inputs, true, 120, Instant::now());
@@ -537,16 +613,14 @@ mod tests {
     fn graduated_response_levels_fire_in_order() {
         let mut tracker = ContextPressureTracker::new(100, 512_000);
         let inputs = pressure_inputs();
+        let now = Instant::now();
         assert_eq!(
-            tracker
-                .observe_at("eng-1", &inputs, true, 120, Instant::now())
-                .1,
+            tracker.observe_at("eng-1", &inputs, true, 120, now).1,
             vec![ContextPressureAction::Warn, ContextPressureAction::Nudge]
         );
-        backdate_score(&mut tracker, "eng-1", inputs.output_bytes);
         assert_eq!(
             tracker
-                .observe_at("eng-1", &inputs, true, 120, Instant::now())
+                .observe_at("eng-1", &inputs, true, 120, now + Duration::from_secs(121))
                 .1,
             vec![ContextPressureAction::Restart]
         );
@@ -575,6 +649,7 @@ mod tests {
             tool_failure_message: None,
             shim_failure_count: 0,
             secs_since_last_commit: Some(0),
+            proactive_context_usage_pct: None,
         };
         assert!(
             tracker
@@ -600,7 +675,7 @@ mod tests {
                 .1
                 .is_empty()
         );
-        assert_eq!(tracker.members["eng-1"].over_threshold_polls, 0);
+        assert!(tracker.members["eng-1"].over_threshold_since.is_none());
     }
 
     #[test]
@@ -623,6 +698,7 @@ mod tests {
             tool_failure_message: None,
             shim_failure_count: tracker.shim_failure_count("eng-1"),
             secs_since_last_commit: Some(180),
+            proactive_context_usage_pct: None,
         };
 
         let (score, actions) = tracker.observe_at("eng-1", &inputs, true, 120, Instant::now());
@@ -648,6 +724,7 @@ mod tests {
             tool_failure_message: None,
             shim_failure_count: 3,
             secs_since_last_commit: Some(1_200),
+            proactive_context_usage_pct: None,
         };
 
         assert!(compute_pressure_score(&inputs, 512_000) >= 55);
@@ -662,27 +739,66 @@ mod tests {
     }
 
     #[test]
-    fn estimated_context_bytes_sums_input_and_output() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut daemon = crate::team::test_support::TestDaemonBuilder::new(tmp.path())
-            .members(vec![crate::team::test_support::architect_member(
-                "architect",
-            )])
-            .build();
-        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
-        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
-            "architect".into(),
-            crate::shim::protocol::Channel::new(parent),
-            123,
-            "claude".into(),
-            "claude".into(),
-            tmp.path().to_path_buf(),
-        );
-        handle.output_bytes = 120_000;
-        handle.input_bytes = 50_000;
-        daemon.shim_handles.insert("architect".into(), handle);
+    fn proactive_context_threshold_uses_normal_warn_then_restart_flow() {
+        let mut tracker = ContextPressureTracker::new(100, 512_000);
+        let inputs = ContextPressureInputs {
+            output_bytes: 32_000,
+            session_uptime_secs: 300,
+            narration_detected: false,
+            meta_conversation_detected: false,
+            assistant_message_count: 1,
+            tool_call_count: 1,
+            unique_tool_names: 1,
+            shrinking_responses: false,
+            repeated_identical_outputs: false,
+            tool_failure_message: None,
+            shim_failure_count: 0,
+            secs_since_last_commit: Some(60),
+            proactive_context_usage_pct: Some(CLAUDE_PROACTIVE_RESTART_PCT),
+        };
+        let now = Instant::now();
 
-        assert_eq!(daemon.estimated_context_bytes("architect"), 170_000);
-        assert!(daemon.should_proactively_restart_claude_for_context("architect"));
+        assert_eq!(
+            tracker.observe_at("eng-1", &inputs, true, 120, now).1,
+            vec![ContextPressureAction::Warn, ContextPressureAction::Nudge]
+        );
+        assert_eq!(
+            tracker
+                .observe_at("eng-1", &inputs, true, 120, now + Duration::from_secs(121))
+                .1,
+            vec![ContextPressureAction::Restart]
+        );
+    }
+
+    #[test]
+    fn latest_claude_usage_snapshot_counts_cache_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = tmp.path().join("session.jsonl");
+        std::fs::write(
+            &session,
+            concat!(
+                "{\"message\":{\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":4,\"output_tokens\":6}}}\n",
+                "{\"message\":{\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":20,\"output_tokens\":10,\"cache_creation_input_tokens\":30,\"cache_read_input_tokens\":40}}}\n"
+            ),
+        )
+        .unwrap();
+
+        let snapshot = parse_latest_claude_usage_snapshot(&session)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(snapshot.used_tokens, 110);
+    }
+
+    #[test]
+    fn claude_context_limit_tokens_prefers_one_million_aliases() {
+        assert_eq!(
+            claude_context_limit_tokens(Some("claude-opus-4.6-1m")),
+            CLAUDE_ONE_MILLION_CONTEXT_LIMIT_TOKENS
+        );
+        assert_eq!(
+            claude_context_limit_tokens(Some("claude-sonnet-4-6")),
+            CLAUDE_DEFAULT_CONTEXT_LIMIT_TOKENS
+        );
     }
 }
