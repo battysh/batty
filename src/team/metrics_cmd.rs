@@ -20,6 +20,13 @@ pub struct DashboardMetrics {
     pub total_merges: i64,
     pub total_events: i64,
     pub sessions_count: i64,
+    pub discord_events_sent: i64,
+    pub verification_pass_count: i64,
+    pub verification_fail_count: i64,
+    pub verification_pass_rate: Option<f64>,
+    pub notification_isolation_count: i64,
+    pub avg_notification_delivery_latency_secs: Option<f64>,
+    pub merge_queue_depth: i64,
 
     // Cycle time
     pub avg_cycle_time_secs: Option<f64>,
@@ -78,6 +85,23 @@ pub fn query_dashboard(conn: &Connection) -> Result<DashboardMetrics> {
         m.total_tasks_completed += s.tasks_completed;
         m.total_merges += s.total_merges;
         m.total_events += s.total_events;
+        m.discord_events_sent += s.discord_events_sent;
+        m.verification_pass_count += s.verification_passes;
+        m.verification_fail_count += s.verification_failures;
+        m.notification_isolation_count += s.notification_isolations;
+    }
+    let total_notification_latency_secs: i64 = sessions
+        .iter()
+        .map(|row| row.notification_latency_total_secs)
+        .sum();
+    let total_notification_latency_samples: i64 = sessions
+        .iter()
+        .map(|row| row.notification_latency_samples)
+        .sum();
+    if total_notification_latency_samples > 0 {
+        m.avg_notification_delivery_latency_secs = Some(
+            total_notification_latency_secs as f64 / total_notification_latency_samples as f64,
+        );
     }
 
     // Per-agent metrics
@@ -155,6 +179,13 @@ pub fn query_dashboard(conn: &Connection) -> Result<DashboardMetrics> {
     if total_reviewed > 0 {
         m.rework_rate = Some(m.rework_count as f64 / total_reviewed as f64 * 100.0);
     }
+    let verification_total = m.verification_pass_count + m.verification_fail_count;
+    if verification_total > 0 {
+        m.verification_pass_rate =
+            Some(m.verification_pass_count as f64 / verification_total as f64 * 100.0);
+    }
+
+    m.merge_queue_depth = telemetry_db::query_merge_queue_depth(conn)?;
 
     m.cycle_time_by_priority = telemetry_db::query_average_cycle_time_by_priority(conn)?;
     m.engineer_throughput = telemetry_db::query_engineer_throughput(conn)?;
@@ -200,6 +231,7 @@ pub fn format_dashboard(m: &DashboardMetrics) -> String {
     out.push_str(&format!("  Tasks Completed: {}\n", m.total_tasks_completed));
     out.push_str(&format!("  Total Merges:    {}\n", m.total_merges));
     out.push_str(&format!("  Total Events:    {}\n", m.total_events));
+    out.push_str(&format!("  Discord Events:  {}\n", m.discord_events_sent));
 
     // Cycle time
     out.push_str("\nCycle Time\n");
@@ -284,6 +316,31 @@ pub fn format_dashboard(m: &DashboardMetrics) -> String {
             out.push_str(&format!("    - {} ({})\n", row.reason, row.count));
         }
     }
+
+    out.push_str("\nSubsystem Health\n");
+    out.push_str(&"-".repeat(40));
+    out.push('\n');
+    let verify_rate = m
+        .verification_pass_rate
+        .map(|rate| format!("{rate:.0}%"))
+        .unwrap_or_else(|| na.clone());
+    let notification_latency = m
+        .avg_notification_delivery_latency_secs
+        .map(format_duration)
+        .unwrap_or_else(|| na.clone());
+    out.push_str(&format!(
+        "  Verification: pass {}  fail {}  pass-rate {}\n",
+        m.verification_pass_count, m.verification_fail_count, verify_rate
+    ));
+    out.push_str(&format!("  Merge Queue Depth: {}\n", m.merge_queue_depth));
+    out.push_str(&format!(
+        "  Notification Isolation: {}\n",
+        m.notification_isolation_count
+    ));
+    out.push_str(&format!(
+        "  Notification Latency: {}\n",
+        notification_latency
+    ));
 
     if !m.cycle_time_by_priority.is_empty() {
         out.push_str("\nAverage Cycle Time By Priority\n");
@@ -620,6 +677,13 @@ mod tests {
             total_tasks_completed: 10,
             total_merges: 8,
             total_events: 50,
+            discord_events_sent: 4,
+            verification_pass_count: 5,
+            verification_fail_count: 1,
+            verification_pass_rate: Some(83.0),
+            notification_isolation_count: 3,
+            avg_notification_delivery_latency_secs: Some(12.0),
+            merge_queue_depth: 2,
             avg_cycle_time_secs: Some(300.0),
             min_cycle_time_secs: Some(60),
             max_cycle_time_secs: Some(900),
@@ -681,6 +745,7 @@ mod tests {
         assert!(text.contains("Sessions:        2"));
         assert!(text.contains("Tasks Completed: 10"));
         assert!(text.contains("Total Merges:    8"));
+        assert!(text.contains("Discord Events:  4"));
 
         assert!(text.contains("Cycle Time"));
         assert!(text.contains("Average: 5m 0s"));
@@ -702,6 +767,11 @@ mod tests {
         assert!(text.contains("Average Cycle Time By Priority"));
         assert!(text.contains("Engineer Throughput Ranking"));
         assert!(text.contains("Longest-Running In-Progress Tasks"));
+        assert!(text.contains("Subsystem Health"));
+        assert!(text.contains("Verification: pass 5  fail 1"));
+        assert!(text.contains("Merge Queue Depth: 2"));
+        assert!(text.contains("Notification Isolation: 3"));
+        assert!(text.contains("Notification Latency: 12s"));
 
         assert!(text.contains("Per-Agent Breakdown"));
         assert!(text.contains("eng-1"));
