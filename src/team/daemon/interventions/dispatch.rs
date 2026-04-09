@@ -76,7 +76,7 @@ impl TeamDaemon {
             }
             if supervisory_stalled {
                 let reason = self.supervisory_progress_signal(&name, stall_threshold);
-                self.record_supervisory_stall_reason(&name, stall_threshold, reason.stall_reason());
+                self.record_supervisory_stall_reason(&name, stall_threshold, reason);
             }
             if !supervisory_stalled && !self.ready_for_idle_automation(&inbox_root, &name) {
                 continue;

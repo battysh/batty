@@ -132,6 +132,31 @@ fn starvation_test_daemon(tmp: &tempfile::TempDir, threshold: Option<usize>) -> 
     daemon
 }
 
+fn insert_working_shim_handle(
+    daemon: &mut TeamDaemon,
+    member: &str,
+    working_secs: u64,
+    last_activity_secs: u64,
+) {
+    let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+    let mut channel = crate::shim::protocol::Channel::new(parent);
+    channel
+        .set_read_timeout(Some(Duration::from_millis(5)))
+        .unwrap();
+    let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+        member.to_string(),
+        channel,
+        999,
+        "claude".to_string(),
+        "claude".to_string(),
+        std::path::PathBuf::from("/tmp/test"),
+    );
+    handle.apply_state_change(crate::shim::protocol::ShimState::Working);
+    handle.state_changed_at = Instant::now() - Duration::from_secs(working_secs);
+    handle.last_activity_at = Some(Instant::now() - Duration::from_secs(last_activity_secs));
+    daemon.shim_handles.insert(member.to_string(), handle);
+}
+
 #[test]
 fn extract_nudge_from_file() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -1636,6 +1661,141 @@ fn maybe_intervene_review_backlog_does_not_fire_on_startup_idle() {
 
     assert!(inbox::pending_messages(&root, "lead").unwrap().is_empty());
     assert!(!daemon.owned_task_interventions.contains_key("review::lead"));
+}
+
+#[test]
+fn supervisory_manager_stall_detection_skips_fresh_triage_backlog() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(vec![
+            architect_member("architect"),
+            manager_member("lead", Some("architect")),
+            engineer_member("eng-1", Some("lead"), false),
+        ])
+        .states(HashMap::from([("lead".to_string(), MemberState::Working)]))
+        .build();
+    let threshold = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .stall_threshold_secs;
+    insert_working_shim_handle(&mut daemon, "lead", threshold + 10, threshold + 10);
+
+    let root = inbox::inboxes_root(tmp.path());
+    inbox::init_inbox(&root, "lead").unwrap();
+    let mut report = inbox::InboxMessage::new_send("eng-1", "lead", "done");
+    report.timestamp = crate::team::now_unix();
+    let id = inbox::deliver_to_inbox(&root, &report).unwrap();
+    inbox::mark_delivered(&root, "lead", &id).unwrap();
+
+    assert_eq!(
+        daemon
+            .supervisory_progress_signal("lead", threshold)
+            .short_label(),
+        "inbox batching"
+    );
+    assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
+}
+
+#[test]
+fn supervisory_manager_stall_detection_skips_pending_inbox_batching() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(vec![
+            architect_member("architect"),
+            manager_member("lead", Some("architect")),
+            engineer_member("eng-1", Some("lead"), false),
+        ])
+        .states(HashMap::from([("lead".to_string(), MemberState::Working)]))
+        .build();
+    let threshold = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .stall_threshold_secs;
+    insert_working_shim_handle(&mut daemon, "lead", threshold + 10, threshold + 10);
+
+    let root = inbox::inboxes_root(tmp.path());
+    inbox::init_inbox(&root, "lead").unwrap();
+    let report = inbox::InboxMessage::new_send("eng-1", "lead", "queued result");
+    inbox::deliver_to_inbox(&root, &report).unwrap();
+
+    assert_eq!(
+        daemon
+            .supervisory_progress_signal("lead", threshold)
+            .short_label(),
+        "inbox batching"
+    );
+    assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
+}
+
+#[test]
+fn supervisory_manager_stall_detection_skips_review_waiting() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(vec![
+            architect_member("architect"),
+            manager_member("lead", Some("architect")),
+            engineer_member("eng-1", Some("lead"), false),
+        ])
+        .states(HashMap::from([("lead".to_string(), MemberState::Working)]))
+        .build();
+    let threshold = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .stall_threshold_secs;
+    insert_working_shim_handle(&mut daemon, "lead", threshold + 10, threshold + 10);
+    write_owned_task_file(tmp.path(), 191, "review-task", "review", "eng-1");
+
+    assert_eq!(
+        daemon
+            .supervisory_progress_signal("lead", threshold)
+            .short_label(),
+        "review waiting"
+    );
+    assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
+}
+
+#[test]
+fn supervisory_architect_stall_event_records_role_specific_reason_and_summary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(vec![
+            architect_member("architect"),
+            manager_member("lead", Some("architect")),
+            engineer_member("eng-1", Some("lead"), false),
+        ])
+        .states(HashMap::from([(
+            "architect".to_string(),
+            MemberState::Working,
+        )]))
+        .build();
+    let threshold = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .stall_threshold_secs;
+    insert_working_shim_handle(&mut daemon, "architect", threshold + 10, threshold + 10);
+
+    let signal = daemon.supervisory_progress_signal("architect", threshold);
+    daemon.record_supervisory_stall_reason("architect", threshold, signal);
+
+    let events =
+        crate::team::events::read_events(&crate::team::team_events_path(tmp.path())).unwrap();
+    let stall_event = events
+        .iter()
+        .find(|event| event.event == "stall_detected" && event.role.as_deref() == Some("architect"))
+        .expect("expected supervisory stall event");
+
+    assert_eq!(
+        stall_event.reason.as_deref(),
+        Some("supervisory_stalled_architect_no_actionable_progress")
+    );
+    assert_eq!(
+        stall_event.details.as_deref(),
+        Some("architect (architect) stalled after 5m: no actionable progress")
+    );
 }
 
 #[test]

@@ -754,7 +754,7 @@ fn supervisory_manager_shim_chatter_still_trips_dispatch_gap() {
     assert!(events.iter().any(|event| {
         event.event == "stall_detected"
             && event.role.as_deref() == Some("lead")
-            && event.reason.as_deref() == Some("supervisory_shim_activity_only")
+            && event.reason.as_deref() == Some("supervisory_stalled_manager_shim_activity_only")
     }));
 }
 

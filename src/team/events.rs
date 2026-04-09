@@ -2118,11 +2118,11 @@ mod tests {
             "lead",
             None,
             300,
-            Some("supervisory_shim_activity_only"),
+            Some("supervisory_stalled_manager_shim_activity_only"),
         );
         assert_eq!(
             event.reason.as_deref(),
-            Some("supervisory_shim_activity_only")
+            Some("supervisory_stalled_manager_shim_activity_only")
         );
     }
 

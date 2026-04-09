@@ -8,9 +8,33 @@ use tracing::warn;
 use super::super::*;
 use super::{CONTEXT_RESTART_COOLDOWN, format_checkpoint_section};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in super::super) enum SupervisoryLane {
+    Architect,
+    Manager,
+}
+
+impl SupervisoryLane {
+    pub(in super::super) fn from_role(role_type: RoleType) -> Option<Self> {
+        match role_type {
+            RoleType::Architect => Some(Self::Architect),
+            RoleType::Manager => Some(Self::Manager),
+            _ => None,
+        }
+    }
+
+    pub(in super::super) fn label(self) -> &'static str {
+        match self {
+            Self::Architect => "architect",
+            Self::Manager => "manager",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in super::super) enum SupervisoryProgress {
     Actionable(&'static str),
+    Expected(&'static str),
     Incidental(&'static str),
     None,
 }
@@ -19,14 +43,146 @@ impl SupervisoryProgress {
     pub(in super::super) fn stall_reason(&self) -> &'static str {
         match self {
             Self::Actionable(_) => "supervisory_actionable_progress",
+            Self::Expected("inbox_batching") => "supervisory_inbox_batching",
+            Self::Expected(_) => "supervisory_review_waiting",
             Self::Incidental("shim_activity") => "supervisory_shim_activity_only",
             Self::Incidental(_) => "supervisory_status_only_output",
             Self::None => "supervisory_no_actionable_progress",
         }
     }
+
+    fn stall_reason_suffix(self) -> &'static str {
+        match self {
+            Self::Actionable(_) => "actionable_progress",
+            Self::Expected("inbox_batching") => "inbox_batching",
+            Self::Expected(_) => "review_waiting",
+            Self::Incidental("shim_activity") => "shim_activity_only",
+            Self::Incidental(_) => "status_only_output",
+            Self::None => "no_actionable_progress",
+        }
+    }
+
+    pub(in super::super) fn short_label(&self) -> &'static str {
+        match self {
+            Self::Actionable(_) => "actionable progress",
+            Self::Expected("inbox_batching") => "inbox batching",
+            Self::Expected("review_waiting") => "review waiting",
+            Self::Expected(_) => "expected supervisory work",
+            Self::Incidental("shim_activity") => "shim activity only",
+            Self::Incidental(_) => "status-only output",
+            Self::None => "no actionable progress",
+        }
+    }
+
+    pub(in super::super) fn stall_reason_for_lane(self, lane: SupervisoryLane) -> String {
+        format!(
+            "supervisory_stalled_{}_{}",
+            lane.label(),
+            self.stall_reason_suffix()
+        )
+    }
+
+    pub(in super::super) fn is_stall_signal(&self) -> bool {
+        matches!(self, Self::Incidental(_) | Self::None)
+    }
+}
+
+pub(in super::super) enum SupervisoryStallRecordInput<'a> {
+    Signal(SupervisoryProgress),
+    LegacyReason(&'a str),
+}
+
+impl<'a> From<SupervisoryProgress> for SupervisoryStallRecordInput<'a> {
+    fn from(value: SupervisoryProgress) -> Self {
+        Self::Signal(value)
+    }
+}
+
+impl<'a> From<&'a str> for SupervisoryStallRecordInput<'a> {
+    fn from(value: &'a str) -> Self {
+        Self::LegacyReason(value)
+    }
 }
 
 impl TeamDaemon {
+    pub(in super::super) fn supervisory_lane(&self, member_name: &str) -> Option<SupervisoryLane> {
+        self.config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+            .and_then(|member| SupervisoryLane::from_role(member.role_type))
+    }
+
+    fn supervisory_expected_progress(&self, member_name: &str) -> Option<SupervisoryProgress> {
+        let inbox_root = crate::team::inbox::inboxes_root(&self.config.project_root);
+        if crate::team::inbox::pending_message_count(&inbox_root, member_name)
+            .ok()
+            .is_some_and(|count| count > 0)
+        {
+            return Some(SupervisoryProgress::Expected("inbox_batching"));
+        }
+
+        let direct_reports =
+            super::super::super::status::direct_reports_by_member(&self.config.members);
+        if let Some(reports) = direct_reports.get(member_name)
+            && let Ok(triage_state) =
+                super::super::super::status::delivered_direct_report_triage_state(
+                    &inbox_root,
+                    member_name,
+                    reports,
+                )
+            && triage_state.count > 0
+        {
+            return Some(SupervisoryProgress::Expected("inbox_batching"));
+        }
+
+        let tasks_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        if let Ok(tasks) = crate::task::load_tasks_from_dir(&tasks_dir)
+            && tasks.iter().any(|task| {
+                if task.status != "review" {
+                    return false;
+                }
+
+                let Some(claimed_by) = task.claimed_by.as_deref() else {
+                    return false;
+                };
+                self.config
+                    .members
+                    .iter()
+                    .find(|member| member.name == claimed_by)
+                    .and_then(|member| member.reports_to.as_deref())
+                    == Some(member_name)
+            })
+        {
+            return Some(SupervisoryProgress::Expected("review_waiting"));
+        }
+
+        None
+    }
+
+    pub(in super::super) fn format_supervisory_stall_summary(
+        &self,
+        member_name: &str,
+        stall_secs: u64,
+        signal: &SupervisoryProgress,
+    ) -> String {
+        let lane = self
+            .supervisory_lane(member_name)
+            .map(|lane| lane.label())
+            .unwrap_or("supervisory");
+        format!(
+            "{member_name} ({lane}) stalled after {}: {}",
+            crate::team::status::format_health_duration(stall_secs),
+            signal.short_label(),
+        )
+    }
+
     pub(in super::super) fn supervisory_progress_signal(
         &self,
         member_name: &str,
@@ -34,6 +190,13 @@ impl TeamDaemon {
     ) -> SupervisoryProgress {
         if threshold_secs == 0 {
             return SupervisoryProgress::None;
+        }
+        if self.supervisory_lane(member_name).is_none() {
+            return SupervisoryProgress::None;
+        }
+
+        if let Some(signal) = self.supervisory_expected_progress(member_name) {
+            return signal;
         }
 
         let now = super::super::super::now_unix();
@@ -93,16 +256,7 @@ impl TeamDaemon {
         if threshold_secs == 0 {
             return false;
         }
-
-        let Some(member) = self
-            .config
-            .members
-            .iter()
-            .find(|member| member.name == member_name)
-        else {
-            return false;
-        };
-        if !matches!(member.role_type, RoleType::Architect | RoleType::Manager) {
+        if self.supervisory_lane(member_name).is_none() {
             return false;
         }
 
@@ -118,18 +272,18 @@ impl TeamDaemon {
             return false;
         }
 
-        !matches!(
-            self.supervisory_progress_signal(member_name, threshold_secs),
-            SupervisoryProgress::Actionable(_)
-        )
+        self.supervisory_progress_signal(member_name, threshold_secs)
+            .is_stall_signal()
     }
 
-    pub(in super::super) fn record_supervisory_stall_reason(
+    pub(in super::super) fn record_supervisory_stall_reason<'a, T>(
         &mut self,
         member_name: &str,
         stall_secs: u64,
-        reason: &str,
-    ) {
+        input: T,
+    ) where
+        T: Into<SupervisoryStallRecordInput<'a>>,
+    {
         let cooldown_key = format!("supervisory-stall::{member_name}");
         let cooldown = std::time::Duration::from_secs(
             self.config
@@ -144,16 +298,34 @@ impl TeamDaemon {
         {
             return;
         }
-
-        self.emit_event(TeamEvent::stall_detected_with_reason(
+        let observed_stall_secs = self
+            .shim_handles
+            .get(member_name)
+            .map(|handle| handle.secs_since_state_change())
+            .unwrap_or(stall_secs);
+        let (signal, fallback_reason) = match input.into() {
+            SupervisoryStallRecordInput::Signal(signal) => (signal, signal.stall_reason()),
+            SupervisoryStallRecordInput::LegacyReason(reason) => {
+                (self.supervisory_progress_signal(member_name, stall_secs), reason)
+            }
+        };
+        let reason = self
+            .supervisory_lane(member_name)
+            .map(|lane| signal.stall_reason_for_lane(lane))
+            .unwrap_or_else(|| fallback_reason.to_string());
+        let mut event = TeamEvent::stall_detected_with_reason(
             member_name,
             None,
-            stall_secs,
-            Some(reason),
-        ));
+            observed_stall_secs,
+            Some(&reason),
+        );
+        event.task = Some(format!("supervisory::{member_name}"));
+        event.details =
+            Some(self.format_supervisory_stall_summary(member_name, observed_stall_secs, &signal));
+        self.emit_event(event);
         self.record_orchestrator_action(format!(
-            "stall: detected supervisory stall for {} ({}) after {}s",
-            member_name, reason, stall_secs
+            "stall: detected {}",
+            self.format_supervisory_stall_summary(member_name, observed_stall_secs, &signal)
         ));
         self.intervention_cooldowns
             .insert(cooldown_key, Instant::now());
@@ -323,22 +495,49 @@ impl TeamDaemon {
 mod tests {
     use super::super::super::*;
     use super::super::test_helpers::test_team_config;
+    use super::SupervisoryProgress;
     use crate::team::config::{
         AutomationConfig, BoardConfig, OrchestratorPosition, RoleType, StandupConfig, TeamConfig,
         WorkflowMode, WorkflowPolicy,
     };
     use crate::team::events::TeamEvent;
     use crate::team::hierarchy::MemberInstance;
+    use crate::team::inbox::{self, InboxMessage};
     use crate::team::standup::MemberState;
     use crate::team::test_helpers::{make_test_daemon, write_event_log};
     use crate::team::test_support::{
-        TestDaemonBuilder, engineer_member, setup_fake_claude, write_owned_task_file,
-        write_owned_task_file_with_context,
+        TestDaemonBuilder, architect_member, engineer_member, manager_member, setup_fake_claude,
+        write_owned_task_file, write_owned_task_file_with_context,
     };
     use serial_test::serial;
     use std::collections::HashMap;
     use std::process::Command;
     use std::time::{Duration, Instant};
+
+    fn insert_working_shim_handle(
+        daemon: &mut TeamDaemon,
+        member: &str,
+        working_secs: u64,
+        last_activity_secs: u64,
+    ) {
+        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+        let mut channel = crate::shim::protocol::Channel::new(parent);
+        channel
+            .set_read_timeout(Some(Duration::from_millis(5)))
+            .unwrap();
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            member.to_string(),
+            channel,
+            999,
+            "claude".to_string(),
+            "claude".to_string(),
+            std::path::PathBuf::from("/tmp/test"),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Working);
+        handle.state_changed_at = Instant::now() - Duration::from_secs(working_secs);
+        handle.last_activity_at = Some(Instant::now() - Duration::from_secs(last_activity_secs));
+        daemon.shim_handles.insert(member.to_string(), handle);
+    }
 
     #[test]
     fn stall_restart_count_returns_zero_with_no_events() {
@@ -376,6 +575,86 @@ mod tests {
         let policy = WorkflowPolicy::default();
         assert_eq!(policy.stall_threshold_secs, 300);
         assert_eq!(policy.max_stall_restarts, 2);
+    }
+
+    #[test]
+    fn supervisory_progress_signal_treats_triage_backlog_as_expected_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .build();
+        let threshold = daemon
+            .config
+            .team_config
+            .workflow_policy
+            .stall_threshold_secs;
+        insert_working_shim_handle(&mut daemon, "lead", threshold + 10, threshold + 10);
+
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "lead").unwrap();
+        let mut result = InboxMessage::new_send("eng-1", "lead", "task complete");
+        result.timestamp = crate::team::now_unix();
+        let id = inbox::deliver_to_inbox(&inbox_root, &result).unwrap();
+        inbox::mark_delivered(&inbox_root, "lead", &id).unwrap();
+
+        let signal = daemon.supervisory_progress_signal("lead", threshold);
+        assert_eq!(signal, SupervisoryProgress::Expected("inbox_batching"));
+        assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
+    }
+
+    #[test]
+    fn supervisory_progress_signal_treats_review_backlog_as_expected_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .build();
+        let threshold = daemon
+            .config
+            .team_config
+            .workflow_policy
+            .stall_threshold_secs;
+        insert_working_shim_handle(&mut daemon, "lead", threshold + 10, threshold + 10);
+        write_owned_task_file(tmp.path(), 191, "review-task", "review", "eng-1");
+
+        let signal = daemon.supervisory_progress_signal("lead", threshold);
+        assert_eq!(signal, SupervisoryProgress::Expected("review_waiting"));
+        assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
+    }
+
+    #[test]
+    fn record_supervisory_stall_reason_emits_role_specific_summary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![architect_member("architect")])
+            .build();
+        let threshold = daemon
+            .config
+            .team_config
+            .workflow_policy
+            .stall_threshold_secs;
+        insert_working_shim_handle(&mut daemon, "architect", threshold + 12, threshold + 12);
+
+        daemon.record_supervisory_stall_reason("architect", threshold, SupervisoryProgress::None);
+
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(tmp.path())).unwrap();
+        let stall = events
+            .iter()
+            .find(|event| event.event == "stall_detected")
+            .expect("expected supervisory stall event");
+        assert_eq!(stall.task.as_deref(), Some("supervisory::architect"));
+        assert_eq!(
+            stall.details.as_deref(),
+            Some("architect (architect) stalled after 5m: no actionable progress")
+        );
     }
 
     #[test]
