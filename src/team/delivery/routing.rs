@@ -145,7 +145,7 @@ fn is_status_query(body: &str) -> bool {
     let body = normalized_body(body);
     body == "status"
         || body == "status?"
-        || body.starts_with("status ")
+        || (body.starts_with("status ") && !body.starts_with("status update"))
         || body.contains("what's the status")
         || body.contains("what is the status")
         || body.contains("current status")
@@ -166,6 +166,10 @@ fn classify_manager_notice(body: &str) -> ManagerNoticeClass {
 
     if is_manager_completion_notice(&body) {
         ManagerNoticeClass::Completion
+    } else if is_review_nudge(&body) {
+        ManagerNoticeClass::Review
+    } else if is_idle_nudge(&body) {
+        ManagerNoticeClass::Recovery
     } else if body.starts_with("review backlog detected:") {
         ManagerNoticeClass::Review
     } else if body.starts_with("dispatch recovery needed:") {
@@ -204,10 +208,23 @@ fn should_batch_manager_notice(class: ManagerNoticeClass) -> bool {
 fn is_manager_completion_notice(body: &str) -> bool {
     body.contains("awaiting manual review")
         || body.contains("requires manual review")
+        || is_structured_completion_packet(body)
         || (!body.starts_with("rollup:")
             && body.contains("task #")
             && body.contains("tests: passed")
             && body.contains("merge: success"))
+}
+
+fn is_structured_completion_packet(body: &str) -> bool {
+    let mentions_task = body.contains("\"task_id\":") || body.contains("task_id:");
+    let tests_passed = body.contains("\"tests_passed\":true")
+        || body.contains("\"tests_passed\": true")
+        || body.contains("tests_passed: true");
+    let ready_for_review = body.contains("\"outcome\":\"ready_for_review\"")
+        || body.contains("\"outcome\": \"ready_for_review\"")
+        || body.contains("outcome: ready_for_review");
+
+    mentions_task && tests_passed && ready_for_review
 }
 
 fn is_manager_status_update(body: &str) -> bool {
@@ -813,6 +830,8 @@ impl TeamDaemon {
             let mut delivered_any = false;
             let mut digested_ids = std::collections::HashSet::new();
             let mut suppressed_ids = std::collections::HashSet::new();
+            let mut pending_manager_digest: Option<Vec<inbox::InboxMessage>> = None;
+            let mut pending_manager_digest_ids = std::collections::HashSet::new();
             if self.is_manager_member(name) {
                 let suppression_window = Duration::from_secs(600);
                 for message in &messages {
@@ -848,12 +867,11 @@ impl TeamDaemon {
                     .cloned()
                     .collect();
                 if digestible_messages.len() > 1 {
-                    let flushed_ids =
-                        self.flush_manager_digest(&root, name, &digestible_messages)?;
-                    if !flushed_ids.is_empty() {
-                        delivered_any = true;
-                        digested_ids.extend(flushed_ids);
-                    }
+                    pending_manager_digest_ids = digestible_messages
+                        .iter()
+                        .map(|message| message.id.clone())
+                        .collect();
+                    pending_manager_digest = Some(digestible_messages);
                 }
             } else if self.uses_management_batching(name) {
                 let batched_messages: Vec<inbox::InboxMessage> = messages
@@ -884,7 +902,10 @@ impl TeamDaemon {
             }
 
             for msg in &ordered_messages {
-                if digested_ids.contains(&msg.id) || suppressed_ids.contains(&msg.id) {
+                if digested_ids.contains(&msg.id)
+                    || suppressed_ids.contains(&msg.id)
+                    || pending_manager_digest_ids.contains(&msg.id)
+                {
                     continue;
                 }
                 let from_role = self.resolve_role_name(&msg.from);
@@ -1076,6 +1097,14 @@ impl TeamDaemon {
                 std::thread::sleep(Duration::from_secs(1));
             }
 
+            if let Some(digest_messages) = pending_manager_digest.as_ref() {
+                let flushed_ids = self.flush_manager_digest(&root, name, digest_messages)?;
+                if !flushed_ids.is_empty() {
+                    delivered_any = true;
+                    digested_ids.extend(flushed_ids);
+                }
+            }
+
             if delivered_any {
                 self.mark_member_working(name);
             }
@@ -1204,6 +1233,11 @@ impl TeamDaemon {
             digest.entries.len(),
             digest.duplicates_suppressed,
         ));
+        self.record_supervisory_digest_emitted(
+            member_name,
+            u32::try_from(digest.total_messages).unwrap_or(u32::MAX),
+            u32::try_from(digest.duplicates_suppressed).unwrap_or(u32::MAX),
+        );
 
         let mut flushed_ids = Vec::with_capacity(messages.len());
         for message in messages {
@@ -1251,7 +1285,6 @@ mod tests {
 
     use super::super::{MessageDelivery, PendingMessage};
     use super::OrchestratorOnlyReason;
-    use crate::team::AssignmentResultStatus;
     use crate::team::comms::Channel;
     use crate::team::config::OrchestratorPosition;
     use crate::team::config::RoleDef;
@@ -1267,8 +1300,10 @@ mod tests {
     use crate::team::message;
     use crate::team::standup::MemberState;
     use crate::team::test_support::{
-        TestDaemonBuilder, architect_member, engineer_member, manager_member, test_channel_config,
+        architect_member, engineer_member, inferred_role_defs, manager_member, test_channel_config,
+        TestDaemonBuilder,
     };
+    use crate::team::AssignmentResultStatus;
 
     struct RecordingChannel {
         messages: Arc<Mutex<Vec<String>>>,
@@ -1325,6 +1360,7 @@ mod tests {
             manager_member("manager", Some("architect")),
             engineer_member("eng-1", Some("manager"), false),
         ];
+        daemon.config.team_config.roles = inferred_role_defs(&daemon.config.members);
         daemon.config.pane_map = HashMap::from([("eng-1".to_string(), "%9999999".to_string())]);
         daemon
     }
@@ -1557,11 +1593,9 @@ mod tests {
         assert!(engineer_pending.is_empty());
 
         let engineer_all = inbox::all_messages(&root, "eng-1").unwrap();
-        assert!(
-            engineer_all
-                .iter()
-                .any(|(msg, delivered)| msg.id == id && *delivered)
-        );
+        assert!(engineer_all
+            .iter()
+            .any(|(msg, delivered)| msg.id == id && *delivered));
 
         let manager_pending = inbox::pending_messages(&root, "manager").unwrap();
         assert_eq!(manager_pending.len(), 1);
@@ -1641,12 +1675,10 @@ mod tests {
         assert_eq!(messages[0].from, "email-router");
         assert!(messages[0].body.contains("New email from user@example.com"));
 
-        assert!(
-            daemon
-                .config
-                .team_config
-                .can_talk("email-router", "manager")
-        );
+        assert!(daemon
+            .config
+            .team_config
+            .can_talk("email-router", "manager"));
     }
 
     #[test]
@@ -1794,11 +1826,9 @@ mod tests {
         assert!(engineer_pending.is_empty());
 
         let engineer_all = inbox::all_messages(&root, "eng-1").unwrap();
-        assert!(
-            engineer_all
-                .iter()
-                .any(|(msg, delivered)| msg.id == id && *delivered)
-        );
+        assert!(engineer_all
+            .iter()
+            .any(|(msg, delivered)| msg.id == id && *delivered));
         // Shim-managed agents: state driven by shim events, not speculative mark_member_working
         assert_ne!(daemon.states.get("eng-1"), Some(&MemberState::Working));
     }
@@ -1891,7 +1921,7 @@ mod tests {
         daemon.deliver_inbox_messages().unwrap();
 
         child_channel
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         let first_cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
         match first_cmd {
@@ -1924,11 +1954,9 @@ mod tests {
             other => panic!("expected SendMessage, got {other:?}"),
         }
 
-        assert!(
-            inbox::pending_messages(&root, "manager")
-                .unwrap()
-                .is_empty()
-        );
+        assert!(inbox::pending_messages(&root, "manager")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1972,7 +2000,7 @@ mod tests {
         daemon.deliver_inbox_messages().unwrap();
 
         child_channel
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         let cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
         match cmd {
@@ -1987,6 +2015,77 @@ mod tests {
         let log = std::fs::read_to_string(crate::team::orchestrator_log_path(tmp.path())).unwrap();
         assert!(log.contains("supervision digest: manager batched 3 notice(s)"));
         assert!(log.contains("duplicates suppressed: 2"));
+
+        let events = std::fs::read_to_string(tmp.path().join("events.jsonl")).unwrap();
+        assert!(events.contains("\"event\":\"supervisory_digest_emitted\""));
+        assert!(events.contains("\"role\":\"manager\""));
+        assert!(events.contains("notice_count=3 suppressed_duplicates=2"));
+    }
+
+    #[test]
+    fn manager_digest_collapses_repeated_idle_nudges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+        let root = inbox::inboxes_root(tmp.path());
+        daemon
+            .config
+            .pane_map
+            .insert("manager".to_string(), "%123".to_string());
+
+        for _ in 0..2 {
+            inbox::deliver_to_inbox(
+                &root,
+                &inbox::InboxMessage::new_send(
+                    "daemon",
+                    "manager",
+                    "Idle nudge: you have been idle past your configured timeout.",
+                ),
+            )
+            .unwrap();
+        }
+
+        let (parent_sock, child_sock) = crate::shim::protocol::socketpair().unwrap();
+        let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+        let mut child_channel = crate::shim::protocol::Channel::new(child_sock);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "manager".to_string(),
+            parent_channel,
+            12345,
+            "claude".to_string(),
+            "claude".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("manager".to_string(), handle);
+        daemon.states.insert(
+            "manager".to_string(),
+            crate::team::standup::MemberState::Idle,
+        );
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        child_channel
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+        match cmd {
+            crate::shim::protocol::Command::SendMessage { body, .. } => {
+                assert!(body.contains("[manager-digest] 2 low-signal supervisory notice(s)"));
+                assert!(body.contains("1 duplicate(s) suppressed"));
+                assert!(body.contains("recovery [daemon x2]"));
+                assert!(
+                    body.contains("Idle nudge: you have been idle past your configured timeout.")
+                );
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+
+        let second: Result<Option<crate::shim::protocol::Command>, _> = child_channel.recv();
+        assert!(
+            second.is_err(),
+            "repeated nudges should collapse into one digest"
+        );
     }
 
     #[test]
@@ -2039,7 +2138,7 @@ mod tests {
         daemon.deliver_inbox_messages().unwrap();
 
         child_channel
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         let first_cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
         match first_cmd {
@@ -2052,6 +2151,159 @@ mod tests {
         match second_cmd {
             crate::shim::protocol::Command::SendMessage { body, .. } => {
                 assert!(body.contains("Status update: triage queue is unchanged."));
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manager_inbox_prioritizes_structured_completion_packet_over_status_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let root = inbox::inboxes_root(tmp.path());
+        daemon
+            .config
+            .pane_map
+            .insert("manager".to_string(), "%123".to_string());
+
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send(
+                "architect",
+                "manager",
+                "Status update: triage queue is unchanged.",
+            ),
+        )
+        .unwrap();
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send(
+                "eng-1",
+                "manager",
+                r#"Task complete.
+
+```json
+{"task_id":42,"branch":"eng-1/task-42","commit":"abc1234","tests_run":["cargo test"],"tests_passed":true,"outcome":"ready_for_review"}
+```"#,
+            ),
+        )
+        .unwrap();
+
+        let (parent_sock, child_sock) = crate::shim::protocol::socketpair().unwrap();
+        let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+        let mut child_channel = crate::shim::protocol::Channel::new(child_sock);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "manager".to_string(),
+            parent_channel,
+            12345,
+            "claude".to_string(),
+            "claude".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("manager".to_string(), handle);
+        daemon.states.insert(
+            "manager".to_string(),
+            crate::team::standup::MemberState::Idle,
+        );
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        child_channel
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let first_cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+        match first_cmd {
+            crate::shim::protocol::Command::SendMessage { body, .. } => {
+                assert!(body.contains("\"task_id\":42"));
+                assert!(body.contains("\"outcome\":\"ready_for_review\""));
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+        let second_cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+        match second_cmd {
+            crate::shim::protocol::Command::SendMessage { body, .. } => {
+                assert!(body.contains("Status update: triage queue is unchanged."));
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manager_inbox_delivers_completion_before_low_signal_digest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let root = inbox::inboxes_root(tmp.path());
+        daemon
+            .config
+            .pane_map
+            .insert("manager".to_string(), "%123".to_string());
+
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send(
+                "architect",
+                "manager",
+                "Status update: triage queue is unchanged.",
+            ),
+        )
+        .unwrap();
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send(
+                "architect",
+                "manager",
+                "Review backlog detected: direct-report work is waiting for your review.",
+            ),
+        )
+        .unwrap();
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send(
+                "architect",
+                "manager",
+                "[eng-1] Task #42 passed tests but requires manual review.\nTitle: Inbox routing",
+            ),
+        )
+        .unwrap();
+
+        let (parent_sock, child_sock) = crate::shim::protocol::socketpair().unwrap();
+        let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+        let mut child_channel = crate::shim::protocol::Channel::new(child_sock);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "manager".to_string(),
+            parent_channel,
+            12345,
+            "claude".to_string(),
+            "claude".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("manager".to_string(), handle);
+        daemon.states.insert(
+            "manager".to_string(),
+            crate::team::standup::MemberState::Idle,
+        );
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        child_channel
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let first_cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+        match first_cmd {
+            crate::shim::protocol::Command::SendMessage { body, .. } => {
+                assert!(body.contains("requires manual review"));
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+
+        let second_cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+        match second_cmd {
+            crate::shim::protocol::Command::SendMessage { body, .. } => {
+                assert!(body.contains("[manager-digest]"));
+                assert!(body.contains("review [architect]"));
+                assert!(body.contains("status [architect]"));
             }
             other => panic!("expected SendMessage, got {other:?}"),
         }
@@ -2157,10 +2409,9 @@ mod tests {
         assert!(pending.is_empty(), "message should be marked delivered");
 
         let all = inbox::all_messages(&root, "eng-1").unwrap();
-        assert!(
-            all.iter()
-                .any(|(msg, delivered)| msg.id == id && *delivered)
-        );
+        assert!(all
+            .iter()
+            .any(|(msg, delivered)| msg.id == id && *delivered));
     }
 
     #[test]
@@ -2384,13 +2635,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
         daemon.drain_pending_queue("eng-1").unwrap();
-        assert!(
-            daemon
-                .pending_delivery_queue
-                .get("eng-1")
-                .map(|q| q.is_empty())
-                .unwrap_or(true)
-        );
+        assert!(daemon
+            .pending_delivery_queue
+            .get("eng-1")
+            .map(|q| q.is_empty())
+            .unwrap_or(true));
     }
 
     #[test]
@@ -2432,13 +2681,11 @@ mod tests {
         daemon.shim_handles.remove("eng-1");
         daemon.drain_pending_queue("eng-1").unwrap();
 
-        assert!(
-            daemon
-                .pending_delivery_queue
-                .get("eng-1")
-                .map(|q| q.is_empty())
-                .unwrap_or(true)
-        );
+        assert!(daemon
+            .pending_delivery_queue
+            .get("eng-1")
+            .map(|q| q.is_empty())
+            .unwrap_or(true));
 
         let root = inbox::inboxes_root(tmp.path());
         let inbox_msgs = inbox::pending_messages(&root, "eng-1").unwrap();
@@ -2490,13 +2737,11 @@ mod tests {
         assert_eq!(queue[0].body, "Task #42: implement feature");
 
         daemon.watchers.get_mut("eng-1").unwrap().confirm_ready();
-        assert!(
-            daemon
-                .watchers
-                .get("eng-1")
-                .unwrap()
-                .is_ready_for_delivery()
-        );
+        assert!(daemon
+            .watchers
+            .get("eng-1")
+            .unwrap()
+            .is_ready_for_delivery());
 
         // Remove shim handle so drain falls through to inbox delivery
         daemon.shim_handles.remove("eng-1");
@@ -2819,10 +3064,9 @@ mod tests {
         let pending = inbox::pending_messages(&root, "eng-1").unwrap();
         assert!(pending.is_empty());
         let all = inbox::all_messages(&root, "eng-1").unwrap();
-        assert!(
-            all.iter()
-                .any(|(message, delivered)| message.id == id && *delivered)
-        );
+        assert!(all
+            .iter()
+            .any(|(message, delivered)| message.id == id && *delivered));
 
         let mut receiver = crate::shim::protocol::Channel::new(child);
         receiver
