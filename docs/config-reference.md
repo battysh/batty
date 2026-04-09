@@ -159,7 +159,7 @@ roles:
 | --- | --- |
 | `name` | Team/session name |
 | `agent` | Team-wide default backend when a role does not override it |
-| `workflow_mode` | `legacy`, `hybrid`, `workflow_first`, or `board_first` |
+| `workflow_mode` | `legacy`, `hybrid`, or `workflow_first` |
 | `use_shim` | Run members through the managed shim runtime |
 | `use_sdk_mode` | Prefer structured protocols over PTY parsing |
 | `auto_respawn_on_crash` | Restart crashed agents automatically |
@@ -221,4 +221,4 @@ Common fields:
 - Keep `use_shim: true`, `use_sdk_mode: true`, and `auto_respawn_on_crash: true`.
 - Leave `board.auto_dispatch: true` and `workflow_policy.auto_merge.enabled: true`.
 - Enable `use_worktrees: true` for engineers.
-- Use `workflow_mode: hybrid` unless you are intentionally switching to `board_first` or `workflow_first`.
+- Use `workflow_mode: hybrid` unless you are intentionally forcing workflow-first behavior.
