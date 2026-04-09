@@ -124,6 +124,7 @@ pub fn run_codex_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                     uptime_secs,
                     input_tokens: 0,
                     output_tokens: 0,
+                    context_usage_pct: None,
                 })
                 .is_err()
             {

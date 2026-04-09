@@ -59,12 +59,18 @@ struct SdkState {
     message_queue: VecDeque<QueuedMessage>,
     /// Total bytes of response text received.
     cumulative_output_bytes: u64,
+    /// Claude model name used by the current session, when reported.
+    model: Option<String>,
     /// Consecutive failed test fix/retest loops handled inside the shim.
     test_failure_iterations: u8,
     /// Cumulative input tokens reported by the API.
     cumulative_input_tokens: u64,
     /// Cumulative output tokens reported by the API.
     cumulative_output_tokens: u64,
+    /// Total tokens consumed by completed turns in the current session.
+    cumulative_context_tokens: u64,
+    /// Approximate percent of the model context budget already consumed.
+    context_usage_pct: Option<u8>,
     /// Whether a ContextApproaching event has already been emitted this session.
     context_approaching_emitted: bool,
 }
@@ -122,9 +128,12 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
         last_sent_message_preview: None,
         message_queue: VecDeque::new(),
         cumulative_output_bytes: 0,
+        model: None,
         test_failure_iterations: 0,
         cumulative_input_tokens: 0,
         cumulative_output_tokens: 0,
+        cumulative_context_tokens: 0,
+        context_usage_pct: None,
         context_approaching_emitted: false,
     }));
 
@@ -206,6 +215,7 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
 
             match msg.msg_type.as_str() {
                 "assistant" => {
+                    let model_name = msg.model_name();
                     // Extract text from the assistant message
                     if let Some(ref message) = msg.message {
                         let text = sdk_types::extract_assistant_text(message);
@@ -222,6 +232,9 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                                 if let Some(ref sid) = msg.session_id {
                                     st.session_id = sid.clone();
                                 }
+                            }
+                            if st.model.is_none() {
+                                st.model = model_name.clone();
                             }
                             drop(st);
 
@@ -286,6 +299,9 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                             st.session_id = sid.clone();
                         }
                     }
+                    if st.model.is_none() {
+                        st.model = msg.model_name();
+                    }
 
                     // Track cumulative token usage from result messages.
                     if let Some(ref usage) = msg.usage {
@@ -295,6 +311,16 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                         st.cumulative_output_tokens = st
                             .cumulative_output_tokens
                             .saturating_add(usage.output_tokens);
+                        let usage_total_tokens = usage.total_tokens();
+                        if usage_total_tokens > 0 {
+                            st.cumulative_context_tokens = st
+                                .cumulative_context_tokens
+                                .saturating_add(usage_total_tokens);
+                            st.context_usage_pct = model_context_usage_pct(
+                                st.model.as_deref(),
+                                st.cumulative_context_tokens,
+                            );
+                        }
                     }
 
                     // Check for context exhaustion
@@ -513,6 +539,7 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
             let uptime_secs = st.started_at.elapsed().as_secs();
             let input_tokens = st.cumulative_input_tokens;
             let output_tokens = st.cumulative_output_tokens;
+            let context_usage_pct = st.context_usage_pct;
             drop(st);
 
             if stats_channel
@@ -521,6 +548,7 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                     uptime_secs,
                     input_tokens,
                     output_tokens,
+                    context_usage_pct,
                 })
                 .is_err()
             {
@@ -790,6 +818,22 @@ fn maybe_send_keepalive<W: IoWrite>(
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn model_context_usage_pct(model: Option<&str>, total_tokens: u64) -> Option<u8> {
+    let limit = model_context_limit_tokens(model?)?;
+    Some(((total_tokens.saturating_mul(100)) / limit).min(100) as u8)
+}
+
+fn model_context_limit_tokens(model: &str) -> Option<u64> {
+    let model = model.to_ascii_lowercase();
+    if model.contains("1m") {
+        Some(1_000_000)
+    } else if model.starts_with("claude") {
+        Some(200_000)
+    } else {
+        None
+    }
+}
+
 /// Terminate a child process: SIGTERM, grace period, then SIGKILL.
 fn terminate_child(child: &mut Child) {
     let pid = child.id();
@@ -974,10 +1018,13 @@ mod tests {
             last_sent_message_preview: None,
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 0,
+            model: None,
             test_failure_iterations: 0,
-            context_approaching_emitted: false,
             cumulative_input_tokens: 0,
             cumulative_output_tokens: 0,
+            cumulative_context_tokens: 0,
+            context_usage_pct: None,
+            context_approaching_emitted: false,
         };
         assert_eq!(st.state, ShimState::Idle);
         assert!(st.session_id.is_empty());
@@ -1050,6 +1097,31 @@ mod tests {
     }
 
     #[test]
+    fn model_context_limit_tokens_detects_one_million_alias() {
+        assert_eq!(
+            model_context_limit_tokens("claude-opus-4-6-1m"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            model_context_limit_tokens("claude-sonnet-4-6"),
+            Some(200_000)
+        );
+        assert_eq!(model_context_limit_tokens("gpt-5.4"), None);
+    }
+
+    #[test]
+    fn model_context_usage_pct_includes_cache_tokens() {
+        assert_eq!(
+            model_context_usage_pct(Some("claude-sonnet-4-6"), 180_000),
+            Some(90)
+        );
+        assert_eq!(
+            model_context_usage_pct(Some("claude-opus-4-6-1m"), 500_000),
+            Some(50)
+        );
+    }
+
+    #[test]
     fn stalled_mid_turn_response_includes_tracked_message_context() {
         let response = stalled_mid_turn_response(Some("manager"), Some("continue task 496"));
         assert!(response.starts_with(STALLED_MID_TURN_MARKER));
@@ -1070,10 +1142,13 @@ mod tests {
             last_sent_message_preview: Some("continue task".into()),
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 12,
+            model: None,
             test_failure_iterations: 0,
-            context_approaching_emitted: false,
             cumulative_input_tokens: 0,
             cumulative_output_tokens: 0,
+            cumulative_context_tokens: 0,
+            context_usage_pct: None,
+            context_approaching_emitted: false,
         }));
 
         let forced = force_stalled_completion(&state, "sdk-test").expect("forced completion");
@@ -1106,10 +1181,13 @@ mod tests {
                 message_id: Some("msg-2".into()),
             }]),
             cumulative_output_bytes: 0,
+            model: None,
             test_failure_iterations: 0,
-            context_approaching_emitted: false,
             cumulative_input_tokens: 0,
             cumulative_output_tokens: 0,
+            cumulative_context_tokens: 0,
+            context_usage_pct: None,
+            context_approaching_emitted: false,
         }));
 
         let forced = force_stalled_completion(&state, "sdk-test").expect("forced completion");
@@ -1139,10 +1217,13 @@ mod tests {
             last_sent_message_preview: None,
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 0,
+            model: None,
             test_failure_iterations: 0,
-            context_approaching_emitted: false,
             cumulative_input_tokens: 0,
             cumulative_output_tokens: 0,
+            cumulative_context_tokens: 0,
+            context_usage_pct: None,
+            context_approaching_emitted: false,
         }));
         let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
         let mut last_keepalive = Instant::now();
@@ -1166,10 +1247,13 @@ mod tests {
             last_sent_message_preview: None,
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 0,
+            model: None,
             test_failure_iterations: 0,
-            context_approaching_emitted: false,
             cumulative_input_tokens: 0,
             cumulative_output_tokens: 0,
+            cumulative_context_tokens: 0,
+            context_usage_pct: None,
+            context_approaching_emitted: false,
         }));
         let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
         let mut last_keepalive = Instant::now() - Duration::from_secs(SDK_KEEPALIVE_IDLE_SECS + 1);
@@ -1199,10 +1283,13 @@ mod tests {
             last_sent_message_preview: None,
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 0,
+            model: None,
             test_failure_iterations: 0,
-            context_approaching_emitted: false,
             cumulative_input_tokens: 0,
             cumulative_output_tokens: 0,
+            cumulative_context_tokens: 0,
+            context_usage_pct: None,
+            context_approaching_emitted: false,
         }));
         let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
         let mut last_keepalive = Instant::now() - Duration::from_secs(SDK_KEEPALIVE_IDLE_SECS + 1);
@@ -1211,5 +1298,18 @@ mod tests {
 
         assert!(writer.lock().unwrap().is_empty());
         assert_eq!(state.lock().unwrap().state, ShimState::Idle);
+    }
+
+    #[test]
+    fn model_context_usage_pct_respects_one_million_aliases() {
+        assert_eq!(
+            model_context_usage_pct(Some("claude-opus-4-6-1m"), 800_000),
+            Some(80)
+        );
+        assert_eq!(
+            model_context_usage_pct(Some("claude-sonnet-4-6"), 160_000),
+            Some(80)
+        );
+        assert_eq!(model_context_usage_pct(Some("gpt-5.4"), 160_000), None);
     }
 }
