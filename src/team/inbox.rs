@@ -448,6 +448,8 @@ pub fn classify_message(msg: &InboxMessage) -> MessageCategory {
 
     // Review request detection
     if body.contains("ready for review")
+        || body.contains("awaiting manual review")
+        || body.contains("requires manual review")
         || body.contains("review request")
         || body.contains("ready_for_review")
         || body.starts_with("review:")
@@ -868,10 +870,9 @@ mod tests {
 
         let all = all_messages(root, "manager").unwrap();
         assert_eq!(all.len(), 2);
-        assert!(
-            all.iter()
-                .any(|(message, delivered)| message.body == "old" && *delivered)
-        );
+        assert!(all
+            .iter()
+            .any(|(message, delivered)| message.body == "old" && *delivered));
     }
 
     #[test]
@@ -1027,6 +1028,17 @@ mod tests {
     #[test]
     fn classify_review_request() {
         let msg = make_msg("eng-1", "manager", "Task #42 ready for review", 100);
+        assert_eq!(classify_message(&msg), MessageCategory::ReviewRequest);
+    }
+
+    #[test]
+    fn classify_manual_review_notice_as_review_request() {
+        let msg = make_msg(
+            "eng-1",
+            "manager",
+            "[eng-1] Task #42 passed tests but requires manual review.\nTitle: Inbox routing",
+            100,
+        );
         assert_eq!(classify_message(&msg), MessageCategory::ReviewRequest);
     }
 
