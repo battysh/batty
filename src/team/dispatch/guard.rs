@@ -40,6 +40,9 @@ impl TeamDaemon {
         let escalation_key = format!("dispatch-fail:{}:{}", entry.task_id, entry.engineer);
         let cooldown = std::time::Duration::from_secs(900); // 15 minutes
         if self.suppress_recent_escalation(escalation_key, cooldown) {
+            // Still insert into recent_dispatches to prevent re-enqueueing
+            self.recent_dispatches
+                .insert((entry.task_id, entry.engineer.clone()), std::time::Instant::now());
             return Ok(());
         }
 
@@ -48,6 +51,14 @@ impl TeamDaemon {
             entry.engineer, entry.task_id, entry.task_title, entry.validation_failures, detail
         );
         self.queue_daemon_message(&manager, &body)?;
+
+        // Record in recent_dispatches so enqueue_dispatch_candidates won't
+        // immediately re-queue this same task+engineer pair on the next poll
+        // cycle. The dedup window (default 60s) is short, but the escalation
+        // suppression cooldown (900s) prevents message floods even if the
+        // entry does get re-enqueued after the dedup window expires.
+        self.recent_dispatches
+            .insert((entry.task_id, entry.engineer.clone()), std::time::Instant::now());
         Ok(())
     }
 }

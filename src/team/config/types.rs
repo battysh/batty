@@ -967,7 +967,7 @@ fn default_dispatch_stabilization_delay_secs() -> u64 {
 }
 
 fn default_dispatch_dedup_window_secs() -> u64 {
-    60
+    900 // 15 minutes — prevents dispatch→fail→re-enqueue loops
 }
 
 fn default_dispatch_manual_cooldown_secs() -> u64 {
