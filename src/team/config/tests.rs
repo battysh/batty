@@ -527,6 +527,18 @@ fn parse_workflow_mode_workflow_first_from_yaml() {
 }
 
 #[test]
+fn parse_workflow_mode_board_first_from_yaml() {
+    let yaml = format!("workflow_mode: board_first\n{}", minimal_yaml());
+    let config: TeamConfig = serde_yaml::from_str(&yaml).unwrap();
+
+    assert_eq!(config.workflow_mode, WorkflowMode::BoardFirst);
+    assert!(!config.workflow_mode.legacy_runtime_enabled());
+    assert!(config.workflow_mode.workflow_state_primary());
+    assert!(config.workflow_mode.enables_runtime_surface());
+    assert!(config.workflow_mode.suppresses_manager_relay());
+}
+
+#[test]
 fn parse_explicit_automation_config() {
     let yaml = r#"
 name: test
@@ -597,6 +609,19 @@ roles:
     )
     .unwrap();
     assert_eq!(workflow_first.workflow_mode, WorkflowMode::WorkflowFirst);
+
+    let board_first: TeamConfig = serde_yaml::from_str(
+        r#"
+name: test
+workflow_mode: board_first
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#,
+    )
+    .unwrap();
+    assert_eq!(board_first.workflow_mode, WorkflowMode::BoardFirst);
 }
 
 #[test]
@@ -624,6 +649,13 @@ fn orchestrator_enabled_respects_mode_and_pane_flag() {
     ))
     .unwrap();
     assert!(workflow_first_enabled.orchestrator_enabled());
+
+    let board_first_enabled: TeamConfig = serde_yaml::from_str(&format!(
+        "workflow_mode: board_first\norchestrator_pane: true\n{}",
+        minimal_yaml()
+    ))
+    .unwrap();
+    assert!(board_first_enabled.orchestrator_enabled());
 }
 
 #[test]
@@ -1378,16 +1410,12 @@ roles:
 
     // Should have checks for both claude and codex
     assert_eq!(backend_checks.len(), 2);
-    assert!(
-        backend_checks
-            .iter()
-            .any(|c| c.name == "backend_health:claude")
-    );
-    assert!(
-        backend_checks
-            .iter()
-            .any(|c| c.name == "backend_health:codex")
-    );
+    assert!(backend_checks
+        .iter()
+        .any(|c| c.name == "backend_health:claude"));
+    assert!(backend_checks
+        .iter()
+        .any(|c| c.name == "backend_health:codex"));
 }
 
 #[test]

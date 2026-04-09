@@ -6,13 +6,13 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use tracing::{info, warn};
 
 use super::board;
 use super::daemon_mgmt::{
-    DAEMON_SHUTDOWN_GRACE_PERIOD, force_kill_daemon, request_graceful_daemon_shutdown,
-    resume_marker_path,
+    force_kill_daemon, request_graceful_daemon_shutdown, resume_marker_path,
+    DAEMON_SHUTDOWN_GRACE_PERIOD,
 };
 use super::discord::DiscordBot;
 use super::{
@@ -712,6 +712,9 @@ fn migration_validation_notes(
         config::WorkflowMode::WorkflowFirst => vec![
             "Migration: workflow_first mode selected; complete board metadata and orchestrator rollout before treating workflow state as primary truth.".to_string(),
         ],
+        config::WorkflowMode::BoardFirst => vec![
+            "Migration: board_first mode selected; the board becomes the primary coordination surface while manager relay stays reserved for review, blockers, and escalation.".to_string(),
+        ],
     }
 }
 
@@ -753,6 +756,7 @@ pub fn validate_team(project_root: &Path, verbose: bool) -> Result<()> {
             config::WorkflowMode::Legacy => "legacy",
             config::WorkflowMode::Hybrid => "hybrid",
             config::WorkflowMode::WorkflowFirst => "workflow_first",
+            config::WorkflowMode::BoardFirst => "board_first",
         }
     );
     println!("Roles: {}", team_config.roles.len());
@@ -774,13 +778,13 @@ pub fn validate_team(project_root: &Path, verbose: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::team::TRIAGE_RESULT_FRESHNESS_SECONDS;
     use crate::team::config::RoleType;
     use crate::team::hierarchy;
     use crate::team::inbox;
     use crate::team::status;
     use crate::team::team_config_dir;
     use crate::team::team_config_path;
+    use crate::team::TRIAGE_RESULT_FRESHNESS_SECONDS;
     use serial_test::serial;
 
     #[test]
@@ -924,6 +928,27 @@ roles:
         assert_eq!(notes.len(), 1);
         assert!(notes[0].contains("workflow_first mode selected"));
         assert!(notes[0].contains("primary truth"));
+    }
+
+    #[test]
+    fn migration_validation_notes_describe_board_first_manager_relay_policy() {
+        let config: config::TeamConfig = serde_yaml::from_str(
+            r#"
+name: test
+workflow_mode: board_first
+roles:
+  - name: engineer
+    role_type: engineer
+    agent: codex
+"#,
+        )
+        .unwrap();
+        let notes = migration_validation_notes(&config, true);
+
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("board_first mode selected"));
+        assert!(notes[0].contains("board becomes the primary coordination surface"));
+        assert!(notes[0].contains("manager relay"));
     }
 
     fn make_member(name: &str, role_name: &str, role_type: RoleType) -> hierarchy::MemberInstance {
