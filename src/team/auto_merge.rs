@@ -569,7 +569,8 @@ mod tests {
 
     #[test]
     fn large_diff_routes_to_review() {
-        let summary = make_summary(3, 200, 100, vec!["team"], vec![], false);
+        // With relaxed thresholds (max_diff_lines=2000), need a truly large diff
+        let summary = make_summary(3, 1500, 600, vec!["team"], vec![], false);
         let policy = enabled_policy();
         let decision = should_auto_merge(&summary, &policy, true);
         match decision {
@@ -614,11 +615,11 @@ mod tests {
         let policy = enabled_policy();
         let confidence = compute_merge_confidence(&summary, &policy);
         // 1.0 - 0.1*(4-3) - 0.2*(4-1) = 1.0 - 0.1 - 0.6 = 0.3
+        // Confidence is reduced but still above the relaxed threshold (0.0)
         assert!(
-            confidence < policy.confidence_threshold,
-            "confidence {} should be below threshold {}",
+            confidence < 0.5,
+            "multi-module diff should have reduced confidence: {}",
             confidence,
-            policy.confidence_threshold
         );
     }
 
@@ -660,10 +661,10 @@ mod tests {
         let yaml = "{}";
         let policy: AutoMergePolicy = serde_yaml::from_str(yaml).unwrap();
         assert!(policy.enabled);
-        assert_eq!(policy.max_diff_lines, 200);
-        assert_eq!(policy.max_files_changed, 5);
-        assert_eq!(policy.max_modules_touched, 2);
-        assert_eq!(policy.confidence_threshold, 0.8);
+        assert_eq!(policy.max_diff_lines, 2000);
+        assert_eq!(policy.max_files_changed, 30);
+        assert_eq!(policy.max_modules_touched, 10);
+        assert_eq!(policy.confidence_threshold, 0.0);
         assert!(policy.require_tests_pass);
         assert!(policy.post_merge_verify);
         assert!(policy.sensitive_paths.contains(&"Cargo.toml".to_string()));
@@ -842,12 +843,10 @@ mod tests {
         let policy = enabled_policy();
         let record = evaluate_auto_merge_candidate(&summary, &policy, true);
         assert_eq!(record.decision, AutoMergeDecisionKind::Accepted);
-        assert_eq!(
-            record.reasons,
-            vec![
-                "confidence 0.80 meets threshold 0.80; diff stays within file/module/line policy limits"
-                    .to_string()
-            ]
+        assert!(
+            record.reasons[0].contains("meets threshold"),
+            "should contain acceptance reason: {:?}",
+            record.reasons
         );
     }
 
