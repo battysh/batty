@@ -75,34 +75,40 @@ impl OrchestratorOnlyReason {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ManagerNoticeClass {
+    Completion,
     Immediate,
     Triage,
     Review,
     Dispatch,
     Recovery,
     Utilization,
+    Status,
 }
 
 impl ManagerNoticeClass {
     fn label(self) -> &'static str {
         match self {
+            Self::Completion => "completion",
             Self::Immediate => "immediate",
             Self::Triage => "triage",
             Self::Review => "review",
             Self::Dispatch => "dispatch",
             Self::Recovery => "recovery",
             Self::Utilization => "utilization",
+            Self::Status => "status",
         }
     }
 
     fn priority(self) -> u8 {
         match self {
-            Self::Review => 0,
-            Self::Dispatch => 1,
-            Self::Triage => 2,
-            Self::Recovery => 3,
-            Self::Utilization => 4,
-            Self::Immediate => 5,
+            Self::Completion => 0,
+            Self::Review => 1,
+            Self::Dispatch => 2,
+            Self::Triage => 3,
+            Self::Recovery => 4,
+            Self::Utilization => 5,
+            Self::Immediate => 6,
+            Self::Status => 7,
         }
     }
 }
@@ -158,7 +164,9 @@ fn is_standup_request(body: &str) -> bool {
 fn classify_manager_notice(body: &str) -> ManagerNoticeClass {
     let body = normalized_body(body);
 
-    if body.starts_with("review backlog detected:") {
+    if is_manager_completion_notice(&body) {
+        ManagerNoticeClass::Completion
+    } else if body.starts_with("review backlog detected:") {
         ManagerNoticeClass::Review
     } else if body.starts_with("dispatch recovery needed:") {
         ManagerNoticeClass::Dispatch
@@ -174,6 +182,8 @@ fn classify_manager_notice(body: &str) -> ManagerNoticeClass {
         || body.starts_with("architect utilization")
     {
         ManagerNoticeClass::Utilization
+    } else if is_manager_status_update(&body) {
+        ManagerNoticeClass::Status
     } else {
         ManagerNoticeClass::Immediate
     }
@@ -187,7 +197,29 @@ fn should_batch_manager_notice(class: ManagerNoticeClass) -> bool {
             | ManagerNoticeClass::Dispatch
             | ManagerNoticeClass::Recovery
             | ManagerNoticeClass::Utilization
+            | ManagerNoticeClass::Status
     )
+}
+
+fn is_manager_completion_notice(body: &str) -> bool {
+    body.contains("awaiting manual review")
+        || body.contains("requires manual review")
+        || (!body.starts_with("rollup:")
+            && body.contains("task #")
+            && body.contains("tests: passed")
+            && body.contains("merge: success"))
+}
+
+fn is_manager_status_update(body: &str) -> bool {
+    body.starts_with("rollup:") || body.contains("status update")
+}
+
+fn is_manager_escalation_notice(body: &str) -> bool {
+    body.contains("escalation:")
+        || body.contains("escalating")
+        || body.contains("assignment failed.")
+        || body.contains("verification max iterations")
+        || body.contains("could not be merged to main")
 }
 
 fn manager_notice_preview(body: &str) -> String {
@@ -275,6 +307,26 @@ fn format_supervisory_digest(digest: &SupervisoryDigest) -> String {
     format!(
         "{header}\n{entries}\nImmediate tasking, direct report results, and explicit rework continue to deliver live."
     )
+}
+
+fn has_recent_delivered_duplicate(
+    root: &std::path::Path,
+    member_name: &str,
+    new_msg: &inbox::InboxMessage,
+    max_age: Duration,
+) -> bool {
+    let signature = inbox::message_signature(&new_msg.body);
+    inbox::all_messages(root, member_name)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, delivered)| *delivered)
+        .rev()
+        .any(|(existing, _)| {
+            existing.age() <= max_age
+                && existing.from == new_msg.from
+                && existing.msg_type == new_msg.msg_type
+                && inbox::message_signature(&existing.body) == signature
+        })
 }
 
 impl TeamDaemon {
@@ -760,9 +812,37 @@ impl TeamDaemon {
 
             let mut delivered_any = false;
             let mut digested_ids = std::collections::HashSet::new();
+            let mut suppressed_ids = std::collections::HashSet::new();
             if self.is_manager_member(name) {
+                let suppression_window = Duration::from_secs(600);
+                for message in &messages {
+                    if !matches!(message.msg_type, inbox::MessageType::Send) {
+                        continue;
+                    }
+                    if !is_manager_escalation_notice(&normalized_body(&message.body)) {
+                        continue;
+                    }
+                    if !has_recent_delivered_duplicate(&root, name, message, suppression_window) {
+                        continue;
+                    }
+                    if let Err(error) = inbox::mark_delivered(&root, name, &message.id) {
+                        warn!(
+                            member = %name,
+                            id = %message.id,
+                            error = %error,
+                            "failed to mark duplicate escalation delivered"
+                        );
+                        continue;
+                    }
+                    suppressed_ids.insert(message.id.clone());
+                    self.record_orchestrator_action(format!(
+                        "supervision routing: suppressed duplicate escalation for {name} from {} within cooldown",
+                        message.from
+                    ));
+                }
                 let digestible_messages: Vec<inbox::InboxMessage> = messages
                     .iter()
+                    .filter(|msg| !suppressed_ids.contains(&msg.id))
                     .filter(|msg| matches!(msg.msg_type, inbox::MessageType::Send))
                     .filter(|msg| should_batch_manager_notice(classify_manager_notice(&msg.body)))
                     .cloned()
@@ -793,8 +873,18 @@ impl TeamDaemon {
                 continue;
             };
 
-            for msg in &messages {
-                if digested_ids.contains(&msg.id) {
+            let mut ordered_messages = messages.clone();
+            if self.is_manager_member(name) {
+                ordered_messages.sort_by_key(|message| {
+                    (
+                        classify_manager_notice(&message.body).priority(),
+                        message.timestamp,
+                    )
+                });
+            }
+
+            for msg in &ordered_messages {
+                if digested_ids.contains(&msg.id) || suppressed_ids.contains(&msg.id) {
                     continue;
                 }
                 let from_role = self.resolve_role_name(&msg.from);
@@ -1897,6 +1987,141 @@ mod tests {
         let log = std::fs::read_to_string(crate::team::orchestrator_log_path(tmp.path())).unwrap();
         assert!(log.contains("supervision digest: manager batched 3 notice(s)"));
         assert!(log.contains("duplicates suppressed: 2"));
+    }
+
+    #[test]
+    fn manager_inbox_prioritizes_completion_notice_over_status_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let root = inbox::inboxes_root(tmp.path());
+        daemon
+            .config
+            .pane_map
+            .insert("manager".to_string(), "%123".to_string());
+
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send(
+                "architect",
+                "manager",
+                "Status update: triage queue is unchanged.",
+            ),
+        )
+        .unwrap();
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send(
+                "architect",
+                "manager",
+                "[eng-1] Task #42 passed tests but requires manual review.\nTitle: Inbox routing",
+            ),
+        )
+        .unwrap();
+
+        let (parent_sock, child_sock) = crate::shim::protocol::socketpair().unwrap();
+        let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+        let mut child_channel = crate::shim::protocol::Channel::new(child_sock);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "manager".to_string(),
+            parent_channel,
+            12345,
+            "claude".to_string(),
+            "claude".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("manager".to_string(), handle);
+        daemon.states.insert(
+            "manager".to_string(),
+            crate::team::standup::MemberState::Idle,
+        );
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        child_channel
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let first_cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+        match first_cmd {
+            crate::shim::protocol::Command::SendMessage { body, .. } => {
+                assert!(body.contains("requires manual review"));
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+        let second_cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+        match second_cmd {
+            crate::shim::protocol::Command::SendMessage { body, .. } => {
+                assert!(body.contains("Status update: triage queue is unchanged."));
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manager_inbox_suppresses_duplicate_escalations_within_cooldown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let root = inbox::inboxes_root(tmp.path());
+        daemon
+            .config
+            .pane_map
+            .insert("manager".to_string(), "%123".to_string());
+
+        let escalation = "ESCALATION: Task #42 assigned to eng-1 has unresolvable merge conflicts. Task blocked on board.";
+        let recent = inbox::InboxMessage::new_send("architect", "manager", escalation);
+        let recent_id = inbox::deliver_to_inbox(&root, &recent).unwrap();
+        inbox::mark_delivered(&root, "manager", &recent_id).unwrap();
+
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("architect", "manager", escalation),
+        )
+        .unwrap();
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send(
+                "architect",
+                "manager",
+                "[eng-1] Task #42 passed tests but requires manual review.\nTitle: Inbox routing",
+            ),
+        )
+        .unwrap();
+
+        let (parent_sock, child_sock) = crate::shim::protocol::socketpair().unwrap();
+        let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+        let mut child_channel = crate::shim::protocol::Channel::new(child_sock);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "manager".to_string(),
+            parent_channel,
+            12345,
+            "claude".to_string(),
+            "claude".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("manager".to_string(), handle);
+        daemon.states.insert(
+            "manager".to_string(),
+            crate::team::standup::MemberState::Idle,
+        );
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        child_channel
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+        match cmd {
+            crate::shim::protocol::Command::SendMessage { body, .. } => {
+                assert!(body.contains("requires manual review"));
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+        let second: Result<Option<crate::shim::protocol::Command>, _> = child_channel.recv();
+        assert!(
+            second.is_err(),
+            "duplicate escalation should be suppressed instead of redelivered"
+        );
     }
 
     #[test]
