@@ -439,7 +439,7 @@ impl Default for VerificationPolicy {
 }
 
 fn default_graceful_shutdown_timeout_secs() -> u64 {
-    5
+    30
 }
 
 fn default_verification_max_iterations() -> u32 {

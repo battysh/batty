@@ -37,7 +37,7 @@ fn parse_minimal_config() {
         super::super::DEFAULT_EVENT_LOG_MAX_BYTES
     );
     assert!(config.auto_respawn_on_crash);
-    assert_eq!(config.workflow_policy.graceful_shutdown_timeout_secs, 5);
+    assert_eq!(config.workflow_policy.graceful_shutdown_timeout_secs, 30);
     assert!(config.workflow_policy.auto_commit_on_restart);
     assert!(!config.workflow_policy.clean_room_mode);
     assert!(config.workflow_policy.barrier_groups.is_empty());
@@ -265,7 +265,7 @@ roles:
         config.workflow_policy.context_pressure_restart_delay_secs,
         120
     );
-    assert_eq!(config.workflow_policy.graceful_shutdown_timeout_secs, 5);
+    assert_eq!(config.workflow_policy.graceful_shutdown_timeout_secs, 30);
     assert!(config.workflow_policy.auto_commit_on_restart);
     assert_eq!(config.workflow_policy.stale_in_progress_hours, 4);
     assert_eq!(config.workflow_policy.aged_todo_hours, 48);
@@ -1415,12 +1415,16 @@ roles:
 
     // Should have checks for both claude and codex
     assert_eq!(backend_checks.len(), 2);
-    assert!(backend_checks
-        .iter()
-        .any(|c| c.name == "backend_health:claude"));
-    assert!(backend_checks
-        .iter()
-        .any(|c| c.name == "backend_health:codex"));
+    assert!(
+        backend_checks
+            .iter()
+            .any(|c| c.name == "backend_health:claude")
+    );
+    assert!(
+        backend_checks
+            .iter()
+            .any(|c| c.name == "backend_health:codex")
+    );
 }
 
 #[test]
