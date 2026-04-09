@@ -1,0 +1,11 @@
+/Users/zedmor/batty/.batty/worktrees/eng-1-3/.batty-target/debug/deps/mailparse-65b93f45cd8ce962.d: /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/lib.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/addrparse.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/body.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/dateparse.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/header.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/headers.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/msgidparse.rs
+
+/Users/zedmor/batty/.batty/worktrees/eng-1-3/.batty-target/debug/deps/libmailparse-65b93f45cd8ce962.rmeta: /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/lib.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/addrparse.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/body.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/dateparse.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/header.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/headers.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/msgidparse.rs
+
+/Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/lib.rs:
+/Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/addrparse.rs:
+/Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/body.rs:
+/Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/dateparse.rs:
+/Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/header.rs:
+/Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/headers.rs:
+/Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mailparse-0.14.1/src/msgidparse.rs:

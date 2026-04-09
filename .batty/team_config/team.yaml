@@ -1,6 +1,6 @@
 name: batty-dev
 
-workflow_mode: board_first
+workflow_mode: hybrid
 orchestrator_pane: true
 orchestrator_position: left
 use_shim: true

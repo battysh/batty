@@ -1,0 +1,12 @@
+/Users/zedmor/batty/.batty/worktrees/eng-1-3/.batty-target/debug/deps/vt100-97bd331bb2c114eb.d: /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/lib.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/attrs.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/cell.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/grid.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/parser.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/row.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/screen.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/term.rs
+
+/Users/zedmor/batty/.batty/worktrees/eng-1-3/.batty-target/debug/deps/libvt100-97bd331bb2c114eb.rmeta: /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/lib.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/attrs.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/cell.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/grid.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/parser.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/row.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/screen.rs /Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/term.rs
+
+/Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/lib.rs:
+/Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/attrs.rs:
+/Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/cell.rs:
+/Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/grid.rs:
+/Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/parser.rs:
+/Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/row.rs:
+/Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/screen.rs:
+/Users/zedmor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vt100-0.15.2/src/term.rs:
