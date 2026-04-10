@@ -7,8 +7,8 @@ use crate::team::events::EventSink;
 use crate::team::test_helpers::make_test_daemon;
 use crate::team::test_support::{
     EnvVarGuard, PATH_LOCK, TestDaemonBuilder, architect_member, backdate_idle_grace,
-    engineer_member, init_git_repo, manager_member, write_board_task_file, write_open_task_file,
-    write_owned_task_file,
+    engineer_member, git_ok, init_git_repo, manager_member, write_board_task_file,
+    write_open_task_file, write_owned_task_file,
 };
 use std::time::UNIX_EPOCH;
 
@@ -1802,6 +1802,57 @@ fn maybe_intervene_review_backlog_queues_for_idle_manager_with_branch_and_worktr
             .map(|state| state.idle_epoch),
         Some(1)
     );
+}
+
+#[test]
+fn maybe_intervene_review_backlog_distinguishes_stale_review_from_live_review() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "batty-review-normalization");
+    let team_config_dir = repo.join(".batty").join("team_config");
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    let base_branch = crate::team::task_loop::engineer_base_branch_name("eng-1");
+    setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+    crate::team::task_loop::checkout_worktree_branch_from_main(&worktree_dir, "eng-1/192").unwrap();
+    std::fs::write(worktree_dir.join("active-192.txt"), "active branch\n").unwrap();
+    git_ok(&worktree_dir, &["add", "active-192.txt"]);
+    git_ok(&worktree_dir, &["commit", "-m", "active review branch"]);
+    write_owned_task_file(&repo, 191, "stale-review-task", "review", "eng-1");
+    std::fs::write(
+        repo.join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks")
+            .join("192-active-task.md"),
+        "---\nid: 192\ntitle: active-task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nbranch: eng-1/192\nclass: standard\n---\n\nTask description.\n",
+    )
+    .unwrap();
+    write_owned_task_file(&repo, 193, "live-review-task", "review", "eng-2");
+
+    let mut daemon = TestDaemonBuilder::new(&repo)
+        .members(vec![
+            manager_member("lead", Some("architect")),
+            engineer_member("eng-1", Some("lead"), true),
+            engineer_member("eng-2", Some("lead"), false),
+        ])
+        .pane_map(HashMap::from([("lead".to_string(), "%999".to_string())]))
+        .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
+        .build();
+
+    let root = inbox::inboxes_root(&repo);
+    inbox::init_inbox(&root, "lead").unwrap();
+
+    daemon.update_automation_timers_for_state("lead", MemberState::Working);
+    daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+    backdate_idle_grace(&mut daemon, "lead");
+    daemon.maybe_intervene_review_backlog().unwrap();
+
+    let pending = inbox::pending_messages(&root, "lead").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].body.contains("current live review lanes"));
+    assert!(pending[0].body.contains("193 done"));
+    assert!(pending[0].body.contains("STALE REVIEW NORMALIZATION"));
+    assert!(pending[0].body.contains("#191 by eng-1 -> merge"));
+    assert!(pending[0].body.contains("eng-1 already moved to task #192"));
 }
 
 #[test]
@@ -3971,6 +4022,22 @@ fn write_review_task_with_priority(
         .unwrap();
 }
 
+fn write_review_task_with_branch(project_root: &Path, id: u32, review_owner: &str, branch: &str) {
+    let tasks_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    std::fs::create_dir_all(&tasks_dir).unwrap();
+    std::fs::write(
+        tasks_dir.join(format!("{id:03}-review-task-{id}.md")),
+        format!(
+            "---\nid: {id}\ntitle: review-task-{id}\nstatus: review\npriority: high\nclass: standard\nclaimed_by: eng-1\nreview_owner: {review_owner}\nbranch: {branch}\n---\n\nTask description.\n"
+        ),
+    )
+    .unwrap();
+}
+
 fn stale_review_daemon(tmp: &tempfile::TempDir) -> TeamDaemon {
     TestDaemonBuilder::new(tmp.path())
         .members(vec![
@@ -4409,6 +4476,39 @@ fn stale_review_sends_nudge_at_threshold() {
         .join("events.jsonl");
     let events = std::fs::read_to_string(&events_path).unwrap_or_default();
     assert!(events.contains("review_nudge_sent"));
+}
+
+#[test]
+fn stale_review_branch_mismatch_gets_normalized_to_rework() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_review_task_with_branch(tmp.path(), 42, "manager", "eng-1/task-99");
+    let mut daemon = stale_review_daemon(&tmp);
+
+    daemon.maybe_escalate_stale_reviews().unwrap();
+
+    let tasks_dir = tmp
+        .path()
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    let tasks = crate::task::load_tasks_from_dir(&tasks_dir).unwrap();
+    let task = tasks.iter().find(|task| task.id == 42).unwrap();
+    assert_eq!(
+        task.next_action.as_deref(),
+        Some(
+            "stale review -> rework: branch `eng-1/task-99` references task(s) #99 but assigned task is #42"
+        )
+    );
+
+    let manager_messages =
+        crate::team::inbox::all_messages(&crate::team::inbox::inboxes_root(tmp.path()), "manager")
+            .unwrap();
+    assert!(
+        manager_messages
+            .iter()
+            .any(|(msg, _)| msg.body.contains("Stale review normalization: task #42"))
+    );
 }
 
 #[test]

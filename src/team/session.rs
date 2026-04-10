@@ -920,6 +920,7 @@ roles:
             status::OwnedTaskBuckets {
                 active: vec![191u32],
                 review: vec![193u32],
+                stale_review: Vec::new(),
             },
         )]);
         let rows = status::build_team_status_rows(
@@ -1154,7 +1155,8 @@ roles:
         assert!(buckets.review.is_empty());
         let review_buckets = owned.get("lead").unwrap();
         assert!(review_buckets.active.is_empty());
-        assert_eq!(review_buckets.review, vec![193]);
+        assert!(review_buckets.review.is_empty());
+        assert_eq!(review_buckets.stale_review, vec![193]);
     }
 
     #[test]

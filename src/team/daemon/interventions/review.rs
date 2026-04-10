@@ -9,6 +9,7 @@ use tracing::{info, warn};
 use super::super::*;
 use super::OwnedTaskInterventionState;
 use crate::team::config::PlanningDirectiveFile;
+use crate::team::review::{ReviewNormalizationStep, ReviewQueueState};
 
 impl TeamDaemon {
     pub(in super::super) fn maybe_intervene_review_backlog(&mut self) -> Result<()> {
@@ -83,7 +84,7 @@ impl TeamDaemon {
                 continue;
             }
 
-            let text = self.build_review_intervention_message(member, &review_tasks);
+            let text = self.build_review_intervention_message(member, &review_tasks, &tasks);
             info!(
                 member = %name,
                 review_task_count = review_tasks.len(),
@@ -125,6 +126,7 @@ impl TeamDaemon {
         &self,
         member: &MemberInstance,
         review_tasks: &[&crate::task::Task],
+        board_tasks: &[crate::task::Task],
     ) -> String {
         let board_dir = self
             .config
@@ -182,6 +184,33 @@ impl TeamDaemon {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let classified_tasks = review_tasks
+            .iter()
+            .map(|task| {
+                (
+                    *task,
+                    crate::team::review::classify_review_task(
+                        &self.config.project_root,
+                        task,
+                        board_tasks,
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let current_review_tasks = classified_tasks
+            .iter()
+            .filter_map(|(task, state)| match state {
+                ReviewQueueState::Current => Some(*task),
+                ReviewQueueState::Stale(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let stale_review_tasks = classified_tasks
+            .iter()
+            .filter_map(|(task, state)| match state {
+                ReviewQueueState::Current => None,
+                ReviewQueueState::Stale(stale) => Some((*task, stale)),
+            })
+            .collect::<Vec<_>>();
         let first_task = review_tasks[0];
         let first_report = first_task.claimed_by.as_deref().unwrap_or("engineer");
         let first_report_is_engineer = self
@@ -200,11 +229,8 @@ impl TeamDaemon {
             member_name = member.name,
         );
 
-        // Build explicit merge commands for ALL review tasks so the manager
-        // can copy-paste them. Listing only the first task caused managers to
-        // review but not actually run the merge command.
         let mut merge_cmds = Vec::new();
-        for task in review_tasks {
+        for task in current_review_tasks {
             let engineer = task.claimed_by.as_deref().unwrap_or("engineer");
             let is_eng = self
                 .config
@@ -224,13 +250,51 @@ impl TeamDaemon {
                 ));
             }
         }
-        message.push_str(&format!(
-            "\n4. ACTION REQUIRED — run these merge commands NOW:\n{}",
-            merge_cmds.join("\n"),
-        ));
+        if !merge_cmds.is_empty() {
+            message.push_str(&format!(
+                "\n4. ACTION REQUIRED — current live review lanes:\n{}",
+                merge_cmds.join("\n"),
+            ));
+        }
+
+        if !stale_review_tasks.is_empty() {
+            let stale_cmds = stale_review_tasks
+                .iter()
+                .map(|(task, stale)| {
+                    let claimed_by = task.claimed_by.as_deref().unwrap_or("engineer");
+                    let command = stale_review_command(
+                        stale.next_step,
+                        &board_dir,
+                        task.id,
+                        claimed_by,
+                        current_review_recipient(claimed_by, task.id, &self.config.members),
+                    );
+                    format!(
+                        "   #{} by {} -> {} ({})\n   {}",
+                        task.id,
+                        claimed_by,
+                        stale.next_step.as_str(),
+                        stale.reason,
+                        command
+                    )
+                })
+                .collect::<Vec<_>>();
+            message.push_str(&format!(
+                "\n{}. STALE REVIEW NORMALIZATION — these lanes already diverged from live engineer state:\n{}",
+                if merge_cmds.is_empty() { 4 } else { 5 },
+                stale_cmds.join("\n"),
+            ));
+        }
 
         message.push_str(&format!(
-            "\n5. To discard it, run `kanban-md move --dir {board_dir_str} {task_id} archived` and `batty send {first_report} \"Task #{task_id} discarded: <reason>\"`.",
+            "\n{}. To discard it, run `kanban-md move --dir {board_dir_str} {task_id} archived` and `batty send {first_report} \"Task #{task_id} discarded: <reason>\"`.",
+            if merge_cmds.is_empty() && stale_review_tasks.is_empty() {
+                4
+            } else if stale_review_tasks.is_empty() || merge_cmds.is_empty() {
+                5
+            } else {
+                6
+            },
             task_id = first_task.id,
         ));
         let rework_command = if first_report_is_engineer {
@@ -245,13 +309,27 @@ impl TeamDaemon {
             )
         };
         message.push_str(&format!(
-            "\n6. To request rework, run `kanban-md move --dir {board_dir_str} {task_id} in-progress` and {rework_command}.",
+            "\n{}. To request rework, run `kanban-md move --dir {board_dir_str} {task_id} in-progress` and {rework_command}.",
+            if merge_cmds.is_empty() && stale_review_tasks.is_empty() {
+                5
+            } else if stale_review_tasks.is_empty() || merge_cmds.is_empty() {
+                6
+            } else {
+                7
+            },
             task_id = first_task.id,
         ));
 
         if let Some(parent) = &member.reports_to {
             message.push_str(&format!(
-                "\n7. After each review decision, report upward with `batty send {parent} \"Reviewed Task #{task_id}: merged / archived / rework sent to {first_report}\"`.",
+                "\n{}. After each review decision, report upward with `batty send {parent} \"Reviewed Task #{task_id}: merged / archived / rework sent to {first_report}\"`.",
+                if merge_cmds.is_empty() && stale_review_tasks.is_empty() {
+                    6
+                } else if stale_review_tasks.is_empty() || merge_cmds.is_empty() {
+                    7
+                } else {
+                    8
+                },
                 task_id = first_task.id,
             ));
         }
@@ -302,6 +380,39 @@ pub(super) fn review_task_intervention_signature(tasks: &[&crate::task::Task]) -
         .collect::<Vec<_>>();
     parts.sort();
     parts.join("|")
+}
+
+fn current_review_recipient(claimed_by: &str, task_id: u32, members: &[MemberInstance]) -> String {
+    let is_engineer = members
+        .iter()
+        .find(|member| member.name == claimed_by)
+        .is_some_and(|member| member.role_type == RoleType::Engineer);
+    if is_engineer {
+        format!("`batty assign {claimed_by} \"Task #{task_id}: <required changes>\"`")
+    } else {
+        format!("`batty send {claimed_by} \"Task #{task_id}: <required changes>\"`")
+    }
+}
+
+fn stale_review_command(
+    next_step: ReviewNormalizationStep,
+    board_dir: &std::path::Path,
+    task_id: u32,
+    claimed_by: &str,
+    rework_command: String,
+) -> String {
+    let board_dir_str = board_dir.display();
+    match next_step {
+        ReviewNormalizationStep::Merge => format!(
+            "`batty merge {claimed_by}` && `kanban-md move --dir {board_dir_str} {task_id} done`"
+        ),
+        ReviewNormalizationStep::Archive => {
+            format!("`kanban-md move --dir {board_dir_str} {task_id} archived`")
+        }
+        ReviewNormalizationStep::Rework => format!(
+            "`kanban-md move --dir {board_dir_str} {task_id} in-progress` and {rework_command}"
+        ),
+    }
 }
 
 #[cfg(test)]

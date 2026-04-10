@@ -1705,7 +1705,7 @@ fn build_review_intervention_message_includes_merge_and_rework_paths() {
         .unwrap()
         .clone();
 
-    let message = daemon.build_review_intervention_message(&member, &[&tasks[0]]);
+    let message = daemon.build_review_intervention_message(&member, &[&tasks[0]], &tasks);
 
     assert!(message.contains("Review backlog detected"));
     assert!(message.contains("batty merge eng-1"));
@@ -1736,7 +1736,7 @@ fn build_review_intervention_message_prepends_review_policy() {
         .unwrap()
         .clone();
 
-    let message = daemon.build_review_intervention_message(&member, &[&tasks[0]]);
+    let message = daemon.build_review_intervention_message(&member, &[&tasks[0]], &tasks);
 
     assert!(message.starts_with("Review policy context:\nReview must confirm tests and scope."));
 }
@@ -1891,7 +1891,7 @@ fn build_review_intervention_message_truncates_long_policy() {
         .unwrap()
         .clone();
 
-    let message = daemon.build_review_intervention_message(&member, &[&tasks[0]]);
+    let message = daemon.build_review_intervention_message(&member, &[&tasks[0]], &tasks);
 
     assert!(message.contains("[truncated to 2000 chars from review_policy.md]"));
 }

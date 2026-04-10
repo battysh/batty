@@ -200,6 +200,21 @@ fn format_branch_recovery_blocker(reason: &str) -> String {
     format!("automatic branch recovery blocked: {reason}")
 }
 
+fn sync_stale_review_next_action(
+    task: &crate::task::Task,
+    stale: &crate::team::review::StaleReviewState,
+) -> Result<bool> {
+    let next_action = stale.status_next_action();
+    if task.next_action.as_deref() == Some(next_action.as_str()) {
+        return Ok(false);
+    }
+
+    crate::team::task_cmd::update_task_frontmatter(&task.source_path, |mapping| {
+        crate::team::task_cmd::set_optional_string(mapping, "next_action", Some(&next_action));
+    })?;
+    Ok(true)
+}
+
 impl TeamDaemon {
     pub(super) fn claimed_task_branch_mismatch(
         &self,
@@ -1132,6 +1147,23 @@ impl TeamDaemon {
                 continue;
             }
 
+            let review_state =
+                crate::team::review::classify_review_task(&self.config.project_root, task, &tasks);
+            if matches!(
+                task.next_action.as_deref(),
+                Some(next_action) if next_action.starts_with("stale review ->")
+            ) && matches!(review_state, crate::team::review::ReviewQueueState::Current)
+            {
+                crate::team::task_cmd::update_task_frontmatter(&task.source_path, |mapping| {
+                    crate::team::task_cmd::set_optional_string(mapping, "next_action", None);
+                })?;
+                self.record_state_reconciliation(None, Some(task.id), "review_fix");
+                self.record_orchestrator_action(format!(
+                    "state reconciliation: cleared stale review normalization hint for task #{}",
+                    task.id
+                ));
+            }
+
             if !self.review_first_seen.contains_key(&task.id) {
                 self.record_state_reconciliation(None, Some(task.id), "review_fix");
                 self.record_orchestrator_action(format!(
@@ -1148,6 +1180,43 @@ impl TeamDaemon {
                 super::super::policy::effective_nudge_threshold(&policy, &task.priority);
             let timeout_threshold =
                 super::super::policy::effective_escalation_threshold(&policy, &task.priority);
+
+            if let crate::team::review::ReviewQueueState::Stale(stale) = &review_state {
+                if sync_stale_review_next_action(task, stale)? {
+                    self.record_state_reconciliation(None, Some(task.id), "review_fix");
+                    self.record_orchestrator_action(format!(
+                        "state reconciliation: normalized stale review task #{} -> {} ({})",
+                        task.id,
+                        stale.next_step.as_str(),
+                        stale.reason
+                    ));
+                }
+                if !self.review_nudge_sent.contains(&task.id) {
+                    let review_owner = task
+                        .review_owner
+                        .as_deref()
+                        .map(str::to_string)
+                        .or_else(|| {
+                            task.claimed_by
+                                .as_deref()
+                                .and_then(|owner| self.manager_for_member_name(owner))
+                                .map(str::to_string)
+                        })
+                        .or_else(|| first_manager_name(&self.config.members));
+                    if let Some(review_owner) = review_owner.as_deref() {
+                        let body = format!(
+                            "Stale review normalization: task #{} no longer matches the live engineer lane.\nTask: {}\nReason: {}\nNext step: {}.",
+                            task.id,
+                            task.title,
+                            stale.reason,
+                            stale.status_next_action()
+                        );
+                        let _ = self.deliver_automation_nudge(review_owner, &body);
+                    }
+                    self.review_nudge_sent.insert(task.id);
+                }
+                continue;
+            }
 
             // Check escalation first (higher threshold)
             if age >= timeout_threshold {
@@ -1413,14 +1482,37 @@ impl TeamDaemon {
                         .map(str::to_string)
                 })
                 .or_else(|| first_manager_name(&self.config.members));
-            let reason = format!("review queue stale after {}s", task.age_secs);
+            let review_state = crate::team::review::classify_review_task(
+                &self.config.project_root,
+                current_task,
+                &tasks,
+            );
+            let reason = match &review_state {
+                crate::team::review::ReviewQueueState::Current => {
+                    format!("review queue stale after {}s", task.age_secs)
+                }
+                crate::team::review::ReviewQueueState::Stale(stale) => format!(
+                    "stale review normalization after {}s: {}",
+                    task.age_secs, stale.reason
+                ),
+            };
             self.emit_event(TeamEvent::review_stale(&task.task_id.to_string(), &reason));
 
             if let Some(recipient) = review_owner {
-                let body = format!(
-                    "Review urgency: task #{} has been in review for {}s.\nTask: {}\nNext step: merge it, request rework, or escalate immediately.",
-                    task.task_id, task.age_secs, current_task.title
-                );
+                let body = match review_state {
+                    crate::team::review::ReviewQueueState::Current => format!(
+                        "Review urgency: task #{} has been in review for {}s.\nTask: {}\nNext step: merge it, request rework, or escalate immediately.",
+                        task.task_id, task.age_secs, current_task.title
+                    ),
+                    crate::team::review::ReviewQueueState::Stale(stale) => format!(
+                        "Stale review normalization: task #{} has been stuck in review for {}s.\nTask: {}\nReason: {}\nNext step: {}.",
+                        task.task_id,
+                        task.age_secs,
+                        current_task.title,
+                        stale.reason,
+                        stale.status_next_action()
+                    ),
+                };
                 let _ = self.queue_daemon_message(&recipient, &body);
             }
 
