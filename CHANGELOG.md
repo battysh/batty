@@ -2,6 +2,28 @@
 
 All notable changes to Batty are documented here.
 
+## 0.10.8 — 2026-04-10
+
+Fix a regression from 0.10.7: the blocked-task frontmatter repair was
+rewriting already-canonical blocked tasks on every status scan, producing
+log spam like "repaired malformed board task frontmatter during status
+scan" on every single call for every blocked task. Observed firing in
+4 different scan contexts per status call (owned_task_buckets,
+branch_mismatch_by_member, compute_board_metrics, board_status_task_queues)
+for 4 tasks, so each status call emitted 16 spurious warnings.
+
+- **Idempotent `normalize_blocked_frontmatter_content`** — the
+  `rewrites_incomplete_blocked_task` predicate now checks whether the
+  canonical form actually differs from the current frontmatter. A task
+  with `status: blocked`, `blocked: true`, and matching `block_reason`/
+  `blocked_on` fields is already canonical and no longer triggers a
+  rewrite. (`src/task/mod.rs`)
+- **Regression test** —
+  `normalize_blocked_frontmatter_is_idempotent_on_canonical_blocked_status`
+  locks in the no-op behavior for tasks already in canonical form,
+  calling the normalizer three times and asserting all three return
+  `None`. (`src/team/task_cmd.rs`)
+
 ## 0.10.7 — 2026-04-10
 
 Package completed engineer work for #622 and #624 that was sitting in the
