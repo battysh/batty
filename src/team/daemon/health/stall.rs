@@ -44,6 +44,8 @@ impl SupervisoryProgress {
         match self {
             Self::Actionable(_) => "supervisory_actionable_progress",
             Self::Expected("inbox_batching") => "supervisory_inbox_batching",
+            Self::Expected("supervisory_digest") => "supervisory_digest_waiting",
+            Self::Expected("fresh_supervisory_input") => "supervisory_fresh_input",
             Self::Expected(_) => "supervisory_review_waiting",
             Self::Incidental("shim_activity") => "supervisory_shim_activity_only",
             Self::Incidental(_) => "supervisory_status_only_output",
@@ -55,6 +57,8 @@ impl SupervisoryProgress {
         match self {
             Self::Actionable(_) => "actionable_progress",
             Self::Expected("inbox_batching") => "inbox_batching",
+            Self::Expected("supervisory_digest") => "digest_waiting",
+            Self::Expected("fresh_supervisory_input") => "fresh_input",
             Self::Expected(_) => "review_waiting",
             Self::Incidental("shim_activity") => "shim_activity_only",
             Self::Incidental(_) => "status_only_output",
@@ -66,6 +70,8 @@ impl SupervisoryProgress {
         match self {
             Self::Actionable(_) => "actionable progress",
             Self::Expected("inbox_batching") => "inbox batching",
+            Self::Expected("supervisory_digest") => "digest review",
+            Self::Expected("fresh_supervisory_input") => "fresh supervisory input",
             Self::Expected("review_waiting") => "review waiting",
             Self::Expected(_) => "expected supervisory work",
             Self::Incidental("shim_activity") => "shim activity only",
@@ -166,6 +172,54 @@ impl TeamDaemon {
         None
     }
 
+    fn recent_supervisory_event_signal(
+        &self,
+        member_name: &str,
+        threshold_secs: u64,
+    ) -> Option<SupervisoryProgress> {
+        let now = super::super::super::now_unix();
+        let events_path = super::super::super::team_events_path(&self.config.project_root);
+        let events = super::super::super::events::read_events(&events_path).ok()?;
+
+        events.into_iter().rev().find_map(|event| {
+            if now.saturating_sub(event.ts) > threshold_secs {
+                return None;
+            }
+
+            match event.event.as_str() {
+                "message_routed" if event.from.as_deref() == Some(member_name) => {
+                    Some(SupervisoryProgress::Actionable("message_routed"))
+                }
+                "task_escalated"
+                | "task_unblocked"
+                | "task_completed"
+                | "task_auto_merged"
+                | "task_manual_merged"
+                | "state_reconciliation"
+                    if event.role.as_deref() == Some(member_name) =>
+                {
+                    Some(SupervisoryProgress::Actionable("team_event"))
+                }
+                "supervisory_digest_emitted" if event.role.as_deref() == Some(member_name) => {
+                    Some(SupervisoryProgress::Expected("supervisory_digest"))
+                }
+                "notification_delivery_sample"
+                    if event.to.as_deref() == Some(member_name)
+                        && event.from.as_deref() != Some(member_name) =>
+                {
+                    match event.action_type.as_deref() {
+                        Some("digest") => Some(SupervisoryProgress::Expected("supervisory_digest")),
+                        Some("live") => {
+                            Some(SupervisoryProgress::Expected("fresh_supervisory_input"))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        })
+    }
+
     pub(in super::super) fn format_supervisory_stall_summary(
         &self,
         member_name: &str,
@@ -199,32 +253,7 @@ impl TeamDaemon {
             return signal;
         }
 
-        let now = super::super::super::now_unix();
-        let events_path = super::super::super::team_events_path(&self.config.project_root);
-        if let Ok(events) = super::super::super::events::read_events(&events_path)
-            && let Some(signal) = events.into_iter().rev().find_map(|event| {
-                if now.saturating_sub(event.ts) > threshold_secs {
-                    return None;
-                }
-
-                match event.event.as_str() {
-                    "message_routed" if event.from.as_deref() == Some(member_name) => {
-                        Some(SupervisoryProgress::Actionable("message_routed"))
-                    }
-                    "task_escalated"
-                    | "task_unblocked"
-                    | "task_completed"
-                    | "task_auto_merged"
-                    | "task_manual_merged"
-                    | "state_reconciliation"
-                        if event.role.as_deref() == Some(member_name) =>
-                    {
-                        Some(SupervisoryProgress::Actionable("team_event"))
-                    }
-                    _ => None,
-                }
-            })
-        {
+        if let Some(signal) = self.recent_supervisory_event_signal(member_name, threshold_secs) {
             return signal;
         }
 
@@ -305,9 +334,10 @@ impl TeamDaemon {
             .unwrap_or(stall_secs);
         let (signal, fallback_reason) = match input.into() {
             SupervisoryStallRecordInput::Signal(signal) => (signal, signal.stall_reason()),
-            SupervisoryStallRecordInput::LegacyReason(reason) => {
-                (self.supervisory_progress_signal(member_name, stall_secs), reason)
-            }
+            SupervisoryStallRecordInput::LegacyReason(reason) => (
+                self.supervisory_progress_signal(member_name, stall_secs),
+                reason,
+            ),
         };
         let reason = self
             .supervisory_lane(member_name)
@@ -626,6 +656,63 @@ mod tests {
 
         let signal = daemon.supervisory_progress_signal("lead", threshold);
         assert_eq!(signal, SupervisoryProgress::Expected("review_waiting"));
+        assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
+    }
+
+    #[test]
+    fn supervisory_progress_signal_treats_recent_live_delivery_as_expected_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("lead", Some("architect")),
+            ])
+            .build();
+        let threshold = daemon
+            .config
+            .team_config
+            .workflow_policy
+            .stall_threshold_secs;
+        insert_working_shim_handle(&mut daemon, "lead", threshold + 10, threshold + 10);
+
+        let mut delivered = TeamEvent::notification_delivery_sample("architect", "lead", 0, "live");
+        delivered.ts = crate::team::now_unix();
+        write_event_log(tmp.path(), &[delivered]);
+
+        let signal = daemon.supervisory_progress_signal("lead", threshold);
+        assert_eq!(
+            signal,
+            SupervisoryProgress::Expected("fresh_supervisory_input")
+        );
+        assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
+    }
+
+    #[test]
+    fn supervisory_progress_signal_treats_recent_digest_delivery_as_expected_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .build();
+        let threshold = daemon
+            .config
+            .team_config
+            .workflow_policy
+            .stall_threshold_secs;
+        insert_working_shim_handle(&mut daemon, "lead", threshold + 10, threshold + 10);
+
+        let now = crate::team::now_unix();
+        let mut digest = TeamEvent::supervisory_digest_emitted("lead", 3, 1);
+        digest.ts = now;
+        let mut delivered = TeamEvent::notification_delivery_sample("eng-1", "lead", 0, "digest");
+        delivered.ts = now;
+        write_event_log(tmp.path(), &[digest, delivered]);
+
+        let signal = daemon.supervisory_progress_signal("lead", threshold);
+        assert_eq!(signal, SupervisoryProgress::Expected("supervisory_digest"));
         assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
     }
 
