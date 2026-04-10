@@ -78,7 +78,7 @@ pub(crate) fn commits_ahead_of_main(worktree_dir: &Path) -> Result<u32> {
 pub(crate) fn diff_stat_from_main(worktree_dir: &Path) -> Result<String> {
     let output = run_git_with_context(
         worktree_dir,
-        &["diff", "--stat", "main..HEAD"],
+        &["diff", "--stat", "main...HEAD"],
         "check diff stat between main and HEAD for narration-only detection",
     )?;
 
@@ -88,7 +88,7 @@ pub(crate) fn diff_stat_from_main(worktree_dir: &Path) -> Result<String> {
             "{}",
             describe_git_failure(
                 worktree_dir,
-                &["diff", "--stat", "main..HEAD"],
+                &["diff", "--stat", "main...HEAD"],
                 "check diff stat between main and HEAD for narration-only detection",
                 &stderr,
             )
@@ -101,7 +101,7 @@ pub(crate) fn diff_stat_from_main(worktree_dir: &Path) -> Result<String> {
 pub(crate) fn changed_paths_from_main(worktree_dir: &Path) -> Result<Vec<PathBuf>> {
     let output = run_git_with_context(
         worktree_dir,
-        &["diff", "--name-only", "main..HEAD"],
+        &["diff", "--name-only", "main...HEAD"],
         "list changed paths between main and HEAD for narration-only detection",
     )?;
 
@@ -111,7 +111,7 @@ pub(crate) fn changed_paths_from_main(worktree_dir: &Path) -> Result<Vec<PathBuf
             "{}",
             describe_git_failure(
                 worktree_dir,
-                &["diff", "--name-only", "main..HEAD"],
+                &["diff", "--name-only", "main...HEAD"],
                 "list changed paths between main and HEAD for narration-only detection",
                 &stderr,
             )
@@ -356,6 +356,75 @@ mod tests {
         assert!(diff_stat.contains("src.rs"));
         assert!(diff_stat.contains("test.rs"));
         assert_eq!(files_changed_from_main(repo).unwrap(), 2);
+    }
+
+    #[test]
+    fn files_changed_from_main_ignores_main_only_changes_after_branch_point() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "main"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join("README.md"), "hello").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "task-branch"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join("task.rs"), "fn task() {}\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "task.rs"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "task change"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join("main_only.rs"), "fn main_only() {}\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "main_only.rs"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "main only change"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["checkout", "task-branch"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        let diff_stat = diff_stat_from_main(repo).unwrap();
+        assert!(diff_stat.contains("task.rs"));
+        assert!(!diff_stat.contains("main_only.rs"));
+        assert_eq!(files_changed_from_main(repo).unwrap(), 1);
     }
 
     #[test]

@@ -36,7 +36,8 @@ pub(crate) fn run_automatic_verification(
     }
 
     let test_run = run_tests_in_worktree(worktree_dir, test_command)?;
-    let (failures, file_paths) = parse_test_output(&test_run.output, &test_run.results);
+    let (failures, _failure_paths) = parse_test_output(&test_run.output, &test_run.results);
+    let file_paths = changed_files_from_main(worktree_dir)?;
     Ok(VerificationRunResult {
         passed: test_run.passed,
         output: test_run.output,
@@ -389,8 +390,8 @@ mod tests {
     use super::{
         ScopeValidationResult, commit_subjects_since_main, current_branch_name,
         engineer_worktree_context, find_claimed_task_for_worktree, parse_scope_fence,
-        parse_test_output, scope_validation_failure, task_mismatch_validation_failure,
-        validate_declared_scope,
+        parse_test_output, run_automatic_verification, scope_validation_failure,
+        task_mismatch_validation_failure, validate_declared_scope,
     };
 
     #[test]
@@ -673,5 +674,63 @@ src/parser.rs:12: failure here\n";
             commit_subjects_since_main(&worktree_dir).unwrap(),
             vec!["Task #11: implement expected task".to_string()]
         );
+    }
+
+    #[test]
+    fn run_automatic_verification_uses_git_diff_paths_not_test_output_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        let worktree_dir = tmp.path().join(".batty").join("worktrees").join("eng-1-3");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::create_dir_all(worktree_dir.join("src")).unwrap();
+        std::fs::write(
+            tasks_dir.join("011-task.md"),
+            "---\nid: 11\ntitle: target\nstatus: in-progress\npriority: medium\nclaimed_by: eng-1-3\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&worktree_dir)
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init"]).status.success());
+        assert!(
+            git(&["config", "user.email", "test@example.com"])
+                .status
+                .success()
+        );
+        assert!(git(&["config", "user.name", "Test"]).status.success());
+        std::fs::write(worktree_dir.join("src").join("owned.rs"), "pub fn owned() {}\n").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(git(&["commit", "-m", "base"]).status.success());
+        assert!(git(&["branch", "-M", "main"]).status.success());
+        assert!(git(&["checkout", "-b", "eng-1-3/task-11"]).status.success());
+
+        std::fs::write(
+            worktree_dir.join("src").join("owned.rs"),
+            "pub fn owned() -> bool { true }\n",
+        )
+        .unwrap();
+        assert!(git(&["add", "src/owned.rs"]).status.success());
+        assert!(
+            git(&["commit", "-m", "Task #11: change owned"])
+                .status
+                .success()
+        );
+
+        let result = run_automatic_verification(
+            &worktree_dir,
+            Some("printf 'error: src/noisy.rs:9:1 boom\\n'; exit 1"),
+        )
+        .unwrap();
+        assert_eq!(result.file_paths, vec!["src/owned.rs".to_string()]);
     }
 }
