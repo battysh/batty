@@ -1206,6 +1206,64 @@ mod tests {
         );
     }
 
+    fn write_blocked_task(project_root: &Path, id: u32, title: &str, block_reason: &str) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        // kanban-md --block writes `blocked: true` + `block_reason: "..."`.
+        // Regression guard against the old Option<String> deserializer which
+        // silently dropped the boolean shape and let dispatch see the task
+        // as runnable.
+        let content = format!(
+            "---\nid: {id}\ntitle: {title}\nstatus: todo\npriority: high\nblocked: true\nblock_reason: \"{block_reason}\"\nclass: standard\n---\n\nBody.\n"
+        );
+        std::fs::write(tasks_dir.join(format!("{id:03}-{title}.md")), content).unwrap();
+    }
+
+    #[test]
+    fn enqueue_dispatch_candidates_skips_kanban_md_blocked_tasks() {
+        // Regression for #589: kanban-md --block writes `blocked: true` +
+        // `block_reason: "..."`, which used to deserialize to None because
+        // the Task struct's blocked field was Option<String>. Dispatch then
+        // treated the task as runnable and auto-assigned it to benched
+        // engineers. The fix is an untagged deserializer that accepts both
+        // boolean and string shapes and routes `block_reason` into `blocked`.
+        let tmp = tempfile::tempdir().unwrap();
+        write_blocked_task(
+            tmp.path(),
+            30,
+            "kanban-md-blocked",
+            "Deferred per architect",
+        );
+        write_task_with_body(
+            tmp.path(),
+            31,
+            "runnable-candidate",
+            "todo",
+            None,
+            "Touch src/team/telemetry_db.rs only.",
+        );
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+            ])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(
+            daemon.dispatch_queue[0].task_id, 31,
+            "blocked task #30 must be filtered out; only the runnable #31 should be queued"
+        );
+    }
+
     #[test]
     fn enqueue_dispatch_candidates_serializes_overlapping_task_and_enqueues_non_overlapping_task() {
         let tmp = tempfile::tempdir().unwrap();

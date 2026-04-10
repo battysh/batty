@@ -1,8 +1,34 @@
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::path::{Path, PathBuf};
 
 use crate::config::Policy;
+
+/// Accept either a string reason or a boolean flag for the `blocked` field.
+///
+/// kanban-md writes `blocked: true` alongside a separate `block_reason` string,
+/// while legacy batty tasks stored `blocked: "reason"` directly. This
+/// deserializer normalizes both shapes into `Option<String>` so downstream
+/// callers can still rely on `task.blocked.is_some()` as "is this blocked".
+fn deserialize_blocked_field<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum BlockedField {
+        String(String),
+        Bool(bool),
+    }
+
+    let raw: Option<BlockedField> = Option::deserialize(deserializer)?;
+    Ok(match raw {
+        Some(BlockedField::String(s)) => Some(s),
+        Some(BlockedField::Bool(true)) => Some("blocked".to_string()),
+        Some(BlockedField::Bool(false)) => None,
+        None => None,
+    })
+}
 
 /// A parsed kanban-md task file.
 #[derive(Debug)]
@@ -72,8 +98,10 @@ struct Frontmatter {
     claim_extensions: Option<u32>,
     #[serde(default)]
     last_output_bytes: Option<u64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_blocked_field")]
     blocked: Option<String>,
+    #[serde(default)]
+    block_reason: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
     #[serde(default)]
@@ -146,7 +174,9 @@ impl Task {
             claim_warning_sent_at: fm.claim_warning_sent_at,
             claim_extensions: fm.claim_extensions,
             last_output_bytes: fm.last_output_bytes,
-            blocked: fm.blocked,
+            // Prefer the richer `block_reason` if present so operators see
+            // the real reason, not the "blocked" placeholder from `blocked: true`.
+            blocked: fm.block_reason.or(fm.blocked),
             tags: fm.tags,
             depends_on: fm.depends_on,
             review_owner: fm.review_owner,
@@ -286,6 +316,87 @@ Read task files from kanban/phase-N/tasks/ directory.
         assert!(task.next_action.is_none());
         assert!(task.description.contains("Read task files"));
         assert!(task.batty_config.is_none());
+    }
+
+    #[test]
+    fn parse_task_with_kanban_md_block_flag_uses_block_reason() {
+        // kanban-md writes `blocked: true` + a separate `block_reason` string.
+        // Before the untagged deserializer, `blocked: true` failed to parse
+        // into Option<String> and silently became None, so dispatch treated
+        // the task as runnable and auto-assigned it to benched engineers.
+        let content = r#"---
+id: 42
+title: kanban-md-style blocked task
+status: todo
+priority: high
+blocked: true
+block_reason: "Deferred per architect"
+---
+
+Body.
+"#;
+        let task = Task::parse(content).unwrap();
+        assert_eq!(
+            task.blocked.as_deref(),
+            Some("Deferred per architect"),
+            "block_reason must be surfaced as the blocked reason"
+        );
+    }
+
+    #[test]
+    fn parse_task_with_bool_blocked_only() {
+        // If `blocked: true` arrives without a block_reason, fall back to a
+        // placeholder string so `task.blocked.is_some()` still short-circuits
+        // the dispatch filter.
+        let content = r#"---
+id: 43
+title: blocked without reason
+status: todo
+priority: high
+blocked: true
+---
+
+Body.
+"#;
+        let task = Task::parse(content).unwrap();
+        assert!(
+            task.blocked.is_some(),
+            "blocked: true must produce a Some(...) value"
+        );
+    }
+
+    #[test]
+    fn parse_task_with_legacy_string_blocked() {
+        // Older batty tasks stored the reason directly in `blocked`. That
+        // shape must still parse cleanly so historical archives do not rot.
+        let content = r#"---
+id: 44
+title: legacy blocked task
+status: todo
+priority: high
+blocked: "legacy reason string"
+---
+
+Body.
+"#;
+        let task = Task::parse(content).unwrap();
+        assert_eq!(task.blocked.as_deref(), Some("legacy reason string"));
+    }
+
+    #[test]
+    fn parse_task_with_blocked_false_is_not_blocked() {
+        let content = r#"---
+id: 45
+title: explicitly unblocked
+status: todo
+priority: high
+blocked: false
+---
+
+Body.
+"#;
+        let task = Task::parse(content).unwrap();
+        assert!(task.blocked.is_none());
     }
 
     #[test]
