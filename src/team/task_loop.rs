@@ -14,11 +14,6 @@ use super::test_results::{self, TestRunOutput};
 
 const SHARED_CARGO_CONFIG_MARKER: &str = "# Managed by Batty: shared cargo target";
 const WORKTREE_EXCLUDE_MARKER: &str = "# Managed by Batty worktree ignores";
-const REVIEW_READY_SCOPE_FENCE: &[&str] = &[
-    "src/team/task_loop.rs",
-    "src/team/completion.rs",
-    "src/team/review.rs",
-];
 pub(crate) const ADDITIVE_CONFLICT_AUTO_RESOLVE_FENCE: &[&str] =
     &["src/team/task_loop.rs", "src/team/review.rs"];
 const MIN_REVIEW_READY_PRODUCTION_ADDITIONS: usize = 10;
@@ -148,15 +143,27 @@ pub(crate) fn shared_cargo_target_dir(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("shared-target")
 }
 
-pub(crate) fn validate_review_ready_worktree(worktree_dir: &Path) -> Result<Vec<String>> {
+pub(crate) fn validate_review_ready_worktree(
+    worktree_dir: &Path,
+    task_text: &str,
+) -> Result<Vec<String>> {
     let diff = map_git_error(
         retry_git(|| git_cmd::run_git(worktree_dir, &["diff", "--stat", "main..HEAD"])),
         "failed to inspect engineer branch diff",
     )?;
-    Ok(validate_review_ready_diff_stat(&diff.stdout).blockers)
+    let declared_scope = crate::team::daemon::verification::parse_scope_fence(task_text);
+    Ok(validate_review_ready_diff_stat_with_scope(&diff.stdout, &declared_scope).blockers)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn validate_review_ready_diff_stat(diff_stat: &str) -> CommitValidationGate {
+    validate_review_ready_diff_stat_with_scope(diff_stat, &[])
+}
+
+fn validate_review_ready_diff_stat_with_scope(
+    diff_stat: &str,
+    declared_scope: &[String],
+) -> CommitValidationGate {
     let entries = parse_diff_stat_entries(diff_stat);
     let mut blockers = Vec::new();
 
@@ -165,11 +172,15 @@ pub(crate) fn validate_review_ready_diff_stat(diff_stat: &str) -> CommitValidati
         return CommitValidationGate { blockers };
     }
 
-    let out_of_scope = entries
-        .iter()
-        .filter(|entry| !REVIEW_READY_SCOPE_FENCE.contains(&entry.path.as_str()))
-        .map(|entry| entry.path.clone())
-        .collect::<Vec<_>>();
+    let out_of_scope = if declared_scope.is_empty() {
+        Vec::new()
+    } else {
+        entries
+            .iter()
+            .filter(|entry| !path_within_declared_scope(&entry.path, declared_scope))
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>()
+    };
     if !out_of_scope.is_empty() {
         blockers.push(format!(
             "changes outside task scope fence: {}",
@@ -180,7 +191,9 @@ pub(crate) fn validate_review_ready_diff_stat(diff_stat: &str) -> CommitValidati
     let production_entries = entries
         .iter()
         .filter(|entry| {
-            REVIEW_READY_SCOPE_FENCE.contains(&entry.path.as_str()) && entry.path.ends_with(".rs")
+            entry.path.ends_with(".rs")
+                && (declared_scope.is_empty()
+                    || path_within_declared_scope(&entry.path, declared_scope))
         })
         .collect::<Vec<_>>();
     let production_additions: usize = production_entries.iter().map(|entry| entry.additions).sum();
@@ -198,6 +211,15 @@ pub(crate) fn validate_review_ready_diff_stat(diff_stat: &str) -> CommitValidati
     }
 
     CommitValidationGate { blockers }
+}
+
+fn path_within_declared_scope(path: &str, scope_entries: &[String]) -> bool {
+    scope_entries.iter().any(|scope| {
+        path == scope
+            || path
+                .strip_prefix(scope)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
 }
 
 fn parse_diff_stat_entries(diff_stat: &str) -> Vec<DiffStatEntry> {
@@ -2153,11 +2175,6 @@ mod tests {
         assert!(
             gate.blockers
                 .iter()
-                .any(|blocker| blocker.contains("changes outside task scope fence"))
-        );
-        assert!(
-            gate.blockers
-                .iter()
                 .any(|blocker| blocker.contains("need at least 10 lines of production Rust added"))
         );
     }
@@ -2176,14 +2193,24 @@ mod tests {
 
     #[test]
     fn review_ready_gate_rejects_out_of_scope_diff() {
-        let gate = validate_review_ready_diff_stat(
+        let gate = validate_review_ready_diff_stat_with_scope(
             " src/team/daemon.rs | 15 +++++++++++++++\n 1 file changed, 15 insertions(+)\n",
+            &["src/team/completion.rs".to_string()],
         );
         assert!(
             gate.blockers
                 .iter()
                 .any(|blocker| blocker.contains("changes outside task scope fence"))
         );
+    }
+
+    #[test]
+    fn review_ready_gate_accepts_scope_fenced_rust_diff() {
+        let gate = validate_review_ready_diff_stat_with_scope(
+            " src/team/daemon/verification.rs | 15 +++++++++++++++\n 1 file changed, 15 insertions(+)\n",
+            &["src/team/daemon".to_string()],
+        );
+        assert!(gate.blockers.is_empty());
     }
 
     #[test]
