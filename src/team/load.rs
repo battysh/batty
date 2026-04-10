@@ -94,6 +94,7 @@ fn capture_team_load(project_root: &Path) -> Result<TeamLoadSnapshot> {
 
     let triage_backlog_counts = status::triage_backlog_counts(project_root, &members);
     let owned_task_buckets = status::owned_task_buckets(project_root, &members);
+    let branch_mismatches = status::branch_mismatch_by_member(project_root, &members);
     let rows = status::build_team_status_rows(
         &members,
         session_running,
@@ -101,6 +102,7 @@ fn capture_team_load(project_root: &Path) -> Result<TeamLoadSnapshot> {
         &Default::default(),
         &triage_backlog_counts,
         &owned_task_buckets,
+        &branch_mismatches,
         &Default::default(),
         &Default::default(),
     );

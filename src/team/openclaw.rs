@@ -906,6 +906,7 @@ fn load_status_report(project_root: &Path) -> Result<status::TeamStatusJsonRepor
     let pending_inbox_counts = status::pending_inbox_counts(project_root, &members);
     let triage_backlog_counts = status::triage_backlog_counts(project_root, &members);
     let owned_task_buckets = status::owned_task_buckets(project_root, &members);
+    let branch_mismatches = status::branch_mismatch_by_member(project_root, &members);
     let worktree_staleness = status::worktree_staleness_by_member(project_root, &members);
     let agent_health = status::agent_health_by_member(project_root, &members);
     let paused = pause_marker_path(project_root).exists();
@@ -916,6 +917,7 @@ fn load_status_report(project_root: &Path) -> Result<status::TeamStatusJsonRepor
         &pending_inbox_counts,
         &triage_backlog_counts,
         &owned_task_buckets,
+        &branch_mismatches,
         &worktree_staleness,
         &agent_health,
     );
@@ -1028,6 +1030,7 @@ mod tests {
                 branch: None,
                 worktree_path: None,
                 commit: None,
+                branch_mismatch: None,
                 next_action: None,
                 test_summary: None,
             }],
@@ -1042,6 +1045,7 @@ mod tests {
                 branch: None,
                 worktree_path: None,
                 commit: None,
+                branch_mismatch: None,
                 next_action: None,
                 test_summary: None,
             }],
