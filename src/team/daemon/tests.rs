@@ -886,7 +886,11 @@ fn preserve_worktree_before_restart_reports_block_when_preserve_fails() {
     }));
 
     let task = crate::task::load_task_by_id(
-        &repo.join(".batty").join("team_config").join("board").join("tasks"),
+        &repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks"),
         44,
     )
     .unwrap();
@@ -3972,7 +3976,11 @@ fn set_aging_claim_progress(
     last_output_bytes: u64,
 ) {
     let task_path = crate::task::find_task_path_by_id(
-        &project_root.join(".batty").join("team_config").join("board").join("tasks"),
+        &project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks"),
         id,
     )
     .unwrap();
@@ -4007,7 +4015,12 @@ fn aging_claim_progress_lookup_survives_slug_rename() {
         Some("2026-04-06T06:00:00Z"),
     );
 
-    let tasks_dir = tmp.path().join(".batty").join("team_config").join("board").join("tasks");
+    let tasks_dir = tmp
+        .path()
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
     let original = tasks_dir.join("511-stale-slug-original.md");
     let renamed = tasks_dir.join("511-roadmap-title-renamed.md");
     std::fs::rename(&original, &renamed).unwrap();
@@ -4015,7 +4028,10 @@ fn aging_claim_progress_lookup_survives_slug_rename() {
     set_aging_claim_progress(tmp.path(), 511, "2026-04-06T07:00:00Z", 128);
 
     let task = crate::task::load_task_by_id(&tasks_dir, 511).unwrap();
-    assert_eq!(task.last_progress_at.as_deref(), Some("2026-04-06T07:00:00Z"));
+    assert_eq!(
+        task.last_progress_at.as_deref(),
+        Some("2026-04-06T07:00:00Z")
+    );
     assert_eq!(task.last_output_bytes, Some(128));
 }
 

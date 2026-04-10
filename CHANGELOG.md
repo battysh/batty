@@ -2,6 +2,95 @@
 
 All notable changes to Batty are documented here.
 
+## 0.10.1 — 2026-04-10
+
+Stability hardening for the daemon-owned loop. 43 commits since 0.10.0,
+3,330 tests passing. Focus areas: work preservation during daemon resets,
+scope-fence enforcement, review pipeline robustness, and dispatch/escalation
+noise reduction. Fixes several issues that surfaced during multi-hour
+autonomous runs.
+
+### Work preservation
+- **Preserve engineer work before daemon-owned resets** — route all reset paths
+  through a shared `preserve_or_skip` helper so dirty tracked and untracked
+  changes survive claim reclaim, dispatch recovery, and worktree-to-base
+  cleanup instead of being silently discarded (`src/team/task_loop.rs`,
+  `src/worktree.rs`).
+- **Prevent recovery from discarding dirty engineer worktrees** — additional
+  guardrail on the reconciliation path (`src/team/daemon/automation.rs`).
+- **Isolated merges when the root checkout is dirty** — daemon now uses a
+  scratch checkout for main merges when the repo root has uncommitted state,
+  instead of committing it alongside the merge (`src/team/merge/operations.rs`).
+
+### Scope and review
+- **Scope-fence enforcement before and after engineer writes** — verification
+  gate rejects out-of-scope file modifications before they reach merge queue
+  (`src/team/daemon/verification.rs`).
+- **Review-ready validation aligned with claimed task scope** — review check
+  no longer approves branches that diverge from the claimed lane
+  (`src/team/merge/completion.rs`).
+- **Scope check uses merge-base, not `main..HEAD`** — previously, stale branch
+  bases caused scope enforcement to flag files the engineer never touched.
+  Every completion on a long-lived branch was being rejected with identical
+  10-file lists of "protected file" violations that were actually just the
+  inherited divergence from the branch's stale base. Now uses
+  `git merge-base HEAD main` as the diff base (`src/team/merge/completion.rs`).
+- **Scope-fence review gates reject spoofed ACKs and missing new-file reverts**
+  — ACK validation resolves the engineer's configured `reports_to` recipient
+  from `team.yaml` and only accepts tokens from that specific inbox
+  (`src/team/daemon/verification.rs`).
+
+### Dispatch and escalation
+- **Claim drift detection before dispatching engineers** — daemon refuses to
+  hand out tasks when the worktree branch does not match the claimed task ID
+  (`src/team/dispatch/queue.rs`).
+- **Claimed engineer lanes recovered before branch drift stalls work** — the
+  reclaim path fixes drift before it blocks the pipeline
+  (`src/team/daemon/automation.rs`).
+- **Fallback-dispatch runnable work when the manager lane is stalled** —
+  engineers no longer sit idle with runnable work because the manager is
+  saturated (`src/team/dispatch/queue.rs`).
+- **Release engineers from review and blocked lanes automatically** — ownership
+  is cleared when a task transitions out of review or gets blocked, so the
+  engineer is free for new dispatches (`src/team/daemon/automation.rs`).
+- **Exclude blocked manual work from dispatchable-capacity planning** —
+  capacity calculation ignores tasks that are gated on manual review
+  (`src/team/daemon/automation.rs`).
+
+### Manager and orchestrator noise
+- **Raise manager-actionable inbox items above routine chatter** — inbox
+  ordering prioritizes review requests and completion packets over status
+  pings, so the manager sees real work first (`src/team/delivery/routing.rs`).
+- **Keep low-signal engineer chatter out of live task prompts** — routine
+  status messages are diverted to the low-signal lane instead of interrupting
+  active task context (`src/team/delivery/routing.rs`).
+- **Stop false commit reminders on clean review branches** — the commit
+  reminder heuristic no longer fires on branches that are already clean
+  (`src/team/daemon/health/checks.rs`).
+- **Prevent stale review urgency alerts after review exits** — urgency alerts
+  clear once a task leaves the review queue (`src/team/daemon/automation.rs`).
+
+### Verification and test stability
+- **Stabilize Git-backed tests against broken host config** — tests set up
+  their own `user.email`/`user.name` instead of relying on the host
+  (`src/team/merge/git_ops.rs`).
+- **Serialize startup git-identity preflight against other env-mutating tests**
+  — prevents a flaky interaction with concurrent tests.
+- **Prevent green verification runs from self-reporting synthetic test
+  failures** — verification no longer mis-reports passing runs as failed
+  (`src/team/daemon/verification.rs`).
+- **Keep verification-blocked tasks visible to kanban-md** — board layer shows
+  verification-escalated tasks instead of hiding them.
+- **Tact task reads no longer depend on filename slugs** — task lookup
+  normalizes IDs instead of matching filename substrings.
+
+### Release workflow
+- **Automate tagged Batty releases from verified main** — first-class release
+  flow that reuses verification policy, requires changelog metadata, writes
+  durable artifacts, tags the repo, and emits release events (`src/release.rs`).
+- **Keep the generated CLI reference aligned with the release surface** —
+  docs regen is part of the release workflow.
+
 ## 0.10.0 — 2026-04-07
 
 The daemon-owned development loop. Batty can now run a full architect → engineer →
