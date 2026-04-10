@@ -241,6 +241,16 @@ impl TeamEvent {
         }
     }
 
+    pub fn dispatch_fallback_used(role: &str, task: &str, recipient: &str, reason: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task.into()),
+            recipient: Some(recipient.into()),
+            reason: Some(reason.into()),
+            ..Self::base("dispatch_fallback_used")
+        }
+    }
+
     pub fn dispatch_overlap_prevented(task_id: u32, blocked_by: &[u32], details: &str) -> Self {
         Self {
             task: Some(task_id.to_string()),
