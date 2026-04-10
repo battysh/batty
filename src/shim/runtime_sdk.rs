@@ -71,12 +71,8 @@ struct SdkState {
     cumulative_input_tokens: u64,
     /// Cumulative output tokens reported by the API.
     cumulative_output_tokens: u64,
-    /// Total tokens consumed by completed turns in the current session.
-    cumulative_context_tokens: u64,
     /// Approximate percent of the model context budget already consumed.
     context_usage_pct: Option<u8>,
-    /// Whether a ContextApproaching event has already been emitted this session.
-    context_approaching_emitted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -137,9 +133,7 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
         test_failure_iterations: 0,
         cumulative_input_tokens: 0,
         cumulative_output_tokens: 0,
-        cumulative_context_tokens: 0,
         context_usage_pct: None,
-        context_approaching_emitted: false,
     }));
 
     // Shared stdin writer (used by both command loop and stdout reader for auto-approve)
@@ -867,11 +861,13 @@ fn resolved_model_context_limit_tokens(model: Option<&str>) -> u64 {
 // Helpers
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 fn model_context_usage_pct(model: Option<&str>, total_tokens: u64) -> Option<u8> {
     let limit = resolved_model_context_limit_tokens(model);
     Some(((total_tokens.saturating_mul(100)) / limit).min(100) as u8)
 }
 
+#[cfg(test)]
 fn model_context_limit_tokens(model: &str) -> Option<u64> {
     let model = model.to_ascii_lowercase();
     if model.contains("1m") {
@@ -1072,9 +1068,7 @@ mod tests {
             test_failure_iterations: 0,
             cumulative_input_tokens: 0,
             cumulative_output_tokens: 0,
-            cumulative_context_tokens: 0,
             context_usage_pct: None,
-            context_approaching_emitted: false,
         };
         assert_eq!(st.state, ShimState::Idle);
         assert!(st.session_id.is_empty());
@@ -1197,9 +1191,7 @@ mod tests {
             test_failure_iterations: 0,
             cumulative_input_tokens: 0,
             cumulative_output_tokens: 0,
-            cumulative_context_tokens: 0,
             context_usage_pct: None,
-            context_approaching_emitted: false,
         }));
 
         let forced = force_stalled_completion(&state, "sdk-test").expect("forced completion");
@@ -1237,9 +1229,7 @@ mod tests {
             test_failure_iterations: 0,
             cumulative_input_tokens: 0,
             cumulative_output_tokens: 0,
-            cumulative_context_tokens: 0,
             context_usage_pct: None,
-            context_approaching_emitted: false,
         }));
 
         let forced = force_stalled_completion(&state, "sdk-test").expect("forced completion");
@@ -1274,9 +1264,7 @@ mod tests {
             test_failure_iterations: 0,
             cumulative_input_tokens: 0,
             cumulative_output_tokens: 0,
-            cumulative_context_tokens: 0,
             context_usage_pct: None,
-            context_approaching_emitted: false,
         }));
         let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
         let mut last_keepalive = Instant::now();
@@ -1305,9 +1293,7 @@ mod tests {
             test_failure_iterations: 0,
             cumulative_input_tokens: 0,
             cumulative_output_tokens: 0,
-            cumulative_context_tokens: 0,
             context_usage_pct: None,
-            context_approaching_emitted: false,
         }));
         let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
         let mut last_keepalive = Instant::now() - Duration::from_secs(SDK_KEEPALIVE_IDLE_SECS + 1);
@@ -1342,9 +1328,7 @@ mod tests {
             test_failure_iterations: 0,
             cumulative_input_tokens: 0,
             cumulative_output_tokens: 0,
-            cumulative_context_tokens: 0,
             context_usage_pct: None,
-            context_approaching_emitted: false,
         }));
         let writer = Arc::new(Mutex::new(Vec::<u8>::new()));
         let mut last_keepalive = Instant::now() - Duration::from_secs(SDK_KEEPALIVE_IDLE_SECS + 1);
