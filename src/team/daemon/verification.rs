@@ -468,8 +468,8 @@ mod tests {
     use super::{
         ScopeValidationResult, active_claim_conflict_failure, commit_subjects_since_main,
         current_branch_name, engineer_worktree_context, find_claimed_task_for_worktree,
-        parse_scope_fence, parse_test_output, scope_validation_failure,
-        task_mismatch_validation_failure, validate_declared_scope,
+        parse_scope_fence, parse_test_output, run_automatic_verification,
+        scope_validation_failure, task_mismatch_validation_failure, validate_declared_scope,
     };
 
     #[test]
