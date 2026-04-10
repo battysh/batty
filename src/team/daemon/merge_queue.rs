@@ -10,7 +10,7 @@ use super::TeamDaemon;
 use crate::task::load_tasks_from_dir;
 use crate::team::board::{WorkflowMetadata, read_workflow_metadata};
 use crate::team::daemon::verification::run_automatic_verification;
-use crate::team::merge::{MergeLock, MergeOutcome, merge_engineer_branch};
+use crate::team::merge::{MergeLock, MergeMode, MergeOutcome, merge_engineer_branch};
 use crate::team::task_loop::{current_worktree_branch, read_task_title};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -238,7 +238,17 @@ impl TeamDaemon {
         let pre_merge_head = git_head(self.project_root())?;
 
         match merge_engineer_branch(self.project_root(), &request.engineer)? {
-            MergeOutcome::Success => {
+            MergeOutcome::Success(success) => {
+                if success.mode == MergeMode::IsolatedIntegration {
+                    let reason = success
+                        .reason
+                        .as_deref()
+                        .unwrap_or("root checkout required isolation");
+                    self.record_orchestrator_action(format!(
+                        "merge queue: isolated merge for task #{} ({reason})",
+                        request.task_id
+                    ));
+                }
                 let mut post_merge_verify_recorded = false;
                 if request.should_post_merge_verify
                     && self
@@ -333,10 +343,20 @@ impl TeamDaemon {
 
                 if let Some(ref manager_name) = manager_name {
                     let msg = format!(
-                        "[{}] Task #{} completed from merge queue.\nTitle: {}\nTests: passed\nMerge: success{}",
+                        "[{}] Task #{} completed from merge queue.\nTitle: {}\nTests: passed\nMerge: success{}{}{}",
                         request.engineer,
                         request.task_id,
                         task_title,
+                        if success.mode == MergeMode::IsolatedIntegration {
+                            "\nMerge mode: isolated integration checkout"
+                        } else {
+                            ""
+                        },
+                        if let Some(reason) = success.reason.as_deref() {
+                            format!("\nMerge reason: {reason}")
+                        } else {
+                            String::new()
+                        },
                         if board_update_ok {
                             ""
                         } else {
@@ -450,7 +470,7 @@ impl TeamDaemon {
             }
             MergeOutcome::MergeFailure(merge_info) => {
                 let manager_notice = format!(
-                    "Task #{} from {} passed tests but could not be merged to main.\n{}\nDecide whether to clean the main worktree, retry the merge, or redirect the engineer.",
+                    "Task #{} from {} passed tests but could not be merged to main.\n{}\nDecide whether to retry the isolated merge path, inspect the integration-worktree failure, or redirect the engineer.",
                     request.task_id, request.engineer, merge_info
                 );
                 if let Some(ref manager_name) = manager_name {
@@ -933,6 +953,8 @@ mod tests {
         std::fs::write(worktree_dir.join("note.txt"), "queued merge\n").unwrap();
         git_ok(&worktree_dir, &["add", "note.txt"]);
         git_ok(&worktree_dir, &["commit", "-m", "queue merge"]);
+        std::fs::write(repo.join("local-wip.txt"), "root dirty\n").unwrap();
+        git_ok(&repo, &["add", "local-wip.txt"]);
         let branch = current_worktree_branch(&worktree_dir).unwrap();
         let commit = current_head(&worktree_dir);
         write_completion_metadata(
@@ -968,8 +990,12 @@ mod tests {
         daemon.process_merge_queue().unwrap();
 
         assert_eq!(
-            std::fs::read_to_string(repo.join("note.txt")).unwrap(),
-            "queued merge\n"
+            crate::team::test_support::git_stdout(&repo, &["show", "main:note.txt"]),
+            "queued merge"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("local-wip.txt")).unwrap(),
+            "root dirty\n"
         );
         let task = crate::task::Task::from_file(
             &repo
@@ -985,6 +1011,22 @@ mod tests {
         assert_eq!(
             daemon.member_state_for_test("eng-1"),
             Some(MemberState::Idle)
+        );
+        let manager_messages = crate::team::inbox::pending_messages(
+            &crate::team::inbox::inboxes_root(&repo),
+            "manager",
+        )
+        .unwrap();
+        assert!(
+            manager_messages.iter().any(|message| {
+                message
+                    .body
+                    .contains("Merge mode: isolated integration checkout")
+                    && message
+                        .body
+                        .contains("root main checkout has local changes")
+            }),
+            "manager should see isolated merge reason: {manager_messages:?}"
         );
     }
 

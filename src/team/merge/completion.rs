@@ -30,7 +30,7 @@ use super::git_ops::{
     code_files_changed_from_main, commits_ahead_of_main, diff_stat_from_main,
     files_changed_from_main, now_unix, run_git_with_context,
 };
-use super::lock::{MergeLock, MergeOutcome};
+use super::lock::{MergeLock, MergeMode, MergeOutcome, MergeSuccess};
 use super::operations::merge_engineer_branch;
 
 fn transition_verification_phase(
@@ -957,8 +957,17 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         } else {
             merge_engineer_branch(daemon.project_root(), engineer)?
         } {
-            MergeOutcome::Success => {
+            MergeOutcome::Success(success) => {
                 drop(lock);
+                if success.mode == MergeMode::IsolatedIntegration {
+                    let reason = success
+                        .reason
+                        .as_deref()
+                        .unwrap_or("root checkout required isolation");
+                    daemon.record_orchestrator_action(format!(
+                        "completion merge: isolated merge for task #{task_id} ({reason})"
+                    ));
+                }
 
                 if let Err(error) = record_merge_test_timing(
                     daemon,
@@ -994,7 +1003,17 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
 
                 if let Some(ref manager_name) = manager_name {
                     let msg = format!(
-                        "[{engineer}] Task #{task_id} completed.\nTitle: {task_title}\nTests: passed\nMerge: success{}",
+                        "[{engineer}] Task #{task_id} completed.\nTitle: {task_title}\nTests: passed\nMerge: success{}{}{}",
+                        if success.mode == MergeMode::IsolatedIntegration {
+                            "\nMerge mode: isolated integration checkout"
+                        } else {
+                            ""
+                        },
+                        if let Some(reason) = success.reason.as_deref() {
+                            format!("\nMerge reason: {reason}")
+                        } else {
+                            String::new()
+                        },
                         if board_update_ok {
                             ""
                         } else {
@@ -1100,7 +1119,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                 drop(lock);
 
                 let manager_notice = format!(
-                    "Task #{task_id} from {engineer} passed tests but could not be merged to main.\n{merge_info}\nDecide whether to clean the main worktree, retry the merge, or redirect the engineer."
+                    "Task #{task_id} from {engineer} passed tests but could not be merged to main.\n{merge_info}\nDecide whether to retry the isolated merge path, inspect the integration-worktree failure, or redirect the engineer."
                 );
                 if let Some(ref manager_name) = manager_name {
                     daemon.queue_message("daemon", manager_name, &manager_notice)?;
@@ -1301,7 +1320,7 @@ pub(crate) fn merge_multi_repo_engineer_branch(
             continue;
         }
         match merge_engineer_branch_in_repo(&repo_root, &sub_wt, engineer_name)? {
-            MergeOutcome::Success => {}
+            MergeOutcome::Success(_) => {}
             other => return Ok(other),
         }
     }
@@ -1319,7 +1338,10 @@ pub(crate) fn merge_multi_repo_engineer_branch(
         }
     }
 
-    Ok(MergeOutcome::Success)
+    Ok(MergeOutcome::Success(MergeSuccess {
+        mode: MergeMode::DirectRoot,
+        reason: None,
+    }))
 }
 
 /// Merge a single sub-repo's engineer worktree branch into main.
@@ -1378,7 +1400,10 @@ fn merge_engineer_branch_in_repo(
         "Merged branch '{branch}' from {engineer_name} in {}",
         repo_root.file_name().unwrap_or_default().to_string_lossy()
     );
-    Ok(MergeOutcome::Success)
+    Ok(MergeOutcome::Success(MergeSuccess {
+        mode: MergeMode::DirectRoot,
+        reason: None,
+    }))
 }
 
 fn reset_engineer_worktree_in_repo(
@@ -2615,25 +2640,27 @@ mod tests {
     }
 
     #[test]
-    fn handle_engineer_completion_escalates_merge_failures_without_crashing() {
+    fn handle_engineer_completion_escalates_isolated_merge_prep_failures_without_crashing() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "batty-merge-test");
         write_task_file(&repo, 42, "merge-blocked-task");
-
-        std::fs::write(repo.join("journal.rs"), "fn base() {}\n").unwrap();
-        git_ok(&repo, &["add", "journal.rs"]);
-        git_ok(&repo, &["commit", "-m", "add journal"]);
 
         let team_config_dir = repo.join(".batty").join("team_config");
         let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
         setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
 
-        std::fs::write(worktree_dir.join("journal.rs"), "fn engineer() {}\n").unwrap();
-        git_ok(&worktree_dir, &["add", "journal.rs"]);
+        std::fs::write(worktree_dir.join("feature.rs"), "fn engineer() {}\n").unwrap();
+        git_ok(&worktree_dir, &["add", "feature.rs"]);
         git_ok(&worktree_dir, &["commit", "-m", "engineer update"]);
         seed_completion_packet_metadata(&repo, 42, "merge-blocked-task", &worktree_dir);
 
         std::fs::write(repo.join("journal.rs"), "fn dirty_main() {}\n").unwrap();
+        std::fs::create_dir_all(repo.join(".batty")).unwrap();
+        std::fs::write(
+            repo.join(".batty").join("integration-worktrees"),
+            "not a directory\n",
+        )
+        .unwrap();
 
         let members = vec![
             MemberInstance {
@@ -2682,10 +2709,7 @@ mod tests {
         assert!(
             manager_messages[0]
                 .body
-                .contains("would be overwritten by merge")
-                || manager_messages[0]
-                    .body
-                    .contains("Please commit your changes or stash them")
+                .contains("isolated merge path failed")
         );
 
         let engineer_messages =

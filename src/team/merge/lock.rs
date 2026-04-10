@@ -40,9 +40,21 @@ impl Drop for MergeLock {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MergeMode {
+    DirectRoot,
+    IsolatedIntegration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MergeSuccess {
+    pub(crate) mode: MergeMode,
+    pub(crate) reason: Option<String>,
+}
+
 #[derive(Debug)]
 pub(crate) enum MergeOutcome {
-    Success,
+    Success(MergeSuccess),
     RebaseConflict(String),
     MergeFailure(String),
 }

@@ -31,6 +31,28 @@ pub struct AgentWorktree {
     pub path: PathBuf,
 }
 
+#[derive(Debug)]
+pub struct IntegrationWorktree {
+    repo_root: PathBuf,
+    path: PathBuf,
+}
+
+impl IntegrationWorktree {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for IntegrationWorktree {
+    fn drop(&mut self) {
+        let path = self.path.to_string_lossy().into_owned();
+        let _ = run_git(
+            &self.repo_root,
+            ["worktree", "remove", "--force", path.as_str()],
+        );
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MainStartRefSelection {
     pub ref_name: String,
@@ -285,6 +307,42 @@ pub fn prepare_agent_worktrees(
     }
 
     Ok(worktrees)
+}
+
+pub fn prepare_integration_worktree(
+    project_root: &Path,
+    prefix: &str,
+    start_ref: &str,
+) -> Result<IntegrationWorktree> {
+    let repo_root = resolve_repo_root(project_root)?;
+    let scratch_root = repo_root.join(".batty").join("integration-worktrees");
+    std::fs::create_dir_all(&scratch_root).with_context(|| {
+        format!(
+            "failed to create integration worktree directory {}",
+            scratch_root.display()
+        )
+    })?;
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let pid = std::process::id();
+    let path = scratch_root.join(format!("{prefix}{pid}-{stamp}"));
+    let path_s = path.to_string_lossy().into_owned();
+    let add = run_git(
+        &repo_root,
+        ["worktree", "add", "--detach", path_s.as_str(), start_ref],
+    )?;
+    if !add.status.success() {
+        bail!(
+            "failed to add integration worktree at {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&add.stderr).trim()
+        );
+    }
+
+    Ok(IntegrationWorktree { repo_root, path })
 }
 
 fn latest_phase_worktree(project_root: &Path, phase: &str) -> Result<Option<PhaseWorktree>> {
