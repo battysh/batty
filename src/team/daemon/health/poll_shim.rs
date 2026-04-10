@@ -555,6 +555,51 @@ impl TeamDaemon {
                 )?;
             }
 
+            Event::ContextWarning {
+                model,
+                output_bytes,
+                uptime_secs,
+                used_tokens,
+                context_limit_tokens,
+                usage_pct,
+                ..
+            } => {
+                if let Some(handle) = self.shim_handles.get_mut(member_name) {
+                    handle.record_output_bytes(output_bytes);
+                }
+                let model_label = model
+                    .as_deref()
+                    .map(|value| format!(" model={value}"))
+                    .unwrap_or_default();
+                let _ = append_shim_event_log(
+                    &self.config.project_root,
+                    member_name,
+                    &format!(
+                        "<- context_warning usage_pct={usage_pct} used_tokens={used_tokens} limit_tokens={context_limit_tokens}{model_label}"
+                    ),
+                );
+                warn!(
+                    member = member_name,
+                    model = model.as_deref().unwrap_or("unknown"),
+                    output_bytes,
+                    uptime_secs,
+                    used_tokens,
+                    context_limit_tokens,
+                    usage_pct,
+                    "shim reports proactive context pressure"
+                );
+                self.record_orchestrator_action(format!(
+                    "health: proactive context warning for {} at {}% of {} tokens{}",
+                    member_name, usage_pct, context_limit_tokens, model_label
+                ));
+                self.handle_context_pressure_warning(
+                    member_name,
+                    output_bytes,
+                    uptime_secs,
+                    usage_pct,
+                )?;
+            }
+
             Event::Warning { message, idle_secs } => {
                 let _ = append_shim_event_log(
                     &self.config.project_root,
@@ -1627,39 +1672,56 @@ mod tests {
     }
 
     #[test]
-    fn handle_shim_event_context_approaching_logs_proactive_handoff() {
+    fn handle_shim_event_context_warning_uses_policy_path_without_immediate_restart() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "eng-1").unwrap();
 
         let mut daemon = TestDaemonBuilder::new(tmp.path())
             .members(vec![engineer_member("eng-1", Some("manager"), false)])
             .build();
         insert_mock_handle(&mut daemon, "eng-1");
+        daemon.states.insert("eng-1".into(), MemberState::Working);
 
         daemon
             .handle_shim_event(
                 "eng-1",
-                Event::ContextApproaching {
-                    message: "context pressure detected".into(),
-                    input_tokens: 80000,
-                    output_tokens: 20000,
+                Event::ContextWarning {
+                    model: Some("claude-sonnet-4-5".into()),
+                    output_bytes: 64_000,
+                    uptime_secs: 600,
+                    input_tokens: 80_000,
+                    cached_input_tokens: 5_000,
+                    cache_creation_input_tokens: 4_000,
+                    cache_read_input_tokens: 3_000,
+                    output_tokens: 6_000,
+                    reasoning_output_tokens: 2_000,
+                    used_tokens: 100_000,
+                    context_limit_tokens: 200_000,
+                    usage_pct: 80,
                 },
             )
             .unwrap();
 
-        // Verify orchestrator log recorded a proactive handoff action.
-        let log_path = tmp
-            .path()
-            .join(".batty")
-            .join("team_config")
-            .join("orchestrator.log");
-        if log_path.exists() {
-            let log = std::fs::read_to_string(&log_path).unwrap();
-            assert!(
-                log.contains("proactive context handoff"),
-                "orchestrator log should mention proactive handoff"
-            );
-        }
+        assert!(
+            !daemon
+                .intervention_cooldowns
+                .contains_key(&TeamDaemon::context_restart_cooldown_key("eng-1")),
+            "first proactive warning should not restart immediately"
+        );
+        assert!(
+            !daemon.shim_handles["eng-1"].is_terminal(),
+            "warning path should not force the shim into a terminal state"
+        );
+
+        let messages = daemon.pending_delivery_queue.get("eng-1").unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|msg| msg.body.contains("Context pressure is high")),
+            "warning path should still nudge through the normal policy flow"
+        );
     }
 
     #[test]

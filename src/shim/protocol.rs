@@ -90,10 +90,19 @@ pub enum Event {
         message: String,
         last_lines: String,
     },
-    ContextApproaching {
-        message: String,
+    ContextWarning {
+        model: Option<String>,
+        output_bytes: u64,
+        uptime_secs: u64,
         input_tokens: u64,
+        cached_input_tokens: u64,
+        cache_creation_input_tokens: u64,
+        cache_read_input_tokens: u64,
         output_tokens: u64,
+        reasoning_output_tokens: u64,
+        used_tokens: u64,
+        context_limit_tokens: u64,
+        usage_pct: u8,
     },
     ScreenCapture {
         content: String,
@@ -552,6 +561,60 @@ mod tests {
                 assert_eq!(content, "screen data");
                 assert_eq!(cursor_row, 5);
                 assert_eq!(cursor_col, 10);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_event_context_warning() {
+        let (a, b) = socketpair().unwrap();
+        let mut sender = Channel::new(a);
+        let mut receiver = Channel::new(b);
+
+        let evt = Event::ContextWarning {
+            model: Some("claude-sonnet-4-5".into()),
+            output_bytes: 12_345,
+            uptime_secs: 61,
+            input_tokens: 80_000,
+            cached_input_tokens: 5_000,
+            cache_creation_input_tokens: 4_000,
+            cache_read_input_tokens: 3_000,
+            output_tokens: 6_000,
+            reasoning_output_tokens: 2_000,
+            used_tokens: 100_000,
+            context_limit_tokens: 200_000,
+            usage_pct: 50,
+        };
+        sender.send(&evt).unwrap();
+        let received: Event = receiver.recv::<Event>().unwrap().unwrap();
+        match received {
+            Event::ContextWarning {
+                model,
+                output_bytes,
+                uptime_secs,
+                input_tokens,
+                cached_input_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                output_tokens,
+                reasoning_output_tokens,
+                used_tokens,
+                context_limit_tokens,
+                usage_pct,
+            } => {
+                assert_eq!(model.as_deref(), Some("claude-sonnet-4-5"));
+                assert_eq!(output_bytes, 12_345);
+                assert_eq!(uptime_secs, 61);
+                assert_eq!(input_tokens, 80_000);
+                assert_eq!(cached_input_tokens, 5_000);
+                assert_eq!(cache_creation_input_tokens, 4_000);
+                assert_eq!(cache_read_input_tokens, 3_000);
+                assert_eq!(output_tokens, 6_000);
+                assert_eq!(reasoning_output_tokens, 2_000);
+                assert_eq!(used_tokens, 100_000);
+                assert_eq!(context_limit_tokens, 200_000);
+                assert_eq!(usage_pct, 50);
             }
             _ => panic!("wrong variant"),
         }

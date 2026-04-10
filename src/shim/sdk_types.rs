@@ -124,6 +124,14 @@ pub struct SdkOutput {
     #[serde(default)]
     pub result: Option<String>,
 
+    /// For `result` messages: usage counters for the completed turn.
+    #[serde(default)]
+    pub usage: Option<Value>,
+
+    /// For `result` messages: model-specific metadata.
+    #[serde(rename = "modelUsage", default)]
+    pub model_usage: Option<Value>,
+
     /// For `result` messages: number of API turns taken.
     #[serde(default)]
     pub num_turns: Option<u32>,
@@ -149,21 +157,25 @@ pub struct SdkOutput {
     pub request: Option<Value>,
 }
 
-/// Token usage reported in `result` messages.
-#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
-pub struct SdkUsage {
-    #[serde(default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SdkTokenUsage {
     pub input_tokens: u64,
-    #[serde(default)]
     pub cached_input_tokens: u64,
-    #[serde(default)]
     pub cache_creation_input_tokens: u64,
-    #[serde(default)]
     pub cache_read_input_tokens: u64,
-    #[serde(default)]
     pub output_tokens: u64,
-    #[serde(default)]
     pub reasoning_output_tokens: u64,
+}
+
+impl SdkTokenUsage {
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens
+            + self.cached_input_tokens
+            + self.cache_creation_input_tokens
+            + self.cache_read_input_tokens
+            + self.output_tokens
+            + self.reasoning_output_tokens
+    }
 }
 
 impl SdkOutput {
@@ -191,22 +203,35 @@ impl SdkOutput {
             .and_then(|message| message.get("model"))
             .and_then(|value| value.as_str())
             .map(String::from)
+            .or_else(|| {
+                self.model_usage
+                    .as_ref()
+                    .and_then(|value| value.get("model"))
+                    .and_then(|value| value.as_str())
+                    .map(String::from)
+            })
     }
 
-    pub fn usage_total_tokens(&self) -> u64 {
-        self.usage.as_ref().map(SdkUsage::total_tokens).unwrap_or(0)
+    pub fn token_usage(&self) -> Option<SdkTokenUsage> {
+        let usage = self.usage.as_ref()?;
+        let cache_creation = usage.get("cache_creation");
+        let cache_creation_classified =
+            json_u64(cache_creation.and_then(|value| value.get("ephemeral_5m_input_tokens")))
+                + json_u64(cache_creation.and_then(|value| value.get("ephemeral_1h_input_tokens")));
+        Some(SdkTokenUsage {
+            input_tokens: json_u64(usage.get("input_tokens")),
+            cached_input_tokens: json_u64(usage.get("cached_input_tokens")),
+            cache_creation_input_tokens: json_u64(usage.get("cache_creation_input_tokens"))
+                .max(cache_creation_classified),
+            cache_read_input_tokens: json_u64(usage.get("cache_read_input_tokens")),
+            output_tokens: json_u64(usage.get("output_tokens")),
+            reasoning_output_tokens: json_u64(usage.get("reasoning_output_tokens")),
+        })
     }
 }
 
-impl SdkUsage {
-    pub fn total_tokens(&self) -> u64 {
-        self.input_tokens
-            + self.cached_input_tokens
-            + self.cache_creation_input_tokens
-            + self.cache_read_input_tokens
-            + self.output_tokens
-            + self.reasoning_output_tokens
-    }
+fn json_u64(value: Option<&Value>) -> u64 {
+    value.and_then(Value::as_u64).unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +326,36 @@ mod tests {
         assert_eq!(msg.msg_type, "assistant");
         assert_eq!(msg.session_id.as_deref(), Some("abc"));
         assert!(msg.message.is_some());
+    }
+
+    #[test]
+    fn parse_result_token_usage_includes_cache_fields() {
+        let line = r#"{"type":"result","usage":{"input_tokens":10,"cached_input_tokens":4,"cache_creation_input_tokens":3,"cache_read_input_tokens":2,"output_tokens":5,"reasoning_output_tokens":1,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":11}}}"#;
+        let msg: SdkOutput = serde_json::from_str(line).unwrap();
+        let usage = msg.token_usage().unwrap();
+        assert_eq!(
+            usage,
+            SdkTokenUsage {
+                input_tokens: 10,
+                cached_input_tokens: 4,
+                cache_creation_input_tokens: 18,
+                cache_read_input_tokens: 2,
+                output_tokens: 5,
+                reasoning_output_tokens: 1,
+            }
+        );
+        assert_eq!(usage.total_tokens(), 40);
+    }
+
+    #[test]
+    fn model_name_prefers_message_then_model_usage() {
+        let assistant_line = r#"{"type":"assistant","message":{"model":"claude-sonnet-4-5","content":[{"type":"text","text":"hello"}]}}"#;
+        let assistant: SdkOutput = serde_json::from_str(assistant_line).unwrap();
+        assert_eq!(assistant.model_name().as_deref(), Some("claude-sonnet-4-5"));
+
+        let result_line = r#"{"type":"result","modelUsage":{"model":"claude-opus-4-1"}}"#;
+        let result: SdkOutput = serde_json::from_str(result_line).unwrap();
+        assert_eq!(result.model_name().as_deref(), Some("claude-opus-4-1"));
     }
 
     #[test]

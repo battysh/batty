@@ -81,13 +81,32 @@ impl TeamDaemon {
         Ok(())
     }
 
-    pub(super) fn handle_context_pressure_restart(&mut self, member_name: &str) -> Result<()> {
+    pub(super) fn handle_context_pressure_restart(
+        &mut self,
+        member_name: &str,
+        task_id: Option<u32>,
+    ) -> Result<bool> {
+        let restart_cooldown_key = Self::context_restart_cooldown_key(member_name);
+        let restart_on_cooldown = self
+            .intervention_cooldowns
+            .get(&restart_cooldown_key)
+            .is_some_and(|last| last.elapsed() < CONTEXT_RESTART_COOLDOWN);
+        if restart_on_cooldown {
+            info!(
+                member = %member_name,
+                task_id,
+                "context pressure restart suppressed by cooldown"
+            );
+            return Ok(false);
+        }
+
         self.restart_member_with_task_context(member_name, "context pressure")?;
-        self.intervention_cooldowns.insert(
-            Self::context_restart_cooldown_key(member_name),
-            Instant::now(),
-        );
-        Ok(())
+        self.intervention_cooldowns
+            .insert(restart_cooldown_key, Instant::now());
+        if let Some(task_id) = task_id {
+            self.record_agent_restarted(member_name, task_id.to_string(), "context_pressure", 1);
+        }
+        Ok(true)
     }
 
     pub(crate) fn restart_member_with_task_context(
@@ -624,5 +643,24 @@ mod tests {
             pending.is_empty(),
             "escalation should be suppressed by cooldown"
         );
+    }
+
+    #[test]
+    fn handle_context_pressure_restart_cooldown_suppresses_repeat_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member_name = "eng-1";
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![engineer_member(member_name, Some("manager"), false)])
+            .build();
+        daemon.intervention_cooldowns.insert(
+            TeamDaemon::context_restart_cooldown_key(member_name),
+            Instant::now(),
+        );
+
+        let restarted = daemon
+            .handle_context_pressure_restart(member_name, Some(42))
+            .unwrap();
+
+        assert!(!restarted, "cooldown should suppress the proactive restart");
     }
 }
