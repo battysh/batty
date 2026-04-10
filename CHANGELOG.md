@@ -2,6 +2,24 @@
 
 All notable changes to Batty are documented here.
 
+## 0.10.7 — 2026-04-10
+
+Package completed engineer work for #622 and #624 that was sitting in the
+review queue without an owner. Both branches were clean (merge-tree dry
+run showed zero conflicts). Cherry-picked into main and released.
+
+- **Preserve blocked task visibility for legacy frontmatter (#622)** —
+  auto-repair path for malformed blocked task files keeps the board scan
+  able to see live work even when older task frontmatter formats are
+  encountered. Includes legacy-friendly normalization of borrowed string
+  references during the repair pass. (`src/team/task_cmd.rs`,
+  `src/team/daemon/health/preflight.rs`, `src/team/status.rs`)
+- **Expose merge path health for review queue observability (#624)** —
+  consolidates review queue classification into the telemetry layer so the
+  manager and status surfaces share a single source of truth for review
+  health. Removes duplicated review-classification logic from
+  `src/team/review.rs`. (`src/team/telemetry_db.rs`, `src/team/status.rs`)
+
 ## 0.10.6 — 2026-04-10
 
 Proactive deps/build cleanup based on shared-target size, not just disk
