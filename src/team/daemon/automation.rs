@@ -88,16 +88,20 @@ fn claim_time_held_secs(task: &crate::task::Task, now: DateTime<Utc>) -> Option<
         })
 }
 
-fn reset_claimed_worktree_to_base(work_dir: &std::path::Path, base_branch: &str) -> Result<()> {
-    crate::team::git_cmd::run_git(work_dir, &["reset", "--hard"])
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    crate::team::git_cmd::run_git(work_dir, &["clean", "-fd"])
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    crate::team::git_cmd::checkout_new_branch(work_dir, base_branch, "main")
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    crate::team::git_cmd::run_git(work_dir, &["reset", "--hard", "main"])
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    Ok(())
+fn reset_claimed_worktree_to_base(
+    work_dir: &std::path::Path,
+    base_branch: &str,
+) -> Result<crate::worktree::WorktreeResetReason> {
+    let branch = current_worktree_branch(work_dir).unwrap_or_else(|_| base_branch.to_string());
+    let commit_message = format!("wip: auto-save before worktree reset [{branch}]");
+    crate::worktree::reset_worktree_to_base_with_options(
+        work_dir,
+        base_branch,
+        &commit_message,
+        Duration::from_secs(5),
+        crate::worktree::PreserveFailureMode::SkipReset,
+    )
+    .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
 fn owned_task_status_rank(status: &str) -> u8 {
@@ -380,48 +384,52 @@ impl TeamDaemon {
                 .intervention_cooldowns
                 .get(&progress_key)
                 .is_none_or(|last| last.elapsed() >= progress_interval);
+            let Some(expires_at) = task.claim_expires_at.as_deref().and_then(parse_rfc3339_utc)
+            else {
+                continue;
+            };
 
             if should_check_progress
                 && let Some(progress_type) =
                     task_claim_progress_type(task, &work_dir, current_output_bytes)
             {
-                let extensions = task.claim_extensions.unwrap_or(0).saturating_add(1).min(
-                    self.config
-                        .team_config
-                        .workflow_policy
-                        .claim_ttl
-                        .max_extensions,
-                );
-                crate::team::task_cmd::refresh_task_claim_progress(
-                    &self.board_dir(),
-                    task.id,
-                    ttl_secs,
-                    now,
-                    current_output_bytes,
-                    extensions,
-                )?;
-                self.emit_event(TeamEvent::task_claim_progress(
-                    engineer,
-                    &task.id.to_string(),
-                    progress_type,
-                ));
-                self.emit_event(TeamEvent::task_claim_extended(
-                    engineer,
-                    &task.id.to_string(),
-                    &(now + chrono::Duration::seconds(ttl_secs as i64)).to_rfc3339(),
-                ));
-                self.intervention_cooldowns
-                    .insert(progress_key, Instant::now());
-                continue;
+                if expires_at <= now && progress_type == "dirty_files" {
+                    self.intervention_cooldowns
+                        .insert(progress_key.clone(), Instant::now());
+                } else {
+                    let extensions = task.claim_extensions.unwrap_or(0).saturating_add(1).min(
+                        self.config
+                            .team_config
+                            .workflow_policy
+                            .claim_ttl
+                            .max_extensions,
+                    );
+                    crate::team::task_cmd::refresh_task_claim_progress(
+                        &self.board_dir(),
+                        task.id,
+                        ttl_secs,
+                        now,
+                        current_output_bytes,
+                        extensions,
+                    )?;
+                    self.emit_event(TeamEvent::task_claim_progress(
+                        engineer,
+                        &task.id.to_string(),
+                        progress_type,
+                    ));
+                    self.emit_event(TeamEvent::task_claim_extended(
+                        engineer,
+                        &task.id.to_string(),
+                        &(now + chrono::Duration::seconds(ttl_secs as i64)).to_rfc3339(),
+                    ));
+                    self.intervention_cooldowns
+                        .insert(progress_key.clone(), Instant::now());
+                    continue;
+                }
             }
 
             self.intervention_cooldowns
                 .insert(progress_key, Instant::now());
-
-            let Some(expires_at) = task.claim_expires_at.as_deref().and_then(parse_rfc3339_utc)
-            else {
-                continue;
-            };
 
             let expires_in_secs = expires_at.signed_duration_since(now).num_seconds().max(0) as u64;
             if expires_in_secs
@@ -455,17 +463,34 @@ impl TeamDaemon {
             }
 
             let time_held_secs = claim_time_held_secs(task, now);
-            let _ = self.preserve_member_worktree(
-                engineer,
-                &format!("wip: auto-save before claim reclaim [{engineer}]"),
-            );
             if use_worktrees {
                 let base_branch = engineer_base_branch_name(engineer);
                 match reset_claimed_worktree_to_base(&work_dir, &base_branch) {
-                    Ok(()) => self.record_orchestrator_action(format!(
-                        "claim ttl: reset {} worktree to {} before reclaiming task #{}",
-                        engineer, base_branch, task.id
-                    )),
+                    Ok(reason) if reason.reset_performed() => {
+                        self.record_orchestrator_action(format!(
+                            "claim ttl: reset {} worktree to {} before reclaiming task #{} ({})",
+                            engineer,
+                            base_branch,
+                            task.id,
+                            reason.as_str()
+                        ))
+                    }
+                    Ok(reason) => {
+                        warn!(
+                            engineer = %engineer,
+                            task_id = task.id,
+                            worktree = %work_dir.display(),
+                            reset_reason = reason.as_str(),
+                            "claim ttl: skipped engineer worktree reset before reclaim"
+                        );
+                        self.record_orchestrator_action(format!(
+                            "claim ttl: skipped reclaim reset for {} task #{} ({})",
+                            engineer,
+                            task.id,
+                            reason.as_str()
+                        ));
+                        continue;
+                    }
                     Err(error) => warn!(
                         engineer = %engineer,
                         task_id = task.id,
@@ -544,35 +569,28 @@ impl TeamDaemon {
         if !worktree_dir.exists() {
             return;
         }
-        if !is_worktree_safe_to_mutate(&worktree_dir).unwrap_or(false) {
-            warn!(
-                engineer = %engineer,
-                branch = %current_branch,
-                reason,
-                "state reconciliation: skipping safe-branch reset because worktree is not safe to mutate"
-            );
-            return;
-        }
 
-        let _ = self.preserve_member_worktree(
-            engineer,
-            &format!("wip: auto-save before reconciliation reset [{engineer}]"),
-        );
         match reset_claimed_worktree_to_base(&worktree_dir, &base_branch) {
-            Ok(()) => {
+            Ok(reset_reason) if reset_reason.reset_performed() => {
                 info!(
                     engineer = %engineer,
                     stale_branch = %current_branch,
                     reset_to = %base_branch,
+                    reset_reason = reset_reason.as_str(),
                     reason,
                     "state reconciliation reset engineer worktree to safe branch"
                 );
                 self.emit_event(TeamEvent::worktree_reconciled(engineer, current_branch));
                 self.record_state_reconciliation(Some(engineer), None, "branch_reset");
                 self.record_orchestrator_action(format!(
-                    "state reconciliation: reset {engineer} from stale branch '{current_branch}' to '{base_branch}' ({reason})"
+                    "state reconciliation: reset {engineer} from stale branch '{current_branch}' to '{base_branch}' ({reason}, {})",
+                    reset_reason.as_str()
                 ));
             }
+            Ok(reset_reason) => self.record_orchestrator_action(format!(
+                "state reconciliation: skipped resetting {engineer} from stale branch '{current_branch}' to '{base_branch}' ({reason}, {})",
+                reset_reason.as_str()
+            )),
             Err(error) => warn!(
                 engineer = %engineer,
                 branch = %current_branch,
@@ -3430,6 +3448,8 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         let base_branch = engineer_base_branch_name("eng-1");
         setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
         git_ok(&worktree_dir, &["checkout", "-b", "eng-1/41"]);
+        std::fs::write(worktree_dir.join("scratch.txt"), "stale dirty work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "scratch.txt"]);
 
         write_owned_task_file_with_context(
             &repo,
@@ -5028,6 +5048,13 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         let base_branch = engineer_base_branch_name("eng-1");
         setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
         git_ok(&worktree_dir, &["checkout", "-b", "eng-1/42"]);
+        std::fs::write(worktree_dir.join("tracked.txt"), "tracked reclaim work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "tracked.txt"]);
+        std::fs::write(
+            worktree_dir.join("untracked.txt"),
+            "untracked reclaim work\n",
+        )
+        .unwrap();
 
         let task_path = repo.join(".batty/team_config/board/tasks/042-ttl-reset.md");
         let now = chrono::Utc::now();
@@ -5059,6 +5086,14 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         let task = crate::task::Task::from_file(&task_path).unwrap();
         assert_eq!(task.status, "todo");
         assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), base_branch);
+        assert_eq!(
+            git_stdout(&repo, &["show", "eng-1/42:tracked.txt"]),
+            "tracked reclaim work"
+        );
+        assert_eq!(
+            git_stdout(&repo, &["show", "eng-1/42:untracked.txt"]),
+            "untracked reclaim work"
+        );
     }
 
     #[test]

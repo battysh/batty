@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
@@ -41,6 +42,7 @@ pub struct DispatchBranchReset {
     pub changed: bool,
     pub start_ref: String,
     pub fallback_reason: Option<String>,
+    pub reset_reason: Option<WorktreeResetReason>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +57,35 @@ pub enum CleanupDecision {
     Cleaned,
     KeptForReview,
     KeptForFailure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreserveFailureMode {
+    SkipReset,
+    ForceReset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeResetReason {
+    PreservedBeforeReset,
+    CleanReset,
+    PreserveFailedResetSkipped,
+    PreserveFailedForceReset,
+}
+
+impl WorktreeResetReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PreservedBeforeReset => "preserved_before_reset",
+            Self::CleanReset => "clean_reset",
+            Self::PreserveFailedResetSkipped => "preserve_failed_reset_skipped",
+            Self::PreserveFailedForceReset => "preserve_failed_force_reset",
+        }
+    }
+
+    pub fn reset_performed(self) -> bool {
+        self != Self::PreserveFailedResetSkipped
+    }
 }
 
 impl PhaseWorktree {
@@ -775,16 +806,32 @@ pub fn ensure_worktree_branch_for_dispatch(
             changed: false,
             start_ref: current_branch,
             fallback_reason: None,
+            reset_reason: None,
         });
     }
 
     let selection = preferred_main_start_ref(worktree_path)?;
-    let _ = run_git(worktree_path, ["merge", "--abort"]);
-    let _ = run_git(worktree_path, ["checkout", "--", "."]);
-    let _ = run_git(
+    let commit_message = format!("wip: auto-save before worktree reset [{current_branch}]");
+    let reason = prepare_worktree_for_reset(
         worktree_path,
-        ["clean", "-fd", "--exclude=.batty/", "--exclude=.cargo/"],
+        &commit_message,
+        Duration::from_secs(5),
+        PreserveFailureMode::SkipReset,
+    )?;
+    info!(
+        worktree = %worktree_path.display(),
+        expected_branch,
+        reset_reason = reason.as_str(),
+        "prepared worktree for dispatch branch reset"
     );
+    if !reason.reset_performed() {
+        return Ok(DispatchBranchReset {
+            changed: false,
+            start_ref: selection.ref_name,
+            fallback_reason: selection.fallback_reason,
+            reset_reason: Some(reason),
+        });
+    }
 
     let checkout = run_git(
         worktree_path,
@@ -809,12 +856,53 @@ pub fn ensure_worktree_branch_for_dispatch(
         changed: true,
         start_ref: selection.ref_name,
         fallback_reason: selection.fallback_reason,
+        reset_reason: Some(reason),
     })
 }
 
 /// Reset a worktree to point at its base branch. Used to clean up after a
 /// cherry-pick merge has made the task branch redundant.
 pub fn reset_worktree_to_base(worktree_path: &Path, base_branch: &str) -> Result<()> {
+    let branch = git_current_branch(worktree_path).unwrap_or_else(|_| base_branch.to_string());
+    let commit_message = format!("wip: auto-save before worktree reset [{branch}]");
+    reset_worktree_to_base_with_options(
+        worktree_path,
+        base_branch,
+        &commit_message,
+        Duration::from_secs(5),
+        PreserveFailureMode::SkipReset,
+    )?;
+    Ok(())
+}
+
+pub fn reset_worktree_to_base_with_options(
+    worktree_path: &Path,
+    base_branch: &str,
+    commit_message: &str,
+    timeout: Duration,
+    preserve_failure_mode: PreserveFailureMode,
+) -> Result<WorktreeResetReason> {
+    let current_branch =
+        git_current_branch(worktree_path).unwrap_or_else(|_| base_branch.to_string());
+    let reason = prepare_worktree_for_reset(
+        worktree_path,
+        commit_message,
+        timeout,
+        preserve_failure_mode,
+    )?;
+    if !reason.reset_performed() {
+        return Ok(reason);
+    }
+    if reason == WorktreeResetReason::PreservedBeforeReset && current_branch == base_branch {
+        let archived_branch = archive_preserved_base_branch_head(worktree_path, base_branch)?;
+        info!(
+            worktree = %worktree_path.display(),
+            base_branch,
+            archived_branch,
+            "archived preserved base-branch work before reset"
+        );
+    }
+
     let checkout = run_git(worktree_path, ["checkout", base_branch])?;
     if !checkout.status.success() {
         bail!(
@@ -832,7 +920,85 @@ pub fn reset_worktree_to_base(worktree_path: &Path, base_branch: &str) -> Result
             String::from_utf8_lossy(&reset.stderr).trim()
         );
     }
-    Ok(())
+    Ok(reason)
+}
+
+pub(crate) fn prepare_worktree_for_reset(
+    worktree_path: &Path,
+    commit_message: &str,
+    timeout: Duration,
+    preserve_failure_mode: PreserveFailureMode,
+) -> Result<WorktreeResetReason> {
+    if !worktree_path.exists() || !crate::team::task_loop::worktree_has_user_changes(worktree_path)?
+    {
+        let _ = run_git(worktree_path, ["merge", "--abort"]);
+        return Ok(WorktreeResetReason::CleanReset);
+    }
+
+    match crate::team::task_loop::preserve_worktree_with_commit(
+        worktree_path,
+        commit_message,
+        timeout,
+    ) {
+        Ok(true) => {
+            let _ = run_git(worktree_path, ["merge", "--abort"]);
+            return Ok(WorktreeResetReason::PreservedBeforeReset);
+        }
+        Ok(false) => {
+            let _ = run_git(worktree_path, ["merge", "--abort"]);
+            return Ok(WorktreeResetReason::CleanReset);
+        }
+        Err(error) => {
+            warn!(
+                worktree = %worktree_path.display(),
+                error = %error,
+                "failed to preserve worktree before reset"
+            );
+        }
+    }
+
+    if preserve_failure_mode == PreserveFailureMode::SkipReset {
+        return Ok(WorktreeResetReason::PreserveFailedResetSkipped);
+    }
+
+    let _ = run_git(worktree_path, ["merge", "--abort"]);
+    let reset = run_git(worktree_path, ["reset", "--hard"])?;
+    if !reset.status.success() {
+        bail!(
+            "failed to force-reset worktree {}: {}",
+            worktree_path.display(),
+            String::from_utf8_lossy(&reset.stderr).trim()
+        );
+    }
+    let clean = run_git(worktree_path, ["clean", "-fd", "--exclude=.batty/"])?;
+    if !clean.status.success() {
+        bail!(
+            "failed to clean worktree {}: {}",
+            worktree_path.display(),
+            String::from_utf8_lossy(&clean.stderr).trim()
+        );
+    }
+
+    Ok(WorktreeResetReason::PreserveFailedForceReset)
+}
+
+fn archive_preserved_base_branch_head(worktree_path: &Path, base_branch: &str) -> Result<String> {
+    let slug = base_branch.replace('/', "-");
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let branch = format!("preserved/{slug}-{stamp}");
+    let create = run_git(worktree_path, ["branch", branch.as_str(), "HEAD"])?;
+    if !create.status.success() {
+        bail!(
+            "failed to archive preserved work on '{}' in {}: {}",
+            branch,
+            worktree_path.display(),
+            String::from_utf8_lossy(&create.stderr).trim()
+        );
+    }
+    Ok(branch)
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
@@ -1379,10 +1545,18 @@ mod tests {
         // Create a base branch for the worktree to reset to.
         git(tmp.path(), &["branch", "eng-main/test-eng"]);
 
-        reset_worktree_to_base(&wt_path, "eng-main/test-eng").unwrap();
+        let reason = reset_worktree_to_base_with_options(
+            &wt_path,
+            "eng-main/test-eng",
+            "wip: auto-save before worktree reset [feature-reset]",
+            Duration::from_secs(5),
+            PreserveFailureMode::SkipReset,
+        )
+        .unwrap();
 
         let branch_after = git_current_branch(&wt_path).unwrap();
         assert_eq!(branch_after, "eng-main/test-eng");
+        assert_eq!(reason, WorktreeResetReason::CleanReset);
 
         // Cleanup
         let _ = run_git(
@@ -1417,6 +1591,7 @@ mod tests {
         let after = run_git(&wt_path, ["rev-parse", "HEAD"]).unwrap().stdout;
 
         assert!(!reset.changed);
+        assert!(reset.reset_reason.is_none());
         assert_eq!(before, after);
 
         let _ = run_git(
@@ -1453,6 +1628,7 @@ mod tests {
         let main = run_git(tmp.path(), ["rev-parse", "main"]).unwrap().stdout;
 
         assert!(reset.changed);
+        assert_eq!(reset.reset_reason, Some(WorktreeResetReason::CleanReset));
         assert_eq!(git_current_branch(&wt_path).unwrap(), "eng-1-1-502");
         assert_eq!(head, main);
 
@@ -1564,15 +1740,34 @@ mod tests {
             ],
         );
         fs::write(wt_path.join("scratch.txt"), "dirty\n").unwrap();
+        git(&wt_path, &["add", "scratch.txt"]);
 
-        ensure_worktree_branch_for_dispatch(&wt_path, "eng-1-1-502").unwrap();
+        let reset = ensure_worktree_branch_for_dispatch(&wt_path, "eng-1-1-502").unwrap();
 
+        assert!(reset.changed);
+        assert_eq!(
+            reset.reset_reason,
+            Some(WorktreeResetReason::PreservedBeforeReset)
+        );
         assert_eq!(git_current_branch(&wt_path).unwrap(), "eng-1-1-502");
         assert!(!wt_path.join("scratch.txt").exists());
         assert!(
             String::from_utf8_lossy(&run_git(&wt_path, ["status", "--porcelain"]).unwrap().stdout)
                 .trim()
                 .is_empty()
+        );
+        let preserved = run_git(tmp.path(), ["show", "eng-1-1-500:scratch.txt"]).unwrap();
+        assert!(
+            preserved.status.success(),
+            "dirty file should be preserved on the previous branch"
+        );
+        assert_eq!(String::from_utf8_lossy(&preserved.stdout), "dirty\n");
+        let old_branch_log =
+            run_git(tmp.path(), ["log", "--oneline", "-1", "eng-1-1-500"]).unwrap();
+        assert!(
+            String::from_utf8_lossy(&old_branch_log.stdout)
+                .contains("wip: auto-save before worktree reset"),
+            "previous branch should record an auto-save commit"
         );
 
         let _ = run_git(
@@ -1581,5 +1776,75 @@ mod tests {
         );
         let _ = run_git(tmp.path(), ["branch", "-D", "eng-1-1-500"]);
         let _ = run_git(tmp.path(), ["branch", "-D", "eng-1-1-502"]);
+    }
+
+    #[test]
+    fn reset_worktree_to_base_archives_dirty_base_branch_before_reset() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        let wt_path = tmp.path().join("wt");
+        git(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-main/test-eng",
+                wt_path.to_str().unwrap(),
+                "main",
+            ],
+        );
+        fs::write(wt_path.join("scratch.txt"), "dirty\n").unwrap();
+        git(&wt_path, &["add", "scratch.txt"]);
+
+        let reason = reset_worktree_to_base_with_options(
+            &wt_path,
+            "eng-main/test-eng",
+            "wip: auto-save before worktree reset [eng-main/test-eng]",
+            Duration::from_secs(5),
+            PreserveFailureMode::SkipReset,
+        )
+        .unwrap();
+
+        assert_eq!(reason, WorktreeResetReason::PreservedBeforeReset);
+        assert_eq!(git_current_branch(&wt_path).unwrap(), "eng-main/test-eng");
+        assert!(!wt_path.join("scratch.txt").exists());
+        let preserved_branch = String::from_utf8_lossy(
+            &run_git(
+                tmp.path(),
+                [
+                    "for-each-ref",
+                    "--format=%(refname:short)",
+                    "refs/heads/preserved/",
+                ],
+            )
+            .unwrap()
+            .stdout,
+        )
+        .trim()
+        .to_string();
+        assert!(
+            preserved_branch.starts_with("preserved/eng-main-test-eng-"),
+            "expected archived preserved branch, got: {preserved_branch}"
+        );
+        let preserved_file = run_git(
+            tmp.path(),
+            ["show", &format!("{preserved_branch}:scratch.txt")],
+        )
+        .unwrap();
+        assert!(
+            preserved_file.status.success(),
+            "dirty file should be preserved on archived branch"
+        );
+        assert_eq!(String::from_utf8_lossy(&preserved_file.stdout), "dirty\n");
+
+        let _ = run_git(
+            tmp.path(),
+            ["worktree", "remove", "--force", wt_path.to_str().unwrap()],
+        );
+        let _ = run_git(tmp.path(), ["branch", "-D", "eng-main/test-eng"]);
+        let _ = run_git(tmp.path(), ["branch", "-D", preserved_branch.as_str()]);
     }
 }

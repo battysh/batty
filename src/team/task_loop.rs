@@ -1053,18 +1053,19 @@ pub(crate) fn preserve_worktree_with_commit(
 }
 
 fn auto_clean_worktree(worktree_dir: &Path) -> Result<()> {
-    // Try commit first — preserves work in git history (no stash accumulation).
-    if auto_commit_before_reset(worktree_dir) {
-        return Ok(());
-    }
-
-    // Commit failed — fall back to force clean.
-    warn!(
+    let branch = retry_git(|| git_cmd::rev_parse_branch(worktree_dir)).unwrap_or_default();
+    let message = format!("wip: auto-save before worktree reset [{branch}]");
+    let reason = crate::worktree::prepare_worktree_for_reset(
+        worktree_dir,
+        &message,
+        Duration::from_secs(5),
+        crate::worktree::PreserveFailureMode::ForceReset,
+    )?;
+    info!(
         worktree = %worktree_dir.display(),
-        "force-cleaning engineer worktree"
+        reset_reason = reason.as_str(),
+        "prepared engineer worktree for reset"
     );
-    let _ = retry_git(|| git_cmd::run_git(worktree_dir, &["checkout", "--", "."]));
-    let _ = retry_git(|| git_cmd::run_git(worktree_dir, &["clean", "-fd", "--exclude=.batty/"]));
 
     if worktree_has_user_changes(worktree_dir)? {
         bail!(
@@ -2727,8 +2728,11 @@ mod tests {
         )
         .unwrap();
 
-        // Create uncommitted changes.
-        std::fs::write(wt_dir.join("work.txt"), "some work\n").unwrap();
+        // Create both tracked and untracked changes so the shared reset helper
+        // preserves the full dirty worktree before cleanup.
+        std::fs::write(wt_dir.join("tracked.txt"), "tracked work\n").unwrap();
+        git_ok(&wt_dir, &["add", "tracked.txt"]);
+        std::fs::write(wt_dir.join("untracked.txt"), "untracked work\n").unwrap();
 
         auto_clean_worktree(&wt_dir).unwrap();
 
@@ -2746,6 +2750,14 @@ mod tests {
         assert!(
             log.contains("wip: auto-save"),
             "should have wip commit, got: {log}"
+        );
+        assert_eq!(
+            git_stdout(&wt_dir, &["show", "HEAD:tracked.txt"]),
+            "tracked work"
+        );
+        assert_eq!(
+            git_stdout(&wt_dir, &["show", "HEAD:untracked.txt"]),
+            "untracked work"
         );
     }
 

@@ -636,7 +636,7 @@ overall_parity: 100%
         let status = git_stdout(&worktree_dir, &["status", "--porcelain"]);
         let tracked_changes: Vec<&str> = status
             .lines()
-            .filter(|line| !line.starts_with("?? .batty/"))
+            .filter(|line| !line.starts_with("?? .batty/") && !line.starts_with("?? .cargo/"))
             .collect();
         assert!(
             tracked_changes.is_empty(),
@@ -997,7 +997,7 @@ overall_parity: 100%
         let status = git_stdout(&worktree_dir, &["status", "--porcelain"]);
         let tracked_changes: Vec<&str> = status
             .lines()
-            .filter(|line| !line.starts_with("?? .batty/"))
+            .filter(|line| !line.starts_with("?? .batty/") && !line.starts_with("?? .cargo/"))
             .collect();
         assert!(
             tracked_changes.is_empty(),
