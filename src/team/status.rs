@@ -15,6 +15,7 @@ use super::daemon_mgmt::{PersistedWatchdogState, watchdog_state_path};
 use super::events;
 use super::hierarchy::MemberInstance;
 use super::inbox;
+use super::review::ReviewQueueState;
 use super::standup::MemberState;
 use super::{
     TRIAGE_RESULT_FRESHNESS_SECONDS, daemon_state_path, now_unix, pause_marker_path,
@@ -58,6 +59,7 @@ pub(crate) struct TriageBacklogState {
 pub(crate) struct OwnedTaskBuckets {
     pub(crate) active: Vec<u32>,
     pub(crate) review: Vec<u32>,
+    pub(crate) stale_review: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -396,6 +398,7 @@ pub(crate) fn build_team_status_rows(
             };
 
             let review_backlog = owned_tasks.review.len();
+            let stale_review_backlog = owned_tasks.stale_review.len();
             let state = if session_running && state == "idle" && review_backlog > 0 {
                 "reviewing".to_string()
             } else if session_running && state == "idle" && triage_backlog > 0 {
@@ -411,6 +414,7 @@ pub(crate) fn build_team_status_rows(
                 health.stall_summary.clone(),
                 triage_backlog,
                 review_backlog,
+                stale_review_backlog,
             );
             let health_summary =
                 format_agent_health_summary_for_role(&health, Some(member.role_type));
@@ -1076,9 +1080,12 @@ fn merge_status_signal(
     stall_signal: Option<String>,
     triage_backlog: usize,
     review_backlog: usize,
+    stale_review_backlog: usize,
 ) -> Option<String> {
     let triage_signal = (triage_backlog > 0).then(|| format!("needs triage ({triage_backlog})"));
     let review_signal = (review_backlog > 0).then(|| format!("needs review ({review_backlog})"));
+    let stale_review_signal =
+        (stale_review_backlog > 0).then(|| format!("stale review ({stale_review_backlog})"));
     let mut signals = Vec::new();
     if let Some(existing) = signal {
         signals.push(existing);
@@ -1094,6 +1101,9 @@ fn merge_status_signal(
     }
     if let Some(review) = review_signal {
         signals.push(review);
+    }
+    if let Some(stale_review) = stale_review_signal {
+        signals.push(stale_review);
     }
     if signals.is_empty() {
         None
@@ -1307,37 +1317,41 @@ pub(crate) fn owned_task_buckets(
         }
     };
 
-    for task in tasks {
-        let Some(claimed_by) = task.claimed_by else {
+    for task in &tasks {
+        let Some(claimed_by) = task.claimed_by.as_deref() else {
             continue;
         };
-        if !member_names.contains(claimed_by.as_str()) {
+        if !member_names.contains(claimed_by) {
             continue;
         }
         let Some(is_active) = classify_owned_task_status(task.status.as_str()) else {
             continue;
         };
         let owner = if is_active {
-            claimed_by
+            claimed_by.to_string()
         } else {
             members
                 .iter()
                 .find(|member| member.name == claimed_by)
                 .and_then(|member| member.reports_to.as_deref())
-                .unwrap_or(claimed_by.as_str())
+                .unwrap_or(claimed_by)
                 .to_string()
         };
         let entry = owned.entry(owner).or_default();
         if is_active {
             entry.active.push(task.id);
         } else {
-            entry.review.push(task.id);
+            match super::review::classify_review_task(project_root, task, &tasks) {
+                ReviewQueueState::Current => entry.review.push(task.id),
+                ReviewQueueState::Stale(_) => entry.stale_review.push(task.id),
+            }
         }
     }
 
     for buckets in owned.values_mut() {
         buckets.active.sort_unstable();
         buckets.review.sort_unstable();
+        buckets.stale_review.sort_unstable();
     }
 
     owned
@@ -1366,9 +1380,11 @@ pub(crate) fn board_status_task_queues(
 
     let mut active_tasks = Vec::new();
     let mut review_queue = Vec::new();
-    for task in task::load_tasks_from_dir(&tasks_dir)? {
-        let inferred = infer_runtime_task_metadata(project_root, &task);
-        let branch_mismatch = task_branch_mismatch(project_root, &task, &inferred);
+    let tasks = task::load_tasks_from_dir(&tasks_dir)?;
+    for task in &tasks {
+        let inferred = infer_runtime_task_metadata(project_root, task);
+        let branch_mismatch = task_branch_mismatch(project_root, task, &inferred);
+        let review_state = super::review::classify_review_task(project_root, task, &tasks);
         let test_summary = crate::team::board::read_workflow_metadata(&task.source_path)
             .ok()
             .and_then(|metadata| metadata.test_results)
@@ -1376,19 +1392,23 @@ pub(crate) fn board_status_task_queues(
             .map(|results| results.failure_summary());
         let entry = StatusTaskEntry {
             id: task.id,
-            title: task.title,
+            title: task.title.clone(),
             status: task.status.clone(),
-            priority: task.priority,
-            claimed_by: task.claimed_by,
-            review_owner: task.review_owner,
-            blocked_on: task.blocked_on,
-            branch: task.branch.or_else(|| inferred.branch.clone()),
+            priority: task.priority.clone(),
+            claimed_by: task.claimed_by.clone(),
+            review_owner: task.review_owner.clone(),
+            blocked_on: task.blocked_on.clone(),
+            branch: task.branch.clone().or_else(|| inferred.branch.clone()),
             worktree_path: task
                 .worktree_path
+                .clone()
                 .or_else(|| inferred.worktree_path.clone()),
-            commit: task.commit.or_else(|| inferred.commit.clone()),
+            commit: task.commit.clone().or_else(|| inferred.commit.clone()),
             branch_mismatch,
-            next_action: task.next_action,
+            next_action: match review_state {
+                ReviewQueueState::Current => task.next_action.clone(),
+                ReviewQueueState::Stale(stale) => Some(stale.status_next_action()),
+            },
             test_summary,
         };
 
@@ -2519,6 +2539,7 @@ mod tests {
             OwnedTaskBuckets {
                 active: Vec::new(),
                 review: vec![41, 42],
+                stale_review: Vec::new(),
             },
         )]);
 
@@ -2538,6 +2559,45 @@ mod tests {
         assert_eq!(
             rows[0].signal.as_deref(),
             Some("nudge paused, needs review (2)")
+        );
+    }
+
+    #[test]
+    fn build_team_status_rows_distinguishes_stale_review_backlog() {
+        let members = vec![manager("manager")];
+        let runtime_statuses = HashMap::from([(
+            "manager".to_string(),
+            RuntimeMemberStatus {
+                state: "idle".to_string(),
+                signal: None,
+                label: Some("idle".to_string()),
+            },
+        )]);
+        let owned_task_buckets = HashMap::from([(
+            "manager".to_string(),
+            OwnedTaskBuckets {
+                active: Vec::new(),
+                review: vec![41],
+                stale_review: vec![42],
+            },
+        )]);
+
+        let rows = build_team_status_rows(
+            &members,
+            true,
+            &runtime_statuses,
+            &HashMap::new(),
+            &HashMap::new(),
+            &owned_task_buckets,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(rows[0].state, "reviewing");
+        assert_eq!(
+            rows[0].signal.as_deref(),
+            Some("needs review (1), stale review (1)")
         );
     }
 
@@ -2649,6 +2709,7 @@ mod tests {
             OwnedTaskBuckets {
                 active: vec![41],
                 review: Vec::new(),
+                stale_review: Vec::new(),
             },
         )]);
         let branch_mismatches = HashMap::from([(
@@ -2896,7 +2957,8 @@ mod tests {
             buckets.get("manager"),
             Some(&OwnedTaskBuckets {
                 active: Vec::new(),
-                review: vec![3, 4],
+                review: vec![4],
+                stale_review: vec![3],
             })
         );
         assert_eq!(
@@ -2904,6 +2966,7 @@ mod tests {
             Some(&OwnedTaskBuckets {
                 active: vec![5],
                 review: Vec::new(),
+                stale_review: Vec::new(),
             })
         );
     }
@@ -3158,6 +3221,7 @@ mod tests {
                 Some("manager (manager) stalled after 5m: no actionable progress".to_string()),
                 2,
                 1,
+                0,
             ),
             Some(
                 "nudged, manager (manager) stalled after 5m: no actionable progress, needs triage (2), needs review (1)"
@@ -3168,7 +3232,7 @@ mod tests {
 
     #[test]
     fn merge_status_signal_returns_none_when_no_signals_exist() {
-        assert_eq!(merge_status_signal(None, None, None, 0, 0), None);
+        assert_eq!(merge_status_signal(None, None, None, 0, 0, 0), None);
     }
 
     #[test]
@@ -3216,6 +3280,79 @@ mod tests {
         assert_eq!(review_queue[0].review_owner.as_deref(), Some("manager"));
         assert_eq!(review_queue[0].next_action.as_deref(), Some("review now"));
         assert!(review_queue[0].test_summary.is_none());
+    }
+
+    #[test]
+    fn board_status_task_queues_marks_stale_review_when_engineer_moved_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = crate::team::test_support::init_git_repo(&tmp, "status-stale-review");
+        let tasks_dir = repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(
+            tasks_dir.join("042-review.md"),
+            "---\nid: 42\ntitle: Review task\nstatus: review\npriority: medium\nclaimed_by: eng-1\nreview_owner: manager\nclass: standard\n---\n",
+        )
+        .unwrap();
+        fs::write(
+            tasks_dir.join("043-active.md"),
+            "---\nid: 43\ntitle: Active task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nbranch: eng-1/43\nclass: standard\n---\n",
+        )
+        .unwrap();
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = crate::team::task_loop::engineer_base_branch_name("eng-1");
+        crate::team::task_loop::setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            &base_branch,
+            &team_config_dir,
+        )
+        .unwrap();
+        crate::team::task_loop::checkout_worktree_branch_from_main(&worktree_dir, "eng-1/43")
+            .unwrap();
+        std::fs::write(worktree_dir.join("active-43.txt"), "active branch\n").unwrap();
+        crate::team::test_support::git_ok(&worktree_dir, &["add", "active-43.txt"]);
+        crate::team::test_support::git_ok(&worktree_dir, &["commit", "-m", "active branch"]);
+
+        let (_, review_queue) = board_status_task_queues(&repo).unwrap();
+
+        assert_eq!(review_queue.len(), 1);
+        assert_eq!(
+            review_queue[0].next_action.as_deref(),
+            Some("stale review -> merge: eng-1 already moved to task #43 on branch `eng-1/43`")
+        );
+    }
+
+    #[test]
+    fn board_status_task_queues_marks_branch_mismatch_review_as_rework() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(
+            tasks_dir.join("042-review.md"),
+            "---\nid: 42\ntitle: Review task\nstatus: review\npriority: medium\nclaimed_by: eng-1\nreview_owner: manager\nbranch: eng-1/task-99\nclass: standard\n---\n",
+        )
+        .unwrap();
+
+        let (_, review_queue) = board_status_task_queues(tmp.path()).unwrap();
+
+        assert_eq!(review_queue.len(), 1);
+        assert_eq!(
+            review_queue[0].next_action.as_deref(),
+            Some(
+                "stale review -> rework: branch `eng-1/task-99` references task(s) #99 but assigned task is #42"
+            )
+        );
     }
 
     #[test]

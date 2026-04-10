@@ -9,6 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::task::Task;
+
 use super::workflow::{ReviewDisposition, TaskState, WorkflowMeta, can_transition};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +41,45 @@ pub enum ReviewEligibility {
     Eligible,
     MissingMetadata { reasons: Vec<String> },
     AlreadyMerged { reason: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReviewNormalizationStep {
+    Merge,
+    Archive,
+    Rework,
+}
+
+impl ReviewNormalizationStep {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Archive => "archive",
+            Self::Rework => "rework",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StaleReviewState {
+    pub(crate) reason: String,
+    pub(crate) next_step: ReviewNormalizationStep,
+}
+
+impl StaleReviewState {
+    pub(crate) fn status_next_action(&self) -> String {
+        format!(
+            "stale review -> {}: {}",
+            self.next_step.as_str(),
+            self.reason
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReviewQueueState {
+    Current,
+    Stale(StaleReviewState),
 }
 
 pub fn apply_review(
@@ -165,6 +206,161 @@ pub fn validate_review_candidate(
     Ok(ReviewEligibility::Eligible)
 }
 
+pub(crate) fn classify_review_task(
+    project_root: &Path,
+    task: &Task,
+    board_tasks: &[Task],
+) -> ReviewQueueState {
+    if task.status != "review" {
+        return ReviewQueueState::Current;
+    }
+
+    if let Some(branch) = task.branch.as_deref() {
+        let blockers = task_reference_mismatch_blockers(task.id, branch, &[]);
+        if !blockers.is_empty() {
+            return ReviewQueueState::Stale(StaleReviewState {
+                reason: blockers.join("; "),
+                next_step: ReviewNormalizationStep::Rework,
+            });
+        }
+    }
+
+    if let Some(ReviewEligibility::AlreadyMerged { reason }) =
+        review_eligibility_for_task(project_root, task)
+    {
+        return ReviewQueueState::Stale(StaleReviewState {
+            reason,
+            next_step: ReviewNormalizationStep::Merge,
+        });
+    }
+
+    let Some(engineer) = task.claimed_by.as_deref() else {
+        return ReviewQueueState::Current;
+    };
+
+    let active_claims = board_tasks
+        .iter()
+        .filter(|candidate| candidate.id != task.id)
+        .filter(|candidate| candidate.claimed_by.as_deref() == Some(engineer))
+        .filter(|candidate| candidate.status != "review")
+        .filter(|candidate| candidate.status != "done")
+        .filter(|candidate| candidate.status != "archived")
+        .collect::<Vec<_>>();
+
+    if let Some(current_lane) = select_current_lane(engineer, &active_claims, project_root) {
+        let branch_suffix = current_lane
+            .branch
+            .as_deref()
+            .map(|branch| format!(" on branch `{branch}`"))
+            .unwrap_or_default();
+        return ReviewQueueState::Stale(StaleReviewState {
+            reason: format!(
+                "{engineer} already moved to task #{}{}",
+                current_lane.id, branch_suffix
+            ),
+            next_step: ReviewNormalizationStep::Merge,
+        });
+    }
+
+    if let Some(current_branch) = review_worktree_branch(project_root, engineer) {
+        let blockers = task_reference_mismatch_blockers(task.id, &current_branch, &[]);
+        if !blockers.is_empty() {
+            return ReviewQueueState::Stale(StaleReviewState {
+                reason: blockers.join("; "),
+                next_step: ReviewNormalizationStep::Archive,
+            });
+        }
+    }
+
+    ReviewQueueState::Current
+}
+
+fn review_eligibility_for_task(project_root: &Path, task: &Task) -> Option<ReviewEligibility> {
+    let meta = WorkflowMeta {
+        state: TaskState::Review,
+        branch: task.branch.clone().or_else(|| {
+            task.claimed_by
+                .as_deref()
+                .and_then(|engineer| review_worktree_branch(project_root, engineer))
+        }),
+        commit: task.commit.clone().or_else(|| {
+            task.claimed_by
+                .as_deref()
+                .and_then(|engineer| review_worktree_commit(project_root, engineer))
+        }),
+        ..WorkflowMeta::default()
+    };
+    validate_review_candidate(project_root, &meta).ok()
+}
+
+fn select_current_lane<'a>(
+    engineer: &str,
+    active_claims: &[&'a Task],
+    project_root: &Path,
+) -> Option<&'a Task> {
+    if active_claims.is_empty() {
+        return None;
+    }
+
+    let current_branch = review_worktree_branch(project_root, engineer);
+    if let Some(current_branch) = current_branch.as_deref() {
+        let mut branch_matches = active_claims.iter().copied().filter(|candidate| {
+            candidate
+                .branch
+                .as_deref()
+                .map(|branch| branch == current_branch)
+                .unwrap_or_else(|| format!("{engineer}/{}", candidate.id) == current_branch)
+        });
+        if let Some(candidate) = branch_matches.next()
+            && branch_matches.next().is_none()
+        {
+            return Some(candidate);
+        }
+    }
+
+    if active_claims.len() == 1 {
+        return active_claims.first().copied();
+    }
+
+    active_claims
+        .iter()
+        .copied()
+        .min_by_key(|candidate| candidate.id)
+}
+
+fn review_worktree_branch(project_root: &Path, engineer: &str) -> Option<String> {
+    let worktree_dir = review_worktree_dir(project_root, engineer);
+    worktree_dir
+        .is_dir()
+        .then_some(worktree_dir)
+        .and_then(|worktree_dir| {
+            crate::team::task_loop::current_worktree_branch(&worktree_dir).ok()
+        })
+}
+
+fn review_worktree_commit(project_root: &Path, engineer: &str) -> Option<String> {
+    let worktree_dir = review_worktree_dir(project_root, engineer);
+    if !worktree_dir.is_dir() {
+        return None;
+    }
+
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(&worktree_dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn review_worktree_dir(project_root: &Path, engineer: &str) -> std::path::PathBuf {
+    project_root.join(".batty").join("worktrees").join(engineer)
+}
+
 pub(crate) fn task_reference_mismatch_blockers(
     expected_task_id: u32,
     branch_name: &str,
@@ -231,6 +427,9 @@ fn format_task_id_list(task_ids: &BTreeSet<u32>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::team::task_loop::{
+        checkout_worktree_branch_from_main, engineer_base_branch_name, setup_engineer_worktree,
+    };
     use crate::team::test_support::{git_ok, init_git_repo};
     use std::fs;
     use std::process::Command;
@@ -468,5 +667,107 @@ mod tests {
             task_reference_mismatch_blockers(497, "eng-1-1", &["refactor review flow".to_string()]);
 
         assert!(blockers.is_empty());
+    }
+
+    fn review_task(id: u32, claimed_by: &str) -> Task {
+        Task {
+            id,
+            title: format!("review-task-{id}"),
+            status: "review".to_string(),
+            priority: "high".to_string(),
+            claimed_by: Some(claimed_by.to_string()),
+            claimed_at: None,
+            claim_ttl_secs: None,
+            claim_expires_at: None,
+            last_progress_at: None,
+            claim_warning_sent_at: None,
+            claim_extensions: None,
+            last_output_bytes: None,
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: Some("manager".to_string()),
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description: String::new(),
+            batty_config: None,
+            source_path: Path::new("review.md").to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn classify_review_task_keeps_live_review_current() {
+        let tmp = tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "review-current");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        checkout_worktree_branch_from_main(&worktree_dir, "eng-1/42").unwrap();
+        fs::write(worktree_dir.join("live-review.txt"), "live review\n").unwrap();
+        git_ok(&worktree_dir, &["add", "live-review.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "live review branch"]);
+
+        let mut review = review_task(42, "eng-1");
+        review.branch = Some("eng-1/42".to_string());
+
+        assert_eq!(
+            classify_review_task(&repo, &review, &[review_task(42, "eng-1")]),
+            ReviewQueueState::Current
+        );
+    }
+
+    #[test]
+    fn classify_review_task_detects_engineer_moved_on() {
+        let tmp = tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "review-moved-on");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        checkout_worktree_branch_from_main(&worktree_dir, "eng-1/77").unwrap();
+        fs::write(worktree_dir.join("moved-on.txt"), "moved on\n").unwrap();
+        git_ok(&worktree_dir, &["add", "moved-on.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "moved on branch"]);
+
+        let review = review_task(42, "eng-1");
+        let mut active = review_task(77, "eng-1");
+        active.status = "in-progress".to_string();
+        active.branch = Some("eng-1/77".to_string());
+        let review_board_entry = review_task(42, "eng-1");
+
+        assert_eq!(
+            classify_review_task(&repo, &review, &[review_board_entry, active]),
+            ReviewQueueState::Stale(StaleReviewState {
+                reason: "eng-1 already moved to task #77 on branch `eng-1/77`".to_string(),
+                next_step: ReviewNormalizationStep::Merge,
+            })
+        );
+    }
+
+    #[test]
+    fn classify_review_task_detects_branch_mismatch() {
+        let tmp = tempdir().unwrap();
+        let review = Task {
+            branch: Some("eng-1/task-99".to_string()),
+            ..review_task(42, "eng-1")
+        };
+
+        assert_eq!(
+            classify_review_task(tmp.path(), &review, std::slice::from_ref(&review)),
+            ReviewQueueState::Stale(StaleReviewState {
+                reason: "branch `eng-1/task-99` references task(s) #99 but assigned task is #42"
+                    .to_string(),
+                next_step: ReviewNormalizationStep::Rework,
+            })
+        );
     }
 }
