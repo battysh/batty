@@ -22,6 +22,9 @@ Commands:
   stop             Stop the team daemon and kill the tmux session
   attach           Attach to the running team tmux session
   status           Show all team members and their states
+  bench            Prevent an engineer from receiving new auto-dispatch work
+  unbench          Remove an engineer from the durable bench list
+  openclaw         OpenClaw supervisor integration helpers for Batty
   send             Send a message to an agent role (human → agent injection)
   assign           Assign a task to an engineer (used by manager agent)
   validate         Validate team config without launching
@@ -38,15 +41,23 @@ Commands:
   pause            Pause nudges and standups
   resume           Resume nudges and standups
   grafana          Manage Grafana monitoring (setup, status, open)
+  discord          Configure Discord human communication
   telegram         Set up Telegram bot for human communication
+  project          Manage the global Batty project registry for multi-project supervision
   load             Estimate team load and show recent load history
   parity           Show clean-room parity summary from PARITY.md
   verify           Run clean-room equivalence verification from PARITY.md
+  release          Validate clean main, assemble release notes, and create a release tag
   queue            Show pending dispatch queue entries
+  dispatch         Explain which engineer would receive the next dispatch
   cost             Estimate current run cost from agent session files
   scale            Dynamically scale team topology (add/remove agents)
+  reload           Trigger an explicit topology reload for the running daemon
+  research         Run autonomous evaluator-driven research missions
   doctor           Dump diagnostic state from Batty state files
+  worktree         Inspect engineer worktree health
   metrics          Show consolidated telemetry dashboard (tasks, cycle time, rates, agents)
+  stress-test      Run a synthetic long-session stress harness with fault injection
   telemetry        Query the telemetry database for agent and task metrics
   chat             Interactive chat with an agent via the shim protocol
   help             Print this message or the help of the given subcommand(s)
@@ -120,6 +131,30 @@ Attach to the running team tmux session
 Usage: batty attach [OPTIONS]
 
 Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty bench`
+
+Prevent an engineer from receiving new auto-dispatch work
+
+```text
+Prevent an engineer from receiving new auto-dispatch work
+
+Usage: batty bench [OPTIONS] <ENGINEER>
+
+Arguments:
+  <ENGINEER>
+          Engineer instance (e.g., "eng-1-1")
+
+Options:
+      --reason <REASON>
+          Optional reason recorded in bench.yaml and status output
+
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 
@@ -399,6 +434,85 @@ Options:
           Print help
 ```
 
+## `batty discord`
+
+Configure Discord human communication
+
+```text
+Configure Discord human communication
+
+Usage: batty discord [OPTIONS] [COMMAND]
+
+Commands:
+  setup   Run the interactive Discord setup wizard
+  status  Show the current Discord connection health
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty discord setup`
+
+Run the interactive Discord setup wizard
+
+```text
+Run the interactive Discord setup wizard
+
+Usage: batty discord setup [OPTIONS]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty discord status`
+
+Show the current Discord connection health
+
+```text
+Show the current Discord connection health
+
+Usage: batty discord status [OPTIONS]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty dispatch`
+
+Explain which engineer would receive the next dispatch
+
+```text
+Explain which engineer would receive the next dispatch
+
+Usage: batty dispatch [OPTIONS]
+
+Options:
+      --explain
+          Print routing reasons for the chosen engineer
+
+      --task <TASK>
+          Explain routing for a specific task id
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
 ## `batty doctor`
 
 Dump diagnostic state from Batty state files
@@ -534,6 +648,31 @@ Options:
           Print help
 ```
 
+## `batty grafana-webhook`
+
+Internal: receive Grafana webhook alerts and append them to alerts.log
+
+```text
+Internal: receive Grafana webhook alerts and append them to alerts.log
+
+Usage: batty grafana-webhook [OPTIONS] --project-root <PROJECT_ROOT>
+
+Options:
+      --project-root <PROJECT_ROOT>
+          Project root directory
+
+      --port <PORT>
+          Local port to bind for webhook delivery
+          
+          [default: 8787]
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
 ## `batty inbox`
 
 List inbox messages for a team member, or purge delivered inbox messages
@@ -560,6 +699,9 @@ Options:
 
       --all
           Show all messages
+
+      --raw
+          Show all raw messages without digest collapsing
 
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
@@ -782,6 +924,188 @@ Options:
           Print help
 ```
 
+## `batty openclaw`
+
+OpenClaw supervisor integration helpers for Batty
+
+```text
+OpenClaw supervisor integration helpers for Batty
+
+Usage: batty openclaw [OPTIONS] <COMMAND>
+
+Commands:
+  register   Write an OpenClaw project registration/config skeleton for Batty
+  status     Show an operator-friendly Batty summary for OpenClaw supervision
+  instruct   Send a high-level instruction into an allowed Batty role
+  events     Export stable OpenClaw event envelopes for one project or all registered projects
+  follow-up  Run configured OpenClaw follow-up/reminder workflows
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty openclaw events`
+
+Export stable OpenClaw event envelopes for one project or all registered projects
+
+```text
+Export stable OpenClaw event envelopes for one project or all registered projects
+
+Usage: batty openclaw events [OPTIONS]
+
+Options:
+      --project-id <PROJECT_ID>
+          Registered project identifier; defaults to the current project if it is registered
+
+      --all-projects
+          Read events across all registered projects that allow OpenClaw supervision
+
+      --json
+          Emit machine-readable JSON output
+
+      --topic <TOPICS>
+          Filter by stable public event topic
+          
+          [possible values: completion, review, stall, merge, escalation, delivery-failure, lifecycle]
+
+      --role <ROLES>
+          Filter by Batty role identifier
+
+      --task-id <TASK_IDS>
+          Filter by Batty task identifier
+
+      --event-type <EVENT_TYPES>
+          Filter by stable public event type
+
+      --session-name <SESSION_NAMES>
+          Filter by tmux/OpenClaw session name
+
+      --since-ts <SINCE_TS>
+          Include only events at or after this unix timestamp
+
+      --limit <LIMIT>
+          Trim the result set to the N most recent matching events
+
+      --include-archived
+          Include archived projects when reading from the project registry
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty openclaw follow-up`
+
+Run configured OpenClaw follow-up/reminder workflows
+
+```text
+Run configured OpenClaw follow-up/reminder workflows
+
+Usage: batty openclaw follow-up [OPTIONS] <COMMAND>
+
+Commands:
+  run   Evaluate configured cron follow-ups and dispatch any due reminders
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty openclaw follow-up run`
+
+Evaluate configured cron follow-ups and dispatch any due reminders
+
+```text
+Evaluate configured cron follow-ups and dispatch any due reminders
+
+Usage: batty openclaw follow-up run [OPTIONS]
+
+Options:
+      --json
+          Emit machine-readable JSON output
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty openclaw instruct`
+
+Send a high-level instruction into an allowed Batty role
+
+```text
+Send a high-level instruction into an allowed Batty role
+
+Usage: batty openclaw instruct [OPTIONS] <ROLE> <MESSAGE>
+
+Arguments:
+  <ROLE>
+          Target role, typically architect or manager
+
+  <MESSAGE>
+          High-level instruction text
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty openclaw register`
+
+Write an OpenClaw project registration/config skeleton for Batty
+
+```text
+Write an OpenClaw project registration/config skeleton for Batty
+
+Usage: batty openclaw register [OPTIONS]
+
+Options:
+      --force
+          Overwrite an existing config file
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty openclaw status`
+
+Show an operator-friendly Batty summary for OpenClaw supervision
+
+```text
+Show an operator-friendly Batty summary for OpenClaw supervision
+
+Usage: batty openclaw status [OPTIONS]
+
+Options:
+      --json
+          Emit machine-readable JSON output
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
 ## `batty parity`
 
 Show clean-room parity summary from PARITY.md
@@ -822,6 +1146,331 @@ Options:
           Print help
 ```
 
+## `batty project`
+
+Manage the global Batty project registry for multi-project supervision
+
+```text
+Manage the global Batty project registry for multi-project supervision
+
+Usage: batty project [OPTIONS] <COMMAND>
+
+Commands:
+  register    Register a project in the global Batty/OpenClaw registry
+  unregister  Remove a project from the registry
+  list        List all registered projects
+  get         Show one registered project by projectId
+  start       Start one registered project by projectId
+  stop        Stop one registered project by projectId
+  restart     Restart one registered project by projectId
+  status      Show lifecycle and health status for one registered project
+  set-active  Set the active project used for implicit routing
+  resolve     Resolve which project a message should route to
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty project get`
+
+Show one registered project by projectId
+
+```text
+Show one registered project by projectId
+
+Usage: batty project get [OPTIONS] <PROJECT_ID>
+
+Arguments:
+  <PROJECT_ID>
+          Stable unique project identifier
+
+Options:
+      --json
+          Emit machine-readable JSON output
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty project list`
+
+List all registered projects
+
+```text
+List all registered projects
+
+Usage: batty project list [OPTIONS]
+
+Options:
+      --json
+          Emit machine-readable JSON output
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty project register`
+
+Register a project in the global Batty/OpenClaw registry
+
+```text
+Register a project in the global Batty/OpenClaw registry
+
+Usage: batty project register [OPTIONS] --project-id <PROJECT_ID> --name <NAME> --project-root <PROJECT_ROOT> --board-dir <BOARD_DIR> --team-name <TEAM_NAME> --session-name <SESSION_NAME>
+
+Options:
+      --project-id <PROJECT_ID>
+          Stable unique project identifier
+
+      --name <NAME>
+          Operator-facing project name
+
+      --alias <ALIASES>
+          Alternate operator-facing aliases used for routing
+
+      --project-root <PROJECT_ROOT>
+          Repository root for the supervised project
+
+      --board-dir <BOARD_DIR>
+          Kanban board directory for the project
+
+      --team-name <TEAM_NAME>
+          Batty team name from team.yaml
+
+      --session-name <SESSION_NAME>
+          Explicit runtime session name
+
+      --owner <OWNER>
+          Optional owner or owning team
+
+      --tag <TAGS>
+          Tag metadata
+
+      --channel-binding <CHANNEL_BINDINGS>
+          Channel binding in the form <channel>=<binding>
+
+      --thread-binding <THREAD_BINDINGS>
+          Thread binding in the form <channel>=<binding>#<thread-binding>
+
+      --allow-openclaw-supervision
+          Allow OpenClaw supervision actions for this project
+
+      --allow-cross-project-routing
+          Allow cross-project routing for this project
+
+      --allow-shared-service-routing
+          Allow shared-service routing for this project
+
+      --archived
+          Mark the project archived at registration time
+
+      --json
+          Emit machine-readable JSON output
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty project resolve`
+
+Resolve which project a message should route to
+
+```text
+Resolve which project a message should route to
+
+Usage: batty project resolve [OPTIONS] <MESSAGE>
+
+Arguments:
+  <MESSAGE>
+          Message text to resolve
+
+Options:
+      --channel <CHANNEL>
+          Optional channel provider name
+
+      --binding <BINDING>
+          Optional channel binding identifier
+
+      --thread-binding <THREAD_BINDING>
+          Optional thread binding identifier
+
+      --json
+          Emit machine-readable JSON output
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty project restart`
+
+Restart one registered project by projectId
+
+```text
+Restart one registered project by projectId
+
+Usage: batty project restart [OPTIONS] <PROJECT_ID>
+
+Arguments:
+  <PROJECT_ID>
+          Stable unique project identifier
+
+Options:
+      --json
+          Emit machine-readable JSON output
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty project set-active`
+
+Set the active project used for implicit routing
+
+```text
+Set the active project used for implicit routing
+
+Usage: batty project set-active [OPTIONS] <PROJECT_ID>
+
+Arguments:
+  <PROJECT_ID>
+          Stable unique project identifier
+
+Options:
+      --channel <CHANNEL>
+          Optional channel provider name for channel-scoped activation
+
+      --binding <BINDING>
+          Optional channel binding identifier for channel-scoped activation
+
+      --thread-binding <THREAD_BINDING>
+          Optional thread binding identifier for thread-scoped activation
+
+      --json
+          Emit machine-readable JSON output
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty project start`
+
+Start one registered project by projectId
+
+```text
+Start one registered project by projectId
+
+Usage: batty project start [OPTIONS] <PROJECT_ID>
+
+Arguments:
+  <PROJECT_ID>
+          Stable unique project identifier
+
+Options:
+      --json
+          Emit machine-readable JSON output
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty project status`
+
+Show lifecycle and health status for one registered project
+
+```text
+Show lifecycle and health status for one registered project
+
+Usage: batty project status [OPTIONS] <PROJECT_ID>
+
+Arguments:
+  <PROJECT_ID>
+          Stable unique project identifier
+
+Options:
+      --json
+          Emit machine-readable JSON output
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty project stop`
+
+Stop one registered project by projectId
+
+```text
+Stop one registered project by projectId
+
+Usage: batty project stop [OPTIONS] <PROJECT_ID>
+
+Arguments:
+  <PROJECT_ID>
+          Stable unique project identifier
+
+Options:
+      --json
+          Emit machine-readable JSON output
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty project unregister`
+
+Remove a project from the registry
+
+```text
+Remove a project from the registry
+
+Usage: batty project unregister [OPTIONS] <PROJECT_ID>
+
+Arguments:
+  <PROJECT_ID>
+          Stable unique project identifier
+
+Options:
+      --json
+          Emit machine-readable JSON output
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
 ## `batty queue`
 
 Show pending dispatch queue entries
@@ -854,6 +1503,164 @@ Arguments:
 
   <ID>
           Message REF, ID, or ID prefix from `batty inbox` output
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty release`
+
+Validate clean main, assemble release notes, and create a release tag
+
+```text
+Validate clean main, assemble release notes, and create a release tag
+
+Usage: batty release [OPTIONS]
+
+Options:
+      --tag <TAG>
+          Override the git tag to create (default: v<Cargo.toml version>)
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty reload`
+
+Trigger an explicit topology reload for the running daemon
+
+```text
+Trigger an explicit topology reload for the running daemon
+
+Usage: batty reload [OPTIONS]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty research`
+
+Run autonomous evaluator-driven research missions
+
+```text
+Run autonomous evaluator-driven research missions
+
+Usage: batty research [OPTIONS] <COMMAND>
+
+Commands:
+  start   Start a new research mission
+  status  Show the current mission status
+  ledger  Show the current mission ledger
+  stop    Stop the current research mission
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty research ledger`
+
+Show the current mission ledger
+
+```text
+Show the current mission ledger
+
+Usage: batty research ledger [OPTIONS]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty research start`
+
+Start a new research mission
+
+```text
+Start a new research mission
+
+Usage: batty research start [OPTIONS] --evaluator <EVALUATOR> <HYPOTHESIS>
+
+Arguments:
+  <HYPOTHESIS>
+          Short hypothesis or mission description
+
+Options:
+      --evaluator <EVALUATOR>
+          Evaluator shell command to run inside the worktree
+
+      --format <FORMAT>
+          Evaluator output contract
+          
+          [default: json]
+          [possible values: json, exit-code]
+
+      --keep-policy <KEEP_POLICY>
+          Rule for keeping or discarding candidate iterations
+          
+          [default: pass-only]
+          [possible values: pass-only, score-improvement, parity-improvement]
+
+      --max-iterations <MAX_ITERATIONS>
+          Stop after this many iterations
+          
+          [default: 10]
+
+      --worktree <WORKTREE>
+          Worktree to mutate during the mission
+          
+          [default: .]
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty research status`
+
+Show the current mission status
+
+```text
+Show the current mission status
+
+Usage: batty research status [OPTIONS]
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty research stop`
+
+Stop the current research mission
+
+```text
+Stop the current research mission
+
+Usage: batty research stop [OPTIONS]
 
 Options:
   -v, --verbose...
@@ -1151,6 +1958,12 @@ Options:
       --json
           Emit machine-readable JSON output
 
+      --detail
+          Include detailed telemetry-backed engineer profiles
+
+      --health
+          Show optional subsystem health and error-budget state
+
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 
@@ -1168,6 +1981,42 @@ Stop the team daemon and kill the tmux session
 Usage: batty stop [OPTIONS]
 
 Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty stress-test`
+
+Run a synthetic long-session stress harness with fault injection
+
+```text
+Run a synthetic long-session stress harness with fault injection
+
+Usage: batty stress-test [OPTIONS]
+
+Options:
+      --compact
+          Run the full fault matrix on an accelerated compact timeline for CI
+
+      --duration-hours <DURATION_HOURS>
+          Virtual session duration in hours when not using compact mode
+          
+          [default: 8]
+
+      --seed <SEED>
+          Deterministic seed for fault scheduling and synthetic recovery timings
+          
+          [default: 1]
+
+      --json-out <JSON_OUT>
+          Override the JSON report output path
+
+      --markdown-out <MARKDOWN_OUT>
+          Override the Markdown report output path
+
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 
@@ -1504,6 +2353,27 @@ Options:
           Print help
 ```
 
+## `batty unbench`
+
+Remove an engineer from the durable bench list
+
+```text
+Remove an engineer from the durable bench list
+
+Usage: batty unbench [OPTIONS] <ENGINEER>
+
+Arguments:
+  <ENGINEER>
+          Engineer instance (e.g., "eng-1-1")
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
 ## `batty validate`
 
 Validate team config without launching
@@ -1534,6 +2404,49 @@ Run clean-room equivalence verification from PARITY.md
 Usage: batty verify [OPTIONS]
 
 Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty watchdog`
+
+Internal: run the daemon watchdog supervisor (spawned by `batty start`)
+
+```text
+Internal: run the daemon watchdog supervisor (spawned by `batty start`)
+
+Usage: batty watchdog [OPTIONS] --project-root <PROJECT_ROOT>
+
+Options:
+      --project-root <PROJECT_ROOT>
+          Project root directory
+
+      --resume
+          Resume agent sessions from a previous run
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty worktree`
+
+Inspect engineer worktree health
+
+```text
+Inspect engineer worktree health
+
+Usage: batty worktree [OPTIONS]
+
+Options:
+      --health
+          Show the current worktree health report
+
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 
