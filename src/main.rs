@@ -7,7 +7,7 @@ use batty_cli::{
         OpenClawFollowUpCommand, ProjectCommand, ResearchCommand, ResearchFormatArg,
         ResearchKeepPolicyArg, ReviewDispositionArg, TaskCommand, TaskStateArg,
     },
-    project_registry, team,
+    env_file, project_registry, team,
 };
 use clap::Parser;
 use dialoguer::{Confirm, Input, Select};
@@ -238,6 +238,7 @@ fn main() -> Result<()> {
     setup_tracing(cli.verbose);
 
     let root = project_root();
+    env_file::load_project_env(&root)?;
     debug!(root = %root.display(), "project root");
 
     match cli.command {

@@ -6,15 +6,15 @@ mod tests {
 
     use super::super::board::read_workflow_metadata;
     use super::super::capability::{
-        resolve_capability_map, CapabilityMap, CapabilitySubject, WorkflowCapability,
+        CapabilityMap, CapabilitySubject, WorkflowCapability, resolve_capability_map,
     };
     use super::super::completion::ingest_completion_message;
     use super::super::config::{RoleType, TeamConfig, WorkflowMode, WorkflowPolicy};
-    use super::super::hierarchy::{resolve_hierarchy, MemberInstance};
+    use super::super::hierarchy::{MemberInstance, resolve_hierarchy};
     use super::super::nudge::compute_nudges;
     use super::super::policy::{check_wip_limit, is_review_stale, should_escalate};
-    use super::super::resolver::{resolve_board, runnable_tasks, ResolutionStatus};
-    use super::super::review::{apply_review, MergeDisposition, ReviewState};
+    use super::super::resolver::{ResolutionStatus, resolve_board, runnable_tasks};
+    use super::super::review::{MergeDisposition, ReviewState, apply_review};
     use super::super::standup::MemberState;
     use super::super::team_config_dir;
     use super::super::workflow::{TaskState, WorkflowMeta};
@@ -364,12 +364,16 @@ mod tests {
 
         assert!(members.iter().any(|member| member.name == "decompiler"));
         assert!(members.iter().any(|member| member.name == "spec-writer"));
-        assert!(members
-            .iter()
-            .any(|member| member.name == "test-writer-1-1"));
-        assert!(members
-            .iter()
-            .any(|member| member.name == "implementer-1-1"));
+        assert!(
+            members
+                .iter()
+                .any(|member| member.name == "test-writer-1-1")
+        );
+        assert!(
+            members
+                .iter()
+                .any(|member| member.name == "implementer-1-1")
+        );
     }
 
     #[test]

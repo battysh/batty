@@ -870,9 +870,10 @@ mod tests {
 
         let all = all_messages(root, "manager").unwrap();
         assert_eq!(all.len(), 2);
-        assert!(all
-            .iter()
-            .any(|(message, delivered)| message.body == "old" && *delivered));
+        assert!(
+            all.iter()
+                .any(|(message, delivered)| message.body == "old" && *delivered)
+        );
     }
 
     #[test]

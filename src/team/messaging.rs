@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use super::{completion, config, discord, hierarchy, inbox, merge, team_config_path, telegram};
@@ -128,11 +128,7 @@ pub(crate) fn detect_sender() -> Option<String> {
         .ok()?;
     if output.status.success() {
         let role = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !role.is_empty() {
-            Some(role)
-        } else {
-            None
-        }
+        if !role.is_empty() { Some(role) } else { None }
     } else {
         None
     }
@@ -759,9 +755,11 @@ roles:
         send_result.unwrap();
 
         let root = inbox::inboxes_root(tmp.path());
-        assert!(inbox::pending_messages(&root, "sam-designer")
-            .unwrap()
-            .is_empty());
+        assert!(
+            inbox::pending_messages(&root, "sam-designer")
+                .unwrap()
+                .is_empty()
+        );
 
         let pending = inbox::pending_messages(&root, "sam-designer-1-1").unwrap();
         assert_eq!(pending.len(), 1);
