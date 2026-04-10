@@ -2,6 +2,28 @@
 
 All notable changes to Batty are documented here.
 
+## 0.10.5 — 2026-04-10
+
+Fix stale cross-session stall signals appearing on freshly-restarted members.
+
+`agent_health_by_member` aggregated `stall_detected` events from all of
+`events.jsonl` history without considering session boundaries. A stall
+from a prior daemon run would still show up on a freshly-restarted
+member as "manager (manager) stalled after 2h: inbox batching", even
+though the new session had only been running for seconds. This made
+status output misleading and noisy immediately after every restart.
+
+- **Clear stall state on `daemon_started`** — when the aggregator
+  encounters a `daemon_started` event, it now clears supervisory stall
+  state for every tracked member. Stall events that precede the latest
+  `daemon_started` no longer leak into the current session's status.
+  (`src/team/status.rs`)
+- **Regression tests** —
+  `agent_health_by_member_clears_stall_from_previous_daemon_session`
+  locks in the cross-session clearing. Companion test
+  `agent_health_by_member_keeps_stall_from_current_daemon_session`
+  verifies stalls from the current session are still preserved.
+
 ## 0.10.4 — 2026-04-10
 
 Fix two stability bugs: disk pressure under active engineer workload and a
