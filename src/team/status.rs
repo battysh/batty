@@ -667,9 +667,30 @@ pub(crate) fn agent_health_by_member(
     let mut restart_events = HashMap::<String, u32>::new();
     let mut latest_assignment_ts = HashMap::<String, u64>::new();
     let mut latest_assignment_ts_by_task = HashMap::<(String, u32), u64>::new();
+    // Track the latest daemon_started timestamp so stall events from prior
+    // daemon sessions don't leak into the current status display. Without
+    // this, a stall_detected event from 2 hours ago (before the last
+    // restart) appears as a live "stalled after 2h" signal on a freshly
+    // restarted member.
+    let mut latest_daemon_started_ts: u64 = 0;
     match events::read_events(&team_events_path(project_root)) {
         Ok(events) => {
             for event in events {
+                // Session lifecycle events don't carry a role but are
+                // still meaningful — process them before the role guard.
+                if event.event == "daemon_started" {
+                    if event.ts > latest_daemon_started_ts {
+                        latest_daemon_started_ts = event.ts;
+                        // Clear stall state for every member so stall events
+                        // from prior sessions don't affect the current
+                        // display.
+                        for health in health_by_member.values_mut() {
+                            health.record_supervisory_stall(None, None);
+                        }
+                    }
+                    continue;
+                }
+
                 let Some(role) = event.role.as_deref() else {
                     continue;
                 };
@@ -3985,6 +4006,70 @@ mod tests {
         assert_eq!(
             health.get("eng-1").unwrap().backend_health,
             crate::agent::BackendHealth::Healthy,
+        );
+    }
+
+    #[test]
+    fn agent_health_by_member_clears_stall_from_previous_daemon_session() {
+        // Regression: stall_detected events from prior daemon sessions
+        // used to leak into the current status display, producing signals
+        // like "manager (manager) stalled after 2h" on a freshly-restarted
+        // member. The fix: clear supervisory_stall state when a newer
+        // daemon_started event is seen.
+        let tmp = tempfile::tempdir().unwrap();
+        let events_path = team_events_path(tmp.path());
+        let mut sink = EventSink::new(&events_path).unwrap();
+
+        // Old daemon session emits a stall for the manager.
+        let mut old_stall = TeamEvent::stall_detected_with_reason(
+            "manager",
+            None,
+            7200,
+            Some("supervisory_inbox_batching"),
+        );
+        old_stall.task = Some("supervisory::manager".to_string());
+        old_stall.details = Some("manager (manager) stalled after 2h: inbox batching".to_string());
+        sink.emit(old_stall).unwrap();
+
+        // Daemon restarts — this should clear the prior stall state.
+        sink.emit(TeamEvent::daemon_started()).unwrap();
+
+        // After the restart, no new stall events have been emitted for the
+        // manager. The status display must NOT show the stale 2h stall.
+        let health = agent_health_by_member(tmp.path(), &[manager("manager"), engineer("eng-1")]);
+        let manager_health = health.get("manager").unwrap();
+        assert!(
+            !manager_health.has_supervisory_warning(),
+            "manager should not carry a supervisory stall warning from a prior daemon session; got reason={:?} summary={:?}",
+            manager_health.stall_reason,
+            manager_health.stall_summary,
+        );
+    }
+
+    #[test]
+    fn agent_health_by_member_keeps_stall_from_current_daemon_session() {
+        // Companion to the clears-previous-session test: a stall event that
+        // happens AFTER the latest daemon_started should be preserved.
+        let tmp = tempfile::tempdir().unwrap();
+        let events_path = team_events_path(tmp.path());
+        let mut sink = EventSink::new(&events_path).unwrap();
+
+        sink.emit(TeamEvent::daemon_started()).unwrap();
+        let mut stall = TeamEvent::stall_detected_with_reason(
+            "manager",
+            None,
+            300,
+            Some("supervisory_inbox_batching"),
+        );
+        stall.task = Some("supervisory::manager".to_string());
+        stall.details = Some("manager (manager) stalled after 5m: inbox batching".to_string());
+        sink.emit(stall).unwrap();
+
+        let health = agent_health_by_member(tmp.path(), &[manager("manager"), engineer("eng-1")]);
+        let manager_health = health.get("manager").unwrap();
+        assert!(
+            manager_health.has_supervisory_warning(),
+            "manager should retain a stall warning from the current session",
         );
     }
 
