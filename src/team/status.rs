@@ -66,6 +66,8 @@ pub(crate) struct AgentHealthSummary {
     pub(crate) context_exhaustion_count: u32,
     pub(crate) delivery_failure_count: u32,
     pub(crate) supervisory_digest_count: u32,
+    pub(crate) dispatch_fallback_count: u32,
+    pub(crate) dispatch_fallback_reason: Option<String>,
     pub(crate) task_elapsed_secs: Option<u64>,
     pub(crate) stall_summary: Option<String>,
     pub(crate) stall_reason: Option<String>,
@@ -75,6 +77,11 @@ pub(crate) struct AgentHealthSummary {
 impl AgentHealthSummary {
     pub(crate) fn record_supervisory_digest(&mut self) {
         self.supervisory_digest_count += 1;
+    }
+
+    pub(crate) fn record_dispatch_fallback(&mut self, reason: Option<&str>) {
+        self.dispatch_fallback_count += 1;
+        self.dispatch_fallback_reason = reason.map(str::to_string);
     }
 
     pub(crate) fn record_supervisory_stall(&mut self, reason: Option<&str>, summary: Option<&str>) {
@@ -627,6 +634,12 @@ pub(crate) fn agent_health_by_member(
                             .or_default()
                             .record_supervisory_digest();
                     }
+                    "dispatch_fallback_used" => {
+                        health_by_member
+                            .entry(role.to_string())
+                            .or_default()
+                            .record_dispatch_fallback(event.reason.as_deref());
+                    }
                     "stall_detected" => {
                         let role_type = members
                             .iter()
@@ -929,6 +942,13 @@ pub(crate) fn format_agent_health_summary_for_role(
     }
     if health.supervisory_digest_count > 0 {
         parts.push(format!("sd{}", health.supervisory_digest_count));
+    }
+    if health.dispatch_fallback_count > 0 {
+        let token = match health.dispatch_fallback_reason.as_deref() {
+            Some(reason) => format!("fd{}:{reason}", health.dispatch_fallback_count),
+            None => format!("fd{}", health.dispatch_fallback_count),
+        };
+        parts.push(token);
     }
     if let Some(supervisory_token) = health.supervisory_status_token_for_role(role_type) {
         parts.push(supervisory_token);
@@ -2689,6 +2709,8 @@ mod tests {
                     context_exhaustion_count: 0,
                     delivery_failure_count: 0,
                     supervisory_digest_count: 0,
+                    dispatch_fallback_count: 0,
+                    dispatch_fallback_reason: None,
                     task_elapsed_secs: None,
                     backend_health: crate::agent::BackendHealth::default(),
                     stall_summary: None,
@@ -2716,6 +2738,8 @@ mod tests {
                     context_exhaustion_count: 1,
                     delivery_failure_count: 1,
                     supervisory_digest_count: 0,
+                    dispatch_fallback_count: 0,
+                    dispatch_fallback_reason: None,
                     task_elapsed_secs: None,
                     backend_health: crate::agent::BackendHealth::default(),
                     stall_summary: None,
@@ -3289,6 +3313,8 @@ mod tests {
                         context_exhaustion_count: 0,
                         delivery_failure_count: 0,
                         supervisory_digest_count: 0,
+                        dispatch_fallback_count: 0,
+                        dispatch_fallback_reason: None,
                         task_elapsed_secs: Some(30),
                         stall_reason: None,
                         stall_summary: None,
@@ -3478,6 +3504,8 @@ mod tests {
             context_exhaustion_count: 1,
             delivery_failure_count: 3,
             supervisory_digest_count: 1,
+            dispatch_fallback_count: 0,
+            dispatch_fallback_reason: None,
             task_elapsed_secs: Some(750),
             stall_reason: None,
             stall_summary: None,
@@ -3502,6 +3530,19 @@ mod tests {
         });
 
         assert_eq!(summary, "stall:manager:no-progress");
+    }
+
+    #[test]
+    fn format_agent_health_summary_includes_dispatch_fallback_token() {
+        let summary = format_agent_health_summary(&AgentHealthSummary {
+            dispatch_fallback_count: 1,
+            dispatch_fallback_reason: Some(
+                "manager_supervisory_no_actionable_progress".to_string(),
+            ),
+            ..AgentHealthSummary::default()
+        });
+
+        assert_eq!(summary, "fd1:manager_supervisory_no_actionable_progress");
     }
 
     #[test]

@@ -151,6 +151,31 @@ impl TeamDaemon {
                 continue;
             }
 
+            if supervisory_stalled
+                && !idle_unassigned_reports.is_empty()
+                && !unassigned_open_tasks.is_empty()
+            {
+                let reason = format!(
+                    "manager_{}",
+                    self.supervisory_progress_signal(&name, stall_threshold)
+                        .stall_reason()
+                );
+                let fallback_count = self.fallback_direct_dispatch(
+                    &name,
+                    &reason,
+                    &board_dir,
+                    &idle_unassigned_reports,
+                    &unassigned_open_tasks,
+                )?;
+                if fallback_count > 0 {
+                    self.record_orchestrator_action(format!(
+                        "recovery: dispatch fallback for {} assigned {} task(s) directly ({})",
+                        name, fallback_count, reason
+                    ));
+                    continue;
+                }
+            }
+
             let dispatch_key = manager_dispatch_intervention_key(&name);
             let signature = manager_dispatch_intervention_signature(
                 &idle_active_reports,
@@ -214,6 +239,55 @@ impl TeamDaemon {
         }
 
         Ok(())
+    }
+
+    fn fallback_direct_dispatch(
+        &mut self,
+        manager_name: &str,
+        reason: &str,
+        board_dir: &std::path::Path,
+        idle_unassigned_reports: &[&ReportDispatchSnapshot],
+        unassigned_open_tasks: &[&crate::task::Task],
+    ) -> Result<usize> {
+        let mut dispatched = 0usize;
+        for (report, task) in idle_unassigned_reports
+            .iter()
+            .zip(unassigned_open_tasks.iter())
+        {
+            let assignment_message =
+                format!("Task #{}: {}\n\n{}", task.id, task.title, task.description);
+            crate::team::task_cmd::assign_task_owners(
+                board_dir,
+                task.id,
+                Some(&report.name),
+                None,
+            )?;
+            crate::team::task_cmd::transition_task(board_dir, task.id, "in-progress")?;
+
+            match self.assign_task_with_task_id_as(
+                "daemon",
+                &report.name,
+                &assignment_message,
+                Some(task.id),
+            ) {
+                Ok(_) => {
+                    self.record_dispatch_fallback_used(manager_name, &report.name, task.id, reason);
+                    dispatched += 1;
+                }
+                Err(error) => {
+                    let _ = crate::team::task_cmd::transition_task(board_dir, task.id, "todo");
+                    let _ = crate::team::task_cmd::unclaim_task(board_dir, task.id);
+                    warn!(
+                        manager = %manager_name,
+                        engineer = %report.name,
+                        task_id = task.id,
+                        error = %error,
+                        "fallback direct-dispatch failed"
+                    );
+                }
+            }
+        }
+        Ok(dispatched)
     }
 
     fn build_manager_dispatch_gap_message(

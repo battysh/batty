@@ -279,6 +279,21 @@ impl TeamDaemon {
         ));
     }
 
+    pub(crate) fn record_dispatch_fallback_used(
+        &mut self,
+        manager: &str,
+        engineer: &str,
+        task_id: u32,
+        reason: &str,
+    ) {
+        self.emit_event(TeamEvent::dispatch_fallback_used(
+            manager,
+            &task_id.to_string(),
+            engineer,
+            reason,
+        ));
+    }
+
     pub(crate) fn record_auto_merge_decision(
         &mut self,
         engineer: &str,

@@ -77,6 +77,25 @@ fn insert_working_shim_handle(
     daemon.shim_handles.insert(member.to_string(), handle);
 }
 
+fn insert_idle_shim_handle(
+    daemon: &mut TeamDaemon,
+    member: &str,
+) -> crate::shim::protocol::Channel {
+    let (parent, child) = crate::shim::protocol::socketpair().unwrap();
+    let channel = crate::shim::protocol::Channel::new(parent);
+    let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+        member.to_string(),
+        channel,
+        999,
+        "claude".to_string(),
+        "claude".to_string(),
+        std::path::PathBuf::from("/tmp/test"),
+    );
+    handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+    daemon.shim_handles.insert(member.to_string(), handle);
+    crate::shim::protocol::Channel::new(child)
+}
+
 fn expire_triage_cooldown(daemon: &mut TeamDaemon, member: &str) {
     daemon.intervention_cooldowns.insert(
         format!("triage::{member}"),
@@ -770,6 +789,116 @@ fn supervisory_manager_shim_chatter_still_trips_dispatch_gap() {
             && event.role.as_deref() == Some("lead")
             && event.reason.as_deref() == Some("supervisory_stalled_manager_shim_activity_only")
     }));
+}
+
+#[test]
+fn healthy_manager_dispatch_gap_does_not_fallback_dispatch() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("lead", "%999997")
+        .with_board_task(192, "open-task", "todo", None);
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.config.team_config.use_shim = true;
+    let mut child = insert_idle_shim_handle(&mut daemon, "eng-2");
+    child
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+
+    enter_idle_epoch(&mut daemon, "lead");
+    daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+    assert_eq!(daemon.active_task_id("eng-2"), None);
+    assert!(harness.pending_inbox_messages("lead").unwrap().len() >= 1);
+    assert!(
+        child.recv::<crate::shim::protocol::Command>().is_err(),
+        "healthy manager path should not bypass into direct dispatch"
+    );
+}
+
+#[test]
+fn stalled_manager_dispatch_gap_fallback_dispatches_work() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Working)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("lead", "%999997")
+        .with_board_task(192, "open-task", "todo", None);
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.config.team_config.use_shim = true;
+    let threshold = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .stall_threshold_secs;
+    insert_working_shim_handle(&mut daemon, "lead", threshold + 10, 1);
+    let _eng1_child = insert_idle_shim_handle(&mut daemon, "eng-1");
+    let _eng2_child = insert_idle_shim_handle(&mut daemon, "eng-2");
+
+    daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+    assert!(
+        daemon.active_task_id("eng-1") == Some(192) || daemon.active_task_id("eng-2") == Some(192)
+    );
+    let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+    let task = tasks.iter().find(|task| task.id == 192).unwrap();
+    assert_eq!(task.status, "in-progress");
+    assert!(matches!(
+        task.claimed_by.as_deref(),
+        Some("eng-1" | "eng-2")
+    ));
+
+    let events =
+        crate::team::events::read_events(&crate::team::team_events_path(harness.project_root()))
+            .unwrap();
+    assert!(events.iter().any(|event| {
+        event.event == "dispatch_fallback_used"
+            && event.role.as_deref() == Some("lead")
+            && event.task.as_deref() == Some("192")
+    }));
+}
+
+#[test]
+fn stalled_manager_dispatch_gap_skips_blocked_manual_work() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Working)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("lead", "%999997");
+    crate::team::test_support::write_board_task_file(
+        harness.project_root(),
+        198,
+        "manual-provider-blocked",
+        "todo",
+        None,
+        &[],
+        Some("manual provider-console token rotation"),
+    );
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.config.team_config.use_shim = true;
+    let threshold = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .stall_threshold_secs;
+    insert_working_shim_handle(&mut daemon, "lead", threshold + 10, 1);
+    let mut child = insert_idle_shim_handle(&mut daemon, "eng-2");
+    child
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+
+    daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+    assert_eq!(daemon.active_task_id("eng-2"), None);
+    let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+    let task = tasks.iter().find(|task| task.id == 198).unwrap();
+    assert_eq!(task.status, "todo");
+    assert!(task.claimed_by.is_none());
+    assert!(
+        child.recv::<crate::shim::protocol::Command>().is_err(),
+        "blocked/manual work should not be direct-dispatched"
+    );
 }
 
 #[test]
