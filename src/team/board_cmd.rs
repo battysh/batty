@@ -284,18 +284,8 @@ fn snapshot_scheduling_fields(
 
 /// Find a task file by numeric ID in the board's tasks directory.
 fn find_task_file(board_dir: &Path, task_id: &str) -> Option<std::path::PathBuf> {
-    let tasks_dir = board_dir.join("tasks");
     let id: u32 = task_id.parse().ok()?;
-    let prefix = format!("{id:03}-");
-    let entries = std::fs::read_dir(&tasks_dir).ok()?;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.starts_with(&prefix) && name_str.ends_with(".md") {
-            return Some(entry.path());
-        }
-    }
-    None
+    crate::task::find_task_path_by_id(&board_dir.join("tasks"), id).ok()
 }
 
 fn run_board_owned(board_dir: &Path, args: &[String]) -> Result<BoardOutput, BoardError> {

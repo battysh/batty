@@ -2432,6 +2432,14 @@ printf 'Created task #%s\n' \"$id\"
         .unwrap();
     }
 
+    fn board_task_path(project_root: &Path, task_id: u32) -> std::path::PathBuf {
+        crate::task::find_task_path_by_id(
+            &project_root.join(".batty").join("team_config").join("board").join("tasks"),
+            task_id,
+        )
+        .unwrap()
+    }
+
     const SINGLE_TASK_RESPONSE: &str = r#"---
 title: "Add planning telemetry"
 priority: high
@@ -3282,13 +3290,7 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
             &[],
             None,
         );
-        let task_path = tmp
-            .path()
-            .join(".batty")
-            .join("team_config")
-            .join("board")
-            .join("tasks")
-            .join("010-review-task.md");
+        let task_path = board_task_path(tmp.path(), 10);
         crate::team::task_cmd::assign_task_owners(
             &daemon.board_dir(),
             10,
@@ -3345,13 +3347,7 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
             &[],
             Some("manual provider-console token rotation"),
         );
-        let task_path = tmp
-            .path()
-            .join(".batty")
-            .join("team_config")
-            .join("board")
-            .join("tasks")
-            .join("010-blocked-task.md");
+        let task_path = board_task_path(tmp.path(), 10);
 
         daemon.reconcile_active_tasks().unwrap();
 
@@ -5385,10 +5381,7 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
 
         daemon.maybe_manage_task_claim_ttls().unwrap();
 
-        let task = crate::task::Task::from_file(
-            &repo.join(".batty/team_config/board/tasks/042-ttl-init.md"),
-        )
-        .unwrap();
+        let task = crate::task::Task::from_file(&board_task_path(&repo, 42)).unwrap();
         assert_eq!(task.claim_ttl_secs, Some(900));
         assert!(task.claimed_at.is_some());
         assert!(task.claim_expires_at.is_some());
@@ -5407,7 +5400,7 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         let repo = init_git_repo(&tmp, "claim-ttl-expire");
         write_owned_task_file(&repo, 42, "ttl-expire", "in-progress", "eng-1");
 
-        let task_path = repo.join(".batty/team_config/board/tasks/042-ttl-expire.md");
+        let task_path = board_task_path(&repo, 42);
         let now = chrono::Utc::now();
         let stale_time = (now - chrono::Duration::minutes(40)).to_rfc3339();
         let recent_progress_time = now.to_rfc3339();
@@ -5477,7 +5470,7 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         )
         .unwrap();
 
-        let task_path = repo.join(".batty/team_config/board/tasks/042-ttl-reset.md");
+        let task_path = board_task_path(&repo, 42);
         let now = chrono::Utc::now();
         let stale_time = (now - chrono::Duration::minutes(40)).to_rfc3339();
         let recent_progress_time = now.to_rfc3339();
@@ -5524,7 +5517,7 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         write_owned_task_file(&repo, 42, "ttl-redispatch", "in-progress", "eng-1");
         write_open_task_file(&repo, 99, "background-done", "done");
 
-        let task_path = repo.join(".batty/team_config/board/tasks/042-ttl-redispatch.md");
+        let task_path = board_task_path(&repo, 42);
         let now = chrono::Utc::now();
         let stale_time = (now - chrono::Duration::minutes(40)).to_rfc3339();
         let recent_progress_time = now.to_rfc3339();
@@ -5593,7 +5586,7 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         let repo = init_git_repo(&tmp, "claim-ttl-output");
         write_owned_task_file(&repo, 42, "ttl-output", "in-progress", "eng-1");
 
-        let task_path = repo.join(".batty/team_config/board/tasks/042-ttl-output.md");
+        let task_path = board_task_path(&repo, 42);
         let now = chrono::Utc::now();
         let stale_time = (now - chrono::Duration::minutes(20)).to_rfc3339();
         let recent_progress_time = now.to_rfc3339();
