@@ -359,6 +359,7 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool, health: bool) 
     let pending_inbox_counts = status::pending_inbox_counts(project_root, &members);
     let triage_backlog_counts = status::triage_backlog_counts(project_root, &members);
     let owned_task_buckets = status::owned_task_buckets(project_root, &members);
+    let branch_mismatches = status::branch_mismatch_by_member(project_root, &members);
     let worktree_staleness = status::worktree_staleness_by_member(project_root, &members);
     let agent_health = status::agent_health_by_member(project_root, &members);
     let paused = pause_marker_path(project_root).exists();
@@ -369,6 +370,7 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool, health: bool) 
         &pending_inbox_counts,
         &triage_backlog_counts,
         &owned_task_buckets,
+        &branch_mismatches,
         &worktree_staleness,
         &agent_health,
     );
@@ -929,6 +931,7 @@ roles:
             &owned,
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         );
         assert_eq!(rows[0].state, "stopped");
         assert_eq!(rows[0].pending_inbox, 3);
@@ -957,6 +960,7 @@ roles:
             &pending,
             &triage,
             &owned,
+            &Default::default(),
             &Default::default(),
             &Default::default(),
         );

@@ -181,6 +181,8 @@ pub(crate) struct StatusTaskEntry {
     pub(crate) branch: Option<String>,
     pub(crate) worktree_path: Option<String>,
     pub(crate) commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) branch_mismatch: Option<String>,
     pub(crate) next_action: Option<String>,
     pub(crate) test_summary: Option<String>,
 }
@@ -354,6 +356,7 @@ pub(crate) fn build_team_status_rows(
     pending_inbox_counts: &HashMap<String, usize>,
     triage_backlog_counts: &HashMap<String, usize>,
     owned_task_buckets: &HashMap<String, OwnedTaskBuckets>,
+    branch_mismatches: &HashMap<String, String>,
     worktree_staleness: &HashMap<String, u32>,
     agent_health: &HashMap<String, AgentHealthSummary>,
 ) -> Vec<TeamStatusRow> {
@@ -396,6 +399,7 @@ pub(crate) fn build_team_status_rows(
             let health = agent_health.get(&member.name).cloned().unwrap_or_default();
             let signal = merge_status_signal(
                 signal,
+                branch_mismatches.get(&member.name).cloned(),
                 health.stall_summary.clone(),
                 triage_backlog,
                 review_backlog,
@@ -421,6 +425,105 @@ pub(crate) fn build_team_status_rows(
                 health_summary,
                 eta: "-".to_string(),
             }
+        })
+        .collect()
+}
+
+fn task_has_active_claim(task: &task::Task, member_name: &str) -> bool {
+    task.claimed_by.as_deref() == Some(member_name)
+        && classify_owned_task_status(task.status.as_str()) == Some(true)
+}
+
+fn managed_task_branch(member_name: &str, task: &task::Task) -> String {
+    task.branch
+        .clone()
+        .unwrap_or_else(|| format!("{member_name}/{}", task.id))
+}
+
+fn format_branch_mismatch_signal(
+    task_id: u32,
+    current_branch: &str,
+    expected_branch: &str,
+) -> String {
+    if current_branch == "HEAD" {
+        format!(
+            "branch mismatch (#{} detached HEAD; expected {})",
+            task_id, expected_branch
+        )
+    } else {
+        format!(
+            "branch mismatch (#{} on {}; expected {})",
+            task_id, current_branch, expected_branch
+        )
+    }
+}
+
+fn select_authoritative_claimed_task<'a>(
+    member_name: &str,
+    current_branch: &str,
+    claimed_tasks: &[&'a task::Task],
+) -> Option<&'a task::Task> {
+    let mut branch_matches = claimed_tasks
+        .iter()
+        .copied()
+        .filter(|task| managed_task_branch(member_name, task) == current_branch);
+    if let Some(task) = branch_matches.next()
+        && branch_matches.next().is_none()
+    {
+        return Some(task);
+    }
+
+    claimed_tasks.iter().copied().min_by_key(|task| task.id)
+}
+
+pub(crate) fn branch_mismatch_by_member(
+    project_root: &Path,
+    members: &[MemberInstance],
+) -> HashMap<String, String> {
+    let tasks_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    if !tasks_dir.is_dir() {
+        return HashMap::new();
+    }
+
+    let tasks = match task::load_tasks_from_dir(&tasks_dir) {
+        Ok(tasks) => tasks,
+        Err(error) => {
+            warn!(path = %tasks_dir.display(), error = %error, "failed to load board tasks for branch mismatch status");
+            return HashMap::new();
+        }
+    };
+
+    members
+        .iter()
+        .filter(|member| member.role_type == RoleType::Engineer && member.use_worktrees)
+        .filter_map(|member| {
+            let worktree_dir = project_root
+                .join(".batty")
+                .join("worktrees")
+                .join(&member.name);
+            if !worktree_dir.is_dir() {
+                return None;
+            }
+
+            let current_branch =
+                git_stdout_raw(&worktree_dir, ["rev-parse", "--abbrev-ref", "HEAD"])?;
+            let claimed_tasks = tasks
+                .iter()
+                .filter(|task| task_has_active_claim(task, &member.name))
+                .collect::<Vec<_>>();
+            let task =
+                select_authoritative_claimed_task(&member.name, &current_branch, &claimed_tasks)?;
+            let expected_branch = managed_task_branch(&member.name, task);
+            (current_branch != expected_branch).then(|| {
+                (
+                    member.name.clone(),
+                    format_branch_mismatch_signal(task.id, &current_branch, &expected_branch),
+                )
+            })
         })
         .collect()
 }
@@ -882,6 +985,7 @@ fn fallback_supervisory_stall_summary(
 
 fn merge_status_signal(
     signal: Option<String>,
+    branch_mismatch_signal: Option<String>,
     stall_signal: Option<String>,
     triage_backlog: usize,
     review_backlog: usize,
@@ -891,6 +995,9 @@ fn merge_status_signal(
     let mut signals = Vec::new();
     if let Some(existing) = signal {
         signals.push(existing);
+    }
+    if let Some(branch_mismatch) = branch_mismatch_signal {
+        signals.push(branch_mismatch);
     }
     if let Some(stall) = stall_signal {
         signals.push(stall);
@@ -1174,6 +1281,7 @@ pub(crate) fn board_status_task_queues(
     let mut review_queue = Vec::new();
     for task in task::load_tasks_from_dir(&tasks_dir)? {
         let inferred = infer_runtime_task_metadata(project_root, &task);
+        let branch_mismatch = task_branch_mismatch(&task, &inferred);
         let test_summary = crate::team::board::read_workflow_metadata(&task.source_path)
             .ok()
             .and_then(|metadata| metadata.test_results)
@@ -1192,6 +1300,7 @@ pub(crate) fn board_status_task_queues(
                 .worktree_path
                 .or_else(|| inferred.worktree_path.clone()),
             commit: task.commit.or_else(|| inferred.commit.clone()),
+            branch_mismatch,
             next_action: task.next_action,
             test_summary,
         };
@@ -1230,13 +1339,27 @@ fn infer_runtime_task_metadata(project_root: &Path, task: &task::Task) -> Inferr
     }
 
     InferredTaskMetadata {
-        branch: git_stdout(&worktree_path, ["rev-parse", "--abbrev-ref", "HEAD"]),
+        branch: git_stdout_raw(&worktree_path, ["rev-parse", "--abbrev-ref", "HEAD"]),
         worktree_path: relative_to_project_root(project_root, &worktree_path),
         commit: git_stdout(&worktree_path, ["rev-parse", "--short", "HEAD"]),
     }
 }
 
-fn git_stdout<const N: usize>(cwd: &Path, args: [&str; N]) -> Option<String> {
+fn task_branch_mismatch(task: &task::Task, inferred: &InferredTaskMetadata) -> Option<String> {
+    let member_name = task.claimed_by.as_deref()?;
+    if !member_name.starts_with("eng-")
+        || classify_owned_task_status(task.status.as_str()) != Some(true)
+    {
+        return None;
+    }
+
+    let current_branch = inferred.branch.as_deref()?;
+    let expected_branch = managed_task_branch(member_name, task);
+    (current_branch != expected_branch)
+        .then(|| format_branch_mismatch_signal(task.id, current_branch, &expected_branch))
+}
+
+fn git_stdout_raw<const N: usize>(cwd: &Path, args: [&str; N]) -> Option<String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(cwd)
@@ -1246,7 +1369,11 @@ fn git_stdout<const N: usize>(cwd: &Path, args: [&str; N]) -> Option<String> {
         return None;
     }
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!value.is_empty() && value != "HEAD").then_some(value)
+    (!value.is_empty()).then_some(value)
+}
+
+fn git_stdout<const N: usize>(cwd: &Path, args: [&str; N]) -> Option<String> {
+    git_stdout_raw(cwd, args).filter(|value| value != "HEAD")
 }
 
 fn relative_to_project_root(project_root: &Path, path: &Path) -> Option<String> {
@@ -2232,6 +2359,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
         );
 
         assert_eq!(rows[0].state, "stopped");
@@ -2260,6 +2388,7 @@ mod tests {
             &runtime_statuses,
             &HashMap::new(),
             &triage_backlog_counts,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -2295,6 +2424,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &owned_task_buckets,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
         );
@@ -2363,6 +2493,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             &agent_health,
         );
 
@@ -2390,10 +2521,141 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
         );
 
         assert_eq!(rows[0].state, "starting");
         assert_eq!(rows[0].runtime_label, None);
+    }
+
+    #[test]
+    fn build_team_status_rows_includes_branch_mismatch_signal() {
+        let members = vec![engineer("eng-1")];
+        let runtime_statuses = HashMap::from([(
+            "eng-1".to_string(),
+            RuntimeMemberStatus {
+                state: "idle".to_string(),
+                signal: Some("nudge paused".to_string()),
+                label: Some("idle".to_string()),
+            },
+        )]);
+        let owned_task_buckets = HashMap::from([(
+            "eng-1".to_string(),
+            OwnedTaskBuckets {
+                active: vec![41],
+                review: Vec::new(),
+            },
+        )]);
+        let branch_mismatches = HashMap::from([(
+            "eng-1".to_string(),
+            "branch mismatch (#41 detached HEAD; expected eng-1/41)".to_string(),
+        )]);
+
+        let rows = build_team_status_rows(
+            &members,
+            true,
+            &runtime_statuses,
+            &HashMap::new(),
+            &HashMap::new(),
+            &owned_task_buckets,
+            &branch_mismatches,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            rows[0].signal.as_deref(),
+            Some("nudge paused, branch mismatch (#41 detached HEAD; expected eng-1/41)")
+        );
+    }
+
+    #[test]
+    fn branch_mismatch_by_member_flags_detached_head_claimed_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = crate::team::test_support::init_git_repo(&tmp, "status-branch-mismatch");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = crate::team::task_loop::engineer_base_branch_name("eng-1");
+        crate::team::task_loop::setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            &base_branch,
+            &team_config_dir,
+        )
+        .unwrap();
+        crate::team::task_loop::checkout_worktree_branch_from_main(&worktree_dir, "eng-1/41")
+            .unwrap();
+        let head = crate::team::test_support::git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
+        crate::team::test_support::git_ok(&worktree_dir, &["checkout", "--detach", &head]);
+
+        write_board_task(
+            &repo,
+            "041-active.md",
+            "id: 41\ntitle: Active task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\n",
+        );
+
+        let mut member = engineer("eng-1");
+        member.use_worktrees = true;
+        let mismatches = branch_mismatch_by_member(&repo, &[member]);
+
+        assert_eq!(
+            mismatches.get("eng-1").map(String::as_str),
+            Some("branch mismatch (#41 detached HEAD; expected eng-1/41)")
+        );
+    }
+
+    #[test]
+    fn branch_mismatch_by_member_ignores_matching_claimed_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = crate::team::test_support::init_git_repo(&tmp, "status-branch-match");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = crate::team::task_loop::engineer_base_branch_name("eng-1");
+        crate::team::task_loop::setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            &base_branch,
+            &team_config_dir,
+        )
+        .unwrap();
+        crate::team::task_loop::checkout_worktree_branch_from_main(&worktree_dir, "eng-1/41")
+            .unwrap();
+
+        write_board_task(
+            &repo,
+            "041-active.md",
+            "id: 41\ntitle: Active task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\n",
+        );
+
+        let mut member = engineer("eng-1");
+        member.use_worktrees = true;
+        let mismatches = branch_mismatch_by_member(&repo, &[member]);
+
+        assert!(mismatches.is_empty());
+    }
+
+    #[test]
+    fn branch_mismatch_by_member_ignores_detached_head_without_claim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = crate::team::test_support::init_git_repo(&tmp, "status-detached-no-claim");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = crate::team::task_loop::engineer_base_branch_name("eng-1");
+        crate::team::task_loop::setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            &base_branch,
+            &team_config_dir,
+        )
+        .unwrap();
+        let head = crate::team::test_support::git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
+        crate::team::test_support::git_ok(&worktree_dir, &["checkout", "--detach", &head]);
+
+        let mut member = engineer("eng-1");
+        member.use_worktrees = true;
+        let mismatches = branch_mismatch_by_member(&repo, &[member]);
+
+        assert!(mismatches.is_empty());
     }
 
     #[test]
@@ -2779,6 +3041,7 @@ mod tests {
         assert_eq!(
             merge_status_signal(
                 Some("nudged".to_string()),
+                None,
                 Some("manager (manager) stalled after 5m: no actionable progress".to_string()),
                 2,
                 1,
@@ -2792,7 +3055,7 @@ mod tests {
 
     #[test]
     fn merge_status_signal_returns_none_when_no_signals_exist() {
-        assert_eq!(merge_status_signal(None, None, 0, 0), None);
+        assert_eq!(merge_status_signal(None, None, None, 0, 0), None);
     }
 
     #[test]
@@ -2886,7 +3149,52 @@ mod tests {
                 .is_some_and(|branch| branch.contains("eng-1"))
         );
         assert!(active_tasks[0].commit.as_deref().is_some());
+        assert_eq!(
+            active_tasks[0].branch_mismatch.as_deref(),
+            Some("branch mismatch (#41 on eng-1; expected eng-1/41)")
+        );
         assert!(active_tasks[0].test_summary.is_none());
+    }
+
+    #[test]
+    fn board_status_task_queues_surfaces_detached_head_branch_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = crate::team::test_support::init_git_repo(&tmp, "status-detached-board");
+        let tasks_dir = repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(
+            tasks_dir.join("041-active.md"),
+            "---\nid: 41\ntitle: Active task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\n---\n",
+        )
+        .unwrap();
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = crate::team::task_loop::engineer_base_branch_name("eng-1");
+        crate::team::task_loop::setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            &base_branch,
+            &team_config_dir,
+        )
+        .unwrap();
+        crate::team::task_loop::checkout_worktree_branch_from_main(&worktree_dir, "eng-1/41")
+            .unwrap();
+        let head = crate::team::test_support::git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
+        crate::team::test_support::git_ok(&worktree_dir, &["checkout", "--detach", &head]);
+
+        let (active_tasks, review_queue) = board_status_task_queues(&repo).unwrap();
+
+        assert!(review_queue.is_empty());
+        assert_eq!(active_tasks[0].branch.as_deref(), Some("HEAD"));
+        assert_eq!(
+            active_tasks[0].branch_mismatch.as_deref(),
+            Some("branch mismatch (#41 detached HEAD; expected eng-1/41)")
+        );
     }
 
     #[test]
@@ -2949,6 +3257,7 @@ mod tests {
                 branch: Some("eng-1/task-41".to_string()),
                 worktree_path: None,
                 commit: None,
+                branch_mismatch: None,
                 next_action: None,
                 test_summary: Some("1 tests failed: parser::it_works".to_string()),
             }],
@@ -2963,6 +3272,7 @@ mod tests {
                 branch: None,
                 worktree_path: None,
                 commit: None,
+                branch_mismatch: None,
                 next_action: Some("review now".to_string()),
                 test_summary: None,
             }],
