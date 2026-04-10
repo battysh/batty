@@ -61,6 +61,7 @@ enum OrchestratorOnlyReason {
     Nudge,
     StatusQuery,
     StandupRequest,
+    EngineerChatter,
 }
 
 impl OrchestratorOnlyReason {
@@ -69,6 +70,7 @@ impl OrchestratorOnlyReason {
             Self::Nudge => "nudge",
             Self::StatusQuery => "status query",
             Self::StandupRequest => "standup request",
+            Self::EngineerChatter => "engineer chatter",
         }
     }
 }
@@ -365,6 +367,14 @@ impl TeamDaemon {
             .is_some_and(|member| member.role_type == RoleType::Manager)
     }
 
+    fn is_engineer_member(&self, member_name: &str) -> bool {
+        self.config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+            .is_some_and(|member| member.role_type == RoleType::Engineer)
+    }
+
     pub(in crate::team) fn member_ready_for_delivery(&self, member_name: &str) -> bool {
         if let Some(handle) = self.shim_handles.get(member_name) {
             if handle.is_terminal() {
@@ -418,6 +428,9 @@ impl TeamDaemon {
         }
         if is_standup_request(body) {
             return Some(OrchestratorOnlyReason::StandupRequest);
+        }
+        if self.is_engineer_member(recipient) && is_engineer_ambient_chatter(body) {
+            return Some(OrchestratorOnlyReason::EngineerChatter);
         }
 
         None
@@ -494,6 +507,10 @@ impl TeamDaemon {
                     cached
                 ));
             }
+            OrchestratorOnlyReason::EngineerChatter => self.record_orchestrator_action(format!(
+                "notification isolation: diverted non-actionable engineer notice from {} for {} ({preview})",
+                from, recipient
+            )),
         }
     }
 
@@ -1274,6 +1291,45 @@ impl TeamDaemon {
             .map(|member| member.role_name.clone())
             .unwrap_or_else(|| member_name.to_string())
     }
+}
+
+fn is_engineer_actionable_message(body: &str) -> bool {
+    let normalized = normalized_body(body);
+    let category =
+        inbox::classify_message(&inbox::InboxMessage::new_send("daemon", "engineer", body));
+
+    if matches!(
+        category,
+        inbox::MessageCategory::ReviewRequest | inbox::MessageCategory::Blocker
+    ) {
+        return true;
+    }
+
+    normalized.contains("verification rejected this completion")
+        || normalized.contains("fix attempt ")
+        || normalized.contains("fix these failures")
+        || normalized.contains("merge conflict during rebase")
+        || normalized.contains("wait for lead direction before making more changes")
+        || normalized.contains("your task passed tests, but")
+}
+
+fn is_engineer_ambient_chatter(body: &str) -> bool {
+    if is_engineer_actionable_message(body) {
+        return false;
+    }
+
+    let normalized = normalized_body(body);
+    is_idle_nudge(body)
+        || is_review_nudge(body)
+        || is_manager_status_update(&normalized)
+        || normalized.starts_with("[digest]")
+        || normalized.starts_with("[manager-digest]")
+        || normalized.starts_with("recovery:")
+        || normalized.starts_with("triage backlog detected:")
+        || normalized.starts_with("dispatch recovery needed:")
+        || normalized.contains("utilization recovery")
+        || normalized.starts_with("utilization gap detected:")
+        || normalized.starts_with("architect utilization")
 }
 
 #[cfg(test)]
@@ -3152,6 +3208,120 @@ mod tests {
 
         let log = std::fs::read_to_string(crate::team::orchestrator_log_path(tmp.path())).unwrap();
         assert!(log.contains("answered standup request from manager about eng-1"));
+    }
+
+    #[test]
+    fn deliver_message_diverts_non_actionable_engineer_chatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        inbox::init_inbox(&inbox::inboxes_root(tmp.path()), "eng-1").unwrap();
+
+        let mut daemon = empty_legacy_daemon(&tmp);
+        daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+        daemon.config.members = vec![MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "engineer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+            ..Default::default()
+        }];
+        daemon
+            .config
+            .pane_map
+            .insert("eng-1".to_string(), "%999".to_string());
+
+        let (parent, child) = crate::shim::protocol::socketpair().unwrap();
+        let channel = crate::shim::protocol::Channel::new(parent);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "eng-1".into(),
+            channel,
+            999,
+            "claude".into(),
+            "claude".into(),
+            std::path::PathBuf::from("/tmp/test"),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("eng-1".to_string(), handle);
+
+        let result = daemon.deliver_message(
+            "manager",
+            "eng-1",
+            "Rollup: review backlog is healthy and no action is required right now.",
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), MessageDelivery::OrchestratorLogged);
+
+        let mut receiver = crate::shim::protocol::Channel::new(child);
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        assert!(
+            receiver.recv::<crate::shim::protocol::Command>().is_err(),
+            "non-actionable chatter should stay out of the engineer PTY"
+        );
+
+        let log = std::fs::read_to_string(crate::team::orchestrator_log_path(tmp.path())).unwrap();
+        assert!(log.contains("diverted non-actionable engineer notice"));
+    }
+
+    #[test]
+    fn deliver_message_keeps_engineer_retry_feedback_inline() {
+        let tmp = tempfile::tempdir().unwrap();
+        inbox::init_inbox(&inbox::inboxes_root(tmp.path()), "eng-1").unwrap();
+
+        let mut daemon = empty_legacy_daemon(&tmp);
+        daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+        daemon.config.members = vec![MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "engineer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+            ..Default::default()
+        }];
+        daemon
+            .config
+            .pane_map
+            .insert("eng-1".to_string(), "%999".to_string());
+
+        let (parent, child) = crate::shim::protocol::socketpair().unwrap();
+        let channel = crate::shim::protocol::Channel::new(parent);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "eng-1".into(),
+            channel,
+            999,
+            "claude".into(),
+            "claude".into(),
+            std::path::PathBuf::from("/tmp/test"),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("eng-1".to_string(), handle);
+
+        let body = "Verification rejected this completion because there are no commits ahead of main.\nFix attempt 1/3.\nFix these failures, then report completion again.";
+        let result = daemon.deliver_message("batty", "eng-1", body);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), MessageDelivery::LivePane);
+
+        let mut receiver = crate::shim::protocol::Channel::new(child);
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let cmd = receiver.recv::<crate::shim::protocol::Command>().unwrap();
+        match cmd {
+            Some(crate::shim::protocol::Command::SendMessage {
+                from,
+                body: delivered,
+                ..
+            }) => {
+                assert_eq!(from, "batty");
+                assert_eq!(delivered, body);
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
     }
 
     // ── expire_stale_pending_messages tests ──
