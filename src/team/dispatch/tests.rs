@@ -530,7 +530,9 @@ fn assignment_guard_allows_resuming_same_active_task() {
     match cmd {
         Command::SendMessage { from, body, .. } => {
             assert_eq!(from, "manager");
-            assert_eq!(body, "Task #91: continue");
+            assert!(body.contains("Task #91: active-task"));
+            assert!(body.contains("Assignment Packet:"));
+            assert!(body.contains("scope_ack_required: false"));
         }
         other => panic!("expected SendMessage, got {other:?}"),
     }

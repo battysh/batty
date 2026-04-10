@@ -15,7 +15,7 @@ use crate::task::load_tasks_from_dir;
 use crate::team::artifact::read_test_timing_log;
 use crate::team::artifact::{append_test_timing_record, track_artifact};
 use crate::team::auto_merge::{self, AutoMergeDecisionKind};
-use crate::team::daemon::verification::run_automatic_verification;
+use crate::team::daemon::verification::{inspect_scope_fence, run_automatic_verification};
 use crate::team::daemon::{MergeRequest, TeamDaemon};
 use crate::team::task_loop::{
     checkout_worktree_branch_from_main, current_worktree_branch, engineer_base_branch_name,
@@ -357,17 +357,11 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         VerificationPhase::Verifying,
     );
 
-    // SCOPE ENFORCEMENT: reject completions that modify protected files.
-    // Engineers should never modify docs, planning, config, or README.
-    // These are architect/human-owned. Prevents the #563-style scope overreach
-    // where engineers delete critical files during implementation tasks.
-    let out_of_scope = check_protected_file_violations(
-        &worktree_dir,
-        daemon.is_multi_repo,
-        &daemon.sub_repo_names,
-    );
-    if !out_of_scope.is_empty() {
-        let violation_list = out_of_scope.join(", ");
+    let scope_fence = inspect_scope_fence(&worktree_dir)?;
+    if let Some(scope_fence) = scope_fence.as_ref()
+        && !scope_fence.out_of_scope_files.is_empty()
+    {
+        let violation_list = scope_fence.out_of_scope_files.join(", ");
         warn!(
             engineer,
             task_id,
@@ -375,28 +369,17 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
             "completion rejected: engineer modified protected files outside task scope"
         );
         daemon.record_orchestrator_action(format!(
-            "scope violation: {engineer} modified protected files: {violation_list} — reverting out-of-scope changes"
+            "scope violation: {engineer} modified fenced files outside declared scope: {violation_list} — reverting out-of-scope changes"
         ));
-        // Revert the out-of-scope files to main's version
-        for file in &out_of_scope {
-            let _ = std::process::Command::new("git")
-                .args(["checkout", "main", "--", file])
-                .current_dir(&worktree_dir)
-                .output();
-        }
-        // Auto-commit the revert so the engineer's next attempt is clean
-        let _ = std::process::Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(&worktree_dir)
-            .output();
-        let _ = std::process::Command::new("git")
-            .args([
-                "commit",
-                "-m",
-                "auto: revert out-of-scope file modifications",
-            ])
-            .current_dir(&worktree_dir)
-            .output();
+        revert_out_of_scope_files(&worktree_dir, &scope_fence.out_of_scope_files)?;
+        daemon.emit_event(crate::team::events::TeamEvent::scope_fence_violation(
+            engineer,
+            task_id,
+            &format!(
+                "reclaim_requested=true out_of_scope_files={}",
+                violation_list
+            ),
+        ));
     }
 
     if total_commits > 0 {
@@ -430,7 +413,80 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         );
     }
 
-    let (verification_run, test_duration_ms) = if verification_policy.auto_run_tests {
+    let (verification_run, test_duration_ms) = if let Some(scope_fence) = scope_fence.as_ref() {
+        if !scope_fence.ack_present || !scope_fence.out_of_scope_files.is_empty() {
+            (
+                run_automatic_verification(&worktree_dir, test_command.as_deref())?,
+                0,
+            )
+        } else if verification_policy.auto_run_tests {
+            verification_state.begin_iteration();
+            let test_started = Instant::now();
+            let verification_run =
+                run_automatic_verification(&worktree_dir, test_command.as_deref()).with_context(
+                    || {
+                        format!(
+                            "automatic verification failed while running tests in {}",
+                            worktree_dir.display()
+                        )
+                    },
+                )?;
+            let test_duration_ms = test_started.elapsed().as_millis() as u64;
+            verification_state.last_test_passed = verification_run.passed;
+            verification_state.last_test_output = Some(verification_run.output.clone());
+            if verification_run.passed {
+                record_verification_evidence(
+                    daemon,
+                    engineer,
+                    task_id,
+                    &mut verification_state,
+                    EvidenceKind::TestsPassed,
+                    "tests_passed".to_string(),
+                );
+            } else {
+                record_verification_evidence(
+                    daemon,
+                    engineer,
+                    task_id,
+                    &mut verification_state,
+                    EvidenceKind::TestsFailed,
+                    verification_run
+                        .failures
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "tests_failed".to_string()),
+                );
+            }
+            (verification_run, test_duration_ms)
+        } else {
+            let output =
+                "automatic verification skipped because workflow_policy.verification.auto_run_tests=false"
+                    .to_string();
+            verification_state.last_test_passed = true;
+            verification_state.last_test_output = Some(output.clone());
+            record_verification_evidence(
+                daemon,
+                engineer,
+                task_id,
+                &mut verification_state,
+                EvidenceKind::TestsPassed,
+                "automatic verification skipped by policy".to_string(),
+            );
+            (
+                crate::team::daemon::verification::VerificationRunResult {
+                    passed: true,
+                    output,
+                    results: empty_test_results(
+                        "cargo",
+                        Some("automatic verification skipped by policy".to_string()),
+                    ),
+                    failures: Vec::new(),
+                    file_paths: Vec::new(),
+                },
+                0,
+            )
+        }
+    } else if verification_policy.auto_run_tests {
         verification_state.begin_iteration();
         let test_started = Instant::now();
         let verification_run = run_automatic_verification(&worktree_dir, test_command.as_deref())
@@ -1129,77 +1185,46 @@ fn load_previous_test_results(board_dir: &Path, task_id: u32) -> Result<Option<T
     Ok(metadata.test_results)
 }
 
-/// Check if an engineer's diff includes modifications to protected files.
-/// Protected files are docs, planning, config, and other architect/human-owned paths
-/// that engineers should never modify during implementation tasks.
-fn check_protected_file_violations(
-    worktree_dir: &Path,
-    is_multi_repo: bool,
-    sub_repo_names: &[String],
-) -> Vec<String> {
-    let protected_prefixes = [
-        "planning/",
-        "docs/",
-        "CLAUDE.md",
-        "AGENTS.md",
-        "README.md",
-        "CHANGELOG.md",
-        "CONTRIBUTING.md",
-        ".batty/team_config/batty_architect.md",
-        ".batty/team_config/batty_manager.md",
-        ".batty/team_config/team.yaml",
-    ];
+fn revert_out_of_scope_files(worktree_dir: &Path, out_of_scope: &[String]) -> Result<bool> {
+    if out_of_scope.is_empty() {
+        return Ok(false);
+    }
 
-    // Compare against the merge-base with main, not main itself. If the branch
-    // has a stale base, `main..HEAD` includes everything main added since that
-    // base, so files the engineer never touched get flagged. Merge-base diff
-    // captures only what the engineer actually changed on their branch.
-    let diff_files = |repo_dir: &Path| -> Vec<String> {
-        let merge_base = match std::process::Command::new("git")
-            .args(["merge-base", "HEAD", "main"])
-            .current_dir(repo_dir)
-            .output()
-        {
-            Ok(out) if out.status.success() => {
-                String::from_utf8_lossy(&out.stdout).trim().to_string()
-            }
-            _ => return Vec::new(),
-        };
-        if merge_base.is_empty() {
-            return Vec::new();
-        }
-        let range = format!("{merge_base}..HEAD");
-        match std::process::Command::new("git")
-            .args(["diff", "--name-only", &range])
-            .current_dir(repo_dir)
-            .output()
-        {
-            Ok(out) => String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .map(|l| l.to_string())
-                .collect(),
-            Err(_) => Vec::new(),
-        }
-    };
+    for file in out_of_scope {
+        run_git_with_context(
+            worktree_dir,
+            &["checkout", "main", "--", file],
+            "failed to revert out-of-scope file",
+        )?;
+    }
 
-    let output = if is_multi_repo {
-        let mut all_files = Vec::new();
-        for repo in sub_repo_names {
-            all_files.extend(diff_files(&worktree_dir.join(repo)));
-        }
-        all_files
-    } else {
-        diff_files(worktree_dir)
-    };
+    run_git_with_context(worktree_dir, &["add", "-A"], "failed to stage scope revert")?;
+    let staged = std::process::Command::new("git")
+        .args(["diff", "--cached", "--quiet"])
+        .current_dir(worktree_dir)
+        .status()
+        .with_context(|| {
+            format!(
+                "failed to inspect staged diff in {}",
+                worktree_dir.display()
+            )
+        })?;
+    if staged.success() {
+        return Ok(false);
+    }
 
-    output
-        .into_iter()
-        .filter(|file| {
-            protected_prefixes
-                .iter()
-                .any(|prefix| file.starts_with(prefix) || file == *prefix)
-        })
-        .collect()
+    run_git_with_context(
+        worktree_dir,
+        &[
+            "commit",
+            "-m",
+            "Restore fenced files after automatic scope recovery",
+            "-m",
+            "Constraint: Scope fence violations must be reverted automatically\nConfidence: medium\nScope-risk: narrow\nDirective: This daemon-owned recovery commit keeps the branch clean after out-of-scope writes\nTested: scope fence auto-revert path\nNot-tested: multi-repo scope recovery",
+        ],
+        "failed to commit scope revert",
+    )?;
+    Ok(true)
 }
 
 fn detect_flaky_failures(
@@ -1483,6 +1508,10 @@ mod tests {
     }
 
     fn write_task_file(project_root: &Path, id: u32, title: &str) {
+        write_task_file_with_body(project_root, id, title, "Task description.\n");
+    }
+
+    fn write_task_file_with_body(project_root: &Path, id: u32, title: &str, body: &str) {
         let tasks_dir = project_root
             .join(".batty")
             .join("team_config")
@@ -1492,7 +1521,7 @@ mod tests {
         std::fs::write(
             tasks_dir.join(format!("{id:03}-{title}.md")),
             format!(
-                "---\nid: {id}\ntitle: {title}\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\n---\n\nTask description.\n"
+                "---\nid: {id}\ntitle: {title}\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\n---\n\n{body}"
             ),
         )
         .unwrap();
@@ -2061,6 +2090,72 @@ mod tests {
         let manager_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
         assert!(manager_messages.is_empty());
+    }
+
+    #[test]
+    fn scope_violation_completion_reverts_and_emits_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs").join("notes.md"), "base notes\n").unwrap();
+        git_ok(&repo, &["add", "docs/notes.md"]);
+        git_ok(&repo, &["commit", "-m", "add docs notes"]);
+
+        write_task_file_with_body(
+            &repo,
+            42,
+            "scope-violation",
+            "Task description.\nSCOPE FENCE: src/lib.rs\n",
+        );
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        let ack = inbox::InboxMessage::new_send("eng-1", "manager", "Scope ACK #42");
+        inbox::deliver_to_inbox(&inbox::inboxes_root(&repo), &ack).unwrap();
+
+        std::fs::write(
+            worktree_dir.join("src").join("lib.rs"),
+            "pub fn smoke() -> bool { true }\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn smoke_test() {\n        assert!(smoke());\n    }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(worktree_dir.join("docs").join("notes.md"), "out of scope\n").unwrap();
+        git_ok(&worktree_dir, &["add", "src/lib.rs", "docs/notes.md"]);
+        git_ok(&worktree_dir, &["commit", "-m", "mixed scope change"]);
+
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(worktree_dir.join("docs").join("notes.md")).unwrap(),
+            "base notes\n"
+        );
+        let revert_subject = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["log", "-1", "--format=%s"])
+                .current_dir(&worktree_dir)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert!(revert_subject.contains("Restore fenced files after automatic scope recovery"));
+
+        let events =
+            read_events(&repo.join(".batty").join("team_config").join("events.jsonl")).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "scope_fence_violation"
+                && event.task.as_deref() == Some("42")
+                && event.role.as_deref() == Some("eng-1")
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("reclaim_requested=true"))
+        }));
     }
 
     #[test]

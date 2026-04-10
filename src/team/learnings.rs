@@ -87,8 +87,42 @@ pub(crate) fn append_task_completion_learning(
     Ok(())
 }
 
-pub(crate) fn augment_assignment_message(project_root: &Path, task: &Task) -> Result<String> {
+fn assignment_packet(task: &Task, ack_recipient: &str) -> String {
+    let allowed_files = crate::team::daemon::verification::parse_scope_fence(&task.description);
+    let ack_token = crate::team::daemon::verification::scope_ack_token(task.id);
+    let ack_required = !allowed_files.is_empty();
+    let mut packet = String::from("Assignment Packet:\n```yaml\n");
+    packet.push_str(&format!("task_id: {}\n", task.id));
+    if allowed_files.is_empty() {
+        packet.push_str("allowed_files: []\n");
+    } else {
+        packet.push_str("allowed_files:\n");
+        for path in allowed_files {
+            packet.push_str(&format!("  - {path}\n"));
+        }
+    }
+    packet.push_str(&format!("scope_ack_required: {ack_required}\n"));
+    packet.push_str(&format!("scope_ack_token: \"{ack_token}\"\n"));
+    packet.push_str(&format!(
+        "scope_ack_command: \"batty send {ack_recipient} \\\"{ack_token}\\\"\"\n"
+    ));
+    packet.push_str("```\n");
+    if ack_required {
+        packet.push_str(&format!(
+            "Before your first file write, run `batty send {ack_recipient} \"{ack_token}\"`.\n"
+        ));
+    }
+    packet
+}
+
+pub(crate) fn augment_assignment_message(
+    project_root: &Path,
+    task: &Task,
+    ack_recipient: &str,
+) -> Result<String> {
     let mut body = format!("Task #{}: {}\n\n{}", task.id, task.title, task.description);
+    body.push_str("\n\n");
+    body.push_str(&assignment_packet(task, ack_recipient));
     let context = build_dispatch_context(project_root, task)?;
     if context.is_empty() {
         return Ok(body);
@@ -605,7 +639,7 @@ mod tests {
         current.tags = vec!["dispatch".to_string()];
         current.description = "Refine daemon dispatch prompts using queue history.".to_string();
 
-        let augmented = augment_assignment_message(tmp.path(), &current).unwrap();
+        let augmented = augment_assignment_message(tmp.path(), &current, "manager").unwrap();
         assert!(augmented.contains("Relevant prior learnings:"));
         assert!(augmented.contains("Prefer prior daemon dispatch patterns"));
         assert!(augmented.contains("[dispatch, daemon]"));
@@ -629,7 +663,7 @@ mod tests {
         current.tags = vec!["dispatch".to_string()];
         current.description = "Dispatch prompt and work allocation.".to_string();
 
-        let augmented = augment_assignment_message(tmp.path(), &current).unwrap();
+        let augmented = augment_assignment_message(tmp.path(), &current, "manager").unwrap();
         assert!(!augmented.contains("Relevant prior learnings:"));
     }
 
@@ -677,7 +711,7 @@ mod tests {
             "Expand dispatch context in src/team/learnings.rs and src/team/dispatch/queue.rs."
                 .to_string();
 
-        let augmented = augment_assignment_message(tmp.path(), &current).unwrap();
+        let augmented = augment_assignment_message(tmp.path(), &current, "manager").unwrap();
         assert!(augmented.contains("Dispatch context:"));
         assert!(augmented.contains("Recent related completions:"));
         assert!(augmented.contains("Failure history from similar tasks:"));
@@ -693,5 +727,24 @@ mod tests {
             .join(" ");
         let truncated = limit_word_count(&repeated, MAX_CONTEXT_WORDS);
         assert!(truncated.split_whitespace().count() <= MAX_CONTEXT_WORDS + 1);
+    }
+
+    #[test]
+    fn augment_assignment_message_includes_scope_packet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut current = sample_task();
+        current.id = 587;
+        current.description =
+            "Harden scope validation.\nSCOPE FENCE: src/team/completion.rs, src/team/review.rs\n"
+                .to_string();
+
+        let augmented = augment_assignment_message(tmp.path(), &current, "manager").unwrap();
+        assert!(augmented.contains("Assignment Packet:"));
+        assert!(augmented.contains("allowed_files:"));
+        assert!(augmented.contains("src/team/completion.rs"));
+        assert!(augmented.contains("src/team/review.rs"));
+        assert!(augmented.contains("scope_ack_required: true"));
+        assert!(augmented.contains("Scope ACK #587"));
+        assert!(augmented.contains("batty send manager"));
     }
 }

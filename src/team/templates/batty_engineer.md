@@ -54,6 +54,14 @@ kanban-md move <task-id> done
 5. **Keep it minimal.** Don't add features beyond what was asked. Don't refactor surrounding code.
 6. **No premature abstraction.** Three similar lines is fine. Don't extract a helper for one use.
 
+## Scope Fence ACK
+
+If an assignment includes an `Assignment Packet`, treat it as a hard gate.
+
+1. Read the `allowed_files` list before touching code.
+2. If `scope_ack_required: true`, send the exact `scope_ack_command` before your first file write.
+3. Do not edit files outside `allowed_files`. If the fence is wrong or too narrow, escalate instead of widening it yourself.
+
 ## Anti-Narration Rules — CRITICAL
 
 Your completion will be REJECTED if you produce no file changes. The system checks `git diff --stat` and rejects completions with zero changes. Do not describe what you would do — DO IT.
