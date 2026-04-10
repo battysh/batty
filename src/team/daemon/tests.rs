@@ -768,6 +768,8 @@ fn preserve_worktree_before_restart_uses_shared_preservation_filters() {
     )
     .unwrap();
 
+    std::fs::write(worktree_dir.join("tracked.txt"), "tracked restart change\n").unwrap();
+    crate::team::test_support::git_ok(&worktree_dir, &["add", "tracked.txt"]);
     std::fs::write(worktree_dir.join("user.txt"), "keep this change\n").unwrap();
     std::fs::create_dir_all(worktree_dir.join(".batty")).unwrap();
     std::fs::write(
@@ -778,7 +780,7 @@ fn preserve_worktree_before_restart_uses_shared_preservation_filters() {
     std::fs::create_dir_all(worktree_dir.join(".cargo")).unwrap();
     std::fs::write(worktree_dir.join(".cargo").join("cache.txt"), "transient\n").unwrap();
 
-    let daemon = TestDaemonBuilder::new(&repo)
+    let mut daemon = TestDaemonBuilder::new(&repo)
         .members(vec![engineer_member("eng-1", None, true)])
         .build();
     daemon.preserve_worktree_before_restart("eng-1", &worktree_dir, "test");
@@ -790,6 +792,7 @@ fn preserve_worktree_before_restart_uses_shared_preservation_filters() {
 
     let committed_files =
         crate::team::test_support::git_stdout(&worktree_dir, &["show", "--pretty=", "--name-only"]);
+    assert!(committed_files.lines().any(|line| line == "tracked.txt"));
     assert!(committed_files.lines().any(|line| line == "user.txt"));
     assert!(!committed_files.contains("restart_context.json"));
     assert!(!committed_files.contains(".cargo/cache.txt"));
@@ -820,7 +823,7 @@ fn preserve_worktree_before_restart_skips_support_files_without_user_changes() {
     std::fs::create_dir_all(worktree_dir.join(".cargo")).unwrap();
     std::fs::write(worktree_dir.join(".cargo").join("cache.txt"), "transient\n").unwrap();
 
-    let daemon = TestDaemonBuilder::new(&repo)
+    let mut daemon = TestDaemonBuilder::new(&repo)
         .members(vec![engineer_member("eng-1", None, true)])
         .build();
     let head_before = crate::team::test_support::git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
@@ -831,6 +834,63 @@ fn preserve_worktree_before_restart_skips_support_files_without_user_changes() {
         head_before, head_after,
         "support files should not trigger a preservation commit"
     );
+}
+
+#[test]
+fn preserve_worktree_before_restart_reports_block_when_preserve_fails() {
+    let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "batty-daemon-preserve-blocked");
+    let team_config_dir = repo.join(".batty").join("team_config");
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    crate::team::task_loop::prepare_engineer_assignment_worktree(
+        &repo,
+        &worktree_dir,
+        "eng-1",
+        "eng-1/44",
+        &team_config_dir,
+    )
+    .unwrap();
+
+    std::fs::write(worktree_dir.join("tracked.txt"), "dirty restart work\n").unwrap();
+    crate::team::test_support::git_ok(&worktree_dir, &["add", "tracked.txt"]);
+    let git_dir = PathBuf::from(crate::team::test_support::git_stdout(
+        &worktree_dir,
+        &["rev-parse", "--git-dir"],
+    ));
+    let git_dir = if git_dir.is_absolute() {
+        git_dir
+    } else {
+        worktree_dir.join(git_dir)
+    };
+    std::fs::write(git_dir.join("index.lock"), "locked\n").unwrap();
+
+    let mut daemon = TestDaemonBuilder::new(&repo)
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ])
+        .build();
+    daemon.active_tasks.insert("eng-1".to_string(), 44);
+    write_owned_task_file(&repo, 44, "restart-blocked", "in-progress", "eng-1");
+
+    daemon.preserve_worktree_before_restart("eng-1", &worktree_dir, "test restart");
+
+    let manager_messages =
+        crate::team::inbox::pending_messages(&crate::team::inbox::inboxes_root(&repo), "manager")
+            .unwrap();
+    assert!(manager_messages.iter().any(|message| {
+        message
+            .body
+            .contains("could not safely auto-save eng-1's dirty worktree before test restart")
+    }));
+
+    let task = crate::task::load_task_by_id(
+        &repo.join(".batty").join("team_config").join("board").join("tasks"),
+        44,
+    )
+    .unwrap();
+    assert_eq!(task.status, "blocked");
 }
 
 #[test]

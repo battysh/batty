@@ -522,6 +522,12 @@ impl TeamDaemon {
                             reset_reason = reason.as_str(),
                             "claim ttl: skipped engineer worktree reset before reclaim"
                         );
+                        self.report_preserve_failure(
+                            engineer,
+                            Some(task.id),
+                            "TTL reclaim/reset",
+                            reason.as_str(),
+                        );
                         self.record_orchestrator_action(format!(
                             "claim ttl: skipped reclaim reset for {} task #{} ({})",
                             engineer,
@@ -530,13 +536,22 @@ impl TeamDaemon {
                         ));
                         continue;
                     }
-                    Err(error) => warn!(
-                        engineer = %engineer,
-                        task_id = task.id,
-                        worktree = %work_dir.display(),
-                        error = %error,
-                        "claim ttl: failed to reset engineer worktree before reclaim"
-                    ),
+                    Err(error) => {
+                        warn!(
+                            engineer = %engineer,
+                            task_id = task.id,
+                            worktree = %work_dir.display(),
+                            error = %error,
+                            "claim ttl: failed to reset engineer worktree before reclaim"
+                        );
+                        self.report_preserve_failure(
+                            engineer,
+                            Some(task.id),
+                            "TTL reclaim/reset",
+                            &error.to_string(),
+                        );
+                        continue;
+                    }
                 }
             }
             let branch = task
@@ -626,18 +641,34 @@ impl TeamDaemon {
                     reset_reason.as_str()
                 ));
             }
-            Ok(reset_reason) => self.record_orchestrator_action(format!(
-                "state reconciliation: skipped resetting {engineer} from stale branch '{current_branch}' to '{base_branch}' ({reason}, {})",
-                reset_reason.as_str()
-            )),
-            Err(error) => warn!(
-                engineer = %engineer,
-                branch = %current_branch,
-                reset_to = %base_branch,
-                error = %error,
-                reason,
-                "state reconciliation failed to reset engineer worktree to safe branch"
-            ),
+            Ok(reset_reason) => {
+                self.report_preserve_failure(
+                    engineer,
+                    None,
+                    "safe-branch recovery",
+                    reset_reason.as_str(),
+                );
+                self.record_orchestrator_action(format!(
+                    "state reconciliation: skipped resetting {engineer} from stale branch '{current_branch}' to '{base_branch}' ({reason}, {})",
+                    reset_reason.as_str()
+                ))
+            }
+            Err(error) => {
+                warn!(
+                    engineer = %engineer,
+                    branch = %current_branch,
+                    reset_to = %base_branch,
+                    error = %error,
+                    reason,
+                    "state reconciliation failed to reset engineer worktree to safe branch"
+                );
+                self.report_preserve_failure(
+                    engineer,
+                    None,
+                    "safe-branch recovery",
+                    &error.to_string(),
+                );
+            }
         }
     }
 
@@ -5508,6 +5539,66 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
             git_stdout(&repo, &["show", "eng-1/42:untracked.txt"]),
             "untracked reclaim work"
         );
+    }
+
+    #[test]
+    fn claim_ttl_reclaim_blocks_lane_when_preserve_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "claim-ttl-blocked");
+        write_owned_task_file(&repo, 42, "ttl-blocked", "in-progress", "eng-1");
+
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        git_ok(&worktree_dir, &["checkout", "-b", "eng-1/42"]);
+        std::fs::write(worktree_dir.join("tracked.txt"), "tracked reclaim work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "tracked.txt"]);
+        let git_dir = std::path::PathBuf::from(git_stdout(&worktree_dir, &["rev-parse", "--git-dir"]));
+        let git_dir = if git_dir.is_absolute() {
+            git_dir
+        } else {
+            worktree_dir.join(git_dir)
+        };
+        std::fs::write(git_dir.join("index.lock"), "locked\n").unwrap();
+
+        let task_path = board_task_path(&repo, 42);
+        let now = chrono::Utc::now();
+        let stale_time = (now - chrono::Duration::minutes(40)).to_rfc3339();
+        let recent_progress_time = now.to_rfc3339();
+        update_task_frontmatter(&task_path, |mapping| {
+            set_optional_string(mapping, "claimed_at", Some(&stale_time));
+            set_optional_u64(mapping, "claim_ttl_secs", Some(60));
+            set_optional_string(mapping, "claim_expires_at", Some(&stale_time));
+            set_optional_string(mapping, "last_progress_at", Some(&recent_progress_time));
+            set_optional_u64(mapping, "last_output_bytes", Some(0));
+            mapping.insert(
+                yaml_key("claim_extensions"),
+                serde_yaml::Value::Number(0.into()),
+            );
+        })
+        .unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), true),
+            ])
+            .build();
+        daemon.active_tasks.insert("eng-1".to_string(), 42);
+
+        daemon.maybe_manage_task_claim_ttls().unwrap();
+
+        let task = crate::task::Task::from_file(&task_path).unwrap();
+        assert_eq!(task.status, "blocked");
+        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-1/42");
+        let manager_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
+        assert!(manager_messages.iter().any(|message| {
+            message
+                .body
+                .contains("could not safely auto-save eng-1's dirty worktree before TTL reclaim/reset")
+        }));
     }
 
     #[test]

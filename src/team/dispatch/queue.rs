@@ -666,6 +666,14 @@ impl TeamDaemon {
                                 error = %reset_err,
                                 "dispatch queue: worktree auto-reset failed; escalating"
                             );
+                            entry.validation_failures += 1;
+                            entry.last_failure = Some(reset_err.to_string());
+                            self.report_preserve_failure(
+                                &entry.engineer,
+                                None,
+                                "dispatch/reset recovery",
+                                &reset_err.to_string(),
+                            );
                             if entry.validation_failures >= DISPATCH_QUEUE_FAILURE_LIMIT {
                                 self.escalate_dispatch_queue_entry(
                                     &entry,
@@ -693,6 +701,19 @@ impl TeamDaemon {
                                 engineer = %entry.engineer,
                                 reset_reason = reason.as_str(),
                                 "dispatch queue: worktree auto-reset skipped"
+                            );
+                            entry.validation_failures += 1;
+                            entry.last_failure = Some(
+                                crate::team::task_loop::dirty_worktree_preservation_blocked_reason(
+                                    &worktree_dir,
+                                    "dispatch/reset recovery",
+                                ),
+                            );
+                            self.report_preserve_failure(
+                                &entry.engineer,
+                                None,
+                                "dispatch/reset recovery",
+                                reason.as_str(),
                             );
                             retained.push(entry);
                         }
@@ -1288,6 +1309,67 @@ mod tests {
             git_stdout(&repo, &["show", "eng-1/41:untracked.txt"]),
             "untracked dispatch work"
         );
+    }
+
+    #[test]
+    fn process_queue_blocks_dirty_worktree_when_preserve_fails() {
+        use super::DispatchQueueEntry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "dispatch-preserve-blocked");
+        write_open_task_file(&repo, 42, "dispatch-reset", "todo");
+
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        git_ok(&worktree_dir, &["checkout", "-b", "eng-1/41"]);
+        std::fs::write(worktree_dir.join("tracked.txt"), "tracked dispatch work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "tracked.txt"]);
+        let git_dir = std::path::PathBuf::from(git_stdout(&worktree_dir, &["rev-parse", "--git-dir"]));
+        let git_dir = if git_dir.is_absolute() {
+            git_dir
+        } else {
+            worktree_dir.join(git_dir)
+        };
+        std::fs::write(git_dir.join("index.lock"), "locked\n").unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), true),
+            ])
+            .board(crate::team::config::BoardConfig {
+                dispatch_stabilization_delay_secs: 0,
+                ..crate::team::config::BoardConfig::default()
+            })
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.idle_started_at.insert(
+            "eng-1".to_string(),
+            std::time::Instant::now() - std::time::Duration::from_secs(1),
+        );
+        daemon.dispatch_queue.push(DispatchQueueEntry {
+            engineer: "eng-1".to_string(),
+            task_id: 42,
+            task_title: "dispatch-reset".to_string(),
+            queued_at: 0,
+            validation_failures: 0,
+            last_failure: None,
+        });
+
+        daemon.process_dispatch_queue().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].validation_failures, 2);
+        assert!(
+            daemon.dispatch_queue[0]
+                .last_failure
+                .as_deref()
+                .unwrap_or("")
+                .contains("could not safely auto-save dirty worktree")
+        );
+        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-1/41");
     }
 
     fn write_blocked_task(project_root: &Path, id: u32, title: &str, block_reason: &str) {

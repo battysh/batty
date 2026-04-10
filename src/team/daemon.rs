@@ -242,8 +242,43 @@ pub struct TeamDaemon {
 }
 
 impl TeamDaemon {
+    pub(in crate::team) fn report_preserve_failure(
+        &mut self,
+        member_name: &str,
+        task_id: Option<u32>,
+        context: &str,
+        detail: &str,
+    ) {
+        let reason = match task_id {
+            Some(task_id) => format!(
+                "Task #{task_id} is blocked because Batty could not safely auto-save {member_name}'s dirty worktree before {context}. {detail}"
+            ),
+            None => format!(
+                "Batty could not safely auto-save {member_name}'s dirty worktree before {context}. {detail}"
+            ),
+        };
+        if let Some(task_id) = task_id {
+            if let Err(error) = task_cmd::block_task_with_reason(&self.board_dir(), task_id, &reason) {
+                warn!(
+                    member = member_name,
+                    task_id,
+                    error = %error,
+                    "failed to block task after dirty worktree preservation failure"
+                );
+            }
+        }
+        let manager = self.assignment_sender(member_name);
+        let _ = self.queue_daemon_message(member_name, &reason);
+        let _ = self.queue_daemon_message(&manager, &reason);
+        self.record_orchestrator_action(format!("blocked recovery: {reason}"));
+    }
+
     #[cfg_attr(test, allow(dead_code))]
-    pub(super) fn preserve_member_worktree(&self, member_name: &str, commit_message: &str) -> bool {
+    pub(super) fn preserve_member_worktree(
+        &mut self,
+        member_name: &str,
+        commit_message: &str,
+    ) -> bool {
         let policy = &self.config.team_config.workflow_policy;
         if !policy.auto_commit_on_restart {
             return false;
@@ -292,6 +327,12 @@ impl TeamDaemon {
                     worktree = %worktree_dir.display(),
                     error = %error,
                     "failed to auto-save worktree before restart/shutdown"
+                );
+                self.report_preserve_failure(
+                    member_name,
+                    self.active_task_id(member_name),
+                    "restart or shutdown",
+                    &error.to_string(),
                 );
                 false
             }
@@ -585,11 +626,22 @@ impl TeamDaemon {
     }
 
     pub(super) fn preserve_worktree_before_restart(
-        &self,
+        &mut self,
         member_name: &str,
         worktree_dir: &Path,
         reason: &str,
     ) {
+        let Some(member) = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+        else {
+            return;
+        };
+        if member.role_type != RoleType::Engineer || !member.use_worktrees {
+            return;
+        }
         if !self
             .config
             .team_config
@@ -618,13 +670,21 @@ impl TeamDaemon {
                 "auto-saved dirty worktree before restart"
             ),
             Ok(false) => {}
-            Err(error) => warn!(
-                member = member_name,
-                worktree = %worktree_dir.display(),
-                reason,
-                error = %error,
-                "failed to auto-save dirty worktree before restart"
-            ),
+            Err(error) => {
+                warn!(
+                    member = member_name,
+                    worktree = %worktree_dir.display(),
+                    reason,
+                    error = %error,
+                    "failed to auto-save dirty worktree before restart"
+                );
+                self.report_preserve_failure(
+                    member_name,
+                    self.active_task_id(member_name),
+                    reason,
+                    &error.to_string(),
+                );
+            }
         }
     }
 
