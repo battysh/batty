@@ -452,9 +452,20 @@ pub fn classify_message(msg: &InboxMessage) -> MessageCategory {
         || body.contains("requires manual review")
         || body.contains("review request")
         || body.contains("ready_for_review")
+        || body.starts_with("review backlog detected:")
         || body.starts_with("review:")
     {
         return MessageCategory::ReviewRequest;
+    }
+
+    // Dispatch / triage / utilization alerts should sort above routine chatter.
+    if body.starts_with("dispatch recovery needed:")
+        || body.starts_with("triage backlog detected:")
+        || body.contains("utilization recovery")
+        || body.starts_with("utilization gap detected:")
+        || body.starts_with("architect utilization")
+    {
+        return MessageCategory::Blocker;
     }
 
     // Status update detection
@@ -1276,6 +1287,23 @@ mod tests {
         }
         assert_eq!(categories[0], MessageCategory::Escalation);
         assert_eq!(*categories.last().unwrap(), MessageCategory::Nudge);
+    }
+
+    #[test]
+    fn classify_message_prioritizes_dispatch_and_utilization_alerts() {
+        let dispatch = InboxMessage::new_send(
+            "daemon",
+            "manager",
+            "Dispatch recovery needed: idle reports and runnable work are waiting.",
+        );
+        let utilization = InboxMessage::new_send(
+            "daemon",
+            "manager",
+            "Utilization recovery needed: 2 idle engineer(s), top task #42.",
+        );
+
+        assert_eq!(classify_message(&dispatch), MessageCategory::Blocker);
+        assert_eq!(classify_message(&utilization), MessageCategory::Blocker);
     }
 
     #[test]

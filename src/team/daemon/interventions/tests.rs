@@ -259,9 +259,9 @@ fn maybe_intervene_triage_backlog_queues_expected_message_for_idle_manager() {
     assert!(
         pending[0]
             .body
-            .contains("1 delivered direct-report result packet")
+            .contains("1 direct-report result packet(s) are waiting for review")
     );
-    assert!(pending[0].body.contains("Reports in scope: eng-1, eng-2."));
+    assert!(pending[0].body.contains("from eng-1, eng-2."));
     assert!(pending[0].body.contains("batty inbox lead"));
     assert!(pending[0].body.contains("batty read lead <ref>"));
     assert!(pending[0].body.contains("batty send eng-1"));
@@ -390,9 +390,9 @@ fn maybe_intervene_triage_backlog_updates_count_when_new_report_arrives() {
     assert!(
         pending[0]
             .body
-            .contains("2 delivered direct-report result packet")
+            .contains("2 direct-report result packet(s) are waiting for review")
     );
-    assert!(pending[0].body.contains("Reports in scope: eng-1, eng-2."));
+    assert!(pending[0].body.contains("from eng-1, eng-2."));
 }
 
 #[test]
@@ -3206,7 +3206,7 @@ fn utilization_ignores_blocked_manual_todo_as_open_work() {
     assert!(
         pending[0]
             .body
-            .contains("Unassigned open board work: none.")
+            .contains("0 dispatchable task(s) are available. Top dispatchable items: none.")
     );
 }
 

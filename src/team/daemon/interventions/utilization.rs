@@ -258,9 +258,12 @@ impl TeamDaemon {
                 .collect::<Vec<_>>()
                 .join("; ")
         };
+        let idle_active_count = idle_active_engineers.len();
+        let idle_unassigned_count = idle_unassigned_engineers.len();
+        let dispatchable_count = unassigned_open_tasks.len();
 
         let mut message = format!(
-            "Utilization recovery needed: you are idle while team throughput is low. Working engineers: {working_summary}. Idle engineers still holding active work: {idle_active_summary}. Idle engineers with no active task: {idle_unassigned_summary}. Unassigned open board work: {open_task_summary}.\n\
+            "Utilization recovery needed: {idle_unassigned_count} idle engineer(s) have no active task, {idle_active_count} idle engineer(s) are still parked on active work, and {dispatchable_count} dispatchable task(s) are available. Top dispatchable items: {open_task_summary}. Working engineers: {working_summary}. Idle active lanes: {idle_active_summary}. Idle free engineers: {idle_unassigned_summary}.\n\
             Recover throughput now:\n\
             1. `batty status`\n\
             2. `kanban-md list --dir {board_dir_str} --status in-progress`\n\
@@ -403,10 +406,41 @@ mod tests {
             &[],
             &[],
             &["eng-1".to_string()],
-            &[],
+            &[&crate::task::Task {
+                id: 42,
+                title: "Inbox triage".to_string(),
+                status: "todo".to_string(),
+                priority: "high".to_string(),
+                claimed_by: None,
+                claimed_at: None,
+                claim_ttl_secs: None,
+                claim_expires_at: None,
+                last_progress_at: None,
+                claim_warning_sent_at: None,
+                claim_extensions: None,
+                last_output_bytes: None,
+                blocked: None,
+                tags: Vec::new(),
+                depends_on: Vec::new(),
+                review_owner: None,
+                blocked_on: None,
+                worktree_path: None,
+                branch: None,
+                commit: None,
+                artifacts: Vec::new(),
+                next_action: None,
+                scheduled_for: None,
+                cron_schedule: None,
+                cron_last_run: None,
+                completed: None,
+                description: String::new(),
+                batty_config: None,
+                source_path: std::path::PathBuf::new(),
+            }],
         );
 
         assert!(message.starts_with("Utilization recovery needed:"));
+        assert!(message.contains("Top dispatchable items: #42 (todo) Inbox triage."));
         assert!(message.contains("Recover throughput now:"));
     }
 }

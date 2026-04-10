@@ -78,12 +78,13 @@ impl OrchestratorOnlyReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ManagerNoticeClass {
     Completion,
-    Immediate,
     Triage,
     Review,
+    Immediate,
+    Escalation,
     Dispatch,
-    Recovery,
     Utilization,
+    Recovery,
     Status,
 }
 
@@ -91,12 +92,13 @@ impl ManagerNoticeClass {
     fn label(self) -> &'static str {
         match self {
             Self::Completion => "completion",
+            Self::Escalation => "escalation",
             Self::Immediate => "immediate",
             Self::Triage => "triage",
             Self::Review => "review",
             Self::Dispatch => "dispatch",
-            Self::Recovery => "recovery",
             Self::Utilization => "utilization",
+            Self::Recovery => "recovery",
             Self::Status => "status",
         }
     }
@@ -105,12 +107,13 @@ impl ManagerNoticeClass {
         match self {
             Self::Completion => 0,
             Self::Review => 1,
-            Self::Dispatch => 2,
-            Self::Triage => 3,
-            Self::Recovery => 4,
+            Self::Immediate => 2,
+            Self::Escalation => 3,
+            Self::Dispatch => 4,
             Self::Utilization => 5,
-            Self::Immediate => 6,
-            Self::Status => 7,
+            Self::Triage => 6,
+            Self::Recovery => 7,
+            Self::Status => 8,
         }
     }
 }
@@ -168,26 +171,28 @@ fn classify_manager_notice(body: &str) -> ManagerNoticeClass {
 
     if is_manager_completion_notice(&body) {
         ManagerNoticeClass::Completion
+    } else if is_manager_escalation_notice(&body) {
+        ManagerNoticeClass::Escalation
     } else if is_review_nudge(&body) {
         ManagerNoticeClass::Review
-    } else if is_idle_nudge(&body) {
-        ManagerNoticeClass::Recovery
     } else if body.starts_with("review backlog detected:") {
         ManagerNoticeClass::Review
     } else if body.starts_with("dispatch recovery needed:") {
         ManagerNoticeClass::Dispatch
-    } else if body.starts_with("triage backlog detected:") {
-        ManagerNoticeClass::Triage
-    } else if body.starts_with("recovery:")
-        || body.contains("lane blocked")
-        || body.contains("stuck-task escalation")
-    {
-        ManagerNoticeClass::Recovery
     } else if body.contains("utilization recovery")
         || body.starts_with("utilization gap detected:")
         || body.starts_with("architect utilization")
     {
         ManagerNoticeClass::Utilization
+    } else if body.starts_with("triage backlog detected:") {
+        ManagerNoticeClass::Triage
+    } else if is_idle_nudge(&body) {
+        ManagerNoticeClass::Recovery
+    } else if body.starts_with("recovery:")
+        || body.contains("lane blocked")
+        || body.contains("stuck-task escalation")
+    {
+        ManagerNoticeClass::Recovery
     } else if is_manager_status_update(&body) {
         ManagerNoticeClass::Status
     } else {
@@ -198,11 +203,13 @@ fn classify_manager_notice(body: &str) -> ManagerNoticeClass {
 fn should_batch_manager_notice(class: ManagerNoticeClass) -> bool {
     matches!(
         class,
-        ManagerNoticeClass::Triage
-            | ManagerNoticeClass::Review
+        ManagerNoticeClass::Escalation
+            | ManagerNoticeClass::Immediate
             | ManagerNoticeClass::Dispatch
-            | ManagerNoticeClass::Recovery
             | ManagerNoticeClass::Utilization
+            | ManagerNoticeClass::Triage
+            | ManagerNoticeClass::Review
+            | ManagerNoticeClass::Recovery
             | ManagerNoticeClass::Status
     )
 }
@@ -255,6 +262,45 @@ fn manager_notice_preview(body: &str) -> String {
     preview
 }
 
+fn extract_task_id_from_notice_body(body: &str) -> Option<String> {
+    let lower = body.to_ascii_lowercase();
+
+    if let Some(pos) = lower.find("task_id") {
+        let after = &body[pos + 7..];
+        let digits: String = after
+            .chars()
+            .skip_while(|ch| !ch.is_ascii_digit())
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect();
+        if !digits.is_empty() {
+            return Some(digits);
+        }
+    }
+
+    if let Some(pos) = body.find('#') {
+        let digits: String = body[pos + 1..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect();
+        if !digits.is_empty() {
+            return Some(digits);
+        }
+    }
+
+    None
+}
+
+fn manager_notice_digest_key(message: &inbox::InboxMessage, class: ManagerNoticeClass) -> String {
+    let task_scope = extract_task_id_from_notice_body(&message.body)
+        .map(|task_id| format!("task#{task_id}"))
+        .unwrap_or_else(|| format!("from:{}", message.from));
+
+    match class {
+        ManagerNoticeClass::Triage => format!("{}:from:{}", class.label(), message.from),
+        _ => format!("{}:{task_scope}", class.label()),
+    }
+}
+
 fn build_supervisory_digest(messages: &[inbox::InboxMessage]) -> SupervisoryDigest {
     let mut entries: Vec<SupervisoryDigestEntry> = Vec::new();
     let mut entry_by_key: std::collections::HashMap<(ManagerNoticeClass, String), usize> =
@@ -263,7 +309,7 @@ fn build_supervisory_digest(messages: &[inbox::InboxMessage]) -> SupervisoryDige
     for (index, message) in messages.iter().enumerate() {
         let class = classify_manager_notice(&message.body);
         let preview = manager_notice_preview(&message.body);
-        let dedupe_key = (class, normalized_body(&preview));
+        let dedupe_key = (class, manager_notice_digest_key(message, class));
         if let Some(existing) = entry_by_key.get(&dedupe_key) {
             entries[*existing].duplicate_count += 1;
             continue;
@@ -279,7 +325,13 @@ fn build_supervisory_digest(messages: &[inbox::InboxMessage]) -> SupervisoryDige
         });
     }
 
-    entries.sort_by_key(|entry| (entry.class.priority(), entry.first_seen));
+    entries.sort_by(|left, right| {
+        left.class
+            .priority()
+            .cmp(&right.class.priority())
+            .then_with(|| right.duplicate_count.cmp(&left.duplicate_count))
+            .then_with(|| left.first_seen.cmp(&right.first_seen))
+    });
 
     SupervisoryDigest {
         duplicates_suppressed: messages.len().saturating_sub(entries.len()),
@@ -2150,6 +2202,108 @@ mod tests {
             second.is_err(),
             "repeated nudges should collapse into one digest"
         );
+    }
+
+    #[test]
+    fn manager_digest_orders_review_and_utilization_ahead_of_status_noise() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+        let root = inbox::inboxes_root(tmp.path());
+        daemon
+            .config
+            .pane_map
+            .insert("manager".to_string(), "%123".to_string());
+
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send(
+                "daemon",
+                "manager",
+                "Status update: triage queue is unchanged.",
+            ),
+        )
+        .unwrap();
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send(
+                "daemon",
+                "manager",
+                "Utilization recovery needed: 2 idle engineer(s) have no active task, 0 idle engineer(s) are still parked on active work, and 2 dispatchable task(s) are available. Top dispatchable items: #42 (high) Inbox fix; #43 (medium) Metrics cleanup.",
+            ),
+        )
+        .unwrap();
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send(
+                "daemon",
+                "manager",
+                "Review backlog detected: direct-report work is waiting for your review on Task #99.",
+            ),
+        )
+        .unwrap();
+
+        let (parent_sock, child_sock) = crate::shim::protocol::socketpair().unwrap();
+        let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+        let mut child_channel = crate::shim::protocol::Channel::new(child_sock);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "manager".to_string(),
+            parent_channel,
+            12345,
+            "claude".to_string(),
+            "claude".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("manager".to_string(), handle);
+        daemon.states.insert(
+            "manager".to_string(),
+            crate::team::standup::MemberState::Idle,
+        );
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        child_channel
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+        match cmd {
+            crate::shim::protocol::Command::SendMessage { body, .. } => {
+                let review_idx = body.find("review [daemon]").unwrap();
+                let utilization_idx = body.find("utilization [daemon]").unwrap();
+                let status_idx = body.find("status [daemon]").unwrap();
+                assert!(review_idx < utilization_idx);
+                assert!(utilization_idx < status_idx);
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn manager_digest_collapses_task_scoped_escalations_with_stable_key() {
+        let messages = vec![
+            inbox::InboxMessage::new_send(
+                "daemon",
+                "manager",
+                "Escalation: task #77 is blocked on provider access.",
+            ),
+            inbox::InboxMessage::new_send(
+                "daemon",
+                "manager",
+                "Escalation: task #77 is blocked on provider access after another retry.",
+            ),
+            inbox::InboxMessage::new_send(
+                "daemon",
+                "manager",
+                "Escalation: task #88 is blocked on a different provider issue.",
+            ),
+        ];
+
+        let digest = super::build_supervisory_digest(&messages);
+        assert_eq!(digest.entries.len(), 2);
+        assert_eq!(digest.duplicates_suppressed, 1);
+        assert_eq!(digest.entries[0].duplicate_count, 2);
+        assert!(digest.entries[0].preview.contains("task #77"));
     }
 
     #[test]
