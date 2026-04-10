@@ -1763,6 +1763,11 @@ mod tests {
             std::fs::read_to_string(repo.join("note.txt")).unwrap(),
             "done\n"
         );
+        let snapshot = std::fs::read_to_string(verification_snapshot_path(&repo, 42, "eng-1", 1))
+            .unwrap();
+        assert!(snapshot.contains("\"phase\": \"complete\""));
+        assert!(snapshot.contains("\"passed\": true"));
+        assert!(!snapshot.contains("test command failed without a parsed failure line"));
     }
 
     #[test]

@@ -39,7 +39,8 @@ pub(crate) fn run_automatic_verification(
     }
 
     let test_run = run_tests_in_worktree(worktree_dir, test_command)?;
-    let (failures, _failure_paths) = parse_test_output(&test_run.output, &test_run.results);
+    let (failures, _failure_paths) =
+        parse_test_output(&test_run.output, &test_run.results, test_run.passed);
     let file_paths = changed_files_from_main(worktree_dir)?;
     Ok(VerificationRunResult {
         passed: test_run.passed,
@@ -368,7 +369,11 @@ fn resolve_worktree_path(project_root: &Path, worktree_path: &str) -> PathBuf {
     }
 }
 
-fn parse_test_output(output: &str, results: &TestResults) -> (Vec<String>, Vec<String>) {
+fn parse_test_output(
+    output: &str,
+    results: &TestResults,
+    passed: bool,
+) -> (Vec<String>, Vec<String>) {
     let mut failures = Vec::new();
     let mut file_paths = BTreeSet::new();
 
@@ -423,7 +428,7 @@ fn parse_test_output(output: &str, results: &TestResults) -> (Vec<String>, Vec<S
         }
     }
 
-    if failures.is_empty() && !output.trim().is_empty() {
+    if failures.is_empty() && !passed && !output.trim().is_empty() {
         failures.push("test command failed without a parsed failure line".to_string());
     }
 
@@ -491,7 +496,7 @@ src/parser.rs:12: failure here\n";
             }],
             summary: Some("test result: FAILED. 0 passed; 1 failed; 0 ignored;".to_string()),
         };
-        let (failures, paths) = parse_test_output(output, &results);
+        let (failures, paths) = parse_test_output(output, &results, false);
         assert!(
             failures
                 .iter()
@@ -503,6 +508,46 @@ src/parser.rs:12: failure here\n";
                 .any(|line| line.contains("assertion failed"))
         );
         assert!(paths.iter().any(|path| path == "src/parser.rs"));
+    }
+
+    #[test]
+    fn parse_test_output_ignores_non_failure_output_for_passing_runs() {
+        let output = "Finished verification override successfully\n";
+        let results = TestResults {
+            framework: "cargo".to_string(),
+            total: Some(1),
+            passed: 1,
+            failed: 0,
+            ignored: 0,
+            failures: Vec::new(),
+            summary: Some("test result: ok. 1 passed; 0 failed; 0 ignored;".to_string()),
+        };
+
+        let (failures, paths) = parse_test_output(output, &results, true);
+
+        assert!(failures.is_empty());
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn parse_test_output_keeps_fallback_for_unparsed_failed_runs() {
+        let output = "verification override failed\n";
+        let results = TestResults {
+            framework: "cargo".to_string(),
+            total: None,
+            passed: 0,
+            failed: 1,
+            ignored: 0,
+            failures: Vec::new(),
+            summary: None,
+        };
+
+        let (failures, _paths) = parse_test_output(output, &results, false);
+
+        assert_eq!(
+            failures,
+            vec!["test command failed without a parsed failure line".to_string()]
+        );
     }
 
     #[test]
