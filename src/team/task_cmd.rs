@@ -329,7 +329,7 @@ pub fn cmd_review_structured(
         }
         if target_state == TaskState::Blocked {
             let reason = feedback.unwrap_or(&default_reject_reason);
-            set_optional_string(mapping, "blocked_on", Some(reason));
+            set_blocked_reason(mapping, Some(reason), Some(reason));
         } else {
             clear_blocked(mapping);
         }
@@ -387,16 +387,20 @@ pub fn cmd_update(board_dir: &Path, task_id: u32, fields: HashMap<String, String
     }
 
     let blocked_on = fields.get("blocked_on").cloned();
+    let block_reason = fields.get("block_reason").cloned();
     let should_clear_blocked = fields.contains_key("clear_blocked");
-    if blocked_on.is_some() || should_clear_blocked {
+    if blocked_on.is_some() || block_reason.is_some() || should_clear_blocked {
         update_task_frontmatter(&task_path, |mapping| {
             if should_clear_blocked {
                 clear_blocked(mapping);
             }
-            if let Some(reason) = blocked_on.as_deref() {
-                let reason = normalize_optional(reason);
-                set_optional_string(mapping, "blocked", reason);
-                set_optional_string(mapping, "blocked_on", reason);
+            let normalized_reason = block_reason
+                .as_deref()
+                .and_then(normalize_optional)
+                .or_else(|| blocked_on.as_deref().and_then(normalize_optional));
+            let normalized_blocked_on = blocked_on.as_deref().and_then(normalize_optional);
+            if normalized_reason.is_some() || normalized_blocked_on.is_some() {
+                set_blocked_reason(mapping, normalized_reason, normalized_blocked_on);
             }
         })?;
     }
@@ -579,7 +583,60 @@ fn set_status(mapping: &mut Mapping, state: TaskState) {
 
 fn clear_blocked(mapping: &mut Mapping) {
     mapping.remove(yaml_key("blocked"));
+    mapping.remove(yaml_key("block_reason"));
     mapping.remove(yaml_key("blocked_on"));
+}
+
+fn set_blocked_reason(mapping: &mut Mapping, reason: Option<&str>, blocked_on: Option<&str>) {
+    if reason.is_none() && blocked_on.is_none() {
+        clear_blocked(mapping);
+        return;
+    }
+
+    mapping.insert(yaml_key("blocked"), Value::Bool(true));
+    set_optional_string(mapping, "block_reason", reason);
+    set_optional_string(mapping, "blocked_on", blocked_on.or(reason));
+}
+
+pub(crate) fn normalize_blocked_frontmatter(task_path: &Path) -> Result<bool> {
+    let mut changed = false;
+    update_task_frontmatter(task_path, |mapping| {
+        let blocked_value = mapping.get(yaml_key("blocked")).cloned();
+        let block_reason = mapping
+            .get(yaml_key("block_reason"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let blocked_on = mapping
+            .get(yaml_key("blocked_on"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let status_is_blocked = mapping
+            .get(yaml_key("status"))
+            .and_then(Value::as_str)
+            .is_some_and(|status| status == "blocked");
+
+        let legacy_reason = match blocked_value {
+            Some(Value::String(reason)) if !reason.trim().is_empty() => Some(reason),
+            Some(Value::Bool(true)) => block_reason.clone().or(blocked_on.clone()),
+            Some(Value::Bool(false)) => None,
+            _ => block_reason.clone().or(blocked_on.clone()),
+        };
+
+        if status_is_blocked && legacy_reason.is_some() {
+            let desired_reason = legacy_reason.as_deref();
+            let desired_blocked_on = blocked_on.as_deref().or(desired_reason).map(str::to_string);
+            let needs_rewrite =
+                !matches!(mapping.get(yaml_key("blocked")), Some(Value::Bool(true)))
+                    || block_reason.as_deref() != desired_reason
+                    || mapping.get(yaml_key("blocked_on")).and_then(Value::as_str)
+                        != desired_blocked_on.as_deref();
+            if needs_rewrite {
+                set_blocked_reason(mapping, desired_reason, desired_blocked_on.as_deref());
+                changed = true;
+            }
+        }
+    })?;
+    Ok(changed)
 }
 
 pub(crate) fn set_optional_string(mapping: &mut Mapping, key: &str, value: Option<&str>) {
@@ -724,6 +781,9 @@ mod tests {
         let task = Task::from_file(&task_path).unwrap();
         assert_eq!(task.blocked.as_deref(), Some("waiting for review"));
         assert_eq!(task.blocked_on.as_deref(), Some("waiting for review"));
+        let content = std::fs::read_to_string(&task_path).unwrap();
+        assert!(content.contains("blocked: true"));
+        assert!(content.contains("block_reason: waiting for review"));
 
         cmd_update(
             board_dir,
@@ -735,6 +795,27 @@ mod tests {
         let task = Task::from_file(&task_path).unwrap();
         assert!(task.blocked.is_none());
         assert!(task.blocked_on.is_none());
+    }
+
+    #[test]
+    fn normalize_blocked_frontmatter_repairs_legacy_string_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        let task_path = write_task_file(board_dir, 14, "blocked");
+        std::fs::write(
+            &task_path,
+            "---\nid: 14\ntitle: Task 14\nstatus: blocked\npriority: high\nblocked: legacy verification reason\nclass: standard\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        let changed = normalize_blocked_frontmatter(&task_path).unwrap();
+
+        assert!(changed);
+        let content = std::fs::read_to_string(&task_path).unwrap();
+        assert!(content.contains("blocked: true"));
+        assert!(content.contains("block_reason: legacy verification reason"));
+        let task = Task::from_file(&task_path).unwrap();
+        assert_eq!(task.blocked.as_deref(), Some("legacy verification reason"));
     }
 
     #[test]

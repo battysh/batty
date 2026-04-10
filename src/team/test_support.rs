@@ -591,7 +591,8 @@ pub(crate) fn write_board_task_file(
     }
     if let Some(blocked_on) = blocked_on {
         content.push_str(&format!("blocked_on: {blocked_on}\n"));
-        content.push_str(&format!("blocked: {blocked_on}\n"));
+        content.push_str("blocked: true\n");
+        content.push_str(&format!("block_reason: {blocked_on}\n"));
     }
     content.push_str("class: standard\n---\n\nTask description.\n");
 
