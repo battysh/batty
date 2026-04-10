@@ -13,7 +13,7 @@ use super::super::events::{QualityMetricsInfo, TeamEvent, VerificationPhaseChang
 use super::*;
 
 impl TeamDaemon {
-    pub(super) fn emit_event(&mut self, event: TeamEvent) {
+    pub(crate) fn emit_event(&mut self, event: TeamEvent) {
         self.failure_tracker.push(&event);
 
         // Dual-write to SQLite telemetry database (best-effort).

@@ -28,6 +28,7 @@ use super::launcher::{
     write_launch_script,
 };
 use super::*;
+use crate::task::load_tasks_from_dir;
 use crate::team::append_shim_event_log;
 use crate::team::config::{ClaudeAuth, ClaudeAuthMode};
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,25 @@ pub(crate) struct AssignmentLaunch {
 }
 
 impl TeamDaemon {
+    fn render_assignment_body(&self, sender: &str, task: &str, task_id: Option<u32>) -> String {
+        let Some(task_id) = task_id else {
+            return task.to_string();
+        };
+        let tasks_dir = self.board_dir().join("tasks");
+        let Ok(tasks) = load_tasks_from_dir(&tasks_dir) else {
+            return task.to_string();
+        };
+        let Some(board_task) = tasks.into_iter().find(|candidate| candidate.id == task_id) else {
+            return task.to_string();
+        };
+        crate::team::learnings::augment_assignment_message(
+            &self.config.project_root,
+            &board_task,
+            sender,
+        )
+        .unwrap_or_else(|_| task.to_string())
+    }
+
     fn maybe_refresh_assignment_worktree(
         &mut self,
         engineer: &str,
@@ -264,9 +284,10 @@ impl TeamDaemon {
         emit_task_assigned: bool,
     ) -> Result<AssignmentLaunch> {
         let launch = self.prepare_assignment_launch(engineer, task, task_id)?;
+        let assignment_body = self.render_assignment_body(sender, task, task_id);
         if let Some(handle) = self.shim_handles.get_mut(engineer) {
             if handle.is_ready() {
-                handle.send_message(sender, task)?;
+                handle.send_message(sender, &assignment_body)?;
                 handle.apply_state_change(crate::shim::protocol::ShimState::Working);
                 let _ = append_shim_event_log(
                     &self.config.project_root,
@@ -279,7 +300,7 @@ impl TeamDaemon {
                     .or_default()
                     .push(PendingMessage {
                         from: sender.to_string(),
-                        body: task.to_string(),
+                        body: assignment_body,
                         queued_at: Instant::now(),
                     });
                 let _ = append_shim_event_log(
@@ -349,6 +370,7 @@ impl TeamDaemon {
             .as_ref()
             .and_then(|m| m.agent.as_deref())
             .unwrap_or("claude");
+        let assignment_body = self.render_assignment_body(sender, task, task_id);
         let worktree_launch = self.prepare_assignment_launch(engineer, task, task_id)?;
         let work_dir = worktree_launch.work_dir.clone();
         let task_branch = worktree_launch.branch.clone();
@@ -376,7 +398,7 @@ impl TeamDaemon {
             engineer,
             agent_name,
             &claude_auth,
-            task,
+            &assignment_body,
             role_context.as_deref(),
             &work_dir,
             &self.config.project_root,

@@ -398,6 +398,15 @@ impl TeamEvent {
         }
     }
 
+    pub fn scope_fence_violation(role: &str, task_id: u32, details: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            task: Some(task_id.to_string()),
+            reason: Some(details.into()),
+            ..Self::base("scope_fence_violation")
+        }
+    }
+
     pub fn board_task_archived(task: &str, role: Option<&str>) -> Self {
         Self {
             role: role.map(str::to_string),
