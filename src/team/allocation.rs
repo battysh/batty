@@ -440,6 +440,8 @@ pub fn print_dispatch_explanation(project_root: &Path, task_id: Option<u32>) -> 
             .map(|member| member.name)
             .collect();
     }
+    let bench_state = crate::team::bench::load_bench_state(project_root)?;
+    engineers.retain(|engineer| !bench_state.benched.contains_key(engineer));
     engineers.sort();
     let profiles = load_engineer_profiles(project_root, &engineers, &tasks)?;
     let explanation = explain_routing_for_task(

@@ -78,6 +78,21 @@ pub enum Command {
         health: bool,
     },
 
+    /// Prevent an engineer from receiving new auto-dispatch work
+    Bench {
+        /// Engineer instance (e.g., "eng-1-1")
+        engineer: String,
+        /// Optional reason recorded in bench.yaml and status output
+        #[arg(long)]
+        reason: Option<String>,
+    },
+
+    /// Remove an engineer from the durable bench list
+    Unbench {
+        /// Engineer instance (e.g., "eng-1-1")
+        engineer: String,
+    },
+
     /// OpenClaw supervisor integration helpers for Batty
     #[command(name = "openclaw")]
     OpenClaw {
@@ -1591,6 +1606,27 @@ mod tests {
                 assert_eq!(task, "fix auth bug");
             }
             other => panic!("expected assign command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bench_subcommand_parses_reason() {
+        let cli = Cli::parse_from(["batty", "bench", "eng-1-1", "--reason", "session end"]);
+        match cli.command {
+            Command::Bench { engineer, reason } => {
+                assert_eq!(engineer, "eng-1-1");
+                assert_eq!(reason.as_deref(), Some("session end"));
+            }
+            other => panic!("expected bench command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unbench_subcommand_parses_engineer() {
+        let cli = Cli::parse_from(["batty", "unbench", "eng-1-1"]);
+        match cli.command {
+            Command::Unbench { engineer } => assert_eq!(engineer, "eng-1-1"),
+            other => panic!("expected unbench command, got {other:?}"),
         }
     }
 

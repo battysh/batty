@@ -395,6 +395,13 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool, health: bool) 
 
     let workflow_metrics = status::workflow_metrics_section(project_root, &members);
     let watchdog = status::load_watchdog_status(project_root, session_running);
+    let bench_state = match crate::team::bench::load_bench_state(project_root) {
+        Ok(state) => state,
+        Err(error) => {
+            warn!(error = %error, "failed to load bench state for status");
+            crate::team::bench::BenchState::default()
+        }
+    };
     let (active_tasks, review_queue) = match status::board_status_task_queues(project_root) {
         Ok(queues) => queues,
         Err(error) => {
@@ -518,6 +525,10 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool, health: bool) 
                 println!();
                 println!("Engineer Profiles\nNo engineer performance telemetry recorded yet.");
             }
+        }
+        if let Some(formatted) = status::format_benched_engineers(&bench_state) {
+            println!();
+            println!("{formatted}");
         }
     }
 

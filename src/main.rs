@@ -366,6 +366,28 @@ fn main() -> Result<()> {
             team::team_status(&root, json, detail, health)?;
         }
 
+        Command::Bench { engineer, reason } => {
+            let entry = team::bench::bench_engineer(&root, &engineer, reason.as_deref())?;
+            println!(
+                "Benched {} at {}{}",
+                engineer,
+                entry.timestamp,
+                entry
+                    .reason
+                    .as_deref()
+                    .map(|reason| format!(" ({reason})"))
+                    .unwrap_or_default()
+            );
+        }
+
+        Command::Unbench { engineer } => {
+            if team::bench::unbench_engineer(&root, &engineer)? {
+                println!("Unbenched {engineer}.");
+            } else {
+                println!("{engineer} was not benched.");
+            }
+        }
+
         Command::OpenClaw { command } => match command {
             OpenClawCommand::Register { force } => {
                 let path = team::openclaw::register_project(&root, force)?;

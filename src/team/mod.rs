@@ -9,6 +9,7 @@ pub mod artifact;
 pub mod auto_merge;
 #[cfg(test)]
 mod behavioral_tests;
+pub mod bench;
 pub mod board;
 #[cfg(test)]
 mod smoke_tests;
