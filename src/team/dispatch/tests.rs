@@ -231,6 +231,66 @@ fn prepare_assignment_launch_resets_stale_existing_branch_to_current_main() {
 }
 
 #[test]
+fn prepare_assignment_launch_falls_back_to_local_main_when_origin_main_is_frozen() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "dispatch-stale-origin");
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    let team_config_dir = repo.join(".batty").join("team_config");
+    let frozen = git_stdout(&repo, &["rev-parse", "main"]);
+
+    setup_engineer_worktree(
+        &repo,
+        &worktree_dir,
+        &engineer_base_branch_name("eng-1"),
+        &team_config_dir,
+    )
+    .unwrap();
+    git_ok(&repo, &["update-ref", "refs/remotes/origin/main", frozen.trim()]);
+
+    for i in 1..=3 {
+        std::fs::write(repo.join(format!("local-{i}.txt")), format!("local {i}\n")).unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(&repo, &["commit", "-m", &format!("advance local main {i}")]);
+    }
+
+    let mut daemon = TestDaemonBuilder::new(repo.as_path())
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ])
+        .build();
+
+    let launch = daemon
+        .prepare_assignment_launch("eng-1", "Task #41: new assignment", Some(41))
+        .unwrap();
+
+    assert_eq!(launch.branch.as_deref(), Some("eng-1/41"));
+    assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-1/41");
+    assert_eq!(
+        git_stdout(&worktree_dir, &["rev-parse", "HEAD"]),
+        git_stdout(&repo, &["rev-parse", "main"])
+    );
+    assert_ne!(
+        git_stdout(&worktree_dir, &["rev-parse", "HEAD"]),
+        frozen,
+        "worktree should not reset to the frozen origin/main"
+    );
+
+    let events = events::read_events(&team_events_path(&repo)).unwrap();
+    let event = events
+        .iter()
+        .find(|event| {
+            event.event == "worktree_refreshed"
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("stale_origin_fallback ahead=3"))
+        })
+        .unwrap();
+    assert_eq!(event.role.as_deref(), Some("eng-1"));
+}
+
+#[test]
 fn prepare_assignment_launch_resets_stale_worktree_after_rebase_conflict() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = init_git_repo(&tmp, "dispatch-stale-reset");
