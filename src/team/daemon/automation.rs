@@ -1003,14 +1003,42 @@ impl TeamDaemon {
             );
         }
 
+        // Preserve any dirty changes as an auto-save commit on the current
+        // branch BEFORE switching. This lets the recovery path work on lanes
+        // that have in-flight engineer work, instead of refusing to act.
+        // The existing work is preserved on the wrong branch — the engineer
+        // can cherry-pick it to the correct branch after recovery lands them
+        // on the expected lane.
         if crate::team::task_loop::worktree_has_user_changes(&worktree_dir)? {
-            return self.alert_claimed_task_branch_mismatch(
-                engineer,
-                &mismatch,
-                Some(&format_branch_recovery_blocker(
-                    "worktree has uncommitted or untracked changes",
-                )),
+            let auto_save_message = format!(
+                "wip: auto-save before branch recovery from {} to {}",
+                mismatch.current_branch, mismatch.expected_branch
             );
+            match crate::team::task_loop::preserve_worktree_with_commit(
+                &worktree_dir,
+                &auto_save_message,
+                Duration::from_secs(10),
+            ) {
+                Ok(true) => {
+                    self.record_orchestrator_action(format!(
+                        "state reconciliation: auto-saved dirty worktree for {} on branch '{}' before recovery to '{}'",
+                        engineer, mismatch.current_branch, mismatch.expected_branch
+                    ));
+                }
+                Ok(false) => {
+                    // worktree_has_user_changes said dirty but preserve saw
+                    // nothing to save; fall through to checkout.
+                }
+                Err(error) => {
+                    return self.alert_claimed_task_branch_mismatch(
+                        engineer,
+                        &mismatch,
+                        Some(&format_branch_recovery_blocker(&format!(
+                            "failed to auto-save dirty worktree before recovery: {error}"
+                        ))),
+                    );
+                }
+            }
         }
 
         let switch_result = if crate::team::git_cmd::show_ref_exists(
@@ -3799,7 +3827,14 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
     }
 
     #[test]
-    fn reconcile_active_tasks_blocks_dirty_branch_mismatch_without_switching() {
+    fn reconcile_active_tasks_preserves_dirty_work_then_repairs_branch_mismatch() {
+        // Regression: previously, a dirty worktree on the wrong branch would
+        // cause the reconciliation path to refuse recovery and just alert.
+        // This left engineers permanently stuck on stale branches until a
+        // human intervened. The fix: auto-save dirty changes as a commit on
+        // the current (stale) branch first, then switch to the expected
+        // branch. Dirty work is preserved in git history and the engineer
+        // lands on the correct lane.
         let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "reconcile-stale-branch");
@@ -3848,25 +3883,51 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
 
         daemon.reconcile_active_tasks().unwrap();
 
+        // Task ownership recorded.
         assert_eq!(daemon.active_task_id("eng-1"), Some(42));
-        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-1/41");
-        let inbox_root = inbox::inboxes_root(&repo);
-        let manager_messages = inbox::pending_messages(&inbox_root, "manager").unwrap();
-        assert!(manager_messages.iter().any(|message| {
-            message.body.contains("Reconciliation alert")
-                && message.body.contains("eng-1/41")
-                && message.body.contains("eng-1/42")
-                && message.body.contains("automatic branch recovery blocked")
-                && message.body.contains("uncommitted or untracked changes")
-        }));
+        // Branch was switched to the expected lane.
+        assert_eq!(
+            current_worktree_branch(&worktree_dir).unwrap(),
+            "eng-1/42",
+            "branch should have been recovered to the expected lane"
+        );
+        // Dirty file is now committed (not dirty, not lost). Use the same
+        // semantics as production (ignores .batty/ and .cargo/ which are
+        // always excluded from preservation).
+        assert!(
+            !crate::team::task_loop::worktree_has_user_changes(&worktree_dir).unwrap(),
+            "worktree should have no user changes after preserve-and-recover",
+        );
+        // Verify the auto-save commit exists on eng-1/41 (the original branch).
+        let log_on_41 = git_stdout(&worktree_dir, &["log", "--oneline", "eng-1/41", "-1"]);
+        assert!(
+            log_on_41.contains("auto-save before branch recovery"),
+            "eng-1/41 tip should be the auto-save commit, was:\n{log_on_41}",
+        );
+        // The originally-dirty scratch.txt should exist on eng-1/41 as a
+        // committed file, not in the current worktree (eng-1/42 doesn't have it).
+        let files_on_41 = git_stdout(&worktree_dir, &["ls-tree", "-r", "eng-1/41", "--name-only"]);
+        assert!(
+            files_on_41.contains("scratch.txt"),
+            "scratch.txt should be committed on eng-1/41, files:\n{files_on_41}",
+        );
+        // Reconciliation event recorded as a branch_repair, not a mismatch
+        // block.
         let events =
             crate::team::events::read_events(&crate::team::team_events_path(&repo)).unwrap();
-        assert!(events.iter().any(|event| {
-            event.event == "state_reconciliation"
-                && event.role.as_deref() == Some("eng-1")
-                && event.task.as_deref() == Some("42")
-                && event.reason.as_deref() == Some("branch_mismatch")
-        }));
+        assert!(
+            events.iter().any(|event| {
+                event.event == "state_reconciliation"
+                    && event.role.as_deref() == Some("eng-1")
+                    && event.task.as_deref() == Some("42")
+                    && event.reason.as_deref() == Some("branch_repair")
+            }),
+            "expected a branch_repair state_reconciliation event, got: {:?}",
+            events
+                .iter()
+                .filter(|e| e.event == "state_reconciliation")
+                .collect::<Vec<_>>(),
+        );
     }
 
     #[test]
