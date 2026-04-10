@@ -11,11 +11,13 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use super::super::*;
-use crate::shim::common::SESSION_STATS_INTERVAL_SECS;
 use crate::team::watcher::CodexQualitySignals;
 
 const WARNING_PERCENT: u64 = 70;
 const NUDGE_PERCENT: u64 = 90;
+const CLAUDE_PROACTIVE_RESTART_PCT: u64 = 80;
+const CLAUDE_DEFAULT_CONTEXT_LIMIT_TOKENS: u64 = 200_000;
+const CLAUDE_ONE_MILLION_CONTEXT_LIMIT_TOKENS: u64 = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextPressureAction {
@@ -28,7 +30,7 @@ pub(crate) enum ContextPressureAction {
 struct ContextPressureInputs {
     output_bytes: u64,
     session_uptime_secs: u64,
-    proactive_usage_pct: Option<u8>,
+    proactive_context_usage_pct: Option<u64>,
     narration_detected: bool,
     meta_conversation_detected: bool,
     assistant_message_count: u32,
@@ -39,7 +41,6 @@ struct ContextPressureInputs {
     tool_failure_message: Option<String>,
     shim_failure_count: u32,
     secs_since_last_commit: Option<u64>,
-    proactive_context_usage_pct: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -140,9 +141,8 @@ impl ContextPressureTracker {
         }
 
         if score >= self.threshold {
-            state.over_threshold_polls = state.over_threshold_polls.saturating_add(1);
-            if state.over_threshold_polls >= restart_after_over_threshold_polls(restart_delay_secs)
-            {
+            let since = state.over_threshold_since.get_or_insert(now);
+            if now.duration_since(*since) >= Duration::from_secs(restart_delay_secs.max(1)) {
                 actions.push(ContextPressureAction::Restart);
             }
         } else {
@@ -158,7 +158,7 @@ fn compute_pressure_score(inputs: &ContextPressureInputs, threshold_bytes: u64) 
     score += inputs.output_bytes.saturating_mul(35) / threshold_bytes.max(1);
     score = score.min(35);
 
-    if inputs.proactive_usage_pct.is_some() {
+    if inputs.proactive_context_usage_pct.is_some() {
         score = score.max(100);
     }
 
@@ -280,12 +280,6 @@ fn should_force_restart(inputs: &ContextPressureInputs, restart_delay_secs: u64)
         && inputs.secs_since_last_commit.unwrap_or(u64::MAX) >= restart_delay_secs
 }
 
-fn restart_after_over_threshold_polls(restart_delay_secs: u64) -> u32 {
-    restart_delay_secs
-        .max(SESSION_STATS_INTERVAL_SECS)
-        .div_ceil(SESSION_STATS_INTERVAL_SECS) as u32
-}
-
 /// Minimum uptime (seconds) before a zero-output agent is considered dead.
 const ZERO_OUTPUT_THRESHOLD_SECS: u64 = 600;
 
@@ -295,7 +289,7 @@ impl TeamDaemon {
         member_name: &str,
         output_bytes: u64,
         uptime_secs: u64,
-        proactive_context_usage_pct: Option<u8>,
+        _proactive_context_usage_pct: Option<u8>,
     ) -> Result<()> {
         if output_bytes == 0 && uptime_secs >= ZERO_OUTPUT_THRESHOLD_SECS {
             if self.shim_handles.contains_key(member_name) {
@@ -447,7 +441,7 @@ impl TeamDaemon {
         ContextPressureInputs {
             output_bytes,
             session_uptime_secs: uptime_secs,
-            proactive_usage_pct,
+            proactive_context_usage_pct: proactive_usage_pct.map(u64::from),
             narration_detected: self.narration_tracker.is_narrating(member_name),
             meta_conversation_detected: self.narration_tracker.is_narrating(member_name),
             assistant_message_count: quality.assistant_message_count,
@@ -460,8 +454,6 @@ impl TeamDaemon {
                 .context_pressure_tracker
                 .shim_failure_count(member_name),
             secs_since_last_commit: self.secs_since_last_commit(member_name),
-            proactive_context_usage_pct: proactive_context_usage_pct
-                .or_else(|| self.proactive_claude_context_usage_pct(member_name)),
         }
     }
 
@@ -527,7 +519,7 @@ mod tests {
         ContextPressureInputs {
             output_bytes: 450_000,
             session_uptime_secs: 2_000,
-            proactive_usage_pct: None,
+            proactive_context_usage_pct: None,
             narration_detected: true,
             meta_conversation_detected: true,
             assistant_message_count: 4,
@@ -538,7 +530,6 @@ mod tests {
             tool_failure_message: None,
             shim_failure_count: 0,
             secs_since_last_commit: Some(2_000),
-            proactive_context_usage_pct: None,
         }
     }
 
@@ -554,7 +545,7 @@ mod tests {
         let inputs = ContextPressureInputs {
             output_bytes: 250_000,
             session_uptime_secs: 60,
-            proactive_usage_pct: None,
+            proactive_context_usage_pct: None,
             narration_detected: false,
             meta_conversation_detected: false,
             assistant_message_count: 2,
@@ -565,7 +556,6 @@ mod tests {
             tool_failure_message: None,
             shim_failure_count: 0,
             secs_since_last_commit: Some(60),
-            proactive_context_usage_pct: None,
         };
         assert!(compute_pressure_score(&inputs, 512_000) < 30);
     }
@@ -588,7 +578,7 @@ mod tests {
         let inputs = ContextPressureInputs {
             output_bytes: 120_000,
             session_uptime_secs: 120,
-            proactive_usage_pct: None,
+            proactive_context_usage_pct: None,
             narration_detected: false,
             meta_conversation_detected: false,
             assistant_message_count: 2,
@@ -599,7 +589,6 @@ mod tests {
             tool_failure_message: None,
             shim_failure_count: 0,
             secs_since_last_commit: Some(120),
-            proactive_context_usage_pct: None,
         };
 
         let (score, actions) = tracker.observe_at("eng-1", &inputs, true, 120, Instant::now());
@@ -640,7 +629,7 @@ mod tests {
         let reset_inputs = ContextPressureInputs {
             output_bytes: 100,
             session_uptime_secs: 5,
-            proactive_usage_pct: None,
+            proactive_context_usage_pct: None,
             narration_detected: false,
             meta_conversation_detected: false,
             assistant_message_count: 0,
@@ -651,7 +640,6 @@ mod tests {
             tool_failure_message: None,
             shim_failure_count: 0,
             secs_since_last_commit: Some(0),
-            proactive_context_usage_pct: None,
         };
         assert!(
             tracker
@@ -690,7 +678,7 @@ mod tests {
         let inputs = ContextPressureInputs {
             output_bytes: 64_000,
             session_uptime_secs: 180,
-            proactive_usage_pct: None,
+            proactive_context_usage_pct: None,
             narration_detected: false,
             meta_conversation_detected: false,
             assistant_message_count: 1,
@@ -701,7 +689,6 @@ mod tests {
             tool_failure_message: None,
             shim_failure_count: tracker.shim_failure_count("eng-1"),
             secs_since_last_commit: Some(180),
-            proactive_context_usage_pct: None,
         };
 
         let (score, actions) = tracker.observe_at("eng-1", &inputs, true, 120, Instant::now());
@@ -717,7 +704,7 @@ mod tests {
         let inputs = ContextPressureInputs {
             output_bytes: 220_000,
             session_uptime_secs: 1_200,
-            proactive_usage_pct: None,
+            proactive_context_usage_pct: None,
             narration_detected: false,
             meta_conversation_detected: false,
             assistant_message_count: 3,
@@ -728,7 +715,6 @@ mod tests {
             tool_failure_message: None,
             shim_failure_count: 3,
             secs_since_last_commit: Some(1_200),
-            proactive_context_usage_pct: None,
         };
 
         assert!(compute_pressure_score(&inputs, 512_000) >= 55);
@@ -747,23 +733,22 @@ mod tests {
         let mut tracker = ContextPressureTracker::new(100, 512_000);
         let mut inputs = pressure_inputs();
         inputs.output_bytes = 64_000;
-        inputs.proactive_usage_pct = Some(80);
+        inputs.proactive_context_usage_pct = Some(80);
         inputs.narration_detected = false;
         inputs.meta_conversation_detected = false;
         inputs.assistant_message_count = 1;
         inputs.tool_call_count = 1;
         inputs.unique_tool_names = 1;
         inputs.shrinking_responses = false;
+        let now = Instant::now();
 
         assert_eq!(
-            tracker
-                .observe_at("eng-1", &inputs, true, 20, Instant::now())
-                .1,
+            tracker.observe_at("eng-1", &inputs, true, 20, now).1,
             vec![ContextPressureAction::Warn, ContextPressureAction::Nudge]
         );
         assert_eq!(
             tracker
-                .observe_at("eng-1", &inputs, true, 20, Instant::now())
+                .observe_at("eng-1", &inputs, true, 20, now + Duration::from_secs(21))
                 .1,
             vec![ContextPressureAction::Restart]
         );
@@ -774,31 +759,36 @@ mod tests {
         let mut tracker = ContextPressureTracker::new(100, 512_000);
         let mut inputs = pressure_inputs();
         inputs.output_bytes = 64_000;
-        inputs.proactive_usage_pct = Some(80);
+        inputs.proactive_context_usage_pct = Some(80);
         inputs.narration_detected = false;
         inputs.meta_conversation_detected = false;
         inputs.assistant_message_count = 1;
         inputs.tool_call_count = 1;
         inputs.unique_tool_names = 1;
         inputs.shrinking_responses = false;
+        let now = Instant::now();
 
         assert_eq!(
-            tracker
-                .observe_at("eng-1", &inputs, true, 120, Instant::now())
-                .1,
+            tracker.observe_at("eng-1", &inputs, true, 120, now).1,
             vec![ContextPressureAction::Warn, ContextPressureAction::Nudge]
         );
-        for _ in 0..10 {
+        for second in [10_u64, 20, 30, 40, 50, 60, 70, 80, 90, 100] {
             assert!(
                 tracker
-                    .observe_at("eng-1", &inputs, true, 120, Instant::now())
+                    .observe_at(
+                        "eng-1",
+                        &inputs,
+                        true,
+                        120,
+                        now + Duration::from_secs(second)
+                    )
                     .1
                     .is_empty()
             );
         }
         assert_eq!(
             tracker
-                .observe_at("eng-1", &inputs, true, 120, Instant::now())
+                .observe_at("eng-1", &inputs, true, 120, now + Duration::from_secs(121))
                 .1,
             vec![ContextPressureAction::Restart]
         );
