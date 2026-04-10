@@ -30,6 +30,19 @@ pub struct AgentWorktree {
     pub path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MainStartRefSelection {
+    pub ref_name: String,
+    pub fallback_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchBranchReset {
+    pub changed: bool,
+    pub start_ref: String,
+    pub fallback_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunOutcome {
     Completed,
@@ -665,37 +678,107 @@ pub fn git_current_branch(path: &Path) -> Result<String> {
     Ok(branch)
 }
 
-fn preferred_main_start_ref(path: &Path) -> Result<String> {
-    let output = run_git(
-        path,
-        [
-            "show-ref",
-            "--verify",
-            "--quiet",
-            "refs/remotes/origin/main",
-        ],
-    )?;
+fn ref_exists(path: &Path, ref_name: &str) -> Result<bool> {
+    let output = run_git(path, ["show-ref", "--verify", "--quiet", ref_name])?;
     match output.status.code() {
-        Some(0) => Ok("origin/main".to_string()),
-        Some(1) => Ok("main".to_string()),
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
         _ => bail!(
-            "failed to inspect origin/main in {}: {}",
+            "failed to inspect {} in {}: {}",
+            ref_name,
             path.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         ),
     }
 }
 
+fn rev_list_count(path: &Path, range: &str) -> Result<u32> {
+    let output = run_git(path, ["rev-list", "--count", range])?;
+    if !output.status.success() {
+        bail!(
+            "failed to count commits in {} for {}: {}",
+            path.display(),
+            range,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .with_context(|| format!("failed to parse rev-list count for {range}"))
+}
+
+fn merge_base_is_ancestor(path: &Path, older: &str, newer: &str) -> Result<bool> {
+    let output = run_git(path, ["merge-base", "--is-ancestor", older, newer])?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!(
+            "failed to compare {} and {} in {}: {}",
+            older,
+            newer,
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+    }
+}
+
+fn preferred_main_start_ref(path: &Path) -> Result<MainStartRefSelection> {
+    if !ref_exists(path, "refs/remotes/origin/main")? {
+        return Ok(MainStartRefSelection {
+            ref_name: "main".to_string(),
+            fallback_reason: Some("stale_origin_fallback ahead=0 origin_unreachable".to_string()),
+        });
+    }
+
+    let local_main = current_commit(path, "refs/heads/main")?;
+    let remote_main = current_commit(path, "refs/remotes/origin/main")?;
+    if local_main == remote_main {
+        return Ok(MainStartRefSelection {
+            ref_name: "origin/main".to_string(),
+            fallback_reason: None,
+        });
+    }
+
+    if merge_base_is_ancestor(path, "refs/remotes/origin/main", "refs/heads/main")? {
+        let ahead = rev_list_count(path, "origin/main..main")?;
+        return Ok(MainStartRefSelection {
+            ref_name: "main".to_string(),
+            fallback_reason: Some(format!("stale_origin_fallback ahead={ahead}")),
+        });
+    }
+
+    if merge_base_is_ancestor(path, "refs/heads/main", "refs/remotes/origin/main")? {
+        return Ok(MainStartRefSelection {
+            ref_name: "origin/main".to_string(),
+            fallback_reason: None,
+        });
+    }
+
+    let ahead = rev_list_count(path, "origin/main..main")?;
+    let origin_ahead = rev_list_count(path, "main..origin/main")?;
+    Ok(MainStartRefSelection {
+        ref_name: "main".to_string(),
+        fallback_reason: Some(format!(
+            "stale_origin_fallback ahead={ahead} divergent origin_ahead={origin_ahead}"
+        )),
+    })
+}
+
 pub fn ensure_worktree_branch_for_dispatch(
     worktree_path: &Path,
     expected_branch: &str,
-) -> Result<bool> {
+) -> Result<DispatchBranchReset> {
     let current_branch = git_current_branch(worktree_path)?;
     if current_branch == expected_branch {
-        return Ok(false);
+        return Ok(DispatchBranchReset {
+            changed: false,
+            start_ref: current_branch,
+            fallback_reason: None,
+        });
     }
 
-    let start_ref = preferred_main_start_ref(worktree_path)?;
+    let selection = preferred_main_start_ref(worktree_path)?;
     let _ = run_git(worktree_path, ["merge", "--abort"]);
     let _ = run_git(worktree_path, ["checkout", "--", "."]);
     let _ = run_git(
@@ -705,19 +788,23 @@ pub fn ensure_worktree_branch_for_dispatch(
 
     let checkout = run_git(
         worktree_path,
-        ["checkout", "-B", expected_branch, start_ref.as_str()],
+        ["checkout", "-B", expected_branch, selection.ref_name.as_str()],
     )?;
     if !checkout.status.success() {
         bail!(
             "failed to checkout '{}' from '{}' in {}: {}",
             expected_branch,
-            start_ref,
+            selection.ref_name,
             worktree_path.display(),
             String::from_utf8_lossy(&checkout.stderr).trim()
         );
     }
 
-    Ok(true)
+    Ok(DispatchBranchReset {
+        changed: true,
+        start_ref: selection.ref_name,
+        fallback_reason: selection.fallback_reason,
+    })
 }
 
 /// Reset a worktree to point at its base branch. Used to clean up after a
@@ -1324,7 +1411,7 @@ mod tests {
         let reset = ensure_worktree_branch_for_dispatch(&wt_path, "eng-1-1-502").unwrap();
         let after = run_git(&wt_path, ["rev-parse", "HEAD"]).unwrap().stdout;
 
-        assert!(!reset);
+        assert!(!reset.changed);
         assert_eq!(before, after);
 
         let _ = run_git(
@@ -1360,7 +1447,7 @@ mod tests {
         let head = run_git(&wt_path, ["rev-parse", "HEAD"]).unwrap().stdout;
         let main = run_git(tmp.path(), ["rev-parse", "main"]).unwrap().stdout;
 
-        assert!(reset);
+        assert!(reset.changed);
         assert_eq!(git_current_branch(&wt_path).unwrap(), "eng-1-1-502");
         assert_eq!(head, main);
 
@@ -1370,6 +1457,87 @@ mod tests {
         );
         let _ = run_git(tmp.path(), ["branch", "-D", "eng-1-1-500"]);
         let _ = run_git(tmp.path(), ["branch", "-D", "eng-1-1-502"]);
+    }
+
+    #[test]
+    fn preferred_main_start_ref_uses_origin_when_equal() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+        let main = current_commit(tmp.path(), "main").unwrap();
+        git(
+            tmp.path(),
+            &["update-ref", "refs/remotes/origin/main", main.as_str()],
+        );
+
+        let selection = preferred_main_start_ref(tmp.path()).unwrap();
+        assert_eq!(selection.ref_name, "origin/main");
+        assert!(selection.fallback_reason.is_none());
+    }
+
+    #[test]
+    fn preferred_main_start_ref_falls_back_to_local_main_when_origin_is_behind() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+        let frozen = current_commit(tmp.path(), "main").unwrap();
+        git(
+            tmp.path(),
+            &["update-ref", "refs/remotes/origin/main", frozen.as_str()],
+        );
+        fs::write(tmp.path().join("local.txt"), "local\n").unwrap();
+        git(tmp.path(), &["add", "local.txt"]);
+        git(tmp.path(), &["commit", "-q", "-m", "local advance"]);
+
+        let selection = preferred_main_start_ref(tmp.path()).unwrap();
+        assert_eq!(selection.ref_name, "main");
+        assert_eq!(
+            selection.fallback_reason.as_deref(),
+            Some("stale_origin_fallback ahead=1")
+        );
+    }
+
+    #[test]
+    fn preferred_main_start_ref_falls_back_to_local_main_when_diverged() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+        let base = current_commit(tmp.path(), "main").unwrap();
+        fs::write(tmp.path().join("local.txt"), "local\n").unwrap();
+        git(tmp.path(), &["add", "local.txt"]);
+        git(tmp.path(), &["commit", "-q", "-m", "local advance"]);
+        git(tmp.path(), &["branch", "origin-side", base.as_str()]);
+        git(tmp.path(), &["checkout", "origin-side"]);
+        fs::write(tmp.path().join("remote.txt"), "remote\n").unwrap();
+        git(tmp.path(), &["add", "remote.txt"]);
+        git(tmp.path(), &["commit", "-q", "-m", "remote advance"]);
+        let remote = current_commit(tmp.path(), "HEAD").unwrap();
+        git(tmp.path(), &["checkout", "main"]);
+        git(
+            tmp.path(),
+            &["update-ref", "refs/remotes/origin/main", remote.as_str()],
+        );
+
+        let selection = preferred_main_start_ref(tmp.path()).unwrap();
+        assert_eq!(selection.ref_name, "main");
+        assert_eq!(
+            selection.fallback_reason.as_deref(),
+            Some("stale_origin_fallback ahead=1 divergent origin_ahead=1")
+        );
+    }
+
+    #[test]
+    fn preferred_main_start_ref_falls_back_to_local_main_when_origin_missing() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        let selection = preferred_main_start_ref(tmp.path()).unwrap();
+        assert_eq!(selection.ref_name, "main");
+        assert_eq!(
+            selection.fallback_reason.as_deref(),
+            Some("stale_origin_fallback ahead=0 origin_unreachable")
+        );
     }
 
     #[test]
