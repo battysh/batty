@@ -2780,6 +2780,54 @@ fn board_replenishment_blocked_todo_excluded_from_unblocked_count() {
 }
 
 #[test]
+fn board_replenishment_mixed_dispatchable_count_excludes_manual_blocked_todo() {
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("architect", "%999996");
+
+    crate::team::test_support::write_board_task_file(
+        harness.project_root(),
+        191,
+        "dispatchable-a",
+        "todo",
+        None,
+        &[],
+        None,
+    );
+    crate::team::test_support::write_board_task_file(
+        harness.project_root(),
+        198,
+        "manual-provider-blocked",
+        "todo",
+        None,
+        &[],
+        Some("manual provider-console token rotation"),
+    );
+
+    let mut daemon = harness.build_daemon().unwrap();
+
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_board_replenishment().unwrap();
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_board_replenishment().unwrap();
+
+    let pending = harness.pending_inbox_messages("architect").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(
+        pending[0]
+            .body
+            .contains("Board needs replenishment: 2 idle engineers, 1 todo tasks.")
+    );
+    assert!(
+        pending[0]
+            .body
+            .contains("Dispatchable todo tasks: #191 dispatchable-a")
+    );
+}
+
+#[test]
 fn board_replenishment_dependency_unmet_excluded_from_unblocked() {
     let harness = intervention_team_harness()
         .with_member_state("architect", MemberState::Idle)
@@ -2998,6 +3046,39 @@ fn fire_utilization_when_engineer_free_with_runnable_work() {
     let pending = harness.pending_inbox_messages("architect").unwrap();
     assert_eq!(pending.len(), 1);
     assert!(pending[0].body.contains("Utilization recovery needed"));
+}
+
+#[test]
+fn utilization_ignores_blocked_manual_todo_as_open_work() {
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("lead", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("architect", "%999996")
+        .with_board_task(191, "task-for-eng-1", "in-progress", Some("eng-1"));
+
+    crate::team::test_support::write_board_task_file(
+        harness.project_root(),
+        198,
+        "manual-provider-blocked",
+        "todo",
+        None,
+        &[],
+        Some("manual provider-console token rotation"),
+    );
+
+    let mut daemon = harness.build_daemon().unwrap();
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_architect_utilization().unwrap();
+
+    let pending = harness.pending_inbox_messages("architect").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(
+        pending[0]
+            .body
+            .contains("Unassigned open board work: none.")
+    );
 }
 
 // --- Helper function unit tests ---

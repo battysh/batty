@@ -94,6 +94,31 @@ pub fn runnable_tasks(resolutions: &[TaskResolution]) -> Vec<TaskResolution> {
         .collect()
 }
 
+pub fn dispatchable_tasks(board_dir: &Path) -> Result<Vec<Task>> {
+    let tasks = load_tasks_from_dir(&board_dir.join("tasks"))?;
+    let done: HashSet<u32> = tasks
+        .iter()
+        .filter(|task| matches!(task.status.as_str(), "done" | "archived"))
+        .map(|task| task.id)
+        .collect();
+
+    Ok(tasks
+        .into_iter()
+        .filter(|task| is_dispatchable_task(task, &done))
+        .collect())
+}
+
+pub fn is_dispatchable_task(task: &Task, done: &HashSet<u32>) -> bool {
+    if !matches!(task.status.as_str(), "todo" | "backlog" | "runnable") {
+        return false;
+    }
+    if task.claimed_by.is_some() {
+        return false;
+    }
+    let metadata = load_workflow_metadata(task).unwrap_or_default();
+    blocking_reason(task, &metadata, done).is_none()
+}
+
 fn acting_capability(
     task: &Task,
     metadata: &WorkflowMetadata,
@@ -648,5 +673,20 @@ roles:
         let task2 = resolutions.iter().find(|r| r.task_id == 2).unwrap();
         assert_eq!(task2.status, ResolutionStatus::Blocked);
         assert_eq!(task2.blocking_reason.as_deref(), Some("manual-hold"));
+    }
+
+    #[test]
+    fn blocked_todo_is_not_dispatchable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(
+            &tasks_dir,
+            1,
+            "status: todo\nblocked: waiting on manual token rotation\n",
+        );
+
+        let tasks = dispatchable_tasks(tmp.path()).unwrap();
+        assert!(tasks.is_empty());
     }
 }
