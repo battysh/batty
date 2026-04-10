@@ -1326,7 +1326,8 @@ mod tests {
         git_ok(&worktree_dir, &["checkout", "-b", "eng-1/41"]);
         std::fs::write(worktree_dir.join("tracked.txt"), "tracked dispatch work\n").unwrap();
         git_ok(&worktree_dir, &["add", "tracked.txt"]);
-        let git_dir = std::path::PathBuf::from(git_stdout(&worktree_dir, &["rev-parse", "--git-dir"]));
+        let git_dir =
+            std::path::PathBuf::from(git_stdout(&worktree_dir, &["rev-parse", "--git-dir"]));
         let git_dir = if git_dir.is_absolute() {
             git_dir
         } else {

@@ -354,8 +354,7 @@ impl TeamDaemon {
                             );
                             self.record_orchestrator_action(format!(
                                 "blocked recovery: stale-branch recovery for {} failed ({})",
-                                name,
-                                error
+                                name, error
                             ));
                             continue;
                         }
@@ -984,7 +983,10 @@ mod tests {
         daemon.is_git_repo = true;
         daemon.maybe_reconcile_stale_worktrees().unwrap();
 
-        assert_eq!(git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]), task_branch);
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            task_branch
+        );
     }
 
     #[test]

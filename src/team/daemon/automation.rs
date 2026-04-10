@@ -2465,7 +2465,11 @@ printf 'Created task #%s\n' \"$id\"
 
     fn board_task_path(project_root: &Path, task_id: u32) -> std::path::PathBuf {
         crate::task::find_task_path_by_id(
-            &project_root.join(".batty").join("team_config").join("board").join("tasks"),
+            &project_root
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks"),
             task_id,
         )
         .unwrap()
@@ -5554,7 +5558,8 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         git_ok(&worktree_dir, &["checkout", "-b", "eng-1/42"]);
         std::fs::write(worktree_dir.join("tracked.txt"), "tracked reclaim work\n").unwrap();
         git_ok(&worktree_dir, &["add", "tracked.txt"]);
-        let git_dir = std::path::PathBuf::from(git_stdout(&worktree_dir, &["rev-parse", "--git-dir"]));
+        let git_dir =
+            std::path::PathBuf::from(git_stdout(&worktree_dir, &["rev-parse", "--git-dir"]));
         let git_dir = if git_dir.is_absolute() {
             git_dir
         } else {
@@ -5595,9 +5600,9 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         let manager_messages =
             inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
         assert!(manager_messages.iter().any(|message| {
-            message
-                .body
-                .contains("could not safely auto-save eng-1's dirty worktree before TTL reclaim/reset")
+            message.body.contains(
+                "could not safely auto-save eng-1's dirty worktree before TTL reclaim/reset",
+            )
         }));
     }
 

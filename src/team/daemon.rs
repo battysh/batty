@@ -258,7 +258,9 @@ impl TeamDaemon {
             ),
         };
         if let Some(task_id) = task_id {
-            if let Err(error) = task_cmd::block_task_with_reason(&self.board_dir(), task_id, &reason) {
+            if let Err(error) =
+                task_cmd::block_task_with_reason(&self.board_dir(), task_id, &reason)
+            {
                 warn!(
                     member = member_name,
                     task_id,
