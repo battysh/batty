@@ -1357,6 +1357,26 @@ pub(crate) fn format_engineer_profiles(
     lines.join("\n")
 }
 
+pub(crate) fn format_benched_engineers(state: &crate::team::bench::BenchState) -> Option<String> {
+    if state.benched.is_empty() {
+        return None;
+    }
+
+    let mut lines = vec![
+        "Benched Engineers".to_string(),
+        format!("{:<20} {:<28} {}", "ENGINEER", "SINCE", "REASON"),
+    ];
+    for (engineer, entry) in &state.benched {
+        lines.push(format!(
+            "{:<20} {:<28} {}",
+            engineer,
+            entry.timestamp,
+            entry.reason.as_deref().unwrap_or("-"),
+        ));
+    }
+    Some(lines.join("\n"))
+}
+
 fn format_age_compact(secs: Option<f64>) -> String {
     let Some(secs) = secs else {
         return "-".to_string();
@@ -3028,6 +3048,25 @@ mod tests {
         assert!(rendered.contains("42.5"));
         assert!(rendered.contains("67%"));
         assert!(rendered.contains("33%"));
+    }
+
+    #[test]
+    fn format_benched_engineers_includes_reason_and_timestamp() {
+        let rendered = format_benched_engineers(&crate::team::bench::BenchState {
+            benched: std::collections::BTreeMap::from([(
+                "eng-1".to_string(),
+                crate::team::bench::BenchEntry {
+                    timestamp: "2026-04-10T12:00:00Z".to_string(),
+                    reason: Some("session end".to_string()),
+                },
+            )]),
+        })
+        .unwrap();
+
+        assert!(rendered.contains("Benched Engineers"));
+        assert!(rendered.contains("eng-1"));
+        assert!(rendered.contains("2026-04-10T12:00:00Z"));
+        assert!(rendered.contains("session end"));
     }
 
     #[test]

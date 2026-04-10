@@ -288,6 +288,7 @@ impl TeamDaemon {
     pub(in super::super) fn enqueue_dispatch_candidates(&mut self) -> Result<()> {
         let board_dir = self.board_dir();
         let board_tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
+        let benched_engineers = crate::team::bench::benched_engineer_names(self.project_root())?;
         let dedup_window =
             Duration::from_secs(self.config.team_config.board.dispatch_dedup_window_secs);
 
@@ -379,8 +380,13 @@ impl TeamDaemon {
             } else {
                 break;
             };
-            let ranked_engineers =
-                self.rank_dispatch_engineers(&task, &queued_engineers, manual_cooldown, &profiles);
+            let ranked_engineers = self.rank_dispatch_engineers(
+                &task,
+                &queued_engineers,
+                &benched_engineers,
+                manual_cooldown,
+                &profiles,
+            );
             let Some(engineer_name) = ranked_engineers.into_iter().find(|engineer_name| {
                 !self
                     .recent_dispatches
@@ -430,6 +436,7 @@ impl TeamDaemon {
 
     pub(in super::super) fn process_dispatch_queue(&mut self) -> Result<()> {
         let board_dir = self.board_dir();
+        let benched_engineers = crate::team::bench::benched_engineer_names(self.project_root())?;
         let mut pending: Vec<DispatchQueueEntry> = std::mem::take(&mut self.dispatch_queue);
         let mut retained = Vec::new();
 
@@ -444,6 +451,14 @@ impl TeamDaemon {
                     engineer = %entry.engineer,
                     task_id = entry.task_id,
                     "dispatch queue: pruning stale entry (task done/claimed/missing)"
+                );
+                continue;
+            }
+            if benched_engineers.contains(&entry.engineer) {
+                debug!(
+                    engineer = %entry.engineer,
+                    task_id = entry.task_id,
+                    "dispatch queue: pruning benched engineer entry"
                 );
                 continue;
             }
@@ -777,6 +792,7 @@ impl TeamDaemon {
         &self,
         task: &crate::task::Task,
         queued_engineers: &HashSet<String>,
+        benched_engineers: &std::collections::BTreeSet<String>,
         manual_cooldown: Duration,
         profiles: &HashMap<String, EngineerProfile>,
     ) -> Vec<String> {
@@ -784,6 +800,7 @@ impl TeamDaemon {
             .idle_engineer_names()
             .into_iter()
             .filter(|engineer_name| !queued_engineers.contains(engineer_name))
+            .filter(|engineer_name| !benched_engineers.contains(engineer_name))
             .filter(|engineer_name| {
                 let Some(assigned_at) = self.manual_assign_cooldowns.get(engineer_name) else {
                     return true;
@@ -884,6 +901,18 @@ mod tests {
         content.push_str(body);
         content.push('\n');
         std::fs::write(tasks_dir.join(format!("{id:03}-{title}.md")), content).unwrap();
+    }
+
+    fn write_bench_test_team_config(project_root: &Path, engineer_instances: u32) {
+        let team_dir = project_root.join(".batty").join("team_config");
+        std::fs::create_dir_all(&team_dir).unwrap();
+        std::fs::write(
+            team_dir.join("team.yaml"),
+            format!(
+                "name: test\nagent: codex\nroles:\n  - name: eng\n    role_type: engineer\n    instances: {engineer_instances}\n"
+            ),
+        )
+        .unwrap();
     }
 
     // -- idle_engineer_names tests --
@@ -1596,6 +1625,61 @@ mod tests {
         daemon.enqueue_dispatch_candidates().unwrap();
         assert_eq!(daemon.dispatch_queue.len(), 1);
         assert_eq!(daemon.dispatch_queue[0].task_id, 52);
+    }
+
+    #[test]
+    fn enqueue_dispatch_candidates_skips_benched_engineer() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 70, "dispatchable", "todo");
+        write_bench_test_team_config(tmp.path(), 2);
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                engineer_member("eng-1", None, false),
+                engineer_member("eng-2", None, false),
+            ])
+            .states(HashMap::from([
+                ("eng-1".to_string(), MemberState::Idle),
+                ("eng-2".to_string(), MemberState::Idle),
+            ]))
+            .build();
+
+        crate::team::bench::bench_engineer(tmp.path(), "eng-1", Some("session end")).unwrap();
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].engineer, "eng-2");
+        assert_eq!(daemon.dispatch_queue[0].task_id, 70);
+    }
+
+    #[test]
+    fn unbench_restores_dispatch_eligibility() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 71, "dispatchable", "todo");
+        write_bench_test_team_config(tmp.path(), 2);
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                engineer_member("eng-1", None, false),
+                engineer_member("eng-2", None, false),
+            ])
+            .states(HashMap::from([
+                ("eng-1".to_string(), MemberState::Idle),
+                ("eng-2".to_string(), MemberState::Idle),
+            ]))
+            .build();
+
+        crate::team::bench::bench_engineer(tmp.path(), "eng-1", Some("pause")).unwrap();
+        daemon.enqueue_dispatch_candidates().unwrap();
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].engineer, "eng-2");
+
+        crate::team::bench::unbench_engineer(tmp.path(), "eng-1").unwrap();
+        daemon.dispatch_queue.clear();
+        daemon.enqueue_dispatch_candidates().unwrap();
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].engineer, "eng-1");
+        assert_eq!(daemon.dispatch_queue[0].task_id, 71);
     }
 
     #[test]
