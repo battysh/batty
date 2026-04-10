@@ -295,7 +295,7 @@ fn normalize_blocked_frontmatter_content(content: &str) -> Result<Option<String>
         _ => block_reason.as_deref().or(blocked_on.as_deref()),
     };
 
-    let desired_reason = legacy_reason.as_deref();
+    let desired_reason = legacy_reason;
     let desired_blocked_on = blocked_on.as_deref().or(desired_reason).map(str::to_string);
     let rewrites_incomplete_blocked_task = status_is_blocked && legacy_reason.is_some();
     let rewrites_incomplete_bool_shape = matches!(blocked_value, Some(Value::Bool(true)))
