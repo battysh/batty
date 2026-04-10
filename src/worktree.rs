@@ -961,21 +961,13 @@ pub fn reset_worktree_to_base_with_options(
         );
     }
 
-    let checkout = run_git(worktree_path, ["checkout", base_branch])?;
+    let checkout = run_git(worktree_path, ["checkout", "-B", base_branch, "main"])?;
     if !checkout.status.success() {
         bail!(
-            "failed to checkout '{}' in {}: {}",
+            "failed to recreate '{}' from 'main' in {}: {}",
             base_branch,
             worktree_path.display(),
             String::from_utf8_lossy(&checkout.stderr).trim()
-        );
-    }
-    let reset = run_git(worktree_path, ["reset", "--hard", "main"])?;
-    if !reset.status.success() {
-        bail!(
-            "failed to reset to main in {}: {}",
-            worktree_path.display(),
-            String::from_utf8_lossy(&reset.stderr).trim()
         );
     }
     Ok(reason)
@@ -1617,6 +1609,51 @@ mod tests {
         assert_eq!(reason, WorktreeResetReason::CleanReset);
 
         // Cleanup
+        let _ = run_git(
+            tmp.path(),
+            ["worktree", "remove", "--force", wt_path.to_str().unwrap()],
+        );
+        let _ = run_git(tmp.path(), ["branch", "-D", "feature-reset"]);
+        let _ = run_git(tmp.path(), ["branch", "-D", "eng-main/test-eng"]);
+    }
+
+    #[test]
+    fn reset_worktree_to_base_recreates_missing_branch_from_main() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        let wt_path = tmp.path().join("wt");
+        git(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature-reset",
+                wt_path.to_str().unwrap(),
+                "main",
+            ],
+        );
+        fs::write(wt_path.join("work.txt"), "work\n").unwrap();
+        git(&wt_path, &["add", "work.txt"]);
+        git(&wt_path, &["commit", "-q", "-m", "work on feature"]);
+
+        let reason = reset_worktree_to_base_with_options(
+            &wt_path,
+            "eng-main/test-eng",
+            "wip: auto-save before worktree reset [feature-reset]",
+            Duration::from_secs(5),
+            PreserveFailureMode::SkipReset,
+        )
+        .unwrap();
+
+        assert_eq!(reason, WorktreeResetReason::CleanReset);
+        assert_eq!(git_current_branch(&wt_path).unwrap(), "eng-main/test-eng");
+        let head = current_commit(&wt_path, "HEAD").unwrap();
+        let main = current_commit(tmp.path(), "main").unwrap();
+        assert_eq!(head, main);
+
         let _ = run_git(
             tmp.path(),
             ["worktree", "remove", "--force", wt_path.to_str().unwrap()],
