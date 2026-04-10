@@ -171,6 +171,10 @@ pub struct WorkflowMetrics {
     // Review pipeline metrics (computed from event log)
     pub auto_merge_count: u32,
     pub manual_merge_count: u32,
+    pub direct_root_merge_count: u32,
+    pub isolated_integration_merge_count: u32,
+    pub direct_root_failure_count: u32,
+    pub isolated_integration_failure_count: u32,
     pub auto_merge_rate: Option<f64>,
     pub rework_count: u32,
     pub rework_rate: Option<f64>,
@@ -1749,6 +1753,10 @@ fn compute_metrics_with_telemetry_and_aging(
         oldest_assignment_age_secs: board_metrics.oldest_assignment_age_secs,
         auto_merge_count: review.auto_merge_count,
         manual_merge_count: review.manual_merge_count,
+        direct_root_merge_count: review.direct_root_merge_count,
+        isolated_integration_merge_count: review.isolated_integration_merge_count,
+        direct_root_failure_count: review.direct_root_failure_count,
+        isolated_integration_failure_count: review.isolated_integration_failure_count,
         auto_merge_rate: review.auto_merge_rate,
         rework_count: review.rework_count,
         rework_rate: review.rework_rate,
@@ -1879,6 +1887,10 @@ fn compute_board_metrics(
 struct ReviewMetrics {
     auto_merge_count: u32,
     manual_merge_count: u32,
+    direct_root_merge_count: u32,
+    isolated_integration_merge_count: u32,
+    direct_root_failure_count: u32,
+    isolated_integration_failure_count: u32,
     auto_merge_rate: Option<f64>,
     rework_count: u32,
     rework_rate: Option<f64>,
@@ -1894,6 +1906,10 @@ fn compute_review_metrics(events_path: Option<&Path>) -> ReviewMetrics {
 
     let mut auto_merge_count: u32 = 0;
     let mut manual_merge_count: u32 = 0;
+    let mut direct_root_merge_count: u32 = 0;
+    let mut isolated_integration_merge_count: u32 = 0;
+    let mut direct_root_failure_count: u32 = 0;
+    let mut isolated_integration_failure_count: u32 = 0;
     let mut rework_count: u32 = 0;
     let mut review_nudge_count: u32 = 0;
     let mut review_escalation_count: u32 = 0;
@@ -1907,6 +1923,11 @@ fn compute_review_metrics(events_path: Option<&Path>) -> ReviewMetrics {
         match event.event.as_str() {
             "task_auto_merged" => {
                 auto_merge_count += 1;
+                match event.merge_mode.as_deref() {
+                    Some("direct_root") => direct_root_merge_count += 1,
+                    Some("isolated_integration") => isolated_integration_merge_count += 1,
+                    _ => {}
+                }
                 if let Some(task_id) = &event.task {
                     if let Some(enter_ts) = review_enter_ts.remove(task_id) {
                         review_latencies.push((event.ts - enter_ts) as f64);
@@ -1915,6 +1936,11 @@ fn compute_review_metrics(events_path: Option<&Path>) -> ReviewMetrics {
             }
             "task_manual_merged" => {
                 manual_merge_count += 1;
+                match event.merge_mode.as_deref() {
+                    Some("direct_root") => direct_root_merge_count += 1,
+                    Some("isolated_integration") => isolated_integration_merge_count += 1,
+                    _ => {}
+                }
                 if let Some(task_id) = &event.task {
                     if let Some(enter_ts) = review_enter_ts.remove(task_id) {
                         review_latencies.push((event.ts - enter_ts) as f64);
@@ -1924,6 +1950,11 @@ fn compute_review_metrics(events_path: Option<&Path>) -> ReviewMetrics {
             "task_reworked" => {
                 rework_count += 1;
             }
+            "task_merge_failed" => match event.merge_mode.as_deref() {
+                Some("direct_root") => direct_root_failure_count += 1,
+                Some("isolated_integration") => isolated_integration_failure_count += 1,
+                _ => {}
+            },
             "review_nudge_sent" => {
                 review_nudge_count += 1;
             }
@@ -1960,6 +1991,10 @@ fn compute_review_metrics(events_path: Option<&Path>) -> ReviewMetrics {
     ReviewMetrics {
         auto_merge_count,
         manual_merge_count,
+        direct_root_merge_count,
+        isolated_integration_merge_count,
+        direct_root_failure_count,
+        isolated_integration_failure_count,
         auto_merge_rate,
         rework_count,
         rework_rate,
@@ -1981,6 +2016,10 @@ fn compute_review_metrics_from_db(conn: &rusqlite::Connection) -> ReviewMetrics 
 
     let auto_merge_count = row.auto_merge_count as u32;
     let manual_merge_count = row.manual_merge_count as u32;
+    let direct_root_merge_count = row.direct_root_merge_count as u32;
+    let isolated_integration_merge_count = row.isolated_integration_merge_count as u32;
+    let direct_root_failure_count = row.direct_root_failure_count as u32;
+    let isolated_integration_failure_count = row.isolated_integration_failure_count as u32;
     let rework_count = row.rework_count as u32;
     let total_merges = auto_merge_count + manual_merge_count;
     let auto_merge_rate = if total_merges > 0 {
@@ -1998,6 +2037,10 @@ fn compute_review_metrics_from_db(conn: &rusqlite::Connection) -> ReviewMetrics 
     ReviewMetrics {
         auto_merge_count,
         manual_merge_count,
+        direct_root_merge_count,
+        isolated_integration_merge_count,
+        direct_root_failure_count,
+        isolated_integration_failure_count,
         auto_merge_rate,
         rework_count,
         rework_rate,
@@ -2045,7 +2088,8 @@ Oldest Review Age: {}\n\
 Oldest Assignment Age: {}\n\n\
 Review Pipeline\n\
 Queue: {} | Avg Latency: {} | Auto-merge Rate: {} | Rework Rate: {}\n\
-Auto: {} | Manual: {} | Rework: {} | Nudges: {} | Escalations: {}",
+Auto: {} | Manual: {} | Rework: {} | Nudges: {} | Escalations: {}\n\
+Merge Modes: direct ok {} / fail {} | isolated ok {} / fail {}",
         metrics.runnable_count,
         metrics.blocked_count,
         metrics.in_review_count,
@@ -2066,6 +2110,10 @@ Auto: {} | Manual: {} | Rework: {} | Nudges: {} | Escalations: {}",
         metrics.rework_count,
         metrics.review_nudge_count,
         metrics.review_escalation_count,
+        metrics.direct_root_merge_count,
+        metrics.direct_root_failure_count,
+        metrics.isolated_integration_merge_count,
+        metrics.isolated_integration_failure_count,
     )
 }
 
@@ -4216,9 +4264,25 @@ mod tests {
         let conn = crate::team::telemetry_db::open_in_memory().unwrap();
         let events = vec![
             crate::team::events::TeamEvent::task_completed("eng-1", Some("1")),
-            crate::team::events::TeamEvent::task_auto_merged("eng-1", "1", 0.9, 3, 50),
+            crate::team::events::TeamEvent::task_auto_merged_with_mode(
+                "eng-1",
+                "1",
+                0.9,
+                3,
+                50,
+                Some(crate::team::merge::MergeMode::DirectRoot),
+            ),
             crate::team::events::TeamEvent::task_completed("eng-1", Some("2")),
-            crate::team::events::TeamEvent::task_manual_merged("2"),
+            crate::team::events::TeamEvent::task_manual_merged_with_mode(
+                "2",
+                Some(crate::team::merge::MergeMode::IsolatedIntegration),
+            ),
+            crate::team::events::TeamEvent::task_merge_failed(
+                "eng-1",
+                "3",
+                Some(crate::team::merge::MergeMode::IsolatedIntegration),
+                "isolated merge path failed: integration checkout broke",
+            ),
             crate::team::events::TeamEvent::task_reworked("eng-1", "3"),
         ];
         for event in &events {
@@ -4230,6 +4294,10 @@ mod tests {
 
         assert_eq!(metrics.auto_merge_count, 1);
         assert_eq!(metrics.manual_merge_count, 1);
+        assert_eq!(metrics.direct_root_merge_count, 1);
+        assert_eq!(metrics.isolated_integration_merge_count, 1);
+        assert_eq!(metrics.direct_root_failure_count, 0);
+        assert_eq!(metrics.isolated_integration_failure_count, 1);
         assert_eq!(metrics.rework_count, 1);
         assert!(metrics.auto_merge_rate.is_some());
         // Board metric still works.
@@ -4249,14 +4317,30 @@ mod tests {
         // Write events to JSONL (no DB).
         let events_path = team_events_path(tmp.path());
         let mut sink = EventSink::new(&events_path).unwrap();
-        sink.emit(TeamEvent::task_auto_merged("eng-1", "1", 0.9, 3, 50))
-            .unwrap();
+        sink.emit(TeamEvent::task_auto_merged_with_mode(
+            "eng-1",
+            "1",
+            0.9,
+            3,
+            50,
+            Some(crate::team::merge::MergeMode::DirectRoot),
+        ))
+        .unwrap();
+        sink.emit(TeamEvent::task_merge_failed(
+            "eng-1",
+            "2",
+            Some(crate::team::merge::MergeMode::IsolatedIntegration),
+            "isolated merge path failed: integration checkout broke",
+        ))
+        .unwrap();
 
         let metrics =
             compute_metrics_with_telemetry(&board_dir(tmp.path()), &[], None, Some(&events_path))
                 .unwrap();
 
         assert_eq!(metrics.auto_merge_count, 1);
+        assert_eq!(metrics.direct_root_merge_count, 1);
+        assert_eq!(metrics.isolated_integration_failure_count, 1);
         assert_eq!(metrics.runnable_count, 1);
     }
 
@@ -4276,6 +4360,10 @@ mod tests {
 
         assert_eq!(metrics.auto_merge_count, 0);
         assert_eq!(metrics.manual_merge_count, 0);
+        assert_eq!(metrics.direct_root_merge_count, 0);
+        assert_eq!(metrics.isolated_integration_merge_count, 0);
+        assert_eq!(metrics.direct_root_failure_count, 0);
+        assert_eq!(metrics.isolated_integration_failure_count, 0);
         assert_eq!(metrics.rework_count, 0);
         assert_eq!(metrics.auto_merge_rate, None);
         // Board metric still works.
