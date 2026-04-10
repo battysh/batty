@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::DEFAULT_EVENT_LOG_MAX_BYTES;
+use super::merge::MergeMode;
 
 /// Bundled parameters for merge-confidence scoring events.
 pub struct MergeConfidenceInfo<'a> {
@@ -105,6 +106,8 @@ pub struct TeamEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub success: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub narration_ratio: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_frequency: Option<f64>,
@@ -153,6 +156,7 @@ impl TeamEvent {
             content_hash: None,
             backend: None,
             success: None,
+            merge_mode: None,
             narration_ratio: None,
             commit_frequency: None,
             first_pass_test_rate: None,
@@ -797,11 +801,31 @@ impl TeamEvent {
         files_changed: usize,
         lines_changed: usize,
     ) -> Self {
+        Self::task_auto_merged_with_mode(
+            engineer,
+            task,
+            confidence,
+            files_changed,
+            lines_changed,
+            None,
+        )
+    }
+
+    pub fn task_auto_merged_with_mode(
+        engineer: &str,
+        task: &str,
+        confidence: f64,
+        files_changed: usize,
+        lines_changed: usize,
+        merge_mode: Option<MergeMode>,
+    ) -> Self {
         Self {
             role: Some(engineer.into()),
             task: Some(task.into()),
             load: Some(confidence),
             reason: Some(format!("files={} lines={}", files_changed, lines_changed)),
+            success: Some(true),
+            merge_mode: merge_mode.map(|mode| mode.as_str().to_string()),
             ..Self::base("task_auto_merged")
         }
     }
@@ -836,9 +860,32 @@ impl TeamEvent {
     }
 
     pub fn task_manual_merged(task: &str) -> Self {
+        Self::task_manual_merged_with_mode(task, None)
+    }
+
+    pub fn task_manual_merged_with_mode(task: &str, merge_mode: Option<MergeMode>) -> Self {
         Self {
             task: Some(task.into()),
+            success: Some(true),
+            merge_mode: merge_mode.map(|mode| mode.as_str().to_string()),
             ..Self::base("task_manual_merged")
+        }
+    }
+
+    pub fn task_merge_failed(
+        engineer: &str,
+        task: &str,
+        merge_mode: Option<MergeMode>,
+        details: &str,
+    ) -> Self {
+        Self {
+            role: Some(engineer.into()),
+            task: Some(task.into()),
+            success: Some(false),
+            merge_mode: merge_mode.map(|mode| mode.as_str().to_string()),
+            reason: Some("merge_failed".into()),
+            details: Some(details.into()),
+            ..Self::base("task_merge_failed")
         }
     }
 
@@ -1423,9 +1470,28 @@ mod tests {
             ),
             (
                 "task_auto_merged",
-                TeamEvent::task_auto_merged("eng-1", "42", 0.95, 2, 30),
+                TeamEvent::task_auto_merged_with_mode(
+                    "eng-1",
+                    "42",
+                    0.95,
+                    2,
+                    30,
+                    Some(MergeMode::IsolatedIntegration),
+                ),
             ),
-            ("task_manual_merged", TeamEvent::task_manual_merged("42")),
+            (
+                "task_manual_merged",
+                TeamEvent::task_manual_merged_with_mode("42", Some(MergeMode::DirectRoot)),
+            ),
+            (
+                "task_merge_failed",
+                TeamEvent::task_merge_failed(
+                    "eng-1",
+                    "43",
+                    Some(MergeMode::IsolatedIntegration),
+                    "isolated merge path failed: boom",
+                ),
+            ),
             (
                 "merge_confidence_scored",
                 TeamEvent::merge_confidence_scored(&MergeConfidenceInfo {
@@ -1819,6 +1885,47 @@ mod tests {
         assert_eq!(parsed["task"].as_str().unwrap(), "42");
         assert!(!parsed["success"].as_bool().unwrap());
         assert_eq!(parsed["reason"].as_str().unwrap(), "failed");
+    }
+
+    #[test]
+    fn merge_events_serialize_merge_mode_and_outcome() {
+        let auto = TeamEvent::task_auto_merged_with_mode(
+            "eng-1",
+            "42",
+            0.95,
+            2,
+            30,
+            Some(MergeMode::DirectRoot),
+        );
+        let auto_json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&auto).unwrap()).unwrap();
+        assert_eq!(auto_json["merge_mode"].as_str().unwrap(), "direct_root");
+        assert!(auto_json["success"].as_bool().unwrap());
+
+        let manual =
+            TeamEvent::task_manual_merged_with_mode("43", Some(MergeMode::IsolatedIntegration));
+        let manual_json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&manual).unwrap()).unwrap();
+        assert_eq!(
+            manual_json["merge_mode"].as_str().unwrap(),
+            "isolated_integration"
+        );
+        assert!(manual_json["success"].as_bool().unwrap());
+
+        let failed = TeamEvent::task_merge_failed(
+            "eng-2",
+            "44",
+            Some(MergeMode::IsolatedIntegration),
+            "isolated merge path failed: broken",
+        );
+        let failed_json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&failed).unwrap()).unwrap();
+        assert_eq!(
+            failed_json["merge_mode"].as_str().unwrap(),
+            "isolated_integration"
+        );
+        assert!(!failed_json["success"].as_bool().unwrap());
+        assert_eq!(failed_json["reason"].as_str().unwrap(), "merge_failed");
     }
 
     #[test]

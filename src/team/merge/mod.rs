@@ -17,5 +17,5 @@ mod operations;
 
 pub(crate) use completion::handle_engineer_completion;
 pub(crate) use completion::record_merge_test_timing;
-pub(crate) use lock::{MergeLock, MergeMode, MergeOutcome};
+pub(crate) use lock::{MergeLock, MergeMode, MergeOutcome, infer_merge_mode_from_failure};
 pub(crate) use operations::merge_engineer_branch;

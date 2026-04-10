@@ -30,7 +30,9 @@ use super::git_ops::{
     code_files_changed_from_main, commits_ahead_of_main, diff_stat_from_main,
     files_changed_from_main, now_unix, run_git_with_context,
 };
-use super::lock::{MergeLock, MergeMode, MergeOutcome, MergeSuccess};
+use super::lock::{
+    MergeLock, MergeMode, MergeOutcome, MergeSuccess, infer_merge_mode_from_failure,
+};
 use super::operations::merge_engineer_branch;
 
 fn transition_verification_phase(
@@ -983,6 +985,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                         "failed to record merge test timing"
                     );
                 }
+                daemon.record_task_manual_merged(task_id, success.mode);
 
                 let board_update_ok = daemon.run_kanban_md_nonfatal(
                     &[
@@ -1117,6 +1120,12 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
             }
             MergeOutcome::MergeFailure(merge_info) => {
                 drop(lock);
+                daemon.record_task_merge_failed(
+                    engineer,
+                    task_id,
+                    infer_merge_mode_from_failure(&merge_info),
+                    &merge_info,
+                );
 
                 let manager_notice = format!(
                     "Task #{task_id} from {engineer} passed tests but could not be merged to main.\n{merge_info}\nDecide whether to retry the isolated merge path, inspect the integration-worktree failure, or redirect the engineer."

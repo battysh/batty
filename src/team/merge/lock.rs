@@ -40,10 +40,29 @@ impl Drop for MergeLock {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MergeMode {
     DirectRoot,
     IsolatedIntegration,
+}
+
+impl MergeMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectRoot => "direct_root",
+            Self::IsolatedIntegration => "isolated_integration",
+        }
+    }
+}
+
+pub(crate) fn infer_merge_mode_from_failure(message: &str) -> Option<MergeMode> {
+    if message.starts_with("direct merge path failed") {
+        Some(MergeMode::DirectRoot)
+    } else if message.starts_with("isolated merge path failed") {
+        Some(MergeMode::IsolatedIntegration)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,5 +128,21 @@ mod tests {
         drop(first_lock);
         handle.join().unwrap();
         assert!(acquired.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn infer_merge_mode_from_failure_prefix() {
+        assert_eq!(
+            infer_merge_mode_from_failure("direct merge path failed: boom"),
+            Some(MergeMode::DirectRoot)
+        );
+        assert_eq!(
+            infer_merge_mode_from_failure("isolated merge path failed: boom"),
+            Some(MergeMode::IsolatedIntegration)
+        );
+        assert_eq!(
+            infer_merge_mode_from_failure("verification detected regressions"),
+            None
+        );
     }
 }

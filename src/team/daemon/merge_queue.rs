@@ -10,7 +10,9 @@ use super::TeamDaemon;
 use crate::task::load_tasks_from_dir;
 use crate::team::board::{WorkflowMetadata, read_workflow_metadata};
 use crate::team::daemon::verification::run_automatic_verification;
-use crate::team::merge::{MergeLock, MergeMode, MergeOutcome, merge_engineer_branch};
+use crate::team::merge::{
+    MergeLock, MergeMode, MergeOutcome, infer_merge_mode_from_failure, merge_engineer_branch,
+};
 use crate::team::task_loop::{current_worktree_branch, read_task_title};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -339,6 +341,7 @@ impl TeamDaemon {
                     request.confidence,
                     request.files_changed,
                     request.lines_changed,
+                    success.mode,
                 );
 
                 if let Some(ref manager_name) = manager_name {
@@ -469,6 +472,12 @@ impl TeamDaemon {
                 Ok(MergeQueueOutcome::Conflict)
             }
             MergeOutcome::MergeFailure(merge_info) => {
+                self.record_task_merge_failed(
+                    &request.engineer,
+                    request.task_id,
+                    infer_merge_mode_from_failure(&merge_info),
+                    &merge_info,
+                );
                 let manager_notice = format!(
                     "Task #{} from {} passed tests but could not be merged to main.\n{}\nDecide whether to retry the isolated merge path, inspect the integration-worktree failure, or redirect the engineer.",
                     request.task_id, request.engineer, merge_info

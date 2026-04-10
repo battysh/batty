@@ -41,6 +41,10 @@ pub struct DashboardMetrics {
     // Review pipeline
     pub auto_merge_count: i64,
     pub manual_merge_count: i64,
+    pub direct_root_merge_count: i64,
+    pub isolated_integration_merge_count: i64,
+    pub direct_root_failure_count: i64,
+    pub isolated_integration_failure_count: i64,
     pub auto_merge_rate: Option<f64>,
     pub accepted_decision_count: i64,
     pub rejected_decision_count: i64,
@@ -158,6 +162,10 @@ pub fn query_dashboard(conn: &Connection) -> Result<DashboardMetrics> {
     let review = telemetry_db::query_review_metrics(conn)?;
     m.auto_merge_count = review.auto_merge_count;
     m.manual_merge_count = review.manual_merge_count;
+    m.direct_root_merge_count = review.direct_root_merge_count;
+    m.isolated_integration_merge_count = review.isolated_integration_merge_count;
+    m.direct_root_failure_count = review.direct_root_failure_count;
+    m.isolated_integration_failure_count = review.isolated_integration_failure_count;
     m.rework_count = review.rework_count;
     m.avg_review_latency_secs = review.avg_review_latency_secs;
     m.accepted_decision_count = review.accepted_decision_count;
@@ -298,6 +306,13 @@ pub fn format_dashboard(m: &DashboardMetrics) -> String {
     out.push_str(&format!(
         "  Auto: {}  Manual: {}  Rework: {}\n",
         m.auto_merge_count, m.manual_merge_count, m.rework_count
+    ));
+    out.push_str(&format!(
+        "  Merge Modes: direct ok {} / fail {}  isolated ok {} / fail {}\n",
+        m.direct_root_merge_count,
+        m.direct_root_failure_count,
+        m.isolated_integration_merge_count,
+        m.isolated_integration_failure_count
     ));
     out.push_str(&format!(
         "  Decision Accept Rate: {} (accepted {} / rejected {})\n",
@@ -512,7 +527,14 @@ mod tests {
         telemetry_db::insert_event(&conn, &c2).unwrap();
 
         // Merge events
-        let mut m1 = TeamEvent::task_auto_merged("eng-1", "10", 0.9, 2, 30);
+        let mut m1 = TeamEvent::task_auto_merged_with_mode(
+            "eng-1",
+            "10",
+            0.9,
+            2,
+            30,
+            Some(crate::team::merge::MergeMode::DirectRoot),
+        );
         m1.ts = 1500;
         telemetry_db::insert_event(&conn, &m1).unwrap();
         telemetry_db::insert_event(
@@ -539,9 +561,22 @@ mod tests {
         )
         .unwrap();
 
-        let mut m2 = TeamEvent::task_manual_merged("20");
+        let mut m2 = TeamEvent::task_manual_merged_with_mode(
+            "20",
+            Some(crate::team::merge::MergeMode::DirectRoot),
+        );
         m2.ts = 1800;
         telemetry_db::insert_event(&conn, &m2).unwrap();
+        telemetry_db::insert_event(
+            &conn,
+            &TeamEvent::task_merge_failed(
+                "eng-2",
+                "30",
+                Some(crate::team::merge::MergeMode::IsolatedIntegration),
+                "isolated merge path failed: integration checkout broke",
+            ),
+        )
+        .unwrap();
         telemetry_db::insert_event(
             &conn,
             &TeamEvent::auto_merge_decision_recorded(&crate::team::events::AutoMergeDecisionInfo {
@@ -603,6 +638,10 @@ mod tests {
         // Review pipeline
         assert_eq!(m.auto_merge_count, 1);
         assert_eq!(m.manual_merge_count, 1);
+        assert_eq!(m.direct_root_merge_count, 2);
+        assert_eq!(m.isolated_integration_merge_count, 0);
+        assert_eq!(m.direct_root_failure_count, 0);
+        assert_eq!(m.isolated_integration_failure_count, 1);
         let amr = m.auto_merge_rate.unwrap();
         assert!((amr - 50.0).abs() < 0.01);
         assert_eq!(m.accepted_decision_count, 1);
@@ -664,7 +703,14 @@ mod tests {
             c.ts = 200 + i as u64 * 100 + 60;
             telemetry_db::insert_event(&conn, &c).unwrap();
 
-            let mut m = TeamEvent::task_auto_merged("eng-1", &i.to_string(), 0.9, 2, 30);
+            let mut m = TeamEvent::task_auto_merged_with_mode(
+                "eng-1",
+                &i.to_string(),
+                0.9,
+                2,
+                30,
+                Some(crate::team::merge::MergeMode::DirectRoot),
+            );
             m.ts = 200 + i as u64 * 100 + 120;
             telemetry_db::insert_event(&conn, &m).unwrap();
         }
@@ -731,6 +777,10 @@ mod tests {
             merge_success_rate: Some(80.0),
             auto_merge_count: 6,
             manual_merge_count: 2,
+            direct_root_merge_count: 5,
+            isolated_integration_merge_count: 3,
+            direct_root_failure_count: 1,
+            isolated_integration_failure_count: 2,
             auto_merge_rate: Some(75.0),
             accepted_decision_count: 6,
             rejected_decision_count: 2,
@@ -798,6 +848,7 @@ mod tests {
 
         assert!(text.contains("Review Pipeline"));
         assert!(text.contains("Auto-merge Rate: 75%"));
+        assert!(text.contains("Merge Modes: direct ok 5 / fail 1  isolated ok 3 / fail 2"));
         assert!(text.contains("Decision Accept Rate: 75%"));
         assert!(text.contains("Post-merge Verify: pass 5  fail 1  skipped 2"));
         assert!(text.contains("needs-human-review"));

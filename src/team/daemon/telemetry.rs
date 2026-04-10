@@ -269,13 +269,41 @@ impl TeamDaemon {
         confidence: f64,
         files_changed: usize,
         lines_changed: usize,
+        merge_mode: crate::team::merge::MergeMode,
     ) {
-        self.emit_event(TeamEvent::task_auto_merged(
+        self.emit_event(TeamEvent::task_auto_merged_with_mode(
             engineer,
             &task_id.to_string(),
             confidence,
             files_changed,
             lines_changed,
+            Some(merge_mode),
+        ));
+    }
+
+    pub(crate) fn record_task_manual_merged(
+        &mut self,
+        task_id: u32,
+        merge_mode: crate::team::merge::MergeMode,
+    ) {
+        self.emit_event(TeamEvent::task_manual_merged_with_mode(
+            &task_id.to_string(),
+            Some(merge_mode),
+        ));
+    }
+
+    pub(crate) fn record_task_merge_failed(
+        &mut self,
+        engineer: &str,
+        task_id: u32,
+        merge_mode: Option<crate::team::merge::MergeMode>,
+        details: &str,
+    ) {
+        self.emit_event(TeamEvent::task_merge_failed(
+            engineer,
+            &task_id.to_string(),
+            merge_mode,
+            details,
         ));
     }
 

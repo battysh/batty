@@ -790,6 +790,10 @@ pub fn query_recent_events(conn: &Connection, limit: usize) -> Result<Vec<EventR
 pub struct ReviewMetricsRow {
     pub auto_merge_count: i64,
     pub manual_merge_count: i64,
+    pub direct_root_merge_count: i64,
+    pub isolated_integration_merge_count: i64,
+    pub direct_root_failure_count: i64,
+    pub isolated_integration_failure_count: i64,
     pub rework_count: i64,
     pub review_nudge_count: i64,
     pub review_escalation_count: i64,
@@ -980,6 +984,18 @@ fn extract_auto_merge_reasons(event: &TeamEvent) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn increment_merge_mode_counts(
+    direct_root_count: &mut i64,
+    isolated_integration_count: &mut i64,
+    merge_mode: Option<&str>,
+) {
+    match merge_mode {
+        Some("direct_root") => *direct_root_count += 1,
+        Some("isolated_integration") => *isolated_integration_count += 1,
+        _ => {}
+    }
+}
+
 /// Query aggregated review pipeline metrics from the events table.
 pub fn query_review_metrics(conn: &Connection) -> Result<ReviewMetricsRow> {
     let count_event = |event_type: &str| -> Result<i64> {
@@ -998,6 +1014,29 @@ pub fn query_review_metrics(conn: &Connection) -> Result<ReviewMetricsRow> {
     let review_escalation_count = count_event("review_escalated")?;
     let decision_events = load_events_by_type(conn, "auto_merge_decision_recorded")?;
     let post_verify_events = load_events_by_type(conn, "auto_merge_post_verify_result")?;
+    let auto_merge_events = load_events_by_type(conn, "task_auto_merged")?;
+    let manual_merge_events = load_events_by_type(conn, "task_manual_merged")?;
+    let merge_failure_events = load_events_by_type(conn, "task_merge_failed")?;
+
+    let mut direct_root_merge_count = 0;
+    let mut isolated_integration_merge_count = 0;
+    for event in auto_merge_events.iter().chain(manual_merge_events.iter()) {
+        increment_merge_mode_counts(
+            &mut direct_root_merge_count,
+            &mut isolated_integration_merge_count,
+            event.merge_mode.as_deref(),
+        );
+    }
+
+    let mut direct_root_failure_count = 0;
+    let mut isolated_integration_failure_count = 0;
+    for event in &merge_failure_events {
+        increment_merge_mode_counts(
+            &mut direct_root_failure_count,
+            &mut isolated_integration_failure_count,
+            event.merge_mode.as_deref(),
+        );
+    }
 
     let mut accepted_decision_count = 0;
     let mut rejected_decision_count = 0;
@@ -1056,6 +1095,10 @@ pub fn query_review_metrics(conn: &Connection) -> Result<ReviewMetricsRow> {
     Ok(ReviewMetricsRow {
         auto_merge_count,
         manual_merge_count,
+        direct_root_merge_count,
+        isolated_integration_merge_count,
+        direct_root_failure_count,
+        isolated_integration_failure_count,
         rework_count,
         review_nudge_count,
         review_escalation_count,
@@ -1454,6 +1497,10 @@ mod tests {
         let row = query_review_metrics(&conn).unwrap();
         assert_eq!(row.auto_merge_count, 0);
         assert_eq!(row.manual_merge_count, 0);
+        assert_eq!(row.direct_root_merge_count, 0);
+        assert_eq!(row.isolated_integration_merge_count, 0);
+        assert_eq!(row.direct_root_failure_count, 0);
+        assert_eq!(row.isolated_integration_failure_count, 0);
         assert_eq!(row.rework_count, 0);
         assert_eq!(row.review_nudge_count, 0);
         assert_eq!(row.review_escalation_count, 0);
@@ -1471,15 +1518,46 @@ mod tests {
         let conn = open_in_memory().unwrap();
         insert_event(
             &conn,
-            &TeamEvent::task_auto_merged("eng-1", "1", 0.9, 2, 30),
+            &TeamEvent::task_auto_merged_with_mode(
+                "eng-1",
+                "1",
+                0.9,
+                2,
+                30,
+                Some(crate::team::merge::MergeMode::DirectRoot),
+            ),
         )
         .unwrap();
         insert_event(
             &conn,
-            &TeamEvent::task_auto_merged("eng-1", "2", 0.9, 2, 30),
+            &TeamEvent::task_auto_merged_with_mode(
+                "eng-1",
+                "2",
+                0.9,
+                2,
+                30,
+                Some(crate::team::merge::MergeMode::IsolatedIntegration),
+            ),
         )
         .unwrap();
-        insert_event(&conn, &TeamEvent::task_manual_merged("3")).unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::task_manual_merged_with_mode(
+                "3",
+                Some(crate::team::merge::MergeMode::DirectRoot),
+            ),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::task_merge_failed(
+                "eng-1",
+                "8",
+                Some(crate::team::merge::MergeMode::IsolatedIntegration),
+                "isolated merge path failed: integration checkout broke",
+            ),
+        )
+        .unwrap();
         insert_event(&conn, &TeamEvent::task_reworked("eng-1", "4")).unwrap();
         insert_event(&conn, &TeamEvent::review_nudge_sent("manager", "5")).unwrap();
         insert_event(&conn, &TeamEvent::review_nudge_sent("manager", "6")).unwrap();
@@ -1545,6 +1623,10 @@ mod tests {
         let row = query_review_metrics(&conn).unwrap();
         assert_eq!(row.auto_merge_count, 2);
         assert_eq!(row.manual_merge_count, 1);
+        assert_eq!(row.direct_root_merge_count, 2);
+        assert_eq!(row.isolated_integration_merge_count, 1);
+        assert_eq!(row.direct_root_failure_count, 0);
+        assert_eq!(row.isolated_integration_failure_count, 1);
         assert_eq!(row.rework_count, 1);
         assert_eq!(row.review_nudge_count, 2);
         assert_eq!(row.review_escalation_count, 1);
@@ -1576,7 +1658,14 @@ mod tests {
         let mut c1 = TeamEvent::task_completed("eng-1", Some("10"));
         c1.ts = 1000;
         insert_event(&conn, &c1).unwrap();
-        let mut m1 = TeamEvent::task_auto_merged("eng-1", "10", 0.9, 2, 30);
+        let mut m1 = TeamEvent::task_auto_merged_with_mode(
+            "eng-1",
+            "10",
+            0.9,
+            2,
+            30,
+            Some(crate::team::merge::MergeMode::DirectRoot),
+        );
         m1.ts = 1100;
         insert_event(&conn, &m1).unwrap();
 
@@ -1584,7 +1673,10 @@ mod tests {
         let mut c2 = TeamEvent::task_completed("eng-2", Some("20"));
         c2.ts = 2000;
         insert_event(&conn, &c2).unwrap();
-        let mut m2 = TeamEvent::task_manual_merged("20");
+        let mut m2 = TeamEvent::task_manual_merged_with_mode(
+            "20",
+            Some(crate::team::merge::MergeMode::IsolatedIntegration),
+        );
         m2.ts = 2300;
         insert_event(&conn, &m2).unwrap();
 
@@ -1759,13 +1851,34 @@ mod tests {
 
         insert_event(
             &conn,
-            &TeamEvent::task_auto_merged("eng-1", "1", 0.9, 2, 30),
+            &TeamEvent::task_auto_merged_with_mode(
+                "eng-1",
+                "1",
+                0.9,
+                2,
+                30,
+                Some(crate::team::merge::MergeMode::DirectRoot),
+            ),
         )
         .unwrap();
-        insert_event(&conn, &TeamEvent::task_manual_merged("2")).unwrap();
         insert_event(
             &conn,
-            &TeamEvent::task_auto_merged("eng-1", "3", 0.8, 1, 10),
+            &TeamEvent::task_manual_merged_with_mode(
+                "2",
+                Some(crate::team::merge::MergeMode::IsolatedIntegration),
+            ),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::task_auto_merged_with_mode(
+                "eng-1",
+                "3",
+                0.8,
+                1,
+                10,
+                Some(crate::team::merge::MergeMode::DirectRoot),
+            ),
         )
         .unwrap();
 
