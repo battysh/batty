@@ -10,8 +10,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
-use crate::team::task_loop::auto_commit_before_reset;
-
 pub(crate) fn run_git_with_context(
     repo_dir: &Path,
     args: &[&str],
@@ -217,35 +215,38 @@ pub(crate) fn now_unix() -> u64 {
 /// so `checkout -B` can succeed.
 /// Best-effort: failures are logged but do not block the reset attempt.
 pub(crate) fn force_clean_worktree(worktree_dir: &Path, engineer_name: &str) {
-    // Try to auto-commit first to preserve work in git history.
-    if !auto_commit_before_reset(worktree_dir) {
-        info!(
-            engineer = engineer_name,
-            "auto-commit skipped or failed, proceeding with force-clean"
-        );
-    }
-
-    if let Err(error) = run_git_with_context(
+    let branch = run_git_with_context(
         worktree_dir,
-        &["reset", "--hard"],
-        "discard staged/unstaged changes before worktree reset",
-    ) {
-        warn!(
-            engineer = engineer_name,
-            error = %error,
-            "git reset --hard failed during worktree cleanup"
-        );
-    }
-    if let Err(error) = run_git_with_context(
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        "capture current branch before worktree cleanup",
+    )
+    .ok()
+    .and_then(|output| {
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    })
+    .unwrap_or_else(|| engineer_name.to_string());
+    let commit_message = format!("wip: auto-save before worktree reset [{branch}]");
+    match crate::worktree::prepare_worktree_for_reset(
         worktree_dir,
-        &["clean", "-fd", "--exclude=.batty/"],
-        "remove untracked files before worktree reset",
+        &commit_message,
+        std::time::Duration::from_secs(5),
+        crate::worktree::PreserveFailureMode::ForceReset,
     ) {
-        warn!(
+        Ok(reason) => info!(
             engineer = engineer_name,
-            error = %error,
-            "git clean failed during worktree cleanup"
-        );
+            reset_reason = reason.as_str(),
+            "prepared merge worktree for cleanup"
+        ),
+        Err(error) => {
+            warn!(
+                engineer = engineer_name,
+                error = %error,
+                "worktree cleanup failed during preserve-before-reset preparation"
+            );
+        }
     }
 }
 

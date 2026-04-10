@@ -651,47 +651,51 @@ impl TeamDaemon {
                         base_branch = %base_branch,
                         "dispatch queue: auto-resetting worktree to base branch"
                     );
-                    // Abort any in-progress merge and clean
-                    let _ = std::process::Command::new("git")
-                        .args(["merge", "--abort"])
-                        .current_dir(&worktree_dir)
-                        .output();
-                    let _ = std::process::Command::new("git")
-                        .args(["checkout", "--", "."])
-                        .current_dir(&worktree_dir)
-                        .output();
-                    let _ = std::process::Command::new("git")
-                        .args(["clean", "-fd"])
-                        .current_dir(&worktree_dir)
-                        .output();
-                    if let Err(reset_err) =
-                        crate::worktree::reset_worktree_to_base(&worktree_dir, &base_branch)
-                    {
-                        warn!(
-                            engineer = %entry.engineer,
-                            error = %reset_err,
-                            "dispatch queue: worktree auto-reset failed; escalating"
-                        );
-                        if entry.validation_failures >= DISPATCH_QUEUE_FAILURE_LIMIT {
-                            self.escalate_dispatch_queue_entry(
-                                &entry,
-                                entry
-                                    .last_failure
-                                    .as_deref()
-                                    .unwrap_or("worktree readiness validation failed"),
-                            )?;
-                        } else {
+                    let commit_message =
+                        format!("wip: auto-save before worktree reset [{}]", base_branch);
+                    match crate::worktree::reset_worktree_to_base_with_options(
+                        &worktree_dir,
+                        &base_branch,
+                        &commit_message,
+                        std::time::Duration::from_secs(5),
+                        crate::worktree::PreserveFailureMode::SkipReset,
+                    ) {
+                        Err(reset_err) => {
+                            warn!(
+                                engineer = %entry.engineer,
+                                error = %reset_err,
+                                "dispatch queue: worktree auto-reset failed; escalating"
+                            );
+                            if entry.validation_failures >= DISPATCH_QUEUE_FAILURE_LIMIT {
+                                self.escalate_dispatch_queue_entry(
+                                    &entry,
+                                    entry
+                                        .last_failure
+                                        .as_deref()
+                                        .unwrap_or("worktree readiness validation failed"),
+                                )?;
+                            } else {
+                                retained.push(entry);
+                            }
+                        }
+                        Ok(reason) if reason.reset_performed() => {
+                            info!(
+                                engineer = %entry.engineer,
+                                reset_reason = reason.as_str(),
+                                "dispatch queue: worktree auto-reset succeeded; retrying dispatch"
+                            );
+                            entry.validation_failures = 0;
+                            entry.last_failure = None;
                             retained.push(entry);
                         }
-                    } else {
-                        info!(
-                            engineer = %entry.engineer,
-                            "dispatch queue: worktree auto-reset succeeded; retrying dispatch"
-                        );
-                        // Reset failure count and retry on next cycle
-                        entry.validation_failures = 0;
-                        entry.last_failure = None;
-                        retained.push(entry);
+                        Ok(reason) => {
+                            warn!(
+                                engineer = %entry.engineer,
+                                reset_reason = reason.as_str(),
+                                "dispatch queue: worktree auto-reset skipped"
+                            );
+                            retained.push(entry);
+                        }
                     }
                     continue;
                 }
@@ -839,9 +843,12 @@ mod tests {
 
     use super::{OverlapConflict, find_overlapping_tasks, predicted_files};
     use crate::team::standup::MemberState;
+    use crate::team::task_loop::{
+        current_worktree_branch, engineer_base_branch_name, setup_engineer_worktree,
+    };
     use crate::team::test_support::{
-        TestDaemonBuilder, engineer_member, manager_member, write_open_task_file,
-        write_owned_task_file,
+        TestDaemonBuilder, engineer_member, git_ok, git_stdout, init_git_repo, manager_member,
+        write_open_task_file, write_owned_task_file,
     };
 
     fn write_task_with_priority(project_root: &Path, id: u32, title: &str, priority: &str) {
@@ -1232,6 +1239,66 @@ mod tests {
             daemon.dispatch_queue.len(),
             1,
             "entry for valid todo task should be retained while engineer is Working"
+        );
+    }
+
+    #[test]
+    fn process_queue_preserves_dirty_worktree_before_auto_reset() {
+        use super::DispatchQueueEntry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "dispatch-preserve-reset");
+        write_open_task_file(&repo, 42, "dispatch-reset", "todo");
+
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        git_ok(&worktree_dir, &["checkout", "-b", "eng-1/41"]);
+        std::fs::write(worktree_dir.join("tracked.txt"), "tracked dispatch work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "tracked.txt"]);
+        std::fs::write(
+            worktree_dir.join("untracked.txt"),
+            "untracked dispatch work\n",
+        )
+        .unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), true),
+            ])
+            .board(crate::team::config::BoardConfig {
+                dispatch_stabilization_delay_secs: 0,
+                ..crate::team::config::BoardConfig::default()
+            })
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.idle_started_at.insert(
+            "eng-1".to_string(),
+            std::time::Instant::now() - std::time::Duration::from_secs(1),
+        );
+        daemon.dispatch_queue.push(DispatchQueueEntry {
+            engineer: "eng-1".to_string(),
+            task_id: 42,
+            task_title: "dispatch-reset".to_string(),
+            queued_at: 0,
+            validation_failures: 0,
+            last_failure: None,
+        });
+
+        daemon.process_dispatch_queue().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].validation_failures, 0);
+        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), base_branch);
+        assert_eq!(
+            git_stdout(&repo, &["show", "eng-1/41:tracked.txt"]),
+            "tracked dispatch work"
+        );
+        assert_eq!(
+            git_stdout(&repo, &["show", "eng-1/41:untracked.txt"]),
+            "untracked dispatch work"
         );
     }
 

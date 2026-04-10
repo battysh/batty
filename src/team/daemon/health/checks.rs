@@ -182,47 +182,49 @@ impl TeamDaemon {
             // Check for merge conflicts first — these block all git operations
             if git_has_unresolved_conflicts(&worktree_path).unwrap_or(false) {
                 let base = format!("eng-main/{}", name);
+                let branch =
+                    current_worktree_branch(&worktree_path).unwrap_or_else(|_| base.clone());
+                let commit_message = format!("wip: auto-save before worktree reset [{branch}]");
                 warn!(
                     member = %name,
                     "worktree has unresolved merge conflicts; auto-recovering via merge --abort and reset"
                 );
-                // Try to abort the merge and reset to base
-                let _ = std::process::Command::new("git")
-                    .args(["merge", "--abort"])
-                    .current_dir(&worktree_path)
-                    .output();
-                let _ = std::process::Command::new("git")
-                    .args(["checkout", "--", "."])
-                    .current_dir(&worktree_path)
-                    .output();
-                let _ = std::process::Command::new("git")
-                    .args(["clean", "-fd"])
-                    .current_dir(&worktree_path)
-                    .output();
-                if let Err(error) = crate::worktree::reset_worktree_to_base(&worktree_path, &base) {
-                    warn!(
-                        member = %name,
-                        error = %error,
-                        "failed to reset worktree after merge conflict recovery"
-                    );
-                } else {
-                    info!(
-                        member = %name,
-                        "worktree merge conflict auto-recovered; reset to base branch"
-                    );
-                    self.record_orchestrator_action(format!(
-                        "health: auto-recovered {}'s worktree from merge conflict state — reset to {}",
-                        name, base
-                    ));
-                    // Clear active task since worktree was reset
-                    if self.active_tasks.contains_key(name.as_str()) {
-                        let task_id = self.active_tasks[name.as_str()];
+                match crate::worktree::reset_worktree_to_base_with_options(
+                    &worktree_path,
+                    &base,
+                    &commit_message,
+                    Duration::from_secs(5),
+                    crate::worktree::PreserveFailureMode::ForceReset,
+                ) {
+                    Err(error) => {
                         warn!(
                             member = %name,
-                            task_id,
-                            "clearing active task after merge conflict recovery"
+                            error = %error,
+                            "failed to reset worktree after merge conflict recovery"
                         );
-                        self.clear_active_task(name);
+                    }
+                    Ok(reason) => {
+                        info!(
+                            member = %name,
+                            reset_reason = reason.as_str(),
+                            "worktree merge conflict auto-recovered; reset to base branch"
+                        );
+                        self.record_orchestrator_action(format!(
+                            "health: auto-recovered {}'s worktree from merge conflict state — reset to {} ({})",
+                            name,
+                            base,
+                            reason.as_str()
+                        ));
+                        // Clear active task since worktree was reset
+                        if self.active_tasks.contains_key(name.as_str()) {
+                            let task_id = self.active_tasks[name.as_str()];
+                            warn!(
+                                member = %name,
+                                task_id,
+                                "clearing active task after merge conflict recovery"
+                            );
+                            self.clear_active_task(name);
+                        }
                     }
                 }
                 continue;
