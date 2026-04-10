@@ -61,6 +61,7 @@ pub struct DashboardMetrics {
     pub engineer_throughput: Vec<telemetry_db::EngineerThroughputRow>,
     pub tasks_completed_per_hour: Vec<telemetry_db::HourlyThroughputRow>,
     pub longest_running_tasks: Vec<metrics::InProgressTaskSummary>,
+    pub latest_release: Option<crate::release::ReleaseRecord>,
 }
 
 /// Per-agent row in the dashboard.
@@ -406,6 +407,27 @@ pub fn format_dashboard(m: &DashboardMetrics) -> String {
         }
     }
 
+    if let Some(release) = &m.latest_release {
+        out.push_str("\nLatest Release\n");
+        out.push_str(&"-".repeat(40));
+        out.push('\n');
+        let status = if release.success {
+            "success"
+        } else {
+            "failure"
+        };
+        out.push_str(&format!(
+            "  {} {} ({})\n",
+            release.tag.as_deref().unwrap_or("unversioned"),
+            release.git_ref.as_deref().unwrap_or("unknown-ref"),
+            status
+        ));
+        out.push_str(&format!("  Reason: {}\n", release.reason));
+        if let Some(details) = release.details.as_deref() {
+            out.push_str(&format!("  Details: {}\n", details));
+        }
+    }
+
     // Per-agent table
     if !m.agent_rows.is_empty() {
         out.push_str("\nPer-Agent Breakdown\n");
@@ -453,6 +475,7 @@ pub fn run(project_root: &Path) -> Result<()> {
     let mut metrics = query_dashboard(&conn)?;
     metrics.longest_running_tasks =
         metrics::longest_running_in_progress_tasks(&records, Utc::now(), 5);
+    metrics.latest_release = crate::release::latest_record(project_root)?;
     print!("{}", format_dashboard(&metrics));
     Ok(())
 }
@@ -684,6 +707,22 @@ mod tests {
             notification_isolation_count: 3,
             avg_notification_delivery_latency_secs: Some(12.0),
             merge_queue_depth: 2,
+            latest_release: Some(crate::release::ReleaseRecord {
+                ts: "2026-04-10T12:00:00Z".to_string(),
+                package_name: Some("batty".to_string()),
+                version: Some("0.10.0".to_string()),
+                tag: Some("v0.10.0".to_string()),
+                git_ref: Some("abc123".to_string()),
+                branch: Some("main".to_string()),
+                previous_tag: Some("v0.9.0".to_string()),
+                commits_since_previous: Some(2),
+                verification_command: Some("cargo test".to_string()),
+                verification_summary: Some("cargo test passed".to_string()),
+                success: true,
+                reason: "created annotated tag `v0.10.0`".to_string(),
+                details: None,
+                notes_path: Some(".batty/releases/v0.10.0.md".to_string()),
+            }),
             avg_cycle_time_secs: Some(300.0),
             min_cycle_time_secs: Some(60),
             max_cycle_time_secs: Some(900),
@@ -772,6 +811,8 @@ mod tests {
         assert!(text.contains("Merge Queue Depth: 2"));
         assert!(text.contains("Notification Isolation: 3"));
         assert!(text.contains("Notification Latency: 12s"));
+        assert!(text.contains("Latest Release"));
+        assert!(text.contains("v0.10.0 abc123 (success)"));
 
         assert!(text.contains("Per-Agent Breakdown"));
         assert!(text.contains("eng-1"));

@@ -57,6 +57,10 @@ pub struct TeamEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
@@ -125,6 +129,8 @@ impl TeamEvent {
         Self {
             event: event.into(),
             action_type: None,
+            version: None,
+            git_ref: None,
             role: None,
             task: None,
             recipient: None,
@@ -991,6 +997,43 @@ impl TeamEvent {
         }
     }
 
+    pub fn release_succeeded(
+        version: &str,
+        git_ref: &str,
+        tag: &str,
+        notes_path: Option<&str>,
+    ) -> Self {
+        Self {
+            action_type: Some("release".into()),
+            version: Some(version.into()),
+            git_ref: Some(git_ref.into()),
+            task: Some(tag.into()),
+            reason: Some("tag_created".into()),
+            success: Some(true),
+            details: notes_path.map(str::to_string),
+            ..Self::base("release_succeeded")
+        }
+    }
+
+    pub fn release_failed(
+        version: Option<&str>,
+        git_ref: Option<&str>,
+        tag: Option<&str>,
+        reason: &str,
+        details: Option<&str>,
+    ) -> Self {
+        Self {
+            action_type: Some("release".into()),
+            version: version.map(str::to_string),
+            git_ref: git_ref.map(str::to_string),
+            task: tag.map(str::to_string),
+            reason: Some(reason.into()),
+            details: details.map(str::to_string),
+            success: Some(false),
+            ..Self::base("release_failed")
+        }
+    }
+
     pub fn worktree_reconciled(role: &str, branch: &str) -> Self {
         Self {
             role: Some(role.into()),
@@ -1427,6 +1470,25 @@ mod tests {
                 }),
             ),
             (
+                "release_succeeded",
+                TeamEvent::release_succeeded(
+                    "0.10.0",
+                    "abc123",
+                    "v0.10.0",
+                    Some("/tmp/v0.10.0.md"),
+                ),
+            ),
+            (
+                "release_failed",
+                TeamEvent::release_failed(
+                    Some("0.10.0"),
+                    Some("abc123"),
+                    Some("v0.10.0"),
+                    "verification failed",
+                    None,
+                ),
+            ),
+            (
                 "worktree_reconciled",
                 TeamEvent::worktree_reconciled("eng-1", "eng-1/42"),
             ),
@@ -1470,6 +1532,39 @@ mod tests {
         assert!(reason.contains("total=10"));
         assert!(reason.contains("spec=8"));
         assert!(reason.contains("verified_pass=4"));
+    }
+
+    #[test]
+    fn release_succeeded_serializes_version_and_git_ref() {
+        let event =
+            TeamEvent::release_succeeded("0.10.0", "abc123", "v0.10.0", Some("/tmp/v0.10.0.md"));
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"].as_str().unwrap(), "release_succeeded");
+        assert_eq!(parsed["version"].as_str().unwrap(), "0.10.0");
+        assert_eq!(parsed["git_ref"].as_str().unwrap(), "abc123");
+        assert_eq!(parsed["task"].as_str().unwrap(), "v0.10.0");
+        assert_eq!(parsed["success"].as_bool().unwrap(), true);
+    }
+
+    #[test]
+    fn release_failed_serializes_reason_and_attempted_tag() {
+        let event = TeamEvent::release_failed(
+            Some("0.10.0"),
+            Some("abc123"),
+            Some("v0.10.0"),
+            "verification_failed",
+            Some("suite::it_breaks"),
+        );
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"].as_str().unwrap(), "release_failed");
+        assert_eq!(parsed["version"].as_str().unwrap(), "0.10.0");
+        assert_eq!(parsed["git_ref"].as_str().unwrap(), "abc123");
+        assert_eq!(parsed["task"].as_str().unwrap(), "v0.10.0");
+        assert_eq!(parsed["reason"].as_str().unwrap(), "verification_failed");
+        assert_eq!(parsed["details"].as_str().unwrap(), "suite::it_breaks");
+        assert_eq!(parsed["success"].as_bool().unwrap(), false);
     }
 
     #[test]

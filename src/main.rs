@@ -7,7 +7,7 @@ use batty_cli::{
         OpenClawFollowUpCommand, ProjectCommand, ResearchCommand, ResearchFormatArg,
         ResearchKeepPolicyArg, ReviewDispositionArg, TaskCommand, TaskStateArg,
     },
-    env_file, project_registry, team,
+    env_file, project_registry, release, team,
 };
 use clap::Parser;
 use dialoguer::{Confirm, Input, Select};
@@ -1386,6 +1386,10 @@ fn main() -> Result<()> {
 
         Command::Verify => {
             team::verification::cmd_verify(&root)?;
+        }
+
+        Command::Release { tag } => {
+            release::cmd_release(&root, tag.as_deref())?;
         }
 
         Command::Queue => {

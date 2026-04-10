@@ -260,6 +260,13 @@ pub enum Command {
     /// Run clean-room equivalence verification from PARITY.md
     Verify,
 
+    /// Validate clean main, assemble release notes, and create a release tag
+    Release {
+        /// Override the git tag to create (default: v<Cargo.toml version>)
+        #[arg(long)]
+        tag: Option<String>,
+    },
+
     /// Show pending dispatch queue entries
     Queue,
 
@@ -2202,6 +2209,26 @@ mod tests {
     fn verify_subcommand_parses() {
         let cli = Cli::parse_from(["batty", "verify"]);
         assert!(matches!(cli.command, Command::Verify));
+    }
+
+    #[test]
+    fn release_subcommand_parses_defaults() {
+        let cli = Cli::parse_from(["batty", "release"]);
+        match cli.command {
+            Command::Release { tag } => assert!(tag.is_none()),
+            other => panic!("expected release command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn release_subcommand_parses_tag_override() {
+        let cli = Cli::parse_from(["batty", "release", "--tag", "batty-2026-04-10"]);
+        match cli.command {
+            Command::Release { tag } => {
+                assert_eq!(tag.as_deref(), Some("batty-2026-04-10"))
+            }
+            other => panic!("expected release command, got {other:?}"),
+        }
     }
 
     #[test]
