@@ -133,7 +133,7 @@ impl TeamDaemon {
         let first_engineer = engineer_reports.first().map(|name| name.as_str());
 
         let mut message = format!(
-            "Triage backlog detected: you have {triage_count} delivered direct-report result packet(s) waiting for review. Reports in scope: {report_list}.\n\
+            "Triage backlog detected: {triage_count} direct-report result packet(s) are waiting for review from {report_list}. Resolve the backlog now so those reports can move again.\n\
             Resolve it with Batty commands now:\n\
             1. `batty inbox {member_name}` to list the recent result packets.\n\
             2. `batty read {member_name} <ref>` for each packet you need to review in full.\n\

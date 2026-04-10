@@ -1148,6 +1148,7 @@ mod tests {
                 aged_todo_count: 0,
                 stale_review_count: 1,
                 idle_with_runnable: vec!["manager".to_string()],
+                top_runnable_tasks: vec!["#42 (high) Inbox fix".to_string()],
                 oldest_review_age_secs: Some(120),
                 oldest_assignment_age_secs: Some(60),
                 auto_merge_count: 1,

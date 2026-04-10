@@ -400,6 +400,10 @@ mod tests {
             aged_todo_count: 2,
             stale_review_count: 3,
             idle_with_runnable: vec!["eng-1".to_string(), "eng-2".to_string()],
+            top_runnable_tasks: vec![
+                "#42 (high) Inbox routing".to_string(),
+                "#43 (medium) Status cleanup".to_string(),
+            ],
             oldest_review_age_secs: Some(120),
             oldest_assignment_age_secs: Some(360),
             ..Default::default()
@@ -412,6 +416,9 @@ mod tests {
         assert!(text.contains("In Progress: 4"));
         assert!(text.contains("Aging Alerts: stale in-progress 1 | aged todo 2 | stale review 3"));
         assert!(text.contains("Idle With Runnable: eng-1, eng-2"));
+        assert!(
+            text.contains("Top Runnable: #42 (high) Inbox routing; #43 (medium) Status cleanup")
+        );
         assert!(text.contains("Oldest Review Age: 120s"));
         assert!(text.contains("Oldest Assignment Age: 360s"));
         assert!(text.contains("Review Pipeline"));

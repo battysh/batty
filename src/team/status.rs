@@ -163,6 +163,7 @@ pub struct WorkflowMetrics {
     pub aged_todo_count: u32,
     pub stale_review_count: u32,
     pub idle_with_runnable: Vec<String>,
+    pub top_runnable_tasks: Vec<String>,
     pub oldest_review_age_secs: Option<u64>,
     pub oldest_assignment_age_secs: Option<u64>,
     // Review pipeline metrics (computed from event log)
@@ -1609,6 +1610,7 @@ fn compute_metrics_with_telemetry_and_aging(
         aged_todo_count: board_metrics.aged_todo_count,
         stale_review_count: board_metrics.stale_review_count,
         idle_with_runnable: board_metrics.idle_with_runnable,
+        top_runnable_tasks: board_metrics.top_runnable_tasks,
         oldest_review_age_secs: board_metrics.oldest_review_age_secs,
         oldest_assignment_age_secs: board_metrics.oldest_assignment_age_secs,
         auto_merge_count: review.auto_merge_count,
@@ -1640,6 +1642,7 @@ struct BoardMetrics {
     aged_todo_count: u32,
     stale_review_count: u32,
     idle_with_runnable: Vec<String>,
+    top_runnable_tasks: Vec<String>,
     oldest_review_age_secs: Option<u64>,
     oldest_assignment_age_secs: Option<u64>,
 }
@@ -1660,6 +1663,7 @@ fn compute_board_metrics(
             aged_todo_count: 0,
             stale_review_count: 0,
             idle_with_runnable: Vec::new(),
+            top_runnable_tasks: Vec::new(),
             oldest_review_age_secs: None,
             oldest_assignment_age_secs: None,
         });
@@ -1676,15 +1680,15 @@ fn compute_board_metrics(
             aged_todo_count: 0,
             stale_review_count: 0,
             idle_with_runnable: Vec::new(),
+            top_runnable_tasks: Vec::new(),
             oldest_review_age_secs: None,
             oldest_assignment_age_secs: None,
         });
     }
 
-    let dispatchable_task_ids: HashSet<u32> = crate::team::resolver::dispatchable_tasks(board_dir)?
-        .into_iter()
-        .map(|task| task.id)
-        .collect();
+    let dispatchable_tasks = crate::team::resolver::dispatchable_tasks(board_dir)?;
+    let dispatchable_task_ids: HashSet<u32> =
+        dispatchable_tasks.iter().map(|task| task.id).collect();
 
     let now = SystemTime::now();
     let runnable_count = tasks
@@ -1715,6 +1719,7 @@ fn compute_board_metrics(
         .max();
 
     let idle_with_runnable = compute_idle_with_runnable(board_dir, members, &tasks, runnable_count);
+    let top_runnable_tasks = top_runnable_task_summaries(&dispatchable_tasks, 3);
     let aging = project_root_from_board_dir(board_dir)
         .and_then(|project_root| {
             crate::team::board::compute_task_aging(board_dir, project_root, thresholds).ok()
@@ -1730,6 +1735,7 @@ fn compute_board_metrics(
         aged_todo_count: aging.aged_todo.len() as u32,
         stale_review_count: aging.stale_review.len() as u32,
         idle_with_runnable,
+        top_runnable_tasks,
         oldest_review_age_secs,
         oldest_assignment_age_secs,
     })
@@ -1873,6 +1879,11 @@ pub fn format_metrics(metrics: &WorkflowMetrics) -> String {
     } else {
         metrics.idle_with_runnable.join(", ")
     };
+    let top_runnable = if metrics.top_runnable_tasks.is_empty() {
+        "-".to_string()
+    } else {
+        metrics.top_runnable_tasks.join("; ")
+    };
 
     let auto_merge_rate_str = metrics
         .auto_merge_rate
@@ -1895,6 +1906,7 @@ In Review: {}\n\
 In Progress: {}\n\
 Aging Alerts: stale in-progress {} | aged todo {} | stale review {}\n\
 Idle With Runnable: {}\n\
+Top Runnable: {}\n\
 Oldest Review Age: {}\n\
 Oldest Assignment Age: {}\n\n\
 Review Pipeline\n\
@@ -1908,6 +1920,7 @@ Auto: {} | Manual: {} | Rework: {} | Nudges: {} | Escalations: {}",
         metrics.aged_todo_count,
         metrics.stale_review_count,
         idle,
+        top_runnable,
         format_age(metrics.oldest_review_age_secs),
         format_age(metrics.oldest_assignment_age_secs),
         metrics.in_review_count,
@@ -1954,6 +1967,26 @@ fn compute_idle_with_runnable(
         .collect::<Vec<_>>();
     idle.sort();
     idle
+}
+
+fn task_priority_rank(priority: &str) -> u8 {
+    match priority {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        "low" => 3,
+        _ => 4,
+    }
+}
+
+fn top_runnable_task_summaries(tasks: &[task::Task], limit: usize) -> Vec<String> {
+    let mut runnable = tasks.iter().collect::<Vec<_>>();
+    runnable.sort_by_key(|task| (task_priority_rank(&task.priority), task.id));
+    runnable
+        .into_iter()
+        .take(limit)
+        .map(|task| format!("#{} ({}) {}", task.id, task.priority, task.title))
+        .collect()
 }
 
 fn project_root_from_board_dir(board_dir: &Path) -> Option<&Path> {
@@ -3257,6 +3290,7 @@ mod tests {
                 in_review_count: 1,
                 in_progress_count: 3,
                 idle_with_runnable: vec!["eng-2".to_string()],
+                top_runnable_tasks: vec!["#7 (high) Unstick manager inbox".to_string()],
                 oldest_review_age_secs: Some(60),
                 oldest_assignment_age_secs: Some(120),
                 ..Default::default()
