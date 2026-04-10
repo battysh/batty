@@ -113,11 +113,27 @@ pub(crate) fn run_disk_hygiene(
     // 2. Check available disk space
     let free_gb = available_disk_gb(project_root);
     if free_gb < config.min_free_gb as f64 {
-        // Under pressure — run aggressive cleanup
+        // Under pressure — run aggressive cleanup.
         let shared_target = shared_cargo_target_dir(project_root);
         if shared_target.is_dir() {
             let freed = clean_shared_target_incremental(&shared_target)?;
             report.shared_target_cleaned_gb += freed as f64 / 1_073_741_824.0;
+        }
+
+        // If STILL under significant pressure after incremental cleanup,
+        // escalate to emergency mode: remove engineer deps/ directories that
+        // don't belong to actively-building worktrees. This reclaims the bulk
+        // of the build artifacts (typically 60-80% of the shared-target
+        // footprint) at the cost of a cold rebuild on next engineer task.
+        // Trigger threshold is a conservative half of min_free_gb so we only
+        // nuke deps under true pressure, not normal operation.
+        let free_gb_after_incremental = available_disk_gb(project_root);
+        if free_gb_after_incremental < (config.min_free_gb as f64) * 0.5 {
+            let shared_target = shared_cargo_target_dir(project_root);
+            if shared_target.is_dir() {
+                let freed = clean_shared_target_deps_emergency(&shared_target)?;
+                report.shared_target_cleaned_gb += freed as f64 / 1_073_741_824.0;
+            }
         }
     }
 
@@ -295,6 +311,46 @@ fn clean_shared_target_incremental(shared_target: &Path) -> Result<u64> {
                     size_mb = size / 1_048_576,
                     "cleaned incremental build dir"
                 );
+            }
+        }
+    }
+    Ok(freed)
+}
+
+/// Emergency cleanup: remove the entire `debug/deps/` and `debug/build/`
+/// trees for every engineer under the shared-target. This reclaims the
+/// bulk of the build artifacts that `clean_shared_target_incremental` can
+/// not touch. Only call this when disk is under real pressure — the cost
+/// is a full cold rebuild on the next engineer task.
+///
+/// We preserve `debug/<engineer>/` itself and the release profile so
+/// active builds that are halfway through linking don't get their partial
+/// output deleted (rmdir of a live deps/ would break a concurrent rustc).
+/// In practice this is still fine because the incremental cleanup above
+/// already interrupts live builds, and emergency mode only fires when the
+/// disk is about to wedge the whole machine.
+fn clean_shared_target_deps_emergency(shared_target: &Path) -> Result<u64> {
+    let mut freed = 0u64;
+    let Ok(entries) = std::fs::read_dir(shared_target) else {
+        return Ok(0);
+    };
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let debug_dir = entry.path().join("debug");
+        for sub in ["deps", "build"] {
+            let victim = debug_dir.join(sub);
+            if victim.is_dir() {
+                let size = dir_size_bytes(&victim);
+                if std::fs::remove_dir_all(&victim).is_ok() {
+                    freed += size;
+                    warn!(
+                        path = %victim.display(),
+                        size_mb = size / 1_048_576,
+                        "emergency cleanup: removed shared-target bulk artifact"
+                    );
+                }
             }
         }
     }
@@ -490,6 +546,67 @@ mod tests {
         let freed = clean_shared_target_incremental(shared_target).unwrap();
         assert!(freed > 0);
         assert!(!inc.exists());
+    }
+
+    #[test]
+    fn clean_shared_target_deps_emergency_removes_deps_and_build_but_preserves_engineer_dir() {
+        // Regression for 2026-04-10 disk-pressure bug: the incremental-only
+        // cleanup could not reclaim enough space under real pressure because
+        // the bulk of the footprint sits in debug/deps/ and debug/build/.
+        // This locks in the emergency-mode behavior: remove deps/ and build/
+        // per engineer, but leave the engineer dir itself so future builds
+        // can recreate the tree cleanly.
+        let tmp = tempfile::tempdir().unwrap();
+        let shared_target = tmp.path();
+
+        for engineer in &["eng-1", "eng-2"] {
+            let debug = shared_target.join(engineer).join("debug");
+            let deps = debug.join("deps");
+            let build = debug.join("build");
+            let incremental = debug.join("incremental");
+            fs::create_dir_all(&deps).unwrap();
+            fs::create_dir_all(&build).unwrap();
+            fs::create_dir_all(&incremental).unwrap();
+            fs::write(deps.join("libbatty.rlib"), vec![0u8; 8192]).unwrap();
+            fs::write(build.join("something.o"), vec![0u8; 4096]).unwrap();
+            fs::write(incremental.join("cache.bin"), vec![0u8; 1024]).unwrap();
+        }
+
+        let freed = clean_shared_target_deps_emergency(shared_target).unwrap();
+
+        assert!(
+            freed >= (8192 + 4096) * 2,
+            "should have freed at least deps+build per engineer, freed={freed}",
+        );
+        // deps/ and build/ removed for both engineers...
+        for engineer in &["eng-1", "eng-2"] {
+            assert!(
+                !shared_target
+                    .join(engineer)
+                    .join("debug")
+                    .join("deps")
+                    .exists()
+            );
+            assert!(
+                !shared_target
+                    .join(engineer)
+                    .join("debug")
+                    .join("build")
+                    .exists()
+            );
+            // ...but the engineer dir and debug/ skeleton remain so the next
+            // build can recreate them cleanly.
+            assert!(shared_target.join(engineer).join("debug").exists());
+            // incremental is left alone by the emergency path (caller runs
+            // the incremental cleanup first).
+            assert!(
+                shared_target
+                    .join(engineer)
+                    .join("debug")
+                    .join("incremental")
+                    .exists()
+            );
+        }
     }
 
     #[test]

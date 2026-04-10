@@ -316,6 +316,19 @@ fn select_current_lane<'a>(
         {
             return Some(candidate);
         }
+        // Worktree exists but its branch does not match any active claim.
+        // That usually means the engineer is still on the review branch
+        // itself, so we should not mark the review as stale. Return None
+        // to preserve the existing "Current" classification.
+        return None;
+    }
+
+    // No worktree at all (unit tests, or the engineer has not been
+    // provisioned yet). Fall back to the single unambiguous active claim if
+    // there is exactly one — that is the current lane by deduction. With
+    // zero or multiple active claims, return None to avoid guessing.
+    if active_claims.len() == 1 {
+        return Some(active_claims[0]);
     }
 
     None

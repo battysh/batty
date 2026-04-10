@@ -2,6 +2,37 @@
 
 All notable changes to Batty are documented here.
 
+## 0.10.4 — 2026-04-10
+
+Fix two stability bugs: disk pressure under active engineer workload and a
+stale-review classification regression.
+
+- **Emergency disk cleanup mode** — the periodic `maybe_run_disk_hygiene`
+  pass previously only removed `debug/incremental/` caches (~1-3GB) even
+  when the disk was critical. The bulk of engineer build artifacts sits in
+  `debug/deps/` and `debug/build/` (10+GB per engineer) and was never
+  reclaimed. Under sustained engineer workload, the shared-target could grow
+  well past the configured 4GB budget and drive disk utilization to >90%,
+  forcing operators to manually `rm -rf target/debug` to keep the daemon
+  alive. The new emergency mode triggers when available disk drops below
+  half of `min_free_gb` (5GB by default) and removes `deps/` and `build/`
+  for every engineer under the shared-target, at the cost of a cold rebuild
+  on next dispatch. (`src/team/daemon/health/disk_hygiene.rs`)
+- **Stale-review fallback when no worktree exists** — the stale-review
+  classifier in `select_current_lane` previously required a worktree branch
+  match to declare an active lane, so unit tests (which never set up a
+  worktree) always got the `Current` classification. The fix falls back to
+  the single unambiguous active claim when there is exactly one — that is
+  the engineer's current lane by deduction. Preserves the existing `None`
+  behavior when the worktree exists but its branch doesn't match an active
+  claim (engineer may still be on the review branch). Fixes the broken
+  `owned_task_buckets_split_active_and_review_claims` and
+  `owned_task_buckets_routes_review_items_to_manager` tests.
+  (`src/team/review.rs`)
+- **Regression tests** — `clean_shared_target_deps_emergency_removes_deps_and_build_but_preserves_engineer_dir`
+  locks in the emergency cleanup behavior without sweeping the engineer dir
+  itself. (`src/team/daemon/health/disk_hygiene.rs`)
+
 ## 0.10.3 — 2026-04-10
 
 Fix the reconciliation path so dirty worktrees on the wrong branch no longer
