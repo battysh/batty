@@ -1,13 +1,8 @@
 //! Proactive context-pressure tracking based on output growth plus agent behavior.
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
-use serde_json::Value;
 use tracing::{debug, warn};
 
 use super::super::*;
@@ -16,8 +11,6 @@ use crate::team::watcher::CodexQualitySignals;
 const WARNING_PERCENT: u64 = 70;
 const NUDGE_PERCENT: u64 = 90;
 const CLAUDE_PROACTIVE_RESTART_PCT: u64 = 80;
-const CLAUDE_DEFAULT_CONTEXT_LIMIT_TOKENS: u64 = 200_000;
-const CLAUDE_ONE_MILLION_CONTEXT_LIMIT_TOKENS: u64 = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextPressureAction {
@@ -205,72 +198,6 @@ fn compute_pressure_score(inputs: &ContextPressureInputs, threshold_bytes: u64) 
     }
 
     score
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ClaudeUsageSnapshot {
-    model: Option<String>,
-    used_tokens: u64,
-}
-
-fn parse_latest_claude_usage_snapshot(path: &Path) -> Result<Option<ClaudeUsageSnapshot>> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut model = None;
-    let mut used_tokens = 0;
-
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        let Some(message) = entry.get("message") else {
-            continue;
-        };
-        if let Some(value) = message.get("model").and_then(Value::as_str) {
-            model = Some(value.to_string());
-        }
-        let Some(usage) = message.get("usage") else {
-            continue;
-        };
-
-        used_tokens += json_u64(usage.get("input_tokens"));
-        used_tokens += json_u64(usage.get("cached_input_tokens"));
-        used_tokens += json_u64(usage.get("cache_creation_input_tokens"));
-        used_tokens += json_u64(usage.get("cache_read_input_tokens"));
-        used_tokens += json_u64(usage.get("output_tokens"));
-        used_tokens += json_u64(usage.get("reasoning_output_tokens"));
-    }
-
-    if model.is_none() && used_tokens == 0 {
-        return Ok(None);
-    }
-
-    Ok(Some(ClaudeUsageSnapshot { model, used_tokens }))
-}
-
-fn json_u64(value: Option<&Value>) -> u64 {
-    value.and_then(Value::as_u64).unwrap_or(0)
-}
-
-fn claude_context_limit_tokens(model: Option<&str>) -> u64 {
-    let normalized = model.unwrap_or_default().to_ascii_lowercase();
-    if normalized.contains("1m") {
-        CLAUDE_ONE_MILLION_CONTEXT_LIMIT_TOKENS
-    } else {
-        CLAUDE_DEFAULT_CONTEXT_LIMIT_TOKENS
-    }
-}
-
-fn default_claude_projects_root() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
-        .join(".claude")
-        .join("projects")
 }
 
 fn should_force_restart(inputs: &ContextPressureInputs, restart_delay_secs: u64) -> bool {
