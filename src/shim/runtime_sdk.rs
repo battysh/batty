@@ -220,7 +220,6 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
 
             match msg.msg_type.as_str() {
                 "assistant" => {
-                    let model_name = msg.model_name();
                     // Extract text from the assistant message
                     if let Some(ref message) = msg.message {
                         let model_name = msg.model_name();
@@ -231,7 +230,7 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                                 continue;
                             }
                             if st.last_model_name.is_none() {
-                                st.last_model_name = model_name;
+                                st.last_model_name = model_name.clone();
                             }
                             st.accumulated_response.push_str(&text);
                             st.cumulative_output_bytes += text.len() as u64;
@@ -824,7 +823,7 @@ fn proactive_context_warning(
     uptime_secs: u64,
 ) -> Option<ProactiveContextWarning> {
     let usage = msg.token_usage()?;
-    let used_tokens = usage.total_tokens();
+    let used_tokens = msg.usage_total_tokens();
     if used_tokens == 0 {
         return None;
     }
@@ -832,7 +831,7 @@ fn proactive_context_warning(
     let model = msg
         .model_name()
         .or_else(|| last_model_name.map(str::to_string));
-    let context_limit_tokens = model_context_limit_tokens(model.as_deref());
+    let context_limit_tokens = resolved_model_context_limit_tokens(model.as_deref());
     let usage_pct = ((used_tokens.saturating_mul(100)) / context_limit_tokens.max(1)) as u8;
     if usage_pct < PROACTIVE_CONTEXT_WARNING_PCT {
         return None;
@@ -849,7 +848,7 @@ fn proactive_context_warning(
     })
 }
 
-fn model_context_limit_tokens(model: Option<&str>) -> u64 {
+fn resolved_model_context_limit_tokens(model: Option<&str>) -> u64 {
     let Some(model) = model else {
         return DEFAULT_CONTEXT_LIMIT_TOKENS;
     };
@@ -869,7 +868,7 @@ fn model_context_limit_tokens(model: Option<&str>) -> u64 {
 // ---------------------------------------------------------------------------
 
 fn model_context_usage_pct(model: Option<&str>, total_tokens: u64) -> Option<u8> {
-    let limit = model_context_limit_tokens(model?)?;
+    let limit = resolved_model_context_limit_tokens(model);
     Some(((total_tokens.saturating_mul(100)) / limit).min(100) as u8)
 }
 
