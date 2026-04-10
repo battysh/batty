@@ -88,6 +88,34 @@ fn claim_time_held_secs(task: &crate::task::Task, now: DateTime<Utc>) -> Option<
         })
 }
 
+fn current_review_task<'a>(
+    tasks_by_id: &HashMap<u32, &'a crate::task::Task>,
+    task_id: u32,
+) -> Option<&'a crate::task::Task> {
+    tasks_by_id
+        .get(&task_id)
+        .copied()
+        .filter(|task| task.status == "review")
+}
+
+fn active_stale_review_entries(
+    report: &crate::team::board::TaskAgingReport,
+    tasks_by_id: &HashMap<u32, &crate::task::Task>,
+) -> (Vec<crate::team::board::AgedTask>, Vec<u32>) {
+    let mut active = Vec::new();
+    let mut suppressed = Vec::new();
+
+    for task in &report.stale_review {
+        if current_review_task(tasks_by_id, task.task_id).is_some() {
+            active.push(task.clone());
+        } else {
+            suppressed.push(task.task_id);
+        }
+    }
+
+    (active, suppressed)
+}
+
 fn reset_claimed_worktree_to_base(
     work_dir: &std::path::Path,
     base_branch: &str,
@@ -1069,6 +1097,15 @@ impl TeamDaemon {
             .iter()
             .map(|task| (task.id, task))
             .collect::<HashMap<_, _>>();
+        let (active_stale_review, suppressed_stale_review) =
+            active_stale_review_entries(&report, &tasks_by_id);
+        for task_id in suppressed_stale_review {
+            self.record_state_reconciliation(None, Some(task_id), "review_fix");
+            self.record_orchestrator_action(format!(
+                "state reconciliation: suppressed stale review aging alert for task #{}",
+                task_id
+            ));
+        }
         let progress_window = Duration::from_secs(
             self.config
                 .team_config
@@ -1094,8 +1131,7 @@ impl TeamDaemon {
                     .map(|task| aging_cooldown_key("task_aged", task.task_id)),
             )
             .chain(
-                report
-                    .stale_review
+                active_stale_review
                     .iter()
                     .map(|task| aging_cooldown_key("review_stale", task.task_id)),
             )
@@ -1205,18 +1241,20 @@ impl TeamDaemon {
             self.intervention_cooldowns.insert(key, Instant::now());
         }
 
-        for task in &report.stale_review {
+        for task in &active_stale_review {
             let key = aging_cooldown_key("review_stale", task.task_id);
             if self.aging_alert_on_cooldown(&key) {
                 continue;
             }
 
-            let review_owner = tasks_by_id
-                .get(&task.task_id)
+            let current_task = current_review_task(&tasks_by_id, task.task_id)
+                .expect("filtered stale review task should still be in review");
+            let review_owner = Some(current_task)
                 .and_then(|task| task.review_owner.as_deref())
                 .map(str::to_string)
                 .or_else(|| {
-                    task.claimed_by
+                    current_task
+                        .claimed_by
                         .as_deref()
                         .and_then(|owner| self.manager_for_member_name(owner))
                         .map(str::to_string)
@@ -1228,7 +1266,7 @@ impl TeamDaemon {
             if let Some(recipient) = review_owner {
                 let body = format!(
                     "Review urgency: task #{} has been in review for {}s.\nTask: {}\nNext step: merge it, request rework, or escalate immediately.",
-                    task.task_id, task.age_secs, task.title
+                    task.task_id, task.age_secs, current_task.title
                 );
                 let _ = self.queue_daemon_message(&recipient, &body);
             }
@@ -2140,7 +2178,7 @@ impl TeamDaemon {
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use super::ClaimedTaskBranchMismatch;
+    use super::{ClaimedTaskBranchMismatch, active_stale_review_entries};
     use crate::team::config::RoleType;
     use crate::team::config::{BoardConfig, WorkflowMode, WorkflowPolicy};
     use crate::team::events::TeamEvent;
@@ -2158,6 +2196,45 @@ mod tests {
         write_owned_task_file, write_owned_task_file_with_context,
     };
     use std::collections::HashMap;
+
+    fn test_task(
+        id: u32,
+        status: &str,
+        claimed_by: Option<&str>,
+        review_owner: Option<&str>,
+    ) -> crate::task::Task {
+        crate::task::Task {
+            id,
+            title: format!("task-{id}"),
+            status: status.to_string(),
+            priority: "high".to_string(),
+            claimed_by: claimed_by.map(str::to_string),
+            claimed_at: None,
+            claim_ttl_secs: None,
+            claim_expires_at: None,
+            last_progress_at: None,
+            claim_warning_sent_at: None,
+            claim_extensions: None,
+            last_output_bytes: None,
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: review_owner.map(str::to_string),
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description: String::new(),
+            batty_config: None,
+            source_path: std::path::PathBuf::new(),
+        }
+    }
 
     fn setup_fake_kanban_for_planning(
         tmp: &tempfile::TempDir,
@@ -4220,6 +4297,28 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
                 && event.task.as_deref() == Some("60")
                 && event.reason.as_deref() == Some("review_fix")
         }));
+    }
+
+    #[test]
+    fn active_stale_review_entries_skip_tasks_that_left_review() {
+        let task = test_task(90, "done", Some("eng-1"), Some("manager"));
+        let tasks_by_id = HashMap::from([(task.id, &task)]);
+        let report = crate::team::board::TaskAgingReport {
+            stale_in_progress: Vec::new(),
+            aged_todo: Vec::new(),
+            stale_review: vec![crate::team::board::AgedTask {
+                task_id: 90,
+                title: "task-90".to_string(),
+                status: "review".to_string(),
+                claimed_by: Some("eng-1".to_string()),
+                age_secs: 7_200,
+            }],
+        };
+
+        let (active, suppressed) = active_stale_review_entries(&report, &tasks_by_id);
+
+        assert!(active.is_empty());
+        assert_eq!(suppressed, vec![90]);
     }
 
     // ── maybe_rotate_board ───────────────────────────────────────
