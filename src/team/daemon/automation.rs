@@ -640,8 +640,9 @@ impl TeamDaemon {
     }
 
     pub(super) fn reconcile_active_tasks(&mut self) -> Result<()> {
-        let tasks_dir = self.board_dir().join("tasks");
-        let board_tasks = if tasks_dir.exists() {
+        let board_dir = self.board_dir();
+        let tasks_dir = board_dir.join("tasks");
+        let mut board_tasks = if tasks_dir.exists() {
             crate::task::load_tasks_from_dir(&tasks_dir)?
         } else {
             Vec::new()
@@ -650,20 +651,27 @@ impl TeamDaemon {
         if audit_due {
             self.mark_state_reconciliation_audit();
         }
-        let stale: Vec<(String, u32, &'static str)> = self
+        let stale: Vec<(String, u32, &'static str, bool)> = self
             .active_tasks
             .iter()
             .filter_map(|(engineer, task_id)| {
                 let task_id = *task_id;
                 match board_tasks.iter().find(|t| t.id == task_id) {
                     Some(task) if task.status == "done" || task.status == "archived" => {
-                        Some((engineer.clone(), task_id, "task is done/archived"))
+                        Some((engineer.clone(), task_id, "task is done/archived", false))
                     }
-                    None => Some((engineer.clone(), task_id, "task no longer exists")),
+                    Some(task) if task.status == "review" => {
+                        Some((engineer.clone(), task_id, "task entered review", true))
+                    }
+                    Some(task) if task.status == "blocked" => {
+                        Some((engineer.clone(), task_id, "task entered blocked", true))
+                    }
+                    None => Some((engineer.clone(), task_id, "task no longer exists", false)),
                     Some(task) if task.claimed_by.as_deref() != Some(engineer.as_str()) => Some((
                         engineer.clone(),
                         task_id,
                         "task no longer claimed by this engineer",
+                        false,
                     )),
                     // Clear if the task has been in todo/backlog for more than 60 seconds.
                     // This gives dispatch time to transition it to in-progress before
@@ -674,19 +682,43 @@ impl TeamDaemon {
                 }
             })
             .collect();
-        for (engineer, task_id, reason) in stale {
+        let mut released_claims = false;
+        for (engineer, task_id, reason, release_claim) in stale {
             info!(
                 engineer = %engineer,
                 task_id,
                 reason,
                 "Reconciled stale active_task: {engineer} was tracking task #{task_id} ({reason})"
             );
-            self.record_state_reconciliation(Some(&engineer), Some(task_id), "clear");
+            let correction = match reason {
+                "task entered review" => "release_review",
+                "task entered blocked" => "release_blocked",
+                _ => "clear",
+            };
+            if release_claim {
+                crate::team::task_cmd::release_engineer_claim(&board_dir, task_id)?;
+                released_claims = true;
+            }
+            self.record_state_reconciliation(Some(&engineer), Some(task_id), correction);
             self.record_orchestrator_action(format!(
-                "state reconciliation: cleared stale active task #{} for {} ({})",
-                task_id, engineer, reason
+                "state reconciliation: {} stale active task #{} for {} ({})",
+                if release_claim {
+                    "released engineer from"
+                } else {
+                    "cleared"
+                },
+                task_id,
+                engineer,
+                reason
             ));
             self.clear_active_task(&engineer);
+        }
+        if released_claims {
+            board_tasks = if tasks_dir.exists() {
+                crate::task::load_tasks_from_dir(&tasks_dir)?
+            } else {
+                Vec::new()
+            };
         }
 
         let engineer_names: Vec<String> = self
@@ -696,7 +728,6 @@ impl TeamDaemon {
             .filter(|m| m.role_type == RoleType::Engineer)
             .map(|m| m.name.clone())
             .collect();
-        let board_dir = self.board_dir();
         for eng in &engineer_names {
             self.normalize_engineer_active_task_ownership(
                 &board_tasks,
@@ -712,11 +743,11 @@ impl TeamDaemon {
             self.active_tasks.values().copied().collect();
 
         // Orphaned review rescue: tasks in "review" that are stuck because
-        // they have no review_owner (nobody assigned to review), or no
-        // claimed_by at all. Move them back to todo for re-dispatch.
+        // they have no review_owner (nobody assigned to review). Review tasks
+        // no longer require claimed_by once the engineer is auto-released.
         for task in &board_tasks {
             if task.status == "review"
-                && (task.claimed_by.is_none() || task.review_owner.is_none())
+                && task.review_owner.is_none()
                 && !actively_tracked.contains(&task.id)
             {
                 warn!(
@@ -3166,6 +3197,128 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
 
         daemon.reconcile_active_tasks().unwrap();
         assert_eq!(daemon.active_tasks.get("eng-1"), Some(&10));
+    }
+
+    #[test]
+    fn reconcile_active_tasks_releases_review_tasks_without_losing_review_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+            ..Default::default()
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
+        daemon.active_tasks.insert("eng-1".to_string(), 10);
+
+        write_board_task_file(
+            tmp.path(),
+            10,
+            "review-task",
+            "review",
+            Some("eng-1"),
+            &[],
+            None,
+        );
+        let task_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks")
+            .join("010-review-task.md");
+        crate::team::task_cmd::assign_task_owners(
+            &daemon.board_dir(),
+            10,
+            Some("eng-1"),
+            Some("manager"),
+        )
+        .unwrap();
+
+        daemon.reconcile_active_tasks().unwrap();
+
+        assert!(!daemon.active_tasks.contains_key("eng-1"));
+        let task = crate::task::Task::from_file(&task_path).unwrap();
+        assert_eq!(task.status, "review");
+        assert!(task.claimed_by.is_none());
+        assert_eq!(task.review_owner.as_deref(), Some("manager"));
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "state_reconciliation"
+                && event.role.as_deref() == Some("eng-1")
+                && event.task.as_deref() == Some("10")
+                && event.reason.as_deref() == Some("release_review")
+        }));
+    }
+
+    #[test]
+    fn reconcile_active_tasks_releases_blocked_tasks_without_losing_block_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+            ..Default::default()
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
+        daemon.active_tasks.insert("eng-1".to_string(), 10);
+
+        write_board_task_file(
+            tmp.path(),
+            10,
+            "blocked-task",
+            "blocked",
+            Some("eng-1"),
+            &[],
+            Some("manual provider-console token rotation"),
+        );
+        let task_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks")
+            .join("010-blocked-task.md");
+
+        daemon.reconcile_active_tasks().unwrap();
+
+        assert!(!daemon.active_tasks.contains_key("eng-1"));
+        let task = crate::task::Task::from_file(&task_path).unwrap();
+        assert_eq!(task.status, "blocked");
+        assert!(task.claimed_by.is_none());
+        assert_eq!(
+            task.blocked.as_deref(),
+            Some("manual provider-console token rotation")
+        );
+
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "state_reconciliation"
+                && event.role.as_deref() == Some("eng-1")
+                && event.task.as_deref() == Some("10")
+                && event.reason.as_deref() == Some("release_blocked")
+        }));
     }
 
     #[test]
