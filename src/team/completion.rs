@@ -129,6 +129,7 @@ pub(crate) fn ingest_completion_message(project_root: &Path, message: &str) -> R
     {
         review_blockers.extend(crate::team::task_loop::validate_review_ready_worktree(
             &worktree_path,
+            &task_text,
         )?);
     }
     metadata.review_blockers = review_blockers;
