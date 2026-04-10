@@ -108,6 +108,21 @@ pub(crate) fn run_disk_hygiene(
             let freed = clean_shared_target_incremental(&shared_target)?;
             report.shared_target_cleaned_gb = freed as f64 / 1_073_741_824.0;
         }
+
+        // Second tier: if shared-target has grown to 3x the budget, the
+        // incremental cleanup alone can't keep up (deps/ and build/ hold the
+        // bulk). Escalate to the deps/build cleanup. This runs regardless of
+        // free disk space because shared-target growth is the leading
+        // indicator — waiting for disk to be under pressure means the daemon
+        // is always playing catch-up under active workload. Without this
+        // tier, shared-target can easily grow to 6x budget (observed 24GB
+        // against a 4GB budget) before the disk-pressure emergency path
+        // kicks in.
+        let size_bytes_after = dir_size_bytes(&shared_target);
+        if size_bytes_after > max_bytes.saturating_mul(3) {
+            let freed = clean_shared_target_deps_emergency(&shared_target)?;
+            report.shared_target_cleaned_gb += freed as f64 / 1_073_741_824.0;
+        }
     }
 
     // 2. Check available disk space
@@ -607,6 +622,55 @@ mod tests {
                     .exists()
             );
         }
+    }
+
+    #[test]
+    fn run_disk_hygiene_triggers_deps_cleanup_when_shared_target_exceeds_3x_budget() {
+        // Regression: the original disk_hygiene only cleaned deps/ when the
+        // free disk space dropped below half of min_free_gb. Under active
+        // engineer workload, shared-target could grow to 6x the configured
+        // budget (24GB against a 4GB budget, observed 2026-04-10) before
+        // the disk-pressure path ever fired. This test locks in the
+        // second-tier cleanup that fires on shared-target size alone.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let shared_target = project_root.join(".batty").join("shared-target");
+
+        // Build a shared-target that exceeds 3x the budget (12GB > 4GB * 3).
+        // Use small files with deliberate padding so the directory size
+        // walker reports > 13GB.
+        let big_file_bytes = 5 * 1_073_741_824_usize; // 5 GB per engineer
+
+        for engineer in &["eng-1", "eng-2", "eng-3"] {
+            let deps = shared_target.join(engineer).join("debug").join("deps");
+            fs::create_dir_all(&deps).unwrap();
+            // Create a single large sparse file via set_len so the test
+            // doesn't actually write 15GB to disk. On APFS, sparse files
+            // report their logical size via the walker.
+            let file = fs::File::create(deps.join("big.rlib")).unwrap();
+            file.set_len(big_file_bytes as u64).unwrap();
+        }
+
+        let config = test_config();
+        let report = run_disk_hygiene(project_root, &config).unwrap();
+
+        // Deps directories should have been removed by the size-based
+        // escalation path, not just the incremental path.
+        for engineer in &["eng-1", "eng-2", "eng-3"] {
+            assert!(
+                !shared_target
+                    .join(engineer)
+                    .join("debug")
+                    .join("deps")
+                    .exists(),
+                "deps/ for {engineer} should have been cleaned"
+            );
+        }
+        assert!(
+            report.shared_target_cleaned_gb > 1.0,
+            "should have freed multiple GB, got {:.3}GB",
+            report.shared_target_cleaned_gb
+        );
     }
 
     #[test]
