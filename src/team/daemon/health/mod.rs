@@ -32,6 +32,12 @@ mod stall;
 
 pub(super) const CONTEXT_RESTART_COOLDOWN: Duration = Duration::from_secs(30);
 const STARTUP_PREFLIGHT_RESPAWN_DELAY: Duration = Duration::from_millis(200);
+const UNCOMMITTED_STATUS_PATHS: &[&str] = &[
+    ".",
+    ":(exclude).batty",
+    ":(exclude).cargo",
+    ":(exclude).batty-target",
+];
 
 /// Format checkpoint content for inclusion in a restart notice.
 ///
@@ -151,39 +157,11 @@ impl TeamDaemon {
 }
 
 /// Count total inserted + deleted lines from uncommitted changes in a worktree.
-/// Excludes transient `.batty-target` artifacts and ignores staged-delete +
-/// identical-untracked-file mismatches for the same path.
+/// Excludes Batty-managed `.batty/`, `.cargo/`, and `.batty-target` paths,
+/// then ignores staged-delete + identical-untracked-file mismatches for the
+/// same path.
 fn uncommitted_diff_lines(worktree: &std::path::Path) -> Result<usize> {
-    let output = std::process::Command::new("git")
-        .args([
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            "--",
-            ".",
-            ":(exclude).batty-target",
-        ])
-        .current_dir(worktree)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .output()
-        .with_context(|| format!("failed to run git status in {}", worktree.display()))?;
-    if !output.status.success() {
-        anyhow::bail!("git status failed in {}", worktree.display());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut entries: std::collections::BTreeMap<String, Vec<String>> =
-        std::collections::BTreeMap::new();
-    for line in stdout.lines() {
-        if line.len() < 4 {
-            continue;
-        }
-        let status = line[..2].to_string();
-        let path = line[3..].to_string();
-        entries.entry(path).or_default().push(status);
-    }
-
+    let entries = worktree_status_entries(worktree)?;
     let mut total = 0usize;
     for (path, statuses) in entries {
         if statuses.iter().any(|status| status == "D ")
@@ -203,6 +181,38 @@ fn uncommitted_diff_lines(worktree: &std::path::Path) -> Result<usize> {
     }
 
     Ok(total)
+}
+
+fn worktree_status_entries(
+    worktree: &std::path::Path,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
+    let mut command = std::process::Command::new("git");
+    command
+        .args(["status", "--porcelain=v1", "--untracked-files=all", "--"])
+        .args(UNCOMMITTED_STATUS_PATHS)
+        .current_dir(worktree)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE");
+    let output = command
+        .output()
+        .with_context(|| format!("failed to run git status in {}", worktree.display()))?;
+    if !output.status.success() {
+        anyhow::bail!("git status failed in {}", worktree.display());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut entries: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for line in stdout.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let status = line[..2].to_string();
+        let path = line[3..].to_string();
+        entries.entry(path).or_default().push(status);
+    }
+
+    Ok(entries)
 }
 
 fn diff_numstat_lines(worktree: &std::path::Path, cached: bool, path: &str) -> Result<usize> {

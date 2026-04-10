@@ -1142,6 +1142,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn uncommitted_diff_lines_clean_review_branch_shape_is_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_repo, worktree_dir) =
+            setup_clean_review_branch_worktree(&tmp, "eng-1-2", "eng-1-2/590");
+
+        let lines = super::super::uncommitted_diff_lines(&worktree_dir).unwrap();
+
+        assert_eq!(
+            lines, 0,
+            "clean eng-1-2/590 review branch should not count committed diff lines, got {lines}"
+        );
+    }
+
+    #[test]
+    fn uncommitted_diff_lines_ignores_managed_cargo_noise_on_review_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_repo, worktree_dir) =
+            setup_review_branch_with_managed_cargo_noise(&tmp, "eng-1-2", "eng-1-2/590");
+
+        let lines = super::super::uncommitted_diff_lines(&worktree_dir).unwrap();
+
+        assert_eq!(
+            lines, 0,
+            "managed cargo config noise on a review branch should not count, got {lines}"
+        );
+    }
+
     fn make_uncommitted_warn_daemon(tmp: &tempfile::TempDir, threshold: usize) -> TeamDaemon {
         let repo = tmp.path();
         let team_config_dir = repo.join(".batty").join("team_config");
@@ -1167,6 +1195,71 @@ mod tests {
             .workflow_policy
             .uncommitted_warn_threshold = threshold;
         daemon
+    }
+
+    fn setup_clean_review_branch_worktree(
+        tmp: &tempfile::TempDir,
+        engineer: &str,
+        review_branch: &str,
+    ) -> (PathBuf, PathBuf) {
+        let repo = init_git_repo(tmp, "uncommitted-review-branch");
+        let worktree_dir = repo.join(".batty").join("worktrees").join(engineer);
+        std::fs::create_dir_all(worktree_dir.parent().unwrap()).unwrap();
+        git_ok(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                review_branch,
+                worktree_dir.to_str().unwrap(),
+                "main",
+            ],
+        );
+
+        std::fs::write(worktree_dir.join("review.txt"), "review branch work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "review.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "review branch commit"]);
+
+        assert!(
+            git_stdout(&worktree_dir, &["status", "--porcelain"]).is_empty(),
+            "review branch worktree should be clean after commit"
+        );
+
+        (repo, worktree_dir)
+    }
+
+    fn setup_review_branch_with_managed_cargo_noise(
+        tmp: &tempfile::TempDir,
+        engineer: &str,
+        review_branch: &str,
+    ) -> (PathBuf, PathBuf) {
+        let repo = init_git_repo(tmp, "uncommitted-managed-noise");
+        let tracked_cargo_dir = repo.join(".cargo");
+        std::fs::create_dir_all(&tracked_cargo_dir).unwrap();
+        std::fs::write(
+            tracked_cargo_dir.join("config.toml"),
+            "[alias]\nxtask = \"run\"\n",
+        )
+        .unwrap();
+        git_ok(&repo, &["add", ".cargo/config.toml"]);
+        git_ok(&repo, &["commit", "-m", "track cargo config"]);
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join(engineer);
+        let base_branch = format!("eng-main/{engineer}");
+
+        git_ok(&repo, &["branch", &base_branch]);
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        git_ok(&worktree_dir, &["checkout", "-b", review_branch]);
+
+        let raw_status = git_stdout(&worktree_dir, &["status", "--porcelain"]);
+        assert!(
+            raw_status.contains("D  .cargo/config.toml") && raw_status.contains("?? .cargo/"),
+            "setup should reproduce managed cargo noise, got: {raw_status}"
+        );
+
+        (repo, worktree_dir)
     }
 
     #[test]
@@ -1284,6 +1377,34 @@ mod tests {
 
         let msgs = inbox::pending_messages(&inbox_root, "eng-no-wt").unwrap();
         assert!(msgs.is_empty(), "non-worktree engineer should be skipped");
+    }
+
+    #[test]
+    fn maybe_warn_uncommitted_work_skips_clean_review_branch_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _worktree_dir) =
+            setup_clean_review_branch_worktree(&tmp, "eng-1-2", "eng-1-2/590");
+
+        let engineer = engineer_member("eng-1-2", Some("manager"), true);
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(vec![manager_member("manager", None), engineer])
+            .build();
+        daemon
+            .config
+            .team_config
+            .workflow_policy
+            .uncommitted_warn_threshold = 1;
+
+        let inbox_root = inbox::inboxes_root(&repo);
+        inbox::init_inbox(&inbox_root, "eng-1-2").unwrap();
+
+        daemon.maybe_warn_uncommitted_work().unwrap();
+
+        let msgs = inbox::pending_messages(&inbox_root, "eng-1-2").unwrap();
+        assert!(
+            msgs.is_empty(),
+            "clean eng-1-2/590 review branch should not trigger a commit reminder"
+        );
     }
 
     #[test]
