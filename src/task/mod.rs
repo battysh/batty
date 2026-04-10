@@ -297,7 +297,18 @@ fn normalize_blocked_frontmatter_content(content: &str) -> Result<Option<String>
 
     let desired_reason = legacy_reason;
     let desired_blocked_on = blocked_on.as_deref().or(desired_reason).map(str::to_string);
-    let rewrites_incomplete_blocked_task = status_is_blocked && legacy_reason.is_some();
+    // A blocked task is already in canonical form when blocked=true,
+    // block_reason matches the desired reason, and blocked_on matches
+    // the desired blocked_on. Only treat it as needing a rewrite when
+    // one of those fields diverges — otherwise status scans fire
+    // `normalize_blocked_frontmatter` on every call and produce a loop
+    // of "repaired malformed board task frontmatter" log spam even
+    // though the content never changes.
+    let rewrites_incomplete_blocked_task = status_is_blocked
+        && legacy_reason.is_some()
+        && (!matches!(blocked_value.as_ref(), Some(Value::Bool(true)))
+            || block_reason.as_deref() != desired_reason
+            || blocked_on.as_deref() != desired_blocked_on.as_deref());
     let rewrites_incomplete_bool_shape = matches!(blocked_value, Some(Value::Bool(true)))
         && (block_reason.as_deref() != desired_reason
             || mapping.get(yaml_key("blocked_on")).and_then(Value::as_str)

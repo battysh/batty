@@ -869,6 +869,46 @@ mod tests {
     }
 
     #[test]
+    fn normalize_blocked_frontmatter_is_idempotent_on_canonical_blocked_status() {
+        // Regression: a blocked task with the canonical shape
+        // (status: blocked + blocked: true + block_reason + blocked_on all
+        // consistent) used to trigger rewrites on every status scan because
+        // `rewrites_incomplete_blocked_task` only checked
+        // `status_is_blocked && legacy_reason.is_some()`. Observed 2026-04-10:
+        // status loop fired "repaired malformed board task frontmatter"
+        // warnings on every call for 4 tasks.
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        let task_path = write_task_file(board_dir, 42, "todo");
+        std::fs::write(
+            &task_path,
+            "---\n\
+id: 42\n\
+title: Already canonical\n\
+status: blocked\n\
+priority: high\n\
+blocked: true\n\
+block_reason: 'verification escalation after 2 attempts: narration-only completion'\n\
+blocked_on: 'verification escalation after 2 attempts: narration-only completion'\n\
+class: standard\n\
+---\n\n\
+Body.\n",
+        )
+        .unwrap();
+
+        let first = normalize_blocked_frontmatter(&task_path).unwrap();
+        let second = normalize_blocked_frontmatter(&task_path).unwrap();
+        let third = normalize_blocked_frontmatter(&task_path).unwrap();
+
+        assert!(
+            first.is_none(),
+            "canonical blocked task must not trigger a repair on first call"
+        );
+        assert!(second.is_none());
+        assert!(third.is_none());
+    }
+
+    #[test]
     fn update_requires_at_least_one_field() {
         let tmp = tempfile::tempdir().unwrap();
         let board_dir = tmp.path();
