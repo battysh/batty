@@ -11,13 +11,11 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use super::super::*;
-use crate::team::watcher::{CodexQualitySignals, discover_claude_session_file};
+use crate::shim::common::SESSION_STATS_INTERVAL_SECS;
+use crate::team::watcher::CodexQualitySignals;
 
 const WARNING_PERCENT: u64 = 70;
 const NUDGE_PERCENT: u64 = 90;
-const CLAUDE_PROACTIVE_RESTART_PCT: u64 = 80;
-const CLAUDE_DEFAULT_CONTEXT_LIMIT_TOKENS: u64 = 200_000;
-const CLAUDE_ONE_MILLION_CONTEXT_LIMIT_TOKENS: u64 = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextPressureAction {
@@ -30,6 +28,7 @@ pub(crate) enum ContextPressureAction {
 struct ContextPressureInputs {
     output_bytes: u64,
     session_uptime_secs: u64,
+    proactive_usage_pct: Option<u8>,
     narration_detected: bool,
     meta_conversation_detected: bool,
     assistant_message_count: u32,
@@ -141,8 +140,9 @@ impl ContextPressureTracker {
         }
 
         if score >= self.threshold {
-            let since = state.over_threshold_since.get_or_insert(now);
-            if now.duration_since(*since) >= Duration::from_secs(restart_delay_secs.max(1)) {
+            state.over_threshold_polls = state.over_threshold_polls.saturating_add(1);
+            if state.over_threshold_polls >= restart_after_over_threshold_polls(restart_delay_secs)
+            {
                 actions.push(ContextPressureAction::Restart);
             }
         } else {
@@ -157,6 +157,10 @@ fn compute_pressure_score(inputs: &ContextPressureInputs, threshold_bytes: u64) 
     let mut score = 0;
     score += inputs.output_bytes.saturating_mul(35) / threshold_bytes.max(1);
     score = score.min(35);
+
+    if inputs.proactive_usage_pct.is_some() {
+        score = score.max(100);
+    }
 
     if inputs.narration_detected {
         score += 25;
@@ -276,6 +280,12 @@ fn should_force_restart(inputs: &ContextPressureInputs, restart_delay_secs: u64)
         && inputs.secs_since_last_commit.unwrap_or(u64::MAX) >= restart_delay_secs
 }
 
+fn restart_after_over_threshold_polls(restart_delay_secs: u64) -> u32 {
+    restart_delay_secs
+        .max(SESSION_STATS_INTERVAL_SECS)
+        .div_ceil(SESSION_STATS_INTERVAL_SECS) as u32
+}
+
 /// Minimum uptime (seconds) before a zero-output agent is considered dead.
 const ZERO_OUTPUT_THRESHOLD_SECS: u64 = 600;
 
@@ -304,6 +314,26 @@ impl TeamDaemon {
             return Ok(());
         }
 
+        self.handle_context_pressure_signal(member_name, output_bytes, uptime_secs, None)
+    }
+
+    pub(in super::super) fn handle_context_pressure_warning(
+        &mut self,
+        member_name: &str,
+        output_bytes: u64,
+        uptime_secs: u64,
+        usage_pct: u8,
+    ) -> Result<()> {
+        self.handle_context_pressure_signal(member_name, output_bytes, uptime_secs, Some(usage_pct))
+    }
+
+    fn handle_context_pressure_signal(
+        &mut self,
+        member_name: &str,
+        output_bytes: u64,
+        uptime_secs: u64,
+        proactive_usage_pct: Option<u8>,
+    ) -> Result<()> {
         let is_working = self.states.get(member_name) == Some(&MemberState::Working);
         let threshold = self
             .config
@@ -319,7 +349,7 @@ impl TeamDaemon {
             member_name,
             output_bytes,
             uptime_secs,
-            proactive_context_usage_pct.map(u64::from),
+            proactive_usage_pct,
         );
         let (score, actions) = self.context_pressure_tracker.observe_at(
             member_name,
@@ -390,20 +420,13 @@ impl TeamDaemon {
                         continue;
                     }
 
-                    self.handle_context_pressure_restart(member_name)?;
-                    if let Some(task_id) = task_id {
-                        self.record_agent_restarted(
-                            member_name,
-                            task_id.to_string(),
-                            "context_pressure",
-                            1,
-                        );
+                    if self.handle_context_pressure_restart(member_name, task_id)? {
+                        self.record_orchestrator_action(format!(
+                            "health: restarted {} after sustained context pressure (score={}/{})",
+                            member_name, score, threshold
+                        ));
+                        self.context_pressure_tracker.clear_member(member_name);
                     }
-                    self.record_orchestrator_action(format!(
-                        "health: restarted {} after sustained context pressure (score={}/{}, proactive_context_usage_pct={:?})",
-                        member_name, score, threshold, inputs.proactive_context_usage_pct
-                    ));
-                    self.context_pressure_tracker.clear_member(member_name);
                 }
             }
         }
@@ -416,7 +439,7 @@ impl TeamDaemon {
         member_name: &str,
         output_bytes: u64,
         uptime_secs: u64,
-        proactive_context_usage_pct: Option<u64>,
+        proactive_usage_pct: Option<u8>,
     ) -> ContextPressureInputs {
         let quality = self
             .current_codex_quality_signals(member_name)
@@ -424,6 +447,7 @@ impl TeamDaemon {
         ContextPressureInputs {
             output_bytes,
             session_uptime_secs: uptime_secs,
+            proactive_usage_pct,
             narration_detected: self.narration_tracker.is_narrating(member_name),
             meta_conversation_detected: self.narration_tracker.is_narrating(member_name),
             assistant_message_count: quality.assistant_message_count,
@@ -487,32 +511,6 @@ impl TeamDaemon {
             .as_secs();
         Some(now.saturating_sub(commit_ts))
     }
-
-    fn proactive_claude_context_usage_pct(&self, member_name: &str) -> Option<u64> {
-        let Some(member) = self
-            .config
-            .members
-            .iter()
-            .find(|member| member.name == member_name)
-        else {
-            return None;
-        };
-        let agent_name = member.agent.as_deref().unwrap_or("claude");
-        if agent_name != "claude" {
-            return None;
-        }
-        let work_dir = self.member_work_dir(member);
-        let session_file =
-            discover_claude_session_file(&default_claude_projects_root(), &work_dir, None)
-                .ok()
-                .flatten()?;
-        let snapshot = parse_latest_claude_usage_snapshot(&session_file)
-            .ok()
-            .flatten()?;
-        let limit_tokens =
-            claude_context_limit_tokens(member.model.as_deref().or(snapshot.model.as_deref()));
-        Some(snapshot.used_tokens.saturating_mul(100) / limit_tokens.max(1))
-    }
 }
 
 #[cfg(test)]
@@ -529,6 +527,7 @@ mod tests {
         ContextPressureInputs {
             output_bytes: 450_000,
             session_uptime_secs: 2_000,
+            proactive_usage_pct: None,
             narration_detected: true,
             meta_conversation_detected: true,
             assistant_message_count: 4,
@@ -555,6 +554,7 @@ mod tests {
         let inputs = ContextPressureInputs {
             output_bytes: 250_000,
             session_uptime_secs: 60,
+            proactive_usage_pct: None,
             narration_detected: false,
             meta_conversation_detected: false,
             assistant_message_count: 2,
@@ -588,6 +588,7 @@ mod tests {
         let inputs = ContextPressureInputs {
             output_bytes: 120_000,
             session_uptime_secs: 120,
+            proactive_usage_pct: None,
             narration_detected: false,
             meta_conversation_detected: false,
             assistant_message_count: 2,
@@ -639,6 +640,7 @@ mod tests {
         let reset_inputs = ContextPressureInputs {
             output_bytes: 100,
             session_uptime_secs: 5,
+            proactive_usage_pct: None,
             narration_detected: false,
             meta_conversation_detected: false,
             assistant_message_count: 0,
@@ -688,6 +690,7 @@ mod tests {
         let inputs = ContextPressureInputs {
             output_bytes: 64_000,
             session_uptime_secs: 180,
+            proactive_usage_pct: None,
             narration_detected: false,
             meta_conversation_detected: false,
             assistant_message_count: 1,
@@ -714,6 +717,7 @@ mod tests {
         let inputs = ContextPressureInputs {
             output_bytes: 220_000,
             session_uptime_secs: 1_200,
+            proactive_usage_pct: None,
             narration_detected: false,
             meta_conversation_detected: false,
             assistant_message_count: 3,
@@ -739,66 +743,64 @@ mod tests {
     }
 
     #[test]
-    fn proactive_context_threshold_uses_normal_warn_then_restart_flow() {
+    fn proactive_warning_enters_warn_then_restart_sequence() {
         let mut tracker = ContextPressureTracker::new(100, 512_000);
-        let inputs = ContextPressureInputs {
-            output_bytes: 32_000,
-            session_uptime_secs: 300,
-            narration_detected: false,
-            meta_conversation_detected: false,
-            assistant_message_count: 1,
-            tool_call_count: 1,
-            unique_tool_names: 1,
-            shrinking_responses: false,
-            repeated_identical_outputs: false,
-            tool_failure_message: None,
-            shim_failure_count: 0,
-            secs_since_last_commit: Some(60),
-            proactive_context_usage_pct: Some(CLAUDE_PROACTIVE_RESTART_PCT),
-        };
-        let now = Instant::now();
+        let mut inputs = pressure_inputs();
+        inputs.output_bytes = 64_000;
+        inputs.proactive_usage_pct = Some(80);
+        inputs.narration_detected = false;
+        inputs.meta_conversation_detected = false;
+        inputs.assistant_message_count = 1;
+        inputs.tool_call_count = 1;
+        inputs.unique_tool_names = 1;
+        inputs.shrinking_responses = false;
 
         assert_eq!(
-            tracker.observe_at("eng-1", &inputs, true, 120, now).1,
+            tracker
+                .observe_at("eng-1", &inputs, true, 20, Instant::now())
+                .1,
             vec![ContextPressureAction::Warn, ContextPressureAction::Nudge]
         );
         assert_eq!(
             tracker
-                .observe_at("eng-1", &inputs, true, 120, now + Duration::from_secs(121))
+                .observe_at("eng-1", &inputs, true, 20, Instant::now())
                 .1,
             vec![ContextPressureAction::Restart]
         );
     }
 
     #[test]
-    fn latest_claude_usage_snapshot_counts_cache_tokens() {
-        let tmp = tempfile::tempdir().unwrap();
-        let session = tmp.path().join("session.jsonl");
-        std::fs::write(
-            &session,
-            concat!(
-                "{\"message\":{\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":4,\"output_tokens\":6}}}\n",
-                "{\"message\":{\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":20,\"output_tokens\":10,\"cache_creation_input_tokens\":30,\"cache_read_input_tokens\":40}}}\n"
-            ),
-        )
-        .unwrap();
+    fn proactive_warning_uses_configured_restart_delay_for_poll_threshold() {
+        let mut tracker = ContextPressureTracker::new(100, 512_000);
+        let mut inputs = pressure_inputs();
+        inputs.output_bytes = 64_000;
+        inputs.proactive_usage_pct = Some(80);
+        inputs.narration_detected = false;
+        inputs.meta_conversation_detected = false;
+        inputs.assistant_message_count = 1;
+        inputs.tool_call_count = 1;
+        inputs.unique_tool_names = 1;
+        inputs.shrinking_responses = false;
 
-        let snapshot = parse_latest_claude_usage_snapshot(&session)
-            .unwrap()
-            .unwrap();
-        assert_eq!(snapshot.model.as_deref(), Some("claude-sonnet-4-6"));
-        assert_eq!(snapshot.used_tokens, 110);
-    }
-
-    #[test]
-    fn claude_context_limit_tokens_prefers_one_million_aliases() {
         assert_eq!(
-            claude_context_limit_tokens(Some("claude-opus-4.6-1m")),
-            CLAUDE_ONE_MILLION_CONTEXT_LIMIT_TOKENS
+            tracker
+                .observe_at("eng-1", &inputs, true, 120, Instant::now())
+                .1,
+            vec![ContextPressureAction::Warn, ContextPressureAction::Nudge]
         );
+        for _ in 0..10 {
+            assert!(
+                tracker
+                    .observe_at("eng-1", &inputs, true, 120, Instant::now())
+                    .1
+                    .is_empty()
+            );
+        }
         assert_eq!(
-            claude_context_limit_tokens(Some("claude-sonnet-4-6")),
-            CLAUDE_DEFAULT_CONTEXT_LIMIT_TOKENS
+            tracker
+                .observe_at("eng-1", &inputs, true, 120, Instant::now())
+                .1,
+            vec![ContextPressureAction::Restart]
         );
     }
 }
