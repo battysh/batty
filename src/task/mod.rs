@@ -280,6 +280,38 @@ pub fn load_tasks_from_dir(dir: &Path) -> Result<Vec<Task>> {
     Ok(tasks)
 }
 
+fn task_id_from_filename(path: &Path) -> Option<u32> {
+    let name = path.file_name()?.to_str()?;
+    if !name.ends_with(".md") {
+        return None;
+    }
+    name.split('-').next()?.parse::<u32>().ok()
+}
+
+pub fn find_task_path_by_id(tasks_dir: &Path, task_id: u32) -> Result<PathBuf> {
+    let entries = std::fs::read_dir(tasks_dir)
+        .with_context(|| format!("failed to read tasks directory: {}", tasks_dir.display()))?;
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if task_id_from_filename(&path) == Some(task_id) {
+            return Ok(path);
+        }
+    }
+
+    load_tasks_from_dir(tasks_dir)?
+        .into_iter()
+        .find(|task| task.id == task_id)
+        .map(|task| task.source_path)
+        .with_context(|| format!("task #{task_id} not found in {}", tasks_dir.display()))
+}
+
+pub fn load_task_by_id(tasks_dir: &Path, task_id: u32) -> Result<Task> {
+    let path = find_task_path_by_id(tasks_dir, task_id)?;
+    Task::from_file(&path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -801,5 +833,46 @@ Second task description.
         let content = "---\nid: 303\ntitle: bad date\nstatus: todo\nscheduled_for: \"not-a-date\"\n---\n\nDesc.\n";
         let task = Task::parse(content).unwrap();
         assert!(!task.is_schedule_blocked());
+    }
+
+    #[test]
+    fn find_task_path_by_id_handles_slug_rename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        let renamed = tasks_dir.join("511-renamed-roadmap-item.md");
+        fs::write(
+            &renamed,
+            "---\nid: 511\ntitle: roadmap task renamed\nstatus: todo\npriority: high\nclass: standard\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        assert_eq!(find_task_path_by_id(&tasks_dir, 511).unwrap(), renamed);
+    }
+
+    #[test]
+    fn find_task_path_by_id_uses_unchanged_prefix_fast_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        let stable = tasks_dir.join("042-stable-path.md");
+        fs::write(&stable, "not valid yaml").unwrap();
+
+        assert_eq!(find_task_path_by_id(&tasks_dir, 42).unwrap(), stable);
+    }
+
+    #[test]
+    fn find_task_path_by_id_reports_missing_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(
+            tasks_dir.join("001-existing.md"),
+            "---\nid: 1\ntitle: existing\nstatus: todo\npriority: high\nclass: standard\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        let error = find_task_path_by_id(&tasks_dir, 999).unwrap_err();
+        assert!(error.to_string().contains("task #999 not found"));
     }
 }

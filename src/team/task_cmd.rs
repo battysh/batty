@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde_yaml::{Mapping, Value};
 
-use crate::task::{Task, load_tasks_from_dir};
+use crate::task::Task;
 
 use super::board::{read_workflow_metadata, write_workflow_metadata};
 use super::workflow::{ReviewDisposition, TaskState, can_transition};
@@ -475,14 +475,7 @@ pub fn cmd_auto_merge(task_id: u32, enabled: bool, project_root: &Path) -> Resul
 }
 
 pub(crate) fn find_task_path(board_dir: &Path, task_id: u32) -> Result<PathBuf> {
-    let tasks_dir = board_dir.join("tasks");
-    let tasks = load_tasks_from_dir(&tasks_dir)
-        .with_context(|| format!("failed to load tasks from {}", tasks_dir.display()))?;
-    tasks
-        .into_iter()
-        .find(|task| task.id == task_id)
-        .map(|task| task.source_path)
-        .with_context(|| format!("task #{task_id} not found in {}", tasks_dir.display()))
+    crate::task::find_task_path_by_id(&board_dir.join("tasks"), task_id)
 }
 
 fn parse_task_state(value: &str) -> Result<TaskState> {

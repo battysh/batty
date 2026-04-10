@@ -3908,16 +3908,14 @@ fn write_aging_task(
 fn set_aging_claim_progress(
     project_root: &Path,
     id: u32,
-    title: &str,
     last_progress_at: &str,
     last_output_bytes: u64,
 ) {
-    let task_path = project_root
-        .join(".batty")
-        .join("team_config")
-        .join("board")
-        .join("tasks")
-        .join(format!("{id:03}-{title}.md"));
+    let task_path = crate::task::find_task_path_by_id(
+        &project_root.join(".batty").join("team_config").join("board").join("tasks"),
+        id,
+    )
+    .unwrap();
     crate::team::task_cmd::update_task_frontmatter(&task_path, |mapping| {
         crate::team::task_cmd::set_optional_string(
             mapping,
@@ -3931,6 +3929,34 @@ fn set_aging_claim_progress(
         );
     })
     .unwrap();
+}
+
+#[test]
+fn aging_claim_progress_lookup_survives_slug_rename() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_aging_task(
+        tmp.path(),
+        511,
+        "stale-slug-original",
+        "in-progress",
+        "high",
+        Some("eng-1"),
+        None,
+        "2026-04-06T06:00:00Z",
+        Some("2026-04-06T06:00:00Z"),
+        Some("2026-04-06T06:00:00Z"),
+    );
+
+    let tasks_dir = tmp.path().join(".batty").join("team_config").join("board").join("tasks");
+    let original = tasks_dir.join("511-stale-slug-original.md");
+    let renamed = tasks_dir.join("511-roadmap-title-renamed.md");
+    std::fs::rename(&original, &renamed).unwrap();
+
+    set_aging_claim_progress(tmp.path(), 511, "2026-04-06T07:00:00Z", 128);
+
+    let task = crate::task::load_task_by_id(&tasks_dir, 511).unwrap();
+    assert_eq!(task.last_progress_at.as_deref(), Some("2026-04-06T07:00:00Z"));
+    assert_eq!(task.last_output_bytes, Some(128));
 }
 
 #[test]
@@ -3998,7 +4024,7 @@ fn aging_dirty_lane_with_output_growth_does_not_escalate() {
         Some("2026-04-06T06:00:00Z"),
     );
     let stale_progress = (chrono::Utc::now() - chrono::Duration::minutes(20)).to_rfc3339();
-    set_aging_claim_progress(&repo, 74, "aging-live-output", &stale_progress, 0);
+    set_aging_claim_progress(&repo, 74, &stale_progress, 0);
     std::fs::write(
         repo.join("src").join("live_output.rs"),
         "pub fn live_output() {}\n",
@@ -4064,7 +4090,7 @@ fn aging_dirty_lane_requests_checkpoint_before_escalating() {
         Some("2026-04-06T06:00:00Z"),
     );
     let stale_progress = (chrono::Utc::now() - chrono::Duration::minutes(20)).to_rfc3339();
-    set_aging_claim_progress(&repo, 75, "aging-checkpoint", &stale_progress, 0);
+    set_aging_claim_progress(&repo, 75, &stale_progress, 0);
     std::fs::write(
         repo.join("src").join("checkpoint.rs"),
         "pub fn checkpoint() {}\n",
