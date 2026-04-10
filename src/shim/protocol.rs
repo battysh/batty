@@ -104,6 +104,11 @@ pub enum Event {
         context_limit_tokens: u64,
         usage_pct: u8,
     },
+    ContextApproaching {
+        message: String,
+        input_tokens: u64,
+        output_tokens: u64,
+    },
     ScreenCapture {
         content: String,
         cursor_row: u16,

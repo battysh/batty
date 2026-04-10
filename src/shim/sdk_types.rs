@@ -124,14 +124,6 @@ pub struct SdkOutput {
     #[serde(default)]
     pub result: Option<String>,
 
-    /// For `result` messages: usage counters for the completed turn.
-    #[serde(default)]
-    pub usage: Option<Value>,
-
-    /// For `result` messages: model-specific metadata.
-    #[serde(rename = "modelUsage", default)]
-    pub model_usage: Option<Value>,
-
     /// For `result` messages: number of API turns taken.
     #[serde(default)]
     pub num_turns: Option<u32>,
@@ -144,9 +136,13 @@ pub struct SdkOutput {
     #[serde(default)]
     pub errors: Option<Vec<String>>,
 
-    /// For `result` messages: token usage from the API call.
+    /// For `result` messages: usage counters for the completed turn.
     #[serde(default)]
-    pub usage: Option<SdkUsage>,
+    pub usage: Option<Value>,
+
+    /// For `result` messages: model-specific metadata.
+    #[serde(rename = "modelUsage", default)]
+    pub model_usage: Option<Value>,
 
     /// For `control_request` messages: the request ID to echo in responses.
     #[serde(default)]
@@ -227,6 +223,21 @@ impl SdkOutput {
             output_tokens: json_u64(usage.get("output_tokens")),
             reasoning_output_tokens: json_u64(usage.get("reasoning_output_tokens")),
         })
+    }
+
+    pub fn usage_total_tokens(&self) -> u64 {
+        let Some(usage) = self.usage.as_ref() else {
+            return 0;
+        };
+        let cache_creation = usage.get("cache_creation");
+        json_u64(usage.get("input_tokens"))
+            + json_u64(usage.get("cached_input_tokens"))
+            + json_u64(usage.get("cache_creation_input_tokens"))
+            + json_u64(cache_creation.and_then(|value| value.get("ephemeral_5m_input_tokens")))
+            + json_u64(cache_creation.and_then(|value| value.get("ephemeral_1h_input_tokens")))
+            + json_u64(usage.get("cache_read_input_tokens"))
+            + json_u64(usage.get("output_tokens"))
+            + json_u64(usage.get("reasoning_output_tokens"))
     }
 }
 
@@ -393,10 +404,10 @@ mod tests {
 
     #[test]
     fn parse_result_usage_and_model() {
-        let line = r#"{"type":"result","session_id":"x","usage":{"input_tokens":10,"cached_input_tokens":5,"cache_creation_input_tokens":20,"cache_read_input_tokens":3,"output_tokens":7,"reasoning_output_tokens":2},"message":{"model":"claude-opus-4-6-1m"}}"#;
+        let line = r#"{"type":"result","session_id":"x","usage":{"input_tokens":10,"cached_input_tokens":5,"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_5m_input_tokens":5,"ephemeral_1h_input_tokens":15},"cache_read_input_tokens":3,"output_tokens":7,"reasoning_output_tokens":2},"message":{"model":"claude-opus-4-6-1m"}}"#;
         let msg: SdkOutput = serde_json::from_str(line).unwrap();
         assert_eq!(msg.model_name().as_deref(), Some("claude-opus-4-6-1m"));
-        assert_eq!(msg.usage_total_tokens(), 47);
+        assert_eq!(msg.usage_total_tokens(), 67);
     }
 
     #[test]

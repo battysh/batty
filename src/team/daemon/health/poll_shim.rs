@@ -486,7 +486,6 @@ impl TeamDaemon {
                 input_tokens,
                 output_tokens,
             } => {
-                let task_id = self.active_task_id(member_name);
                 let _ = append_shim_event_log(
                     &self.config.project_root,
                     member_name,
@@ -496,31 +495,15 @@ impl TeamDaemon {
                 );
                 warn!(
                     member = member_name,
-                    task_id,
                     input_tokens,
                     output_tokens,
                     "shim reports context approaching limit — proactive handoff"
                 );
                 self.record_orchestrator_action(format!(
-                    "health: proactive context handoff for {} — {} (tokens: {}/{})",
+                    "health: proactive context warning for {} — {} (tokens: {}/{})",
                     member_name, message, input_tokens, output_tokens
                 ));
-
-                if let Err(error) = self.handle_context_pressure_restart(member_name) {
-                    warn!(
-                        member = member_name,
-                        error = %error,
-                        "proactive context handoff restart failed"
-                    );
-                } else if let Some(task_id) = task_id {
-                    self.record_agent_restarted(
-                        member_name,
-                        task_id.to_string(),
-                        "proactive_context_handoff",
-                        1,
-                    );
-                }
-                self.context_pressure_tracker.clear_member(member_name);
+                self.handle_context_pressure_warning(member_name, 0, 0, 80)?;
             }
 
             Event::Pong => {
@@ -1721,6 +1704,50 @@ mod tests {
                 .iter()
                 .any(|msg| msg.body.contains("Context pressure is high")),
             "warning path should still nudge through the normal policy flow"
+        );
+    }
+
+    #[test]
+    fn handle_shim_event_context_approaching_uses_policy_path_without_immediate_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "eng-1").unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![engineer_member("eng-1", Some("manager"), false)])
+            .build();
+        insert_mock_handle(&mut daemon, "eng-1");
+        daemon.states.insert("eng-1".into(), MemberState::Working);
+
+        daemon
+            .handle_shim_event(
+                "eng-1",
+                Event::ContextApproaching {
+                    message: "approaching limit".into(),
+                    input_tokens: 80_000,
+                    output_tokens: 6_000,
+                },
+            )
+            .unwrap();
+
+        assert!(
+            !daemon
+                .intervention_cooldowns
+                .contains_key(&TeamDaemon::context_restart_cooldown_key("eng-1")),
+            "legacy approaching path should not restart immediately"
+        );
+        assert!(
+            !daemon.shim_handles["eng-1"].is_terminal(),
+            "legacy approaching path should not force the shim into a terminal state"
+        );
+
+        let messages = daemon.pending_delivery_queue.get("eng-1").unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|msg| msg.body.contains("Context pressure is high")),
+            "legacy approaching path should still nudge through the normal policy flow"
         );
     }
 
