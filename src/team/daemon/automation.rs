@@ -92,6 +92,70 @@ fn reset_claimed_worktree_to_base(work_dir: &std::path::Path, base_branch: &str)
     Ok(())
 }
 
+fn owned_task_status_rank(status: &str) -> u8 {
+    match status {
+        "in-progress" => 0,
+        "todo" => 1,
+        "backlog" => 2,
+        _ => 3,
+    }
+}
+
+fn owned_task_priority_rank(priority: &str) -> u32 {
+    match priority {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        "low" => 3,
+        _ => 4,
+    }
+}
+
+fn select_authoritative_owned_task<'a>(
+    current_task_id: Option<u32>,
+    current_branch: Option<&str>,
+    claimed_tasks: &[&'a crate::task::Task],
+) -> Option<&'a crate::task::Task> {
+    if let Some(task_id) = current_task_id
+        && let Some(task) = claimed_tasks
+            .iter()
+            .copied()
+            .find(|task| task.id == task_id)
+    {
+        return Some(task);
+    }
+
+    if let Some(branch) = current_branch {
+        let mut matches = claimed_tasks
+            .iter()
+            .copied()
+            .filter(|task| task.branch.as_deref() == Some(branch));
+        if let Some(task) = matches.next()
+            && matches.next().is_none()
+        {
+            return Some(task);
+        }
+    }
+
+    claimed_tasks.iter().copied().min_by_key(|task| {
+        (
+            owned_task_status_rank(task.status.as_str()),
+            owned_task_priority_rank(&task.priority),
+            task.id,
+        )
+    })
+}
+
+fn authoritative_task_branch(engineer: &str, task: &crate::task::Task) -> String {
+    task.branch
+        .clone()
+        .unwrap_or_else(|| format!("{engineer}/{}", task.id))
+}
+
+fn is_managed_task_branch(engineer: &str, branch: &str) -> bool {
+    branch.starts_with(&format!("{engineer}/"))
+}
+
 impl TeamDaemon {
     pub(in crate::team) fn deliver_automation_nudge(
         &mut self,
@@ -327,6 +391,68 @@ impl TeamDaemon {
         Ok(())
     }
 
+    fn maybe_reset_engineer_to_safe_branch(
+        &mut self,
+        engineer: &str,
+        current_branch: &str,
+        authorized_tasks: &[&crate::task::Task],
+        reason: &str,
+    ) {
+        let base_branch = engineer_base_branch_name(engineer);
+        if current_branch == "HEAD" || current_branch == base_branch {
+            return;
+        }
+        if authorized_tasks
+            .iter()
+            .any(|task| task.branch.as_deref() == Some(current_branch))
+        {
+            return;
+        }
+
+        let worktree_dir = self.worktree_dir(engineer);
+        if !worktree_dir.exists() {
+            return;
+        }
+        if !is_worktree_safe_to_mutate(&worktree_dir).unwrap_or(false) {
+            warn!(
+                engineer = %engineer,
+                branch = %current_branch,
+                reason,
+                "state reconciliation: skipping safe-branch reset because worktree is not safe to mutate"
+            );
+            return;
+        }
+
+        let _ = self.preserve_member_worktree(
+            engineer,
+            &format!("wip: auto-save before reconciliation reset [{engineer}]"),
+        );
+        match reset_claimed_worktree_to_base(&worktree_dir, &base_branch) {
+            Ok(()) => {
+                info!(
+                    engineer = %engineer,
+                    stale_branch = %current_branch,
+                    reset_to = %base_branch,
+                    reason,
+                    "state reconciliation reset engineer worktree to safe branch"
+                );
+                self.emit_event(TeamEvent::worktree_reconciled(engineer, current_branch));
+                self.record_state_reconciliation(Some(engineer), None, "branch_reset");
+                self.record_orchestrator_action(format!(
+                    "state reconciliation: reset {engineer} from stale branch '{current_branch}' to '{base_branch}' ({reason})"
+                ));
+            }
+            Err(error) => warn!(
+                engineer = %engineer,
+                branch = %current_branch,
+                reset_to = %base_branch,
+                error = %error,
+                reason,
+                "state reconciliation failed to reset engineer worktree to safe branch"
+            ),
+        }
+    }
+
     pub(super) fn claim_ttl_secs_for_priority(&self, priority: &str) -> u64 {
         let policy = &self.config.team_config.workflow_policy.claim_ttl;
         if priority.eq_ignore_ascii_case("critical") {
@@ -343,13 +469,9 @@ impl TeamDaemon {
         } else {
             Vec::new()
         };
-        if self.state_reconciliation_audit_due() {
-            debug!("state reconciliation audit due — adopting board-owned tasks");
-            self.adopt_board_owned_tasks(&board_tasks);
+        let audit_due = self.state_reconciliation_audit_due();
+        if audit_due {
             self.mark_state_reconciliation_audit();
-        }
-        if self.active_tasks.is_empty() {
-            return Ok(());
         }
         let stale: Vec<(String, u32, &'static str)> = self
             .active_tasks
@@ -390,10 +512,6 @@ impl TeamDaemon {
             self.clear_active_task(&engineer);
         }
 
-        // WIP reconciliation: if an engineer has multiple claimed non-done tasks,
-        // unclaim the extras (keep the one with lowest ID / highest priority).
-        // This catches cases where the manager claims tasks via kanban-md directly,
-        // bypassing the daemon's WIP guard.
         let engineer_names: Vec<String> = self
             .config
             .members
@@ -403,64 +521,12 @@ impl TeamDaemon {
             .collect();
         let board_dir = self.board_dir();
         for eng in &engineer_names {
-            // Only count in-progress and review as active WIP.
-            // Claimed todo/backlog tasks are reservations, not active work —
-            // they shouldn't block dispatch or count toward WIP limits.
-            let mut claimed: Vec<&crate::task::Task> = board_tasks
-                .iter()
-                .filter(|t| {
-                    t.claimed_by.as_deref() == Some(eng.as_str())
-                        && matches!(t.status.as_str(), "in-progress" | "review")
-                })
-                .collect();
-            if claimed.len() <= 1 {
-                continue;
-            }
-            let in_progress_count = claimed
-                .iter()
-                .filter(|task| task.status == "in-progress")
-                .count();
-            if in_progress_count > 1 {
-                warn!(
-                    engineer = eng.as_str(),
-                    in_progress_count,
-                    "WIP reconciliation: skipping auto-unclaim because multiple in-progress tasks are claimed"
-                );
-                continue;
-            }
-            // Keep the in-progress one, or the lowest ID if none in-progress
-            claimed.sort_by_key(|t| (if t.status == "in-progress" { 0 } else { 1 }, t.id));
-            let keep = claimed[0].id;
-            for task in &claimed[1..] {
-                warn!(
-                    engineer = eng.as_str(),
-                    task_id = task.id,
-                    kept_task_id = keep,
-                    "WIP reconciliation: unclaiming excess task #{} from {} (keeping #{})",
-                    task.id,
-                    eng,
-                    keep
-                );
-                if let Err(e) = crate::team::task_cmd::unclaim_task(&board_dir, task.id) {
-                    warn!(
-                        task_id = task.id,
-                        error = %e,
-                        "failed to unclaim excess task"
-                    );
-                }
-                // Move back to todo so it's dispatchable again
-                if matches!(task.status.as_str(), "in-progress" | "backlog" | "review") {
-                    // review -> todo requires going through in-progress first
-                    if task.status == "review" {
-                        let _ = crate::team::task_cmd::transition_task(
-                            &board_dir,
-                            task.id,
-                            "in-progress",
-                        );
-                    }
-                    let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "todo");
-                }
-            }
+            self.normalize_engineer_active_task_ownership(
+                &board_tasks,
+                &board_dir,
+                eng,
+                audit_due,
+            )?;
         }
 
         // Skip tasks that are currently tracked in active_tasks — those were just
@@ -519,40 +585,180 @@ impl TeamDaemon {
             .insert(STATE_RECONCILIATION_AUDIT_KEY.to_string(), Instant::now());
     }
 
-    fn adopt_board_owned_tasks(&mut self, board_tasks: &[crate::task::Task]) {
-        let mut candidates: HashMap<String, Vec<u32>> = HashMap::new();
-        for task in board_tasks {
-            if !super::interventions::task_needs_owned_intervention(task.status.as_str()) {
-                continue;
-            }
-            let Some(engineer) = task.claimed_by.as_deref() else {
-                continue;
-            };
-            if self.active_tasks.contains_key(engineer) {
-                continue;
-            }
-            candidates
-                .entry(engineer.to_string())
-                .or_default()
-                .push(task.id);
+    fn normalize_engineer_active_task_ownership(
+        &mut self,
+        board_tasks: &[crate::task::Task],
+        board_dir: &std::path::Path,
+        engineer: &str,
+        audit_due: bool,
+    ) -> Result<()> {
+        let claimed: Vec<&crate::task::Task> = board_tasks
+            .iter()
+            .filter(|task| {
+                task.claimed_by.as_deref() == Some(engineer)
+                    && super::interventions::task_needs_owned_intervention(task.status.as_str())
+            })
+            .collect();
+
+        if claimed.is_empty() {
+            return Ok(());
         }
 
-        for (engineer, task_ids) in candidates {
-            if let [task_id] = task_ids.as_slice() {
-                self.active_tasks.insert(engineer.clone(), *task_id);
-                self.record_state_reconciliation(Some(&engineer), Some(*task_id), "adopt");
-                self.record_orchestrator_action(format!(
-                    "state reconciliation: adopted board-owned task #{} for {}",
-                    task_id, engineer
-                ));
+        let worktree_dir = self.worktree_dir(engineer);
+        let current_branch =
+            if self.states.get(engineer) == Some(&MemberState::Idle) && worktree_dir.exists() {
+                current_worktree_branch(&worktree_dir).ok()
             } else {
+                None
+            };
+
+        let branch_matches: Vec<u32> = current_branch
+            .as_deref()
+            .map(|branch| {
+                claimed
+                    .iter()
+                    .copied()
+                    .filter(|task| authoritative_task_branch(engineer, task) == branch)
+                    .map(|task| task.id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let worktree_matches: Vec<u32> = claimed
+            .iter()
+            .copied()
+            .filter(|task| {
+                task.worktree_path.as_deref().is_some_and(|path| {
+                    let candidate = std::path::PathBuf::from(path);
+                    let resolved = if candidate.is_absolute() {
+                        candidate
+                    } else {
+                        self.config.project_root.join(candidate)
+                    };
+                    resolved == worktree_dir
+                })
+            })
+            .map(|task| task.id)
+            .collect();
+
+        let authoritative_id = if let [task_id] = branch_matches.as_slice() {
+            *task_id
+        } else if let [task_id] = worktree_matches.as_slice() {
+            *task_id
+        } else {
+            select_authoritative_owned_task(
+                self.active_task_id(engineer),
+                current_branch.as_deref(),
+                &claimed,
+            )
+            .map(|task| task.id)
+            .expect("claimed tasks is not empty")
+        };
+
+        if self.active_task_id(engineer) != Some(authoritative_id) {
+            let reason = if claimed.len() == 1 {
+                "adopt"
+            } else {
+                "repair"
+            };
+            self.active_tasks
+                .insert(engineer.to_string(), authoritative_id);
+            self.record_state_reconciliation(Some(engineer), Some(authoritative_id), reason);
+            self.record_orchestrator_action(format!(
+                "state reconciliation: set authoritative active task #{} for {}",
+                authoritative_id, engineer
+            ));
+        }
+
+        if claimed.len() > 1 {
+            for task in claimed
+                .iter()
+                .copied()
+                .filter(|task| task.id != authoritative_id)
+            {
                 warn!(
-                    engineer = %engineer,
-                    ?task_ids,
-                    "state reconciliation: skipping adopt due to multiple claimed board tasks"
+                    engineer,
+                    task_id = task.id,
+                    authoritative_task_id = authoritative_id,
+                    "state reconciliation: releasing excess claimed task"
                 );
+                crate::team::task_cmd::reclaim_task_claim(
+                    board_dir,
+                    task.id,
+                    &format!(
+                        "Reclaimed during reconciliation while {engineer} retained authoritative task #{authoritative_id}."
+                    ),
+                )?;
+                self.record_state_reconciliation(Some(engineer), Some(task.id), "repair");
+                self.record_orchestrator_action(format!(
+                    "state reconciliation: released excess claimed task #{} from {} (keeping #{})",
+                    task.id, engineer, authoritative_id
+                ));
             }
         }
+
+        if audit_due
+            && let Some(task) = claimed
+                .iter()
+                .copied()
+                .find(|task| task.id == authoritative_id)
+        {
+            self.maybe_align_engineer_worktree_with_task(engineer, task)?;
+        }
+
+        Ok(())
+    }
+
+    fn maybe_align_engineer_worktree_with_task(
+        &mut self,
+        engineer: &str,
+        task: &crate::task::Task,
+    ) -> Result<()> {
+        let Some(member) = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == engineer)
+        else {
+            return Ok(());
+        };
+        if !member.use_worktrees || self.states.get(engineer) != Some(&MemberState::Idle) {
+            return Ok(());
+        }
+
+        let worktree_dir = self.worktree_dir(engineer);
+        if !worktree_dir.exists() {
+            return Ok(());
+        }
+
+        let current_branch = match current_worktree_branch(&worktree_dir) {
+            Ok(branch) => branch,
+            Err(_) => return Ok(()),
+        };
+        if current_branch == "HEAD" {
+            return Ok(());
+        }
+
+        let expected_branch = authoritative_task_branch(engineer, task);
+        if current_branch == expected_branch {
+            return Ok(());
+        }
+
+        let base_branch = engineer_base_branch_name(engineer);
+        let safe_to_reset = current_branch == base_branch
+            || branch_is_merged_into(&self.config.project_root, &current_branch, "main")
+                .unwrap_or(false);
+        if !safe_to_reset || !is_worktree_safe_to_mutate(&worktree_dir).unwrap_or(false) {
+            return Ok(());
+        }
+
+        crate::worktree::ensure_worktree_branch_for_dispatch(&worktree_dir, &expected_branch)?;
+        self.emit_event(TeamEvent::worktree_reconciled(engineer, &current_branch));
+        self.record_state_reconciliation(Some(engineer), Some(task.id), "branch_repair");
+        self.record_orchestrator_action(format!(
+            "state reconciliation: aligned {} worktree from '{}' to '{}' for task #{}",
+            engineer, current_branch, expected_branch, task.id
+        ));
+        Ok(())
     }
 
     pub(super) fn maybe_escalate_stale_reviews(&mut self) -> Result<()> {
@@ -1359,6 +1565,12 @@ impl TeamDaemon {
         if !self.is_git_repo && !self.is_multi_repo {
             return Ok(());
         }
+        let tasks_dir = self.board_dir().join("tasks");
+        let board_tasks = if tasks_dir.exists() {
+            crate::task::load_tasks_from_dir(&tasks_dir)?
+        } else {
+            Vec::new()
+        };
 
         let engineers: Vec<(String, bool)> = self
             .config
@@ -1394,6 +1606,14 @@ impl TeamDaemon {
                 continue;
             }
 
+            let authorized_tasks: Vec<&crate::task::Task> = board_tasks
+                .iter()
+                .filter(|task| {
+                    task.claimed_by.as_deref() == Some(engineer.as_str())
+                        && super::interventions::task_needs_owned_intervention(task.status.as_str())
+                })
+                .collect();
+
             if branch == base_branch {
                 match crate::team::task_loop::refresh_engineer_worktree(
                     &self.config.project_root,
@@ -1425,6 +1645,20 @@ impl TeamDaemon {
                         "worktree refresh after main advance failed"
                     ),
                 }
+                continue;
+            }
+
+            if is_managed_task_branch(&engineer, &branch)
+                && authorized_tasks
+                    .iter()
+                    .all(|task| authoritative_task_branch(&engineer, task) != branch)
+            {
+                self.maybe_reset_engineer_to_safe_branch(
+                    &engineer,
+                    &branch,
+                    &authorized_tasks,
+                    "board no longer authorizes current branch",
+                );
                 continue;
             }
 
@@ -1786,7 +2020,7 @@ mod tests {
     use crate::team::test_support::{
         EnvVarGuard, PATH_LOCK, TestDaemonBuilder, architect_member, engineer_member, git_ok,
         git_stdout, init_git_repo, manager_member, write_board_task_file, write_open_task_file,
-        write_owned_task_file,
+        write_owned_task_file, write_owned_task_file_with_context,
     };
     use std::collections::HashMap;
 
@@ -2826,7 +3060,7 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
     }
 
     #[test]
-    fn reconcile_active_tasks_keeps_multiple_in_progress_claims_for_manager_override() {
+    fn reconcile_active_tasks_repairs_multiple_claimed_tasks_for_one_engineer() {
         let tmp = tempfile::tempdir().unwrap();
         let engineer = MemberInstance {
             name: "eng-1".to_string(),
@@ -2886,7 +3120,105 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
             .collect();
 
         assert!(eng_tasks.contains(&(10, "in-progress")));
-        assert!(eng_tasks.contains(&(20, "in-progress")));
+        assert!(!eng_tasks.contains(&(20, "in-progress")));
+        assert_eq!(daemon.active_task_id("eng-1"), Some(10));
+
+        let normalized = tasks.iter().find(|task| task.id == 20).unwrap();
+        assert_eq!(normalized.status, "todo");
+        assert!(normalized.claimed_by.is_none());
+    }
+
+    #[test]
+    fn reconcile_active_tasks_adopts_board_task_after_clearing_stale_tracked_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: false,
+            ..Default::default()
+        };
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+            ..Default::default()
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![manager, engineer]);
+        daemon.active_tasks.insert("eng-1".to_string(), 10);
+
+        write_board_task_file(
+            tmp.path(),
+            20,
+            "replacement-task",
+            "in-progress",
+            Some("eng-1"),
+            &[],
+            None,
+        );
+
+        daemon.reconcile_active_tasks().unwrap();
+
+        assert_eq!(daemon.active_task_id("eng-1"), Some(20));
+    }
+
+    #[test]
+    fn reconcile_active_tasks_repairs_idle_worktree_from_stale_branch_to_authoritative_task() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "reconcile-stale-branch");
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+            ..Default::default()
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: true,
+            ..Default::default()
+        };
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![manager, engineer])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        git_ok(&worktree_dir, &["checkout", "-b", "eng-1/41"]);
+
+        write_owned_task_file_with_context(
+            &repo,
+            42,
+            "authoritative-task",
+            "in-progress",
+            "eng-1",
+            "eng-1/42",
+            ".batty/worktrees/eng-1",
+        );
+
+        daemon.reconcile_active_tasks().unwrap();
+
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-1/42");
     }
 
     // ── manager_for_member_name ──────────────────────────────────
@@ -4640,5 +4972,47 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
             git_stdout(&worktree_dir, &["rev-parse", "HEAD"]),
             before_head
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn reconcile_stale_worktrees_resets_idle_branch_when_board_no_longer_authorizes_it() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "worktree-reset-unauthorized-branch");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        crate::team::task_loop::checkout_worktree_branch_from_main(&worktree_dir, "eng-1/42")
+            .unwrap();
+        std::fs::write(worktree_dir.join("note.txt"), "stale branch work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "note.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "stale branch work"]);
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), true),
+            ])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        daemon.maybe_reconcile_stale_worktrees().unwrap();
+
+        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), base_branch);
+
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(&repo)).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "worktree_reconciled"
+                && event.role.as_deref() == Some("eng-1")
+                && event.reason.as_deref().unwrap_or("").contains("eng-1/42")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event == "state_reconciliation"
+                && event.role.as_deref() == Some("eng-1")
+                && event.reason.as_deref() == Some("branch_reset")
+        }));
     }
 }

@@ -28,6 +28,9 @@ pub(crate) fn run_automatic_verification(
     worktree_dir: &Path,
     test_command: Option<&str>,
 ) -> Result<VerificationRunResult> {
+    if let Some(conflict_failure) = active_claim_conflict_failure(worktree_dir)? {
+        return Ok(conflict_failure);
+    }
     if let Some(task_mismatch_failure) = task_mismatch_validation_failure(worktree_dir)? {
         return Ok(task_mismatch_failure);
     }
@@ -45,6 +48,81 @@ pub(crate) fn run_automatic_verification(
         failures,
         file_paths,
     })
+}
+
+fn active_claim_conflict_failure(worktree_dir: &Path) -> Result<Option<VerificationRunResult>> {
+    let Some((project_root, engineer)) = engineer_worktree_context(worktree_dir) else {
+        return Ok(None);
+    };
+
+    let tasks_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    let active_tasks: Vec<Task> = load_tasks_from_dir(&tasks_dir)
+        .with_context(|| format!("failed to load tasks from {}", tasks_dir.display()))?
+        .into_iter()
+        .filter(|task| {
+            task.claimed_by.as_deref() == Some(engineer.as_str())
+                && matches!(task.status.as_str(), "review" | "in-progress")
+        })
+        .collect();
+    if active_tasks.len() <= 1 {
+        return Ok(None);
+    }
+
+    let current_branch = current_branch_name(worktree_dir).ok();
+    let explicit_worktree_matches = active_tasks
+        .iter()
+        .filter(|task| {
+            task.worktree_path
+                .as_deref()
+                .is_some_and(|path| resolve_worktree_path(&project_root, path) == worktree_dir)
+        })
+        .count();
+    let branch_matches = current_branch
+        .as_deref()
+        .map(|branch| {
+            active_tasks
+                .iter()
+                .filter(|task| {
+                    task.branch
+                        .as_deref()
+                        .map(|task_branch| task_branch == branch)
+                        .unwrap_or_else(|| format!("{engineer}/{}", task.id) == branch)
+                })
+                .count()
+        })
+        .unwrap_or(0);
+
+    if explicit_worktree_matches == 1 || branch_matches == 1 {
+        return Ok(None);
+    }
+
+    let task_list = active_tasks
+        .iter()
+        .map(|task| format!("#{}", task.id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let message = format!(
+        "ambiguous active task ownership for {engineer}: claimed tasks {task_list} do not resolve to a single worktree/task branch"
+    );
+    Ok(Some(VerificationRunResult {
+        passed: false,
+        output: message.clone(),
+        results: TestResults {
+            framework: "claim-conflict".to_string(),
+            total: None,
+            passed: 0,
+            failed: 1,
+            ignored: 0,
+            failures: Vec::new(),
+            summary: Some(message.clone()),
+        },
+        failures: vec![message],
+        file_paths: Vec::new(),
+    }))
 }
 
 fn task_mismatch_validation_failure(worktree_dir: &Path) -> Result<Option<VerificationRunResult>> {
@@ -388,9 +466,9 @@ mod tests {
     use crate::team::test_results::{TestFailure, TestResults};
 
     use super::{
-        ScopeValidationResult, commit_subjects_since_main, current_branch_name,
-        engineer_worktree_context, find_claimed_task_for_worktree, parse_scope_fence,
-        parse_test_output, run_automatic_verification, scope_validation_failure,
+        ScopeValidationResult, active_claim_conflict_failure, commit_subjects_since_main,
+        current_branch_name, engineer_worktree_context, find_claimed_task_for_worktree,
+        parse_scope_fence, parse_test_output, scope_validation_failure,
         task_mismatch_validation_failure, validate_declared_scope,
     };
 
@@ -503,6 +581,40 @@ src/parser.rs:12: failure here\n";
             .unwrap()
             .expect("matching task should be found");
         assert_eq!(task.id, 11);
+    }
+
+    #[test]
+    fn active_claim_conflict_failure_reports_ambiguous_claimed_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        let worktree_dir = tmp.path().join(".batty").join("worktrees").join("eng-1-3");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::create_dir_all(&worktree_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("010-task.md"),
+            "---\nid: 10\ntitle: first\nstatus: in-progress\npriority: medium\nclaimed_by: eng-1-3\n---\n\nTask body.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tasks_dir.join("011-task.md"),
+            "---\nid: 11\ntitle: second\nstatus: review\npriority: medium\nclaimed_by: eng-1-3\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        let result = active_claim_conflict_failure(&worktree_dir)
+            .unwrap()
+            .expect("ambiguous claimed tasks should fail verification");
+        assert!(!result.passed);
+        assert!(
+            result
+                .output
+                .contains("ambiguous active task ownership for eng-1-3")
+        );
     }
 
     #[test]
