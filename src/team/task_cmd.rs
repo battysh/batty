@@ -92,6 +92,22 @@ pub(crate) fn unclaim_task(board_dir: &Path, task_id: u32) -> Result<()> {
     Ok(())
 }
 
+/// Release engineer ownership while preserving downstream review/block metadata.
+pub(crate) fn release_engineer_claim(board_dir: &Path, task_id: u32) -> Result<()> {
+    let task_path = find_task_path(board_dir, task_id)?;
+    update_task_frontmatter(&task_path, |mapping| {
+        set_optional_string(mapping, "claimed_by", None);
+        set_optional_string(mapping, "claimed_at", None);
+        set_optional_u64(mapping, "claim_ttl_secs", None);
+        set_optional_string(mapping, "claim_expires_at", None);
+        set_optional_string(mapping, "last_progress_at", None);
+        set_optional_string(mapping, "claim_warning_sent_at", None);
+        set_optional_u32(mapping, "claim_extensions", None);
+        set_optional_u64(mapping, "last_output_bytes", None);
+    })?;
+    Ok(())
+}
+
 pub(crate) fn initialize_task_claim(
     board_dir: &Path,
     task_id: u32,
