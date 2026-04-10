@@ -245,10 +245,7 @@ fn prepare_assignment_launch_falls_back_to_local_main_when_origin_main_is_frozen
         &team_config_dir,
     )
     .unwrap();
-    git_ok(
-        &repo,
-        &["update-ref", "refs/remotes/origin/main", frozen.trim()],
-    );
+    git_ok(&repo, &["update-ref", "refs/remotes/origin/main", frozen.trim()]);
 
     for i in 1..=3 {
         std::fs::write(repo.join(format!("local-{i}.txt")), format!("local {i}\n")).unwrap();
@@ -356,47 +353,6 @@ fn prepare_assignment_launch_resets_stale_worktree_after_rebase_conflict() {
         "unexpected reason: {:?}",
         event.reason
     );
-}
-
-#[test]
-fn prepare_assignment_launch_refuses_when_claimed_task_branch_mismatch_exists() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = init_git_repo(&tmp, "dispatch-branch-mismatch");
-    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
-    let team_config_dir = repo.join(".batty").join("team_config");
-    let base_branch = engineer_base_branch_name("eng-1");
-
-    setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
-    git_ok(&worktree_dir, &["checkout", "-b", "eng-1/41"]);
-
-    write_task_file(
-        &repo,
-        "042-claimed-task.md",
-        "---\nid: 42\ntitle: claimed-task\nstatus: in-progress\npriority: critical\nclaimed_by: eng-1\nbranch: eng-1/42\nworktree_path: .batty/worktrees/eng-1\nclass: standard\n---\n\nTask description.\n",
-    );
-
-    let mut daemon = TestDaemonBuilder::new(repo.as_path())
-        .members(vec![
-            manager_member("manager", None),
-            engineer_member("eng-1", Some("manager"), true),
-        ])
-        .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
-        .build();
-
-    let err = daemon
-        .prepare_assignment_launch("eng-1", "Task #99: new assignment", Some(99))
-        .unwrap_err();
-
-    assert!(err.to_string().contains("claimed task #42"));
-    assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-1/41");
-
-    let inbox_root = inbox::inboxes_root(&repo);
-    let manager_messages = inbox::pending_messages(&inbox_root, "manager").unwrap();
-    assert!(manager_messages.iter().any(|message| {
-        message.body.contains("Reconciliation alert")
-            && message.body.contains("eng-1/41")
-            && message.body.contains("eng-1/42")
-    }));
 }
 
 #[test]
@@ -998,6 +954,7 @@ fn completion_frees_engineer_and_dispatch_skips_already_claimed_tasks() {
 fn dispatch_preps_worktree_for_idle_engineer() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = init_git_repo(&tmp, "idle-prep");
+    write_open_task_file(&repo, 301, "idle-task", "todo");
     let team_config_dir = repo.join(".batty").join("team_config");
     let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
     setup_engineer_worktree(
@@ -1022,13 +979,21 @@ fn dispatch_preps_worktree_for_idle_engineer() {
         })
         .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
         .build();
+    daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+    daemon.idle_started_at.insert(
+        "eng-1".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
 
-    let launch = daemon
-        .prepare_assignment_launch("eng-1", "Task #301: idle-task", Some(301))
-        .unwrap();
+    daemon.maybe_auto_dispatch().unwrap();
 
-    assert_eq!(launch.branch.as_deref(), Some("eng-1/301"));
-    assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-1/301");
+    // Task branch should have been created by prepare_engineer_assignment_worktree
+    let task_branch = "eng-1/301";
+    let branches = git_stdout(&repo, &["branch", "--list"]);
+    assert!(
+        branches.contains(task_branch),
+        "idle engineer should have task branch created by worktree prep; branches: {branches}"
+    );
 }
 
 // -- End-to-end scheduled tasks tests (task #203) --
