@@ -126,6 +126,33 @@ pub(crate) fn changed_paths_from_main(worktree_dir: &Path) -> Result<Vec<PathBuf
         .collect())
 }
 
+fn is_completion_noise_path(path: &Path) -> bool {
+    let first_component = path
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        .unwrap_or_default();
+
+    if matches!(
+        first_component,
+        ".batty" | ".batty-target" | ".agents" | ".claude" | "target"
+    ) {
+        return true;
+    }
+
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("AGENTS.md" | "CLAUDE.md")
+    )
+}
+
+fn evidence_paths_from_main(worktree_dir: &Path) -> Result<Vec<PathBuf>> {
+    Ok(changed_paths_from_main(worktree_dir)?
+        .into_iter()
+        .filter(|path| !is_completion_noise_path(path))
+        .collect())
+}
+
 pub(crate) fn is_non_code_path(path: &Path) -> bool {
     let root_name = path
         .file_name()
@@ -168,12 +195,12 @@ pub(crate) fn is_non_code_path(path: &Path) -> bool {
 
 /// Count files changed between main and HEAD.
 pub(crate) fn files_changed_from_main(worktree_dir: &Path) -> Result<u32> {
-    Ok(changed_paths_from_main(worktree_dir)?.len() as u32)
+    Ok(evidence_paths_from_main(worktree_dir)?.len() as u32)
 }
 
 /// Count code-relevant files changed between main and HEAD.
 pub(crate) fn code_files_changed_from_main(worktree_dir: &Path) -> Result<u32> {
-    Ok(changed_paths_from_main(worktree_dir)?
+    Ok(evidence_paths_from_main(worktree_dir)?
         .into_iter()
         .filter(|path| !is_non_code_path(path))
         .count() as u32)
@@ -378,11 +405,125 @@ mod tests {
     }
 
     #[test]
+    fn files_changed_from_main_ignores_runtime_noise_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "main"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join("README.md"), "hello").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "task-branch"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::create_dir_all(repo.join(".batty-target").join("debug")).unwrap();
+        std::fs::write(repo.join(".batty-target").join("CACHEDIR.TAG"), "cache\n").unwrap();
+        std::fs::create_dir_all(repo.join(".batty")).unwrap();
+        std::fs::write(repo.join(".batty").join("state.json"), "{}\n").unwrap();
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs").join("notes.md"), "docs only\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "-A", "-f", ".batty-target", ".batty", "docs"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "runtime noise"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        assert_eq!(files_changed_from_main(repo).unwrap(), 1);
+        assert_eq!(code_files_changed_from_main(repo).unwrap(), 0);
+    }
+
+    #[test]
+    fn code_files_changed_from_main_counts_source_changes_but_skips_runtime_noise() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "main"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join("README.md"), "hello").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "task-branch"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::create_dir_all(repo.join(".batty-target").join("debug")).unwrap();
+        std::fs::write(repo.join(".batty-target").join("CACHEDIR.TAG"), "cache\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "-A", "-f", "src", ".batty-target"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "source plus noise"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        assert_eq!(files_changed_from_main(repo).unwrap(), 1);
+        assert_eq!(code_files_changed_from_main(repo).unwrap(), 1);
+    }
+
+    #[test]
     fn is_non_code_path_preserves_code_adjacent_files() {
         assert!(!is_non_code_path(Path::new("Cargo.toml")));
         assert!(!is_non_code_path(Path::new("Cargo.lock")));
         assert!(!is_non_code_path(Path::new("src/main.rs")));
         assert!(is_non_code_path(Path::new("docs/guide.md")));
         assert!(is_non_code_path(Path::new("assets/logo.svg")));
+    }
+
+    #[test]
+    fn completion_noise_paths_are_excluded_from_evidence_counts() {
+        assert!(is_completion_noise_path(Path::new(
+            ".batty-target/debug/output"
+        )));
+        assert!(is_completion_noise_path(Path::new(".batty/state.json")));
+        assert!(is_completion_noise_path(Path::new("target/debug/batty")));
+        assert!(is_completion_noise_path(Path::new("CLAUDE.md")));
+        assert!(!is_completion_noise_path(Path::new("docs/guide.md")));
+        assert!(!is_completion_noise_path(Path::new("src/main.rs")));
     }
 }
