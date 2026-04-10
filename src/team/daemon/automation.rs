@@ -1889,44 +1889,39 @@ impl TeamDaemon {
                 }
             }
 
-            if crate::worktree::has_uncommitted_changes(&worktree_dir).unwrap_or(true) {
-                debug!(
-                    engineer = %engineer,
-                    branch = %branch,
-                    "worktree has uncommitted changes; skipping reconciliation"
-                );
-                continue;
+            match reset_claimed_worktree_to_base(&worktree_dir, &base_branch) {
+                Ok(reset_reason) if reset_reason.reset_performed() => {
+                    info!(
+                        engineer = %engineer,
+                        stale_branch = %branch,
+                        reset_to = %base_branch,
+                        reset_reason = reset_reason.as_str(),
+                        "auto-reconciled stale worktree"
+                    );
+                    self.emit_event(TeamEvent::worktree_reconciled(&engineer, &branch));
+                    self.record_orchestrator_action(format!(
+                        "worktree: auto-reconciled {engineer} from stale branch '{branch}' to '{base_branch}' ({})",
+                        reset_reason.as_str()
+                    ));
+                }
+                Ok(reset_reason) => {
+                    debug!(
+                        engineer = %engineer,
+                        branch = %branch,
+                        reset_reason = reset_reason.as_str(),
+                        "skipping worktree reconciliation"
+                    );
+                }
+                Err(error) => {
+                    warn!(
+                        engineer = %engineer,
+                        branch = %branch,
+                        error = %error,
+                        "worktree reconciliation failed"
+                    );
+                    continue;
+                }
             }
-
-            if !is_worktree_safe_to_mutate(&worktree_dir).unwrap_or(false) {
-                debug!(
-                    engineer = %engineer,
-                    branch = %branch,
-                    "skipping worktree reconciliation — unsafe to mutate"
-                );
-                continue;
-            }
-
-            if let Err(error) = checkout_worktree_branch_from_main(&worktree_dir, &base_branch) {
-                warn!(
-                    engineer = %engineer,
-                    branch = %branch,
-                    error = %error,
-                    "worktree reconciliation failed"
-                );
-                continue;
-            }
-
-            info!(
-                engineer = %engineer,
-                stale_branch = %branch,
-                reset_to = %base_branch,
-                "auto-reconciled stale worktree"
-            );
-            self.emit_event(TeamEvent::worktree_reconciled(&engineer, &branch));
-            self.record_orchestrator_action(format!(
-                "worktree: auto-reconciled {engineer} from stale branch '{branch}' to '{base_branch}'"
-            ));
         }
 
         Ok(())

@@ -46,9 +46,8 @@ use super::task_cmd;
 #[cfg(test)]
 use super::task_loop::next_unclaimed_task;
 use super::task_loop::{
-    branch_is_merged_into, checkout_worktree_branch_from_main, current_worktree_branch,
-    engineer_base_branch_name, is_worktree_safe_to_mutate, preserve_worktree_with_commit,
-    setup_engineer_worktree,
+    branch_is_merged_into, current_worktree_branch, engineer_base_branch_name,
+    preserve_worktree_with_commit, setup_engineer_worktree,
 };
 use super::verification::VerificationState;
 use super::watcher::{SessionWatcher, WatcherState};

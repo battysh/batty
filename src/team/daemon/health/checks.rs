@@ -279,16 +279,6 @@ impl TeamDaemon {
                 _ => {}
             }
 
-            // Also check for uncommitted changes — don't destroy dirty work.
-            if crate::worktree::has_uncommitted_changes(&worktree_path).unwrap_or(true) {
-                debug!(
-                    member = %name,
-                    branch = %current_branch,
-                    "worktree has uncommitted changes; skipping reset"
-                );
-                continue;
-            }
-
             match crate::worktree::branch_fully_merged(
                 &self.config.project_root,
                 &current_branch,
@@ -802,8 +792,9 @@ mod tests {
         let repo = init_git_repo(&tmp, "batty-reconcile");
         let worktree_dir = repo.join(".batty").join("worktrees").join(engineer);
         let team_config_dir = repo.join(".batty").join("team_config");
+        let base_branch = engineer_base_branch_name(engineer);
 
-        setup_engineer_worktree(&repo, &worktree_dir, engineer, &team_config_dir).unwrap();
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
 
         // Clean up untracked files created by setup_engineer_worktree so
         // the worktree appears clean to has_uncommitted_changes().
@@ -845,6 +836,58 @@ mod tests {
             branch,
             engineer_base_branch_name("eng-reconcile"),
             "worktree should be reset to base branch"
+        );
+
+        let _ = Command::new("git")
+            .current_dir(&repo)
+            .args([
+                "worktree",
+                "remove",
+                "--force",
+                worktree_dir.to_str().unwrap(),
+            ])
+            .output();
+    }
+
+    #[test]
+    fn reconcile_preserves_dirty_work_before_resetting_merged_branch() {
+        let (_tmp, repo, worktree_dir) = setup_reconcile_scenario("eng-dirty");
+        let task_branch = "eng-dirty-42";
+        std::fs::write(worktree_dir.join("dirty.txt"), "tracked dirty work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "dirty.txt"]);
+        std::fs::write(worktree_dir.join("untracked.txt"), "untracked dirty work\n").unwrap();
+
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-dirty", Some("manager"), true),
+        ];
+        let states = HashMap::from([("eng-dirty".to_string(), MemberState::Idle)]);
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(members)
+            .states(states)
+            .build();
+
+        daemon.is_git_repo = true;
+        daemon.maybe_reconcile_stale_worktrees().unwrap();
+
+        let branch = git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        assert_eq!(
+            branch,
+            engineer_base_branch_name("eng-dirty"),
+            "worktree should be reset to base branch"
+        );
+        assert_eq!(
+            git_stdout(&repo, &["show", &format!("{task_branch}:dirty.txt")]),
+            "tracked dirty work"
+        );
+        assert_eq!(
+            git_stdout(&repo, &["show", &format!("{task_branch}:untracked.txt")]),
+            "untracked dirty work"
+        );
+        let log = git_stdout(&repo, &["log", "--oneline", "-1", task_branch]);
+        assert!(
+            log.contains("wip: auto-save before worktree reset"),
+            "expected auto-save commit on preserved branch, got: {log}"
         );
 
         let _ = Command::new("git")
