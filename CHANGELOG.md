@@ -2,6 +2,29 @@
 
 All notable changes to Batty are documented here.
 
+## 0.10.3 — 2026-04-10
+
+Fix the reconciliation path so dirty worktrees on the wrong branch no longer
+block recovery indefinitely. Previously, when an engineer's worktree drifted
+to the wrong branch AND had uncommitted changes, `reconcile_claimed_task_branch`
+would refuse to switch and just fire an alert every cycle. This left the
+engineer stuck on the stale branch until a human intervened, with only the
+operator-visible signal `branch recovery blocked (#N on X; expected Y; dirty worktree)`
+as evidence.
+
+- **Preserve dirty changes before recovering the branch** — the reconciliation
+  path now auto-saves dirty tracked and untracked changes as a `wip: auto-save
+  before branch recovery` commit on the *current* (stale) branch, then switches
+  the worktree to the expected branch. The engineer's work is preserved in git
+  history on the wrong-branch tip and can be cherry-picked later.
+  (`src/team/daemon/automation.rs`)
+- **Updated regression test** — `reconcile_active_tasks_preserves_dirty_work_then_repairs_branch_mismatch`
+  replaces the old `_blocks_dirty_branch_mismatch_without_switching` test. The
+  old test locked in the indefinite-block behavior; the new test verifies the
+  preserve-and-recover flow: worktree ends up on the expected branch, dirty
+  file is committed on the originating branch, `state_reconciliation` event
+  records `branch_repair` instead of `branch_mismatch`.
+
 ## 0.10.2 — 2026-04-10
 
 Fix for a preserve-failure acknowledgement loop introduced when the stale-branch
