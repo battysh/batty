@@ -15,6 +15,14 @@ use super::*;
 
 const STATE_RECONCILIATION_AUDIT_KEY: &str = "state-reconciliation::audit";
 const CLAIM_PROGRESS_AUDIT_KEY_PREFIX: &str = "claim-progress::";
+const CLAIMED_BRANCH_MISMATCH_ALERT_KEY_PREFIX: &str = "claimed-branch-mismatch::";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClaimedTaskBranchMismatch {
+    pub(super) task_id: u32,
+    pub(super) expected_branch: String,
+    pub(super) current_branch: String,
+}
 
 fn normalized_context_line(line: &str) -> Option<String> {
     let trimmed = line.trim();
@@ -157,11 +165,134 @@ fn is_managed_task_branch(engineer: &str, branch: &str) -> bool {
 }
 
 impl TeamDaemon {
+    pub(super) fn claimed_task_branch_mismatch(
+        &self,
+        engineer: &str,
+    ) -> Result<Option<ClaimedTaskBranchMismatch>> {
+        let Some(member) = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == engineer)
+        else {
+            return Ok(None);
+        };
+        if !member.use_worktrees {
+            return Ok(None);
+        }
+
+        let tasks_dir = self.board_dir().join("tasks");
+        if !tasks_dir.exists() {
+            return Ok(None);
+        }
+
+        let worktree_dir = self.worktree_dir(engineer);
+        if !worktree_dir.exists() {
+            return Ok(None);
+        }
+
+        let current_branch = match current_worktree_branch(&worktree_dir) {
+            Ok(branch) => branch,
+            Err(_) => return Ok(None),
+        };
+
+        let board_tasks = crate::task::load_tasks_from_dir(&tasks_dir)?;
+        let claimed: Vec<&crate::task::Task> = board_tasks
+            .iter()
+            .filter(|task| {
+                task.claimed_by.as_deref() == Some(engineer)
+                    && super::interventions::task_needs_owned_intervention(task.status.as_str())
+            })
+            .collect();
+        let Some(task) = select_authoritative_owned_task(
+            self.active_task_id(engineer),
+            (current_branch != "HEAD").then_some(current_branch.as_str()),
+            &claimed,
+        ) else {
+            return Ok(None);
+        };
+
+        let expected_branch = authoritative_task_branch(engineer, task);
+        if current_branch == expected_branch {
+            return Ok(None);
+        }
+
+        Ok(Some(ClaimedTaskBranchMismatch {
+            task_id: task.id,
+            expected_branch,
+            current_branch,
+        }))
+    }
+
+    pub(super) fn alert_claimed_task_branch_mismatch(
+        &mut self,
+        engineer: &str,
+        mismatch: &ClaimedTaskBranchMismatch,
+    ) -> Result<()> {
+        let cooldown_key = format!("{CLAIMED_BRANCH_MISMATCH_ALERT_KEY_PREFIX}{engineer}");
+        let cooldown = Duration::from_secs(
+            self.config
+                .team_config
+                .automation
+                .intervention_cooldown_secs
+                .max(60),
+        );
+        if self
+            .intervention_cooldowns
+            .get(&cooldown_key)
+            .is_some_and(|last| last.elapsed() < cooldown)
+        {
+            return Ok(());
+        }
+        self.intervention_cooldowns
+            .insert(cooldown_key, Instant::now());
+
+        let alert = format!(
+            "Reconciliation alert: {engineer} is claimed on task #{} but the worktree is on '{}' instead of '{}'. Batty will refuse new assignment and suppress automation nudges until the branch is corrected manually.",
+            mismatch.task_id, mismatch.current_branch, mismatch.expected_branch
+        );
+        let manager = self.assignment_sender(engineer);
+        let _ = self.queue_daemon_message(&manager, &alert);
+        let _ = self.queue_daemon_message(
+            engineer,
+            &format!(
+                "Branch/task mismatch detected for task #{}. Current branch: '{}'. Expected branch: '{}'. Correct it manually before continuing.",
+                mismatch.task_id, mismatch.current_branch, mismatch.expected_branch
+            ),
+        );
+
+        self.emit_event(TeamEvent::state_reconciliation(
+            Some(engineer),
+            Some(&mismatch.task_id.to_string()),
+            "branch_mismatch",
+        ));
+        self.record_orchestrator_action(format!(
+            "state reconciliation: detected branch/task mismatch for {} (task #{}, current '{}', expected '{}')",
+            engineer, mismatch.task_id, mismatch.current_branch, mismatch.expected_branch
+        ));
+        Ok(())
+    }
+
     pub(in crate::team) fn deliver_automation_nudge(
         &mut self,
         recipient: &str,
         body: &str,
     ) -> Result<MessageDelivery> {
+        if self
+            .config
+            .members
+            .iter()
+            .any(|member| member.name == recipient && member.role_type == RoleType::Engineer)
+            && let Some(mismatch) = self.claimed_task_branch_mismatch(recipient)?
+        {
+            self.alert_claimed_task_branch_mismatch(recipient, &mismatch)?;
+            self.record_orchestrator_action(format!(
+                "suppressed automation nudge for {} while branch/task mismatch is unresolved",
+                recipient
+            ));
+            return Ok(MessageDelivery::OrchestratorLogged);
+        }
+
         if self.config.team_config.orchestrator_enabled() {
             let summary = body
                 .lines()
@@ -734,31 +865,16 @@ impl TeamDaemon {
             Ok(branch) => branch,
             Err(_) => return Ok(()),
         };
-        if current_branch == "HEAD" {
+        let mismatch = ClaimedTaskBranchMismatch {
+            task_id: task.id,
+            expected_branch: authoritative_task_branch(engineer, task),
+            current_branch,
+        };
+        if mismatch.current_branch == mismatch.expected_branch {
             return Ok(());
         }
 
-        let expected_branch = authoritative_task_branch(engineer, task);
-        if current_branch == expected_branch {
-            return Ok(());
-        }
-
-        let base_branch = engineer_base_branch_name(engineer);
-        let safe_to_reset = current_branch == base_branch
-            || branch_is_merged_into(&self.config.project_root, &current_branch, "main")
-                .unwrap_or(false);
-        if !safe_to_reset || !is_worktree_safe_to_mutate(&worktree_dir).unwrap_or(false) {
-            return Ok(());
-        }
-
-        crate::worktree::ensure_worktree_branch_for_dispatch(&worktree_dir, &expected_branch)?;
-        self.emit_event(TeamEvent::worktree_reconciled(engineer, &current_branch));
-        self.record_state_reconciliation(Some(engineer), Some(task.id), "branch_repair");
-        self.record_orchestrator_action(format!(
-            "state reconciliation: aligned {} worktree from '{}' to '{}' for task #{}",
-            engineer, current_branch, expected_branch, task.id
-        ));
-        Ok(())
+        self.alert_claimed_task_branch_mismatch(engineer, &mismatch)
     }
 
     pub(super) fn maybe_escalate_stale_reviews(&mut self) -> Result<()> {
@@ -2006,6 +2122,7 @@ impl TeamDaemon {
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use super::ClaimedTaskBranchMismatch;
     use crate::team::config::RoleType;
     use crate::team::config::{BoardConfig, WorkflowMode, WorkflowPolicy};
     use crate::team::events::TeamEvent;
@@ -3170,7 +3287,116 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
     }
 
     #[test]
-    fn reconcile_active_tasks_repairs_idle_worktree_from_stale_branch_to_authoritative_task() {
+    fn claimed_task_branch_mismatch_reports_detached_head_claimed_task() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "claimed-branch-detached-head");
+        let engineer = engineer_member("eng-1", Some("manager"), true);
+        let manager = manager_member("manager", None);
+        let daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![manager, engineer])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        crate::team::task_loop::checkout_worktree_branch_from_main(&worktree_dir, "eng-1/42")
+            .unwrap();
+        let head = crate::team::test_support::git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
+        git_ok(&worktree_dir, &["checkout", "--detach", &head]);
+
+        write_owned_task_file_with_context(
+            &repo,
+            42,
+            "authoritative-task",
+            "in-progress",
+            "eng-1",
+            "eng-1/42",
+            ".batty/worktrees/eng-1",
+        );
+
+        let mismatch = daemon
+            .claimed_task_branch_mismatch("eng-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            mismatch,
+            ClaimedTaskBranchMismatch {
+                task_id: 42,
+                expected_branch: "eng-1/42".to_string(),
+                current_branch: "HEAD".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn claimed_task_branch_mismatch_ignores_matching_claimed_branch() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "claimed-branch-match");
+        let engineer = engineer_member("eng-1", Some("manager"), true);
+        let manager = manager_member("manager", None);
+        let daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![manager, engineer])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        crate::team::task_loop::checkout_worktree_branch_from_main(&worktree_dir, "eng-1/42")
+            .unwrap();
+
+        write_owned_task_file_with_context(
+            &repo,
+            42,
+            "authoritative-task",
+            "in-progress",
+            "eng-1",
+            "eng-1/42",
+            ".batty/worktrees/eng-1",
+        );
+
+        assert!(
+            daemon
+                .claimed_task_branch_mismatch("eng-1")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn claimed_task_branch_mismatch_ignores_detached_head_without_claim() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "claimed-branch-no-claim");
+        let engineer = engineer_member("eng-1", Some("manager"), true);
+        let manager = manager_member("manager", None);
+        let daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![manager, engineer])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        let head = crate::team::test_support::git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
+        git_ok(&worktree_dir, &["checkout", "--detach", &head]);
+
+        assert!(
+            daemon
+                .claimed_task_branch_mismatch("eng-1")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn reconcile_active_tasks_alerts_on_branch_mismatch_without_switching() {
         let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "reconcile-stale-branch");
@@ -3218,7 +3444,71 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         daemon.reconcile_active_tasks().unwrap();
 
         assert_eq!(daemon.active_task_id("eng-1"), Some(42));
-        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-1/42");
+        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-1/41");
+        let inbox_root = inbox::inboxes_root(&repo);
+        let manager_messages = inbox::pending_messages(&inbox_root, "manager").unwrap();
+        assert!(manager_messages.iter().any(|message| {
+            message.body.contains("Reconciliation alert")
+                && message.body.contains("eng-1/41")
+                && message.body.contains("eng-1/42")
+        }));
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(&repo)).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "state_reconciliation"
+                && event.role.as_deref() == Some("eng-1")
+                && event.task.as_deref() == Some("42")
+                && event.reason.as_deref() == Some("branch_mismatch")
+        }));
+    }
+
+    #[test]
+    fn deliver_automation_nudge_suppresses_engineer_nudge_when_branch_mismatch_exists() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "nudge-branch-mismatch");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let base_branch = engineer_base_branch_name("eng-1");
+
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        git_ok(&worktree_dir, &["checkout", "-b", "eng-1/41"]);
+        write_owned_task_file_with_context(
+            &repo,
+            42,
+            "authoritative-task",
+            "in-progress",
+            "eng-1",
+            "eng-1/42",
+            ".batty/worktrees/eng-1",
+        );
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), true),
+            ])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        let delivery = daemon
+            .deliver_automation_nudge("eng-1", "Idle nudge: move the task forward.")
+            .unwrap();
+
+        assert_eq!(delivery, MessageDelivery::OrchestratorLogged);
+        let inbox_root = inbox::inboxes_root(&repo);
+        let engineer_messages = inbox::pending_messages(&inbox_root, "eng-1").unwrap();
+        assert!(
+            engineer_messages
+                .iter()
+                .all(|message| { !message.body.contains("Idle nudge: move the task forward.") })
+        );
+        let manager_messages = inbox::pending_messages(&inbox_root, "manager").unwrap();
+        assert!(manager_messages.iter().any(|message| {
+            message.body.contains("Reconciliation alert")
+                && message.body.contains("eng-1/41")
+                && message.body.contains("eng-1/42")
+        }));
     }
 
     // ── manager_for_member_name ──────────────────────────────────
