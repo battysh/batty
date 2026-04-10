@@ -318,14 +318,7 @@ fn select_current_lane<'a>(
         }
     }
 
-    if active_claims.len() == 1 {
-        return active_claims.first().copied();
-    }
-
-    active_claims
-        .iter()
-        .copied()
-        .min_by_key(|candidate| candidate.id)
+    None
 }
 
 fn review_worktree_branch(project_root: &Path, engineer: &str) -> Option<String> {
@@ -750,6 +743,43 @@ mod tests {
                 reason: "eng-1 already moved to task #77 on branch `eng-1/77`".to_string(),
                 next_step: ReviewNormalizationStep::Merge,
             })
+        );
+    }
+
+    #[test]
+    fn classify_review_task_keeps_review_current_when_other_task_is_claimed() {
+        let tmp = tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "review-other-claim");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        checkout_worktree_branch_from_main(&worktree_dir, "eng-1/42").unwrap();
+        fs::write(
+            worktree_dir.join("review-still-live.txt"),
+            "still on review\n",
+        )
+        .unwrap();
+        git_ok(&worktree_dir, &["add", "review-still-live.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "keep review lane current"]);
+
+        let review = Task {
+            branch: Some("eng-1/42".to_string()),
+            ..review_task(42, "eng-1")
+        };
+        let review_board_entry = Task {
+            branch: Some("eng-1/42".to_string()),
+            ..review_task(42, "eng-1")
+        };
+        let active = Task {
+            status: "in-progress".to_string(),
+            branch: Some("eng-1/77".to_string()),
+            ..review_task(77, "eng-1")
+        };
+
+        assert_eq!(
+            classify_review_task(&repo, &review, &[review_board_entry, active]),
+            ReviewQueueState::Current
         );
     }
 
