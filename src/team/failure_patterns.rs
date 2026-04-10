@@ -332,6 +332,8 @@ mod tests {
         TeamEvent {
             event: event.to_string(),
             action_type: None,
+            version: None,
+            git_ref: None,
             role: Some(role.to_string()),
             task: None,
             recipient: None,
@@ -373,6 +375,8 @@ mod tests {
         TeamEvent {
             event: event.to_string(),
             action_type: None,
+            version: None,
+            git_ref: None,
             role: Some(role.to_string()),
             task: Some(task.to_string()),
             recipient: None,

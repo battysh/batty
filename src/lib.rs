@@ -10,6 +10,7 @@ pub mod log;
 pub mod paths;
 pub mod project_registry;
 pub mod prompt;
+pub mod release;
 pub mod shim;
 pub mod task;
 pub mod team;

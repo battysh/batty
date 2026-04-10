@@ -216,7 +216,30 @@ batty grafana status
 - `batty doctor` is the first stop when the team looks stuck.
 - `batty telemetry` and `batty metrics` show throughput and review health.
 
-## 9. Optional: Discord Control Surface (Recommended)
+## 9. Cut A Release From Green Main
+
+When `main` is clean and your verification baseline is green, Batty can record
+the release attempt for you:
+
+```sh
+batty release
+```
+
+The command uses the `Cargo.toml` package version as the default tag
+(`v<version>`), requires a matching `CHANGELOG.md` entry for that version, and
+re-runs the release verification command before tagging. If
+`.batty/team_config/team.yaml` exists, Batty reuses
+`workflow_policy.verification.test_command`; otherwise it falls back to
+`cargo test`.
+
+The command fails fast if you are not on `main`, if the worktree is dirty, if
+the verification command is red, if the changelog entry is missing, or if the
+target tag already exists. On success it writes release notes into
+`.batty/releases/`, creates the annotated git tag, and records the attempt in
+`.batty/releases/latest.{json,md}` plus the normal Batty event/telemetry
+surfaces.
+
+## 10. Optional: Discord Control Surface (Recommended)
 
 Discord gives you three dedicated channels for monitoring your team from your phone.
 
@@ -246,7 +269,7 @@ batty discord status
    - Watch `#batty-events` for task progress and merges
    - Watch `#batty-agents` for agent health
 
-## 10. Optional: Telegram Control Plane
+## 11. Optional: Telegram Control Plane
 
 If you prefer Telegram over Discord, or want both:
 
