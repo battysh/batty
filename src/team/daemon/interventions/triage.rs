@@ -48,7 +48,16 @@ impl TeamDaemon {
             if !self.is_member_idle(&name) {
                 continue;
             }
-            if !self.ready_for_idle_automation(&inbox_root, &name) {
+            let actionable_pending = match inbox::pending_messages(&inbox_root, &name) {
+                Ok(messages) => {
+                    crate::team::delivery::actionable_supervisory_notice_count(&messages)
+                }
+                Err(error) => {
+                    warn!(member = %name, error = %error, "failed to read pending inbox for triage gating");
+                    continue;
+                }
+            };
+            if actionable_pending > 0 {
                 continue;
             }
 

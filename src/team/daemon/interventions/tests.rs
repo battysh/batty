@@ -314,6 +314,33 @@ fn maybe_intervene_triage_backlog_ignores_reports_already_answered_by_manager() 
 }
 
 #[test]
+fn maybe_intervene_triage_backlog_ignores_stale_status_rollups() {
+    let harness = triage_harness()
+        .with_inbox_message("lead", delivered_result("eng-1", "done"), true)
+        .with_inbox_message(
+            "lead",
+            InboxMessage::new_send(
+                "daemon",
+                "lead",
+                "Rollup: review backlog is healthy and no action is required right now.",
+            ),
+            false,
+        );
+    let mut daemon = harness.build_daemon().unwrap();
+
+    enter_idle_epoch(&mut daemon, "lead");
+    daemon.maybe_intervene_triage_backlog().unwrap();
+
+    assert_eq!(daemon.triage_interventions.get("lead"), Some(&1));
+    let pending = harness.pending_inbox_messages("lead").unwrap();
+    assert_eq!(pending.len(), 2);
+    assert!(
+        pending.iter().any(|message| message.from == "architect"
+            && message.body.contains("Triage backlog detected"))
+    );
+}
+
+#[test]
 fn maybe_intervene_triage_backlog_respects_cooldown_after_new_idle_epoch() {
     let harness =
         triage_harness().with_inbox_message("lead", delivered_result("eng-1", "done"), true);

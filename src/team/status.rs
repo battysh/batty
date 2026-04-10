@@ -1146,6 +1146,7 @@ fn merge_status_signal(
     let review_signal = (review_backlog > 0).then(|| format!("needs review ({review_backlog})"));
     let stale_review_signal =
         (stale_review_backlog > 0).then(|| format!("stale review ({stale_review_backlog})"));
+    let actionable_backlog_present = triage_signal.is_some() || review_signal.is_some();
     let mut signals = Vec::new();
     if let Some(existing) = signal {
         signals.push(existing);
@@ -1153,7 +1154,7 @@ fn merge_status_signal(
     if let Some(branch_mismatch) = branch_mismatch_signal {
         signals.push(branch_mismatch);
     }
-    if let Some(stall) = stall_signal {
+    if !actionable_backlog_present && let Some(stall) = stall_signal {
         signals.push(stall);
     }
     if let Some(triage) = triage_signal {
@@ -1306,8 +1307,7 @@ pub(crate) fn delivered_direct_report_triage_state_at(
     }
 
     let member_messages = inbox::all_messages(inbox_root, member_name)?;
-    let mut count = 0usize;
-    let mut newest_result_ts = 0u64;
+    let mut latest_pending_by_report: HashMap<String, u64> = HashMap::new();
     for (msg, delivered) in &member_messages {
         let is_fresh = now_ts.saturating_sub(msg.timestamp) <= TRIAGE_RESULT_FRESHNESS_SECONDS;
         let needs_triage = *delivered
@@ -1318,14 +1318,20 @@ pub(crate) fn delivered_direct_report_triage_state_at(
                     .get(msg.from.as_str())
                     .unwrap_or(&0);
         if needs_triage {
-            count += 1;
-            newest_result_ts = newest_result_ts.max(msg.timestamp);
+            latest_pending_by_report
+                .entry(msg.from.clone())
+                .and_modify(|ts| *ts = (*ts).max(msg.timestamp))
+                .or_insert(msg.timestamp);
         }
     }
 
     Ok(TriageBacklogState {
-        count,
-        newest_result_ts,
+        count: latest_pending_by_report.len(),
+        newest_result_ts: latest_pending_by_report
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0),
     })
 }
 
@@ -1336,12 +1342,25 @@ pub(crate) fn pending_inbox_counts(
     let root = inbox::inboxes_root(project_root);
     members
         .iter()
-        .filter_map(|member| match inbox::pending_message_count(&root, &member.name) {
-            Ok(count) => Some((member.name.clone(), count)),
-            Err(error) => {
-                warn!(member = %member.name, error = %error, "failed to count pending inbox messages");
-                None
-            }
+        .filter_map(|member| {
+            let count = if matches!(member.role_type, RoleType::Architect | RoleType::Manager) {
+                match inbox::pending_messages(&root, &member.name) {
+                    Ok(messages) => crate::team::delivery::actionable_supervisory_notice_count(&messages),
+                    Err(error) => {
+                        warn!(member = %member.name, error = %error, "failed to read pending inbox messages");
+                        return None;
+                    }
+                }
+            } else {
+                match inbox::pending_message_count(&root, &member.name) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        warn!(member = %member.name, error = %error, "failed to count pending inbox messages");
+                        return None;
+                    }
+                }
+            };
+            Some((member.name.clone(), count))
         })
         .collect()
 }
@@ -2643,6 +2662,59 @@ mod tests {
     }
 
     #[test]
+    fn delivered_direct_report_triage_state_dedupes_repeated_delivered_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inbox_root = crate::team::inbox::inboxes_root(tmp.path());
+        crate::team::inbox::init_inbox(&inbox_root, "lead").unwrap();
+        crate::team::inbox::init_inbox(&inbox_root, "eng-1").unwrap();
+
+        let mut first = InboxMessage::new_send("eng-1", "lead", "first result");
+        first.timestamp = now_unix().saturating_sub(30);
+        let first_id = crate::team::inbox::deliver_to_inbox(&inbox_root, &first).unwrap();
+        crate::team::inbox::mark_delivered(&inbox_root, "lead", &first_id).unwrap();
+
+        let mut second = InboxMessage::new_send("eng-1", "lead", "second result");
+        second.timestamp = now_unix().saturating_sub(10);
+        let second_id = crate::team::inbox::deliver_to_inbox(&inbox_root, &second).unwrap();
+        crate::team::inbox::mark_delivered(&inbox_root, "lead", &second_id).unwrap();
+
+        let state =
+            delivered_direct_report_triage_state(&inbox_root, "lead", &["eng-1".to_string()])
+                .unwrap();
+        assert_eq!(state.count, 1);
+        assert_eq!(state.newest_result_ts, second.timestamp);
+    }
+
+    #[test]
+    fn pending_inbox_counts_for_supervisors_ignore_stale_status_rollups() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inbox_root = crate::team::inbox::inboxes_root(tmp.path());
+        crate::team::inbox::init_inbox(&inbox_root, "manager").unwrap();
+
+        crate::team::inbox::deliver_to_inbox(
+            &inbox_root,
+            &InboxMessage::new_send(
+                "daemon",
+                "manager",
+                "Rollup: review backlog is healthy and no action is required right now.",
+            ),
+        )
+        .unwrap();
+        crate::team::inbox::deliver_to_inbox(
+            &inbox_root,
+            &InboxMessage::new_send(
+                "daemon",
+                "manager",
+                "Dispatch queue entry failed validation too many times.",
+            ),
+        )
+        .unwrap();
+
+        let counts = pending_inbox_counts(tmp.path(), &[manager("manager")]);
+        assert_eq!(counts.get("manager"), Some(&1usize));
+    }
+
+    #[test]
     fn build_team_status_rows_promotes_idle_member_with_review_backlog() {
         let members = vec![manager("manager")];
         let runtime_statuses = HashMap::from([(
@@ -3403,10 +3475,7 @@ mod tests {
                 1,
                 0,
             ),
-            Some(
-                "nudged, manager (manager) stalled after 5m: no actionable progress, needs triage (2), needs review (1)"
-                    .to_string()
-            )
+            Some("nudged, needs triage (2), needs review (1)".to_string())
         );
     }
 

@@ -197,6 +197,24 @@ fn should_batch_manager_notice(class: ManagerNoticeClass) -> bool {
     )
 }
 
+fn is_actionable_supervisory_notice(class: ManagerNoticeClass) -> bool {
+    !matches!(
+        class,
+        ManagerNoticeClass::Status | ManagerNoticeClass::Recovery
+    )
+}
+
+pub(in crate::team) fn actionable_supervisory_notice_count(
+    messages: &[inbox::InboxMessage],
+) -> usize {
+    let digest = build_supervisory_digest(messages);
+    digest
+        .entries
+        .into_iter()
+        .filter(|entry| is_actionable_supervisory_notice(entry.class))
+        .count()
+}
+
 fn is_manager_completion_notice(body: &str) -> bool {
     body.contains("awaiting manual review")
         || body.contains("requires manual review")
