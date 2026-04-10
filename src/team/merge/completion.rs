@@ -1195,17 +1195,47 @@ fn load_previous_test_results(board_dir: &Path, task_id: u32) -> Result<Option<T
     Ok(metadata.test_results)
 }
 
+fn path_exists_on_main(worktree_dir: &Path, file: &str) -> Result<bool> {
+    let output = std::process::Command::new("git")
+        .args(["ls-tree", "-r", "--name-only", "main", "--", file])
+        .current_dir(worktree_dir)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to inspect whether {file} exists on main in {}",
+                worktree_dir.display()
+            )
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "failed to inspect whether {file} exists on main in {}: {}",
+            worktree_dir.display(),
+            stderr.trim()
+        );
+    }
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+}
+
 fn revert_out_of_scope_files(worktree_dir: &Path, out_of_scope: &[String]) -> Result<bool> {
     if out_of_scope.is_empty() {
         return Ok(false);
     }
 
     for file in out_of_scope {
-        run_git_with_context(
-            worktree_dir,
-            &["checkout", "main", "--", file],
-            "failed to revert out-of-scope file",
-        )?;
+        if path_exists_on_main(worktree_dir, file)? {
+            run_git_with_context(
+                worktree_dir,
+                &["checkout", "main", "--", file],
+                "failed to revert out-of-scope file",
+            )?;
+        } else {
+            run_git_with_context(
+                worktree_dir,
+                &["rm", "-f", "--ignore-unmatch", "--", file],
+                "failed to remove out-of-scope file added outside the fence",
+            )?;
+        }
     }
 
     run_git_with_context(worktree_dir, &["add", "-A"], "failed to stage scope revert")?;
@@ -1519,6 +1549,16 @@ mod tests {
 
     fn write_task_file(project_root: &Path, id: u32, title: &str) {
         write_task_file_with_body(project_root, id, title, "Task description.\n");
+    }
+
+    fn write_scope_ack_team_config(project_root: &Path) {
+        let team_config_dir = project_root.join(".batty").join("team_config");
+        std::fs::create_dir_all(&team_config_dir).unwrap();
+        std::fs::write(
+            team_config_dir.join("team.yaml"),
+            "name: scope-test\nroles:\n  - name: architect\n    role_type: architect\n    agent: claude\n    instances: 1\n  - name: manager\n    role_type: manager\n    agent: claude\n    instances: 1\n  - name: engineer\n    role_type: engineer\n    agent: codex\n    instances: 1\n",
+        )
+        .unwrap();
     }
 
     fn write_task_file_with_body(project_root: &Path, id: u32, title: &str, body: &str) {
@@ -2156,6 +2196,7 @@ mod tests {
     fn scope_violation_completion_reverts_and_emits_event() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "batty-merge-test");
+        write_scope_ack_team_config(&repo);
         std::fs::create_dir_all(repo.join("docs")).unwrap();
         std::fs::write(repo.join("docs").join("notes.md"), "base notes\n").unwrap();
         git_ok(&repo, &["add", "docs/notes.md"]);
@@ -2216,6 +2257,56 @@ mod tests {
                     .as_deref()
                     .is_some_and(|reason| reason.contains("reclaim_requested=true"))
         }));
+    }
+
+    #[test]
+    fn scope_violation_completion_removes_new_out_of_scope_files_not_on_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        write_scope_ack_team_config(&repo);
+        write_task_file_with_body(
+            &repo,
+            42,
+            "scope-violation-new-file",
+            "Task description.\nSCOPE FENCE: src/lib.rs\n",
+        );
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        let ack = inbox::InboxMessage::new_send("eng-1", "manager", "Scope ACK #42");
+        inbox::deliver_to_inbox(&inbox::inboxes_root(&repo), &ack).unwrap();
+
+        std::fs::write(
+            worktree_dir.join("src").join("lib.rs"),
+            "pub fn smoke() -> bool { true }\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn smoke_test() {\n        assert!(smoke());\n    }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(worktree_dir.join("stray.txt"), "out of scope\n").unwrap();
+        git_ok(&worktree_dir, &["add", "src/lib.rs", "stray.txt"]);
+        git_ok(
+            &worktree_dir,
+            &["commit", "-m", "mixed scope change with stray file"],
+        );
+
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        assert!(!worktree_dir.join("stray.txt").exists());
+        let revert_subject = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["log", "-1", "--format=%s"])
+                .current_dir(&worktree_dir)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert!(revert_subject.contains("Restore fenced files after automatic scope recovery"));
     }
 
     #[test]
