@@ -308,6 +308,7 @@ pub(crate) fn run_board_with_program(
     board_dir: &Path,
     args: &[&str],
 ) -> Result<BoardOutput, BoardError> {
+    repair_blocked_frontmatter_compat(board_dir);
     let current_dir = board_dir
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -334,6 +335,20 @@ pub(crate) fn run_board_with_program(
     );
     let message = format!("`{command}` failed with {status}");
     Err(classify_failure(message, stderr))
+}
+
+fn repair_blocked_frontmatter_compat(board_dir: &Path) {
+    let tasks_dir = board_dir.join("tasks");
+    let Ok(entries) = std::fs::read_dir(&tasks_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        let _ = super::task_cmd::normalize_blocked_frontmatter(&path);
+    }
 }
 
 fn format_board_command(program: &str, board_dir: &Path, args: &[&str]) -> String {
@@ -594,6 +609,35 @@ mod tests {
         let cwd = fs::canonicalize(fs::read_to_string(&output_path).unwrap().trim()).unwrap();
         let expected = fs::canonicalize(temp.path()).unwrap();
         assert_eq!(cwd, expected);
+    }
+
+    #[test]
+    fn run_board_repairs_legacy_blocked_frontmatter_before_invocation() {
+        let temp = TempDir::new().unwrap();
+        let board_dir = temp.path().join("board");
+        let tasks_dir = board_dir.join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        let task_path = tasks_dir.join("001-blocked-task.md");
+        fs::write(
+            &task_path,
+            "---\nid: 1\ntitle: blocked task\nstatus: blocked\npriority: high\nblocked: legacy reason string\nclass: standard\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        let script_path = temp.path().join("fake-kanban.sh");
+        fs::write(&script_path, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(&script_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions).unwrap();
+        }
+
+        run_board_with_program(script_path.to_str().unwrap(), &board_dir, &["list"]).unwrap();
+
+        let content = fs::read_to_string(&task_path).unwrap();
+        assert!(content.contains("blocked: true"));
+        assert!(content.contains("block_reason: legacy reason string"));
     }
 
     #[test]

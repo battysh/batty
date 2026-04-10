@@ -176,7 +176,10 @@ impl Task {
             last_output_bytes: fm.last_output_bytes,
             // Prefer the richer `block_reason` if present so operators see
             // the real reason, not the "blocked" placeholder from `blocked: true`.
-            blocked: fm.block_reason.or(fm.blocked),
+            blocked: fm
+                .block_reason
+                .or(fm.blocked)
+                .or_else(|| fm.blocked_on.clone()),
             tags: fm.tags,
             depends_on: fm.depends_on,
             review_owner: fm.review_owner,
@@ -363,6 +366,23 @@ Body.
             task.blocked.is_some(),
             "blocked: true must produce a Some(...) value"
         );
+    }
+
+    #[test]
+    fn parse_task_with_blocked_on_only_uses_human_reason() {
+        let content = r#"---
+id: 430
+title: blocked via blocked_on only
+status: blocked
+priority: high
+blocked_on: waiting-for-review
+---
+
+Body.
+"#;
+        let task = Task::parse(content).unwrap();
+        assert_eq!(task.blocked.as_deref(), Some("waiting-for-review"));
+        assert_eq!(task.blocked_on.as_deref(), Some("waiting-for-review"));
     }
 
     #[test]
