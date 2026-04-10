@@ -1125,6 +1125,51 @@ fn maybe_intervene_owned_tasks_engineer_message_captures_initial_state() {
 }
 
 #[test]
+fn maybe_intervene_owned_tasks_engineer_message_includes_branch_recovery_blocker() {
+    let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "owned-task-branch-blocker");
+    let mut daemon = TestDaemonBuilder::new(repo.as_path())
+        .members(vec![
+            manager_member("lead", Some("architect")),
+            engineer_member("eng-1", Some("lead"), true),
+        ])
+        .pane_map(HashMap::from([("eng-1".to_string(), "%999".to_string())]))
+        .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+        .build();
+
+    let root = inbox::inboxes_root(&repo);
+    inbox::init_inbox(&root, "eng-1").unwrap();
+    write_owned_task_file(&repo, 191, "owned-task", "in-progress", "eng-1");
+
+    let team_config_dir = repo.join(".batty").join("team_config");
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    let base_branch = crate::team::task_loop::engineer_base_branch_name("eng-1");
+    crate::team::task_loop::setup_engineer_worktree(
+        &repo,
+        &worktree_dir,
+        &base_branch,
+        &team_config_dir,
+    )
+    .unwrap();
+    std::fs::write(worktree_dir.join("scratch.txt"), "dirty\n").unwrap();
+
+    daemon.update_automation_timers_for_state("eng-1", MemberState::Working);
+    daemon.update_automation_timers_for_state("eng-1", MemberState::Idle);
+    backdate_idle_grace(&mut daemon, "eng-1");
+    daemon.maybe_intervene_owned_tasks().unwrap();
+
+    let pending = inbox::pending_messages(&root, "eng-1").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].body.contains("Branch recovery status:"));
+    assert!(pending[0].body.contains(
+        "branch recovery blocked (#191 on eng-main/eng-1; expected eng-1/191; dirty worktree)"
+    ));
+    assert!(pending[0].body.contains("git status --short"));
+    assert!(pending[0].body.contains("git branch --show-current"));
+}
+
+#[test]
 fn maybe_intervene_owned_tasks_fires_for_persistent_startup_idle_state() {
     let tmp = tempfile::tempdir().unwrap();
     let mut daemon = TestDaemonBuilder::new(tmp.path())

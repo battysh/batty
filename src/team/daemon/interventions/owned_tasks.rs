@@ -238,6 +238,18 @@ impl TeamDaemon {
             2. Review each owned task:\n{task_context_cmds}",
         );
 
+        if let Some(branch_signal) = crate::team::status::claimed_task_branch_signal(
+            &self.config.project_root,
+            &member.name,
+            owned_tasks,
+        ) && branch_signal.contains("branch recovery blocked")
+        {
+            message.push_str(&format!(
+                "\nBranch recovery status: {branch_signal}.\nResolve it first with `cd {} && git status --short && git branch --show-current`.",
+                self.worktree_dir(&member.name).display()
+            ));
+        }
+
         if let Some(first_report) = direct_reports.first() {
             let report_is_engineer = self
                 .config

@@ -466,6 +466,25 @@ fn format_branch_mismatch_signal(
     }
 }
 
+fn format_blocked_branch_recovery_signal(
+    task_id: u32,
+    current_branch: &str,
+    expected_branch: &str,
+    detail: &str,
+) -> String {
+    if current_branch == "HEAD" {
+        format!(
+            "branch recovery blocked (#{} detached HEAD; expected {}; {})",
+            task_id, expected_branch, detail
+        )
+    } else {
+        format!(
+            "branch recovery blocked (#{} on {}; expected {}; {})",
+            task_id, current_branch, expected_branch, detail
+        )
+    }
+}
+
 fn select_authoritative_claimed_task<'a>(
     member_name: &str,
     current_branch: &str,
@@ -482,6 +501,70 @@ fn select_authoritative_claimed_task<'a>(
     }
 
     claimed_tasks.iter().copied().min_by_key(|task| task.id)
+}
+
+fn task_branch_signal_for_task(
+    project_root: &Path,
+    task: &task::Task,
+    current_branch: &str,
+) -> Option<String> {
+    let member_name = task.claimed_by.as_deref()?;
+    if !member_name.starts_with("eng-")
+        || classify_owned_task_status(task.status.as_str()) != Some(true)
+    {
+        return None;
+    }
+
+    let expected_branch = managed_task_branch(member_name, task);
+    if current_branch == expected_branch {
+        return None;
+    }
+
+    if current_branch == "HEAD" {
+        return Some(format_blocked_branch_recovery_signal(
+            task.id,
+            current_branch,
+            &expected_branch,
+            "manual checkout required",
+        ));
+    }
+
+    let worktree_dir = project_root
+        .join(".batty")
+        .join("worktrees")
+        .join(member_name);
+    if crate::team::task_loop::worktree_has_user_changes(&worktree_dir).unwrap_or(false) {
+        return Some(format_blocked_branch_recovery_signal(
+            task.id,
+            current_branch,
+            &expected_branch,
+            "dirty worktree",
+        ));
+    }
+
+    Some(format_branch_mismatch_signal(
+        task.id,
+        current_branch,
+        &expected_branch,
+    ))
+}
+
+pub(crate) fn claimed_task_branch_signal(
+    project_root: &Path,
+    member_name: &str,
+    claimed_tasks: &[&task::Task],
+) -> Option<String> {
+    let worktree_dir = project_root
+        .join(".batty")
+        .join("worktrees")
+        .join(member_name);
+    if !worktree_dir.is_dir() {
+        return None;
+    }
+
+    let current_branch = git_stdout_raw(&worktree_dir, ["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let task = select_authoritative_claimed_task(member_name, &current_branch, claimed_tasks)?;
+    task_branch_signal_for_task(project_root, task, &current_branch)
 }
 
 pub(crate) fn branch_mismatch_by_member(
@@ -509,29 +592,12 @@ pub(crate) fn branch_mismatch_by_member(
         .iter()
         .filter(|member| member.role_type == RoleType::Engineer && member.use_worktrees)
         .filter_map(|member| {
-            let worktree_dir = project_root
-                .join(".batty")
-                .join("worktrees")
-                .join(&member.name);
-            if !worktree_dir.is_dir() {
-                return None;
-            }
-
-            let current_branch =
-                git_stdout_raw(&worktree_dir, ["rev-parse", "--abbrev-ref", "HEAD"])?;
             let claimed_tasks = tasks
                 .iter()
                 .filter(|task| task_has_active_claim(task, &member.name))
                 .collect::<Vec<_>>();
-            let task =
-                select_authoritative_claimed_task(&member.name, &current_branch, &claimed_tasks)?;
-            let expected_branch = managed_task_branch(&member.name, task);
-            (current_branch != expected_branch).then(|| {
-                (
-                    member.name.clone(),
-                    format_branch_mismatch_signal(task.id, &current_branch, &expected_branch),
-                )
-            })
+            claimed_task_branch_signal(project_root, &member.name, &claimed_tasks)
+                .map(|signal| (member.name.clone(), signal))
         })
         .collect()
 }
@@ -1302,7 +1368,7 @@ pub(crate) fn board_status_task_queues(
     let mut review_queue = Vec::new();
     for task in task::load_tasks_from_dir(&tasks_dir)? {
         let inferred = infer_runtime_task_metadata(project_root, &task);
-        let branch_mismatch = task_branch_mismatch(&task, &inferred);
+        let branch_mismatch = task_branch_mismatch(project_root, &task, &inferred);
         let test_summary = crate::team::board::read_workflow_metadata(&task.source_path)
             .ok()
             .and_then(|metadata| metadata.test_results)
@@ -1366,18 +1432,13 @@ fn infer_runtime_task_metadata(project_root: &Path, task: &task::Task) -> Inferr
     }
 }
 
-fn task_branch_mismatch(task: &task::Task, inferred: &InferredTaskMetadata) -> Option<String> {
-    let member_name = task.claimed_by.as_deref()?;
-    if !member_name.starts_with("eng-")
-        || classify_owned_task_status(task.status.as_str()) != Some(true)
-    {
-        return None;
-    }
-
+fn task_branch_mismatch(
+    project_root: &Path,
+    task: &task::Task,
+    inferred: &InferredTaskMetadata,
+) -> Option<String> {
     let current_branch = inferred.branch.as_deref()?;
-    let expected_branch = managed_task_branch(member_name, task);
-    (current_branch != expected_branch)
-        .then(|| format_branch_mismatch_signal(task.id, current_branch, &expected_branch))
+    task_branch_signal_for_task(project_root, task, current_branch)
 }
 
 fn git_stdout_raw<const N: usize>(cwd: &Path, args: [&str; N]) -> Option<String> {
@@ -2592,7 +2653,7 @@ mod tests {
         )]);
         let branch_mismatches = HashMap::from([(
             "eng-1".to_string(),
-            "branch mismatch (#41 detached HEAD; expected eng-1/41)".to_string(),
+            "branch recovery blocked (#41 detached HEAD; expected eng-1/41; manual checkout required)".to_string(),
         )]);
 
         let rows = build_team_status_rows(
@@ -2609,7 +2670,9 @@ mod tests {
 
         assert_eq!(
             rows[0].signal.as_deref(),
-            Some("nudge paused, branch mismatch (#41 detached HEAD; expected eng-1/41)")
+            Some(
+                "nudge paused, branch recovery blocked (#41 detached HEAD; expected eng-1/41; manual checkout required)"
+            )
         );
     }
 
@@ -2644,7 +2707,9 @@ mod tests {
 
         assert_eq!(
             mismatches.get("eng-1").map(String::as_str),
-            Some("branch mismatch (#41 detached HEAD; expected eng-1/41)")
+            Some(
+                "branch recovery blocked (#41 detached HEAD; expected eng-1/41; manual checkout required)"
+            )
         );
     }
 
@@ -3241,7 +3306,48 @@ mod tests {
         assert_eq!(active_tasks[0].branch.as_deref(), Some("HEAD"));
         assert_eq!(
             active_tasks[0].branch_mismatch.as_deref(),
-            Some("branch mismatch (#41 detached HEAD; expected eng-1/41)")
+            Some(
+                "branch recovery blocked (#41 detached HEAD; expected eng-1/41; manual checkout required)"
+            )
+        );
+    }
+
+    #[test]
+    fn board_status_task_queues_surfaces_dirty_branch_recovery_blocker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = crate::team::test_support::init_git_repo(&tmp, "status-dirty-board");
+        let tasks_dir = repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(
+            tasks_dir.join("041-active.md"),
+            "---\nid: 41\ntitle: Active task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\n---\n",
+        )
+        .unwrap();
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = crate::team::task_loop::engineer_base_branch_name("eng-1");
+        crate::team::task_loop::setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            &base_branch,
+            &team_config_dir,
+        )
+        .unwrap();
+        fs::write(worktree_dir.join("scratch.txt"), "dirty\n").unwrap();
+
+        let (active_tasks, review_queue) = board_status_task_queues(&repo).unwrap();
+
+        assert!(review_queue.is_empty());
+        assert_eq!(
+            active_tasks[0].branch_mismatch.as_deref(),
+            Some(
+                "branch recovery blocked (#41 on eng-main/eng-1; expected eng-1/41; dirty worktree)"
+            )
         );
     }
 

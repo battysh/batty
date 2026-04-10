@@ -193,7 +193,7 @@ impl TeamDaemon {
                 .is_some_and(|branch| branch == mismatch.expected_branch)
                 && mismatch.current_branch == base_branch;
             if !launching_claimed_task_from_base {
-                self.alert_claimed_task_branch_mismatch(engineer, &mismatch)?;
+                self.alert_claimed_task_branch_mismatch(engineer, &mismatch, None)?;
                 bail!(
                     "engineer '{}' worktree is on '{}' but claimed task #{} expects '{}'; correct the branch manually before dispatch",
                     engineer,
