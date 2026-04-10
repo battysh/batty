@@ -13,11 +13,18 @@ use crate::team::task_loop::{
     ADDITIVE_CONFLICT_AUTO_RESOLVE_FENCE, branch_is_merged_into,
     checkout_worktree_branch_from_main, current_worktree_branch, delete_branch,
     engineer_base_branch_name, is_worktree_safe_to_mutate, merge_additive_only_text,
+    worktree_has_user_changes,
 };
 use crate::team::verification::{self, VerifyStatus};
 
 use super::git_ops::{describe_git_failure, force_clean_worktree, run_git_with_context};
-use super::lock::MergeOutcome;
+use super::lock::{MergeMode, MergeOutcome, MergeSuccess};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RootMergePlan {
+    mode: MergeMode,
+    reason: Option<String>,
+}
 
 pub(crate) fn merge_engineer_branch(
     project_root: &Path,
@@ -38,30 +45,6 @@ pub(crate) fn merge_engineer_branch(
 
     let branch = current_worktree_branch(&worktree_dir)?;
     info!(engineer = engineer_name, branch = %branch, "merging worktree branch");
-
-    // Ensure project_root is on main before merging. Without this check,
-    // the merge silently lands on whatever branch happens to be checked out,
-    // causing "merge reported success but commits not on main" (#189, #198).
-    let main_branch = current_worktree_branch(project_root)?;
-    if main_branch != "main" {
-        warn!(
-            engineer = engineer_name,
-            branch = %branch,
-            actual_branch = %main_branch,
-            "project root not on main before merge, attempting checkout"
-        );
-        let checkout = run_git_with_context(
-            project_root,
-            &["checkout", "main"],
-            "checkout main in project root before merge",
-        )?;
-        if !checkout.status.success() {
-            let stderr = String::from_utf8_lossy(&checkout.stderr).trim().to_string();
-            return Ok(MergeOutcome::MergeFailure(format!(
-                "project root is on '{main_branch}', not 'main', and checkout failed: {stderr}"
-            )));
-        }
-    }
 
     // Fetch latest main into the worktree so rebase sees current state.
     let _ = run_git_with_context(
@@ -122,21 +105,33 @@ pub(crate) fn merge_engineer_branch(
         )));
     }
 
-    let output = run_git_with_context(
-        project_root,
-        &["merge", &branch, "--no-edit"],
-        &format!("merge engineer branch '{branch}' from '{engineer_name}' into main"),
-    )?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        warn!(engineer = engineer_name, branch = %branch, "git merge failed");
-        return Ok(MergeOutcome::MergeFailure(describe_git_failure(
-            project_root,
-            &["merge", &branch, "--no-edit"],
-            &format!("merge engineer branch '{branch}' from '{engineer_name}' into main"),
-            &stderr,
-        )));
+    let merge_plan = plan_root_merge(project_root).with_context(|| {
+        format!("determine merge strategy for engineer branch '{branch}' from '{engineer_name}'")
+    })?;
+    let merge_result = match merge_plan.mode {
+        MergeMode::DirectRoot => merge_branch_into_root_main(project_root, engineer_name, &branch),
+        MergeMode::IsolatedIntegration => {
+            merge_branch_via_isolated_integration(project_root, engineer_name, &branch)
+        }
+    };
+    if let Err(error) = merge_result {
+        let prefix = match merge_plan.mode {
+            MergeMode::DirectRoot => "direct merge path failed",
+            MergeMode::IsolatedIntegration => "isolated merge path failed",
+        };
+        let reason = merge_plan
+            .reason
+            .as_deref()
+            .map(|reason| format!("{prefix}: {reason}: {error}"))
+            .unwrap_or_else(|| format!("{prefix}: {error}"));
+        warn!(
+            engineer = engineer_name,
+            branch = %branch,
+            mode = ?merge_plan.mode,
+            error = %reason,
+            "merge execution failed"
+        );
+        return Ok(MergeOutcome::MergeFailure(reason));
     }
 
     println!("Merged branch '{branch}' from {engineer_name}");
@@ -149,7 +144,134 @@ pub(crate) fn merge_engineer_branch(
         );
     }
 
-    Ok(MergeOutcome::Success)
+    Ok(MergeOutcome::Success(MergeSuccess {
+        mode: merge_plan.mode,
+        reason: merge_plan.reason,
+    }))
+}
+
+fn plan_root_merge(project_root: &Path) -> Result<RootMergePlan> {
+    let branch = current_worktree_branch(project_root).unwrap_or_else(|_| "HEAD".to_string());
+    let has_user_changes = worktree_has_user_changes(project_root)?;
+    if branch == "main" && !has_user_changes {
+        return Ok(RootMergePlan {
+            mode: MergeMode::DirectRoot,
+            reason: None,
+        });
+    }
+
+    let reason = match (branch.as_str(), has_user_changes) {
+        ("main", true) => "root main checkout has local changes".to_string(),
+        ("HEAD", true) => "root checkout is detached HEAD with local changes".to_string(),
+        ("HEAD", false) => "root checkout is detached HEAD".to_string(),
+        (other, true) => format!("root checkout is on '{other}' with local changes"),
+        (other, false) => format!("root checkout is on '{other}' instead of 'main'"),
+    };
+    Ok(RootMergePlan {
+        mode: MergeMode::IsolatedIntegration,
+        reason: Some(reason),
+    })
+}
+
+fn merge_branch_into_root_main(
+    project_root: &Path,
+    engineer_name: &str,
+    branch: &str,
+) -> Result<()> {
+    let output = run_git_with_context(
+        project_root,
+        &["merge", branch, "--no-edit"],
+        &format!("merge engineer branch '{branch}' from '{engineer_name}' into main"),
+    )?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!(
+            "{}",
+            describe_git_failure(
+                project_root,
+                &["merge", branch, "--no-edit"],
+                &format!("merge engineer branch '{branch}' from '{engineer_name}' into main"),
+                &stderr,
+            )
+        );
+    }
+    Ok(())
+}
+
+fn merge_branch_via_isolated_integration(
+    project_root: &Path,
+    engineer_name: &str,
+    branch: &str,
+) -> Result<()> {
+    let main_before = run_git_with_context(
+        project_root,
+        &["rev-parse", "refs/heads/main"],
+        "capture main ref before isolated merge",
+    )?;
+    if !main_before.status.success() {
+        bail!(
+            "failed to read main ref before isolated merge: {}",
+            String::from_utf8_lossy(&main_before.stderr).trim()
+        );
+    }
+    let main_before = String::from_utf8_lossy(&main_before.stdout)
+        .trim()
+        .to_string();
+    let integration =
+        crate::worktree::prepare_integration_worktree(project_root, "merge-main-", "main")?;
+    let merge = run_git_with_context(
+        integration.path(),
+        &["merge", branch, "--no-edit"],
+        &format!(
+            "merge engineer branch '{branch}' from '{engineer_name}' in isolated integration worktree"
+        ),
+    )?;
+    if !merge.status.success() {
+        let stderr = String::from_utf8_lossy(&merge.stderr).trim().to_string();
+        bail!(
+            "{}",
+            describe_git_failure(
+                integration.path(),
+                &["merge", branch, "--no-edit"],
+                &format!(
+                    "merge engineer branch '{branch}' from '{engineer_name}' in isolated integration worktree"
+                ),
+                &stderr,
+            )
+        );
+    }
+
+    let integration_head = run_git_with_context(
+        integration.path(),
+        &["rev-parse", "HEAD"],
+        "capture isolated integration merge head",
+    )?;
+    if !integration_head.status.success() {
+        bail!(
+            "failed to read isolated integration merge head: {}",
+            String::from_utf8_lossy(&integration_head.stderr).trim()
+        );
+    }
+    let integration_head = String::from_utf8_lossy(&integration_head.stdout)
+        .trim()
+        .to_string();
+    let advance_main = run_git_with_context(
+        project_root,
+        &[
+            "update-ref",
+            "refs/heads/main",
+            integration_head.as_str(),
+            main_before.as_str(),
+        ],
+        "advance main ref after isolated merge",
+    )?;
+    if !advance_main.status.success() {
+        bail!(
+            "failed to advance main after isolated merge: {}",
+            String::from_utf8_lossy(&advance_main.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 /// Try to auto-resolve rebase conflicts for files that batty manages.
@@ -428,7 +550,13 @@ mod tests {
         git_ok(&repo, &["commit", "-m", "main advance"]);
 
         let result = merge_engineer_branch(&repo, "eng-1").unwrap();
-        assert!(matches!(result, MergeOutcome::Success));
+        assert!(matches!(
+            result,
+            MergeOutcome::Success(MergeSuccess {
+                mode: MergeMode::DirectRoot,
+                ..
+            })
+        ));
         assert!(repo.join("feature.txt").exists());
         assert!(repo.join("other.txt").exists());
     }
@@ -516,7 +644,7 @@ overall_parity: 100%
         git_ok(&worktree_dir, &["commit", "-m", "engineer work"]);
 
         let result = merge_engineer_branch(&repo, "eng-1").unwrap();
-        assert!(matches!(result, MergeOutcome::Success));
+        assert!(matches!(result, MergeOutcome::Success(_)));
 
         let main_head = git_stdout(&repo, &["rev-parse", "HEAD"]);
         let worktree_head = git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
@@ -534,7 +662,7 @@ overall_parity: 100%
 
         let result = merge_engineer_branch(&repo, "eng-empty").unwrap();
 
-        assert!(matches!(result, MergeOutcome::Success));
+        assert!(matches!(result, MergeOutcome::Success(_)));
         assert_eq!(git_stdout(&repo, &["rev-parse", "main"]), main_before);
     }
 
@@ -548,7 +676,7 @@ overall_parity: 100%
 
         let result = merge_engineer_branch(&repo, "eng-empty").unwrap();
 
-        assert!(matches!(result, MergeOutcome::Success));
+        assert!(matches!(result, MergeOutcome::Success(_)));
         assert_eq!(
             git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
             engineer_base_branch_name("eng-empty")
@@ -577,7 +705,7 @@ overall_parity: 100%
 
         let result = merge_engineer_branch(&repo, "eng-stale").unwrap();
 
-        assert!(matches!(result, MergeOutcome::Success));
+        assert!(matches!(result, MergeOutcome::Success(_)));
         assert!(repo.join("feature.txt").exists());
         assert!(repo.join("main-one.txt").exists());
         assert!(repo.join("main-two.txt").exists());
@@ -604,7 +732,7 @@ overall_parity: 100%
         git_ok(&worktree_dir, &["commit", "-m", "engineer work"]);
 
         let result = merge_engineer_branch(&repo, "eng-1").unwrap();
-        assert!(matches!(result, MergeOutcome::Success));
+        assert!(matches!(result, MergeOutcome::Success(_)));
         assert_eq!(
             git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
             engineer_base_branch_name("eng-1")
@@ -631,7 +759,7 @@ overall_parity: 100%
         git_ok(&worktree_dir, &["commit", "-m", "add file"]);
 
         let result = merge_engineer_branch(&repo, "eng-1").unwrap();
-        assert!(matches!(result, MergeOutcome::Success));
+        assert!(matches!(result, MergeOutcome::Success(_)));
 
         let status = git_stdout(&worktree_dir, &["status", "--porcelain"]);
         let tracked_changes: Vec<&str> = status
@@ -755,7 +883,7 @@ overall_parity: 100%
 
         let result = merge_engineer_branch(&repo, "eng-delete").unwrap();
 
-        assert!(matches!(result, MergeOutcome::Success));
+        assert!(matches!(result, MergeOutcome::Success(_)));
         assert!(
             !git(&repo, &["rev-parse", "--verify", "eng-delete"])
                 .status
@@ -827,7 +955,7 @@ overall_parity: 100%
 
         let result = merge_engineer_branch(&repo, "eng-2").unwrap();
 
-        assert!(matches!(result, MergeOutcome::Success));
+        assert!(matches!(result, MergeOutcome::Success(_)));
         let merged = std::fs::read_to_string(review_file).unwrap();
         assert!(merged.contains("\"main\""));
         assert!(merged.contains("\"engineer\""));
@@ -873,7 +1001,7 @@ overall_parity: 100%
     }
 
     #[test]
-    fn merge_with_dirty_main_returns_merge_failure() {
+    fn merge_with_dirty_main_uses_isolated_integration_path() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "batty-merge-test");
         let worktree_dir = repo.join(".batty").join("worktrees").join("eng-3");
@@ -885,22 +1013,33 @@ overall_parity: 100%
 
         setup_engineer_worktree(&repo, &worktree_dir, "eng-3", &team_config_dir).unwrap();
 
-        std::fs::write(worktree_dir.join("journal.md"), "engineer version\n").unwrap();
-        git_ok(&worktree_dir, &["add", "journal.md"]);
+        std::fs::write(worktree_dir.join("feature.txt"), "engineer version\n").unwrap();
+        git_ok(&worktree_dir, &["add", "feature.txt"]);
         git_ok(&worktree_dir, &["commit", "-m", "engineer update"]);
 
         std::fs::write(repo.join("journal.md"), "dirty main\n").unwrap();
 
         let result = merge_engineer_branch(&repo, "eng-3").unwrap();
         match result {
-            MergeOutcome::MergeFailure(stderr) => {
+            MergeOutcome::Success(success) => {
+                assert_eq!(success.mode, MergeMode::IsolatedIntegration);
                 assert!(
-                    stderr.contains("would be overwritten by merge")
-                        || stderr.contains("Please commit your changes or stash them"),
-                    "unexpected merge failure stderr: {stderr}"
+                    success
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("local changes")),
+                    "expected dirty-root isolation reason, got {success:?}"
+                );
+                assert_eq!(
+                    git_stdout(&repo, &["show", "main:feature.txt"]),
+                    "engineer version"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(repo.join("journal.md")).unwrap(),
+                    "dirty main\n"
                 );
             }
-            other => panic!("expected merge failure outcome, got {other:?}"),
+            other => panic!("expected isolated merge success, got {other:?}"),
         }
     }
 
@@ -921,6 +1060,12 @@ overall_parity: 100%
         git_ok(&worktree_dir, &["commit", "-m", "engineer update"]);
 
         std::fs::write(repo.join("journal.md"), "dirty main\n").unwrap();
+        std::fs::create_dir_all(repo.join(".batty")).unwrap();
+        std::fs::write(
+            repo.join(".batty").join("integration-worktrees"),
+            "not a directory\n",
+        )
+        .unwrap();
 
         let result = merge_engineer_branch(&repo, "eng-3").unwrap();
 
@@ -930,6 +1075,14 @@ overall_parity: 100%
             git(&repo, &["rev-parse", "--verify", "eng-3"])
                 .status
                 .success()
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("journal.md")).unwrap(),
+            "dirty main\n"
+        );
+        assert!(
+            !repo.join("feature.txt").exists(),
+            "main ref should not advance when isolated merge preparation fails"
         );
     }
 
@@ -1083,17 +1236,19 @@ overall_parity: 100%
 
         let result = merge_engineer_branch(&repo, "eng-off").unwrap();
         match result {
-            MergeOutcome::Success => {
-                let branch = git_stdout(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
-                assert_eq!(branch, "main");
-            }
-            MergeOutcome::MergeFailure(msg) => {
+            MergeOutcome::Success(success) => {
+                assert_eq!(success.mode, MergeMode::IsolatedIntegration);
                 assert!(
-                    msg.contains("not 'main'"),
-                    "expected branch mismatch message, got: {msg}"
+                    success
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("detached HEAD")),
+                    "expected detached-head isolation reason, got {success:?}"
                 );
+                let branch = git_stdout(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+                assert_eq!(branch, "HEAD");
             }
-            other => panic!("expected Success or MergeFailure, got {other:?}"),
+            other => panic!("expected isolated merge success, got {other:?}"),
         }
     }
 
@@ -1115,7 +1270,13 @@ overall_parity: 100%
         );
 
         let result = merge_engineer_branch(&repo, "eng-ok").unwrap();
-        assert!(matches!(result, MergeOutcome::Success));
+        assert!(matches!(
+            result,
+            MergeOutcome::Success(MergeSuccess {
+                mode: MergeMode::DirectRoot,
+                ..
+            })
+        ));
         assert!(repo.join("feature.txt").exists());
     }
 
