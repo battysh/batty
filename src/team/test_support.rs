@@ -44,10 +44,30 @@ impl Drop for EnvVarGuard {
     }
 }
 
-pub(crate) fn git(dir: &Path, args: &[&str]) -> Output {
+fn isolated_git_config_path() -> &'static str {
+    #[cfg(windows)]
+    {
+        "NUL"
+    }
+    #[cfg(not(windows))]
+    {
+        "/dev/null"
+    }
+}
+
+fn git_with_env(dir: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
     let mut last_not_found = None;
     for program in ["git", "/usr/bin/git", "/opt/homebrew/bin/git"] {
-        match Command::new(program).args(args).current_dir(dir).output() {
+        let mut command = Command::new(program);
+        command.args(args).current_dir(dir);
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        match command
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", isolated_git_config_path())
+            .output()
+        {
             Ok(output) => return output,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 last_not_found = Some(error);
@@ -60,6 +80,10 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> Output {
         std::io::Error::new(std::io::ErrorKind::NotFound, "git binary not found")
     });
     panic!("git {:?} failed to run: {error}", args)
+}
+
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Output {
+    git_with_env(dir, args, &[])
 }
 
 pub(crate) fn git_ok(dir: &Path, args: &[&str]) {
@@ -592,7 +616,7 @@ pub(crate) fn backdate_idle_grace(daemon: &mut TeamDaemon, member_name: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{TestDaemonBuilder, test_channel_config};
+    use super::{TestDaemonBuilder, git_with_env, test_channel_config};
 
     #[test]
     fn test_daemon_builder_initializes_delivery_runtime_fields() {
@@ -617,5 +641,50 @@ mod tests {
         assert!(config.board_channel_id.is_none());
         assert!(config.commands_channel_id.is_none());
         assert!(config.events_channel_id.is_none());
+    }
+
+    #[test]
+    fn init_git_repo_ignores_broken_global_git_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(
+            repo.join("src").join("lib.rs"),
+            "pub fn smoke() -> bool { true }\n",
+        )
+        .unwrap();
+        let broken_config = tmp.path().join("broken.gitconfig");
+        std::fs::write(&broken_config, "[user\nname = broken\n").unwrap();
+        let broken_config_path = broken_config.to_string_lossy().into_owned();
+        let extra_env = [("GIT_CONFIG_GLOBAL", broken_config_path.as_str())];
+
+        let init = git_with_env(
+            tmp.path(),
+            &["init", "-b", "main", repo.to_string_lossy().as_ref()],
+            &extra_env,
+        );
+        assert!(
+            init.status.success(),
+            "git init should ignore broken global config"
+        );
+        let config_email = git_with_env(
+            &repo,
+            &["config", "user.email", "batty@example.com"],
+            &extra_env,
+        );
+        assert!(config_email.status.success());
+        let config_name = git_with_env(&repo, &["config", "user.name", "Batty Tests"], &extra_env);
+        assert!(config_name.status.success());
+        let add = git_with_env(&repo, &["add", "."], &extra_env);
+        assert!(add.status.success());
+        let commit = git_with_env(&repo, &["commit", "-m", "initial"], &extra_env);
+        assert!(
+            commit.status.success(),
+            "git commit should ignore broken global config:\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&commit.stdout),
+            String::from_utf8_lossy(&commit.stderr)
+        );
+
+        assert!(repo.join(".git").is_dir());
     }
 }
