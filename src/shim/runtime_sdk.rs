@@ -36,6 +36,8 @@ const SDK_COMMAND_POLL_MS: u64 = 1000;
 const SDK_KEEPALIVE_IDLE_SECS: u64 = 300;
 const SDK_KEEPALIVE_MESSAGE: &str =
     "Continue monitoring. If you have no pending work, reply with 'idle'.";
+const PROACTIVE_CONTEXT_WARNING_PCT: u8 = 80;
+const DEFAULT_CONTEXT_LIMIT_TOKENS: u64 = 128_000;
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -55,6 +57,8 @@ struct SdkState {
     last_sent_message_from: Option<String>,
     /// Preview of the last in-flight message body.
     last_sent_message_preview: Option<String>,
+    /// Most recent model name observed from Claude output.
+    last_model_name: Option<String>,
     /// Messages queued while the agent is in Working state.
     message_queue: VecDeque<QueuedMessage>,
     /// Total bytes of response text received.
@@ -126,6 +130,7 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
         pending_message_id: None,
         last_sent_message_from: None,
         last_sent_message_preview: None,
+        last_model_name: None,
         message_queue: VecDeque::new(),
         cumulative_output_bytes: 0,
         model: None,
@@ -218,11 +223,15 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                     let model_name = msg.model_name();
                     // Extract text from the assistant message
                     if let Some(ref message) = msg.message {
+                        let model_name = msg.model_name();
                         let text = sdk_types::extract_assistant_text(message);
                         if !text.is_empty() {
                             let mut st = state_stdout.lock().unwrap();
                             if !turn_in_flight(&st) {
                                 continue;
+                            }
+                            if st.last_model_name.is_none() {
+                                st.last_model_name = model_name;
                             }
                             st.accumulated_response.push_str(&text);
                             st.cumulative_output_bytes += text.len() as u64;
@@ -299,28 +308,8 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                             st.session_id = sid.clone();
                         }
                     }
-                    if st.model.is_none() {
-                        st.model = msg.model_name();
-                    }
-
-                    // Track cumulative token usage from result messages.
-                    if let Some(ref usage) = msg.usage {
-                        st.cumulative_input_tokens = st
-                            .cumulative_input_tokens
-                            .saturating_add(usage.input_tokens);
-                        st.cumulative_output_tokens = st
-                            .cumulative_output_tokens
-                            .saturating_add(usage.output_tokens);
-                        let usage_total_tokens = usage.total_tokens();
-                        if usage_total_tokens > 0 {
-                            st.cumulative_context_tokens = st
-                                .cumulative_context_tokens
-                                .saturating_add(usage_total_tokens);
-                            st.context_usage_pct = model_context_usage_pct(
-                                st.model.as_deref(),
-                                st.cumulative_context_tokens,
-                            );
-                        }
+                    if let Some(model_name) = msg.model_name() {
+                        st.last_model_name = Some(model_name);
                     }
 
                     // Check for context exhaustion
@@ -334,6 +323,12 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                             .as_deref()
                             .map(common::detect_context_exhausted)
                             .unwrap_or(false);
+                    let context_warning = proactive_context_warning(
+                        &msg,
+                        st.last_model_name.as_deref(),
+                        st.cumulative_output_bytes,
+                        st.started_at.elapsed().as_secs(),
+                    );
 
                     if is_context_exhausted {
                         let last_lines = last_n_lines_of(&st.accumulated_response, 5);
@@ -360,24 +355,21 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
                         continue;
                     }
 
-                    // Check for context approaching limit (proactive early warning).
-                    // Emit once per session to avoid spamming the daemon.
-                    if !st.context_approaching_emitted {
-                        let text_signal =
-                            common::detect_context_approaching_limit(&st.accumulated_response);
-                        if text_signal {
-                            st.context_approaching_emitted = true;
-                            let input_tokens = st.cumulative_input_tokens;
-                            let output_tokens = st.cumulative_output_tokens;
-                            drop(st);
-                            let _ = evt_channel.send(&Event::ContextApproaching {
-                                message: "Agent output contains context-pressure signals".into(),
-                                input_tokens,
-                                output_tokens,
-                            });
-                            // Re-acquire for the rest of the result handling
-                            st = state_stdout.lock().unwrap();
-                        }
+                    if let Some(warning) = context_warning.clone() {
+                        let _ = evt_channel.send(&Event::ContextWarning {
+                            model: warning.model,
+                            output_bytes: warning.output_bytes,
+                            uptime_secs: warning.uptime_secs,
+                            input_tokens: warning.usage.input_tokens,
+                            cached_input_tokens: warning.usage.cached_input_tokens,
+                            cache_creation_input_tokens: warning.usage.cache_creation_input_tokens,
+                            cache_read_input_tokens: warning.usage.cache_read_input_tokens,
+                            output_tokens: warning.usage.output_tokens,
+                            reasoning_output_tokens: warning.usage.reasoning_output_tokens,
+                            used_tokens: warning.used_tokens,
+                            context_limit_tokens: warning.context_limit_tokens,
+                            usage_pct: warning.usage_pct,
+                        });
                     }
 
                     // Normal completion: Working → Idle
@@ -814,6 +806,64 @@ fn maybe_send_keepalive<W: IoWrite>(
     st.state_changed_at = Instant::now();
 }
 
+#[derive(Debug, Clone)]
+struct ProactiveContextWarning {
+    model: Option<String>,
+    usage: sdk_types::SdkTokenUsage,
+    output_bytes: u64,
+    uptime_secs: u64,
+    used_tokens: u64,
+    context_limit_tokens: u64,
+    usage_pct: u8,
+}
+
+fn proactive_context_warning(
+    msg: &SdkOutput,
+    last_model_name: Option<&str>,
+    output_bytes: u64,
+    uptime_secs: u64,
+) -> Option<ProactiveContextWarning> {
+    let usage = msg.token_usage()?;
+    let used_tokens = usage.total_tokens();
+    if used_tokens == 0 {
+        return None;
+    }
+
+    let model = msg
+        .model_name()
+        .or_else(|| last_model_name.map(str::to_string));
+    let context_limit_tokens = model_context_limit_tokens(model.as_deref());
+    let usage_pct = ((used_tokens.saturating_mul(100)) / context_limit_tokens.max(1)) as u8;
+    if usage_pct < PROACTIVE_CONTEXT_WARNING_PCT {
+        return None;
+    }
+
+    Some(ProactiveContextWarning {
+        model,
+        usage,
+        output_bytes,
+        uptime_secs,
+        used_tokens,
+        context_limit_tokens,
+        usage_pct,
+    })
+}
+
+fn model_context_limit_tokens(model: Option<&str>) -> u64 {
+    let Some(model) = model else {
+        return DEFAULT_CONTEXT_LIMIT_TOKENS;
+    };
+    let normalized = model.to_ascii_lowercase();
+
+    if normalized.contains("1m") {
+        1_000_000
+    } else if normalized.starts_with("claude-") || normalized.contains("claude") {
+        200_000
+    } else {
+        DEFAULT_CONTEXT_LIMIT_TOKENS
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1016,6 +1066,7 @@ mod tests {
             pending_message_id: None,
             last_sent_message_from: None,
             last_sent_message_preview: None,
+            last_model_name: None,
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 0,
             model: None,
@@ -1140,6 +1191,7 @@ mod tests {
             pending_message_id: Some("msg-1".into()),
             last_sent_message_from: Some("manager".into()),
             last_sent_message_preview: Some("continue task".into()),
+            last_model_name: Some("claude-sonnet-4-5".into()),
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 12,
             model: None,
@@ -1175,6 +1227,7 @@ mod tests {
             pending_message_id: Some("msg-1".into()),
             last_sent_message_from: Some("manager".into()),
             last_sent_message_preview: Some("first".into()),
+            last_model_name: Some("claude-sonnet-4-5".into()),
             message_queue: VecDeque::from([QueuedMessage {
                 from: "architect".into(),
                 body: "second message".into(),
@@ -1215,6 +1268,7 @@ mod tests {
             pending_message_id: None,
             last_sent_message_from: None,
             last_sent_message_preview: None,
+            last_model_name: None,
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 0,
             model: None,
@@ -1245,6 +1299,7 @@ mod tests {
             pending_message_id: None,
             last_sent_message_from: None,
             last_sent_message_preview: None,
+            last_model_name: None,
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 0,
             model: None,
@@ -1281,6 +1336,7 @@ mod tests {
             pending_message_id: None,
             last_sent_message_from: None,
             last_sent_message_preview: None,
+            last_model_name: None,
             message_queue: VecDeque::new(),
             cumulative_output_bytes: 0,
             model: None,
@@ -1301,15 +1357,34 @@ mod tests {
     }
 
     #[test]
-    fn model_context_usage_pct_respects_one_million_aliases() {
-        assert_eq!(
-            model_context_usage_pct(Some("claude-opus-4-6-1m"), 800_000),
-            Some(80)
-        );
-        assert_eq!(
-            model_context_usage_pct(Some("claude-sonnet-4-6"), 160_000),
-            Some(80)
-        );
-        assert_eq!(model_context_usage_pct(Some("gpt-5.4"), 160_000), None);
+    fn proactive_context_warning_uses_model_aware_limits_and_cache_tokens() {
+        let line = r#"{"type":"result","usage":{"input_tokens":100000,"cached_input_tokens":15000,"cache_creation_input_tokens":10000,"cache_read_input_tokens":5000,"output_tokens":20000,"reasoning_output_tokens":10000}}"#;
+        let msg: SdkOutput = serde_json::from_str(line).unwrap();
+        let warning =
+            proactive_context_warning(&msg, Some("claude-sonnet-4-5"), 42_000, 900).unwrap();
+
+        assert_eq!(warning.context_limit_tokens, 200_000);
+        assert_eq!(warning.used_tokens, 160_000);
+        assert_eq!(warning.usage_pct, 80);
+        assert_eq!(warning.model.as_deref(), Some("claude-sonnet-4-5"));
+    }
+
+    #[test]
+    fn proactive_context_warning_uses_one_million_limit_for_opus_1m() {
+        let line = r#"{"type":"result","usage":{"input_tokens":700000,"cached_input_tokens":50000,"cache_creation_input_tokens":20000,"cache_read_input_tokens":10000,"output_tokens":10000,"reasoning_output_tokens":10000}}"#;
+        let msg: SdkOutput = serde_json::from_str(line).unwrap();
+        let warning =
+            proactive_context_warning(&msg, Some("claude-opus-4.6-1m"), 42_000, 900).unwrap();
+
+        assert_eq!(warning.context_limit_tokens, 1_000_000);
+        assert_eq!(warning.used_tokens, 800_000);
+        assert_eq!(warning.usage_pct, 80);
+    }
+
+    #[test]
+    fn proactive_context_warning_skips_usage_below_threshold() {
+        let line = r#"{"type":"result","usage":{"input_tokens":20000,"cached_input_tokens":1000,"output_tokens":4000}}"#;
+        let msg: SdkOutput = serde_json::from_str(line).unwrap();
+        assert!(proactive_context_warning(&msg, Some("claude-sonnet-4-5"), 10_000, 120).is_none());
     }
 }
