@@ -151,6 +151,7 @@ mod tests {
 
     #[test]
     fn startup_preflight_reports_missing_git_identity() {
+        let _path_guard = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "startup_git_identity");
         Command::new("git")
