@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::task::{Task, load_tasks_from_dir};
+use crate::team::config::TeamConfig;
+use crate::team::hierarchy::resolve_hierarchy;
 use crate::team::inbox;
 use crate::team::review::task_reference_mismatch_blockers;
 use crate::team::task_loop::run_tests_in_worktree;
@@ -302,39 +304,43 @@ fn scope_acknowledged(
     if !inbox_root.is_dir() {
         return Ok(false);
     }
+    let Some(ack_recipient) = scope_ack_recipient(project_root, engineer)? else {
+        return Ok(false);
+    };
+    if !inbox_root.join(&ack_recipient).is_dir() {
+        return Ok(false);
+    }
 
     let claimed_after = claimed_at
         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
         .map(|value| value.timestamp().max(0) as u64);
 
-    for entry in std::fs::read_dir(&inbox_root)
-        .with_context(|| format!("failed to read {}", inbox_root.display()))?
-    {
-        let entry = entry.with_context(|| format!("failed to read {}", inbox_root.display()))?;
-        if !entry
-            .file_type()
-            .with_context(|| format!("failed to inspect {}", entry.path().display()))?
-            .is_dir()
-        {
+    for (message, _) in inbox::all_messages(&inbox_root, &ack_recipient)? {
+        if message.from != engineer {
             continue;
         }
-        let Some(member) = entry.file_name().to_str().map(|value| value.to_string()) else {
+        if claimed_after.is_some_and(|cutoff| message.timestamp < cutoff) {
             continue;
-        };
-        for (message, _) in inbox::all_messages(&inbox_root, &member)? {
-            if message.from != engineer {
-                continue;
-            }
-            if claimed_after.is_some_and(|cutoff| message.timestamp < cutoff) {
-                continue;
-            }
-            if is_scope_ack_message(&message.body, task_id) {
-                return Ok(true);
-            }
+        }
+        if is_scope_ack_message(&message.body, task_id) {
+            return Ok(true);
         }
     }
 
     Ok(false)
+}
+
+fn scope_ack_recipient(project_root: &Path, engineer: &str) -> Result<Option<String>> {
+    let team_config_path = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("team.yaml");
+    let team_config = TeamConfig::load(&team_config_path)
+        .with_context(|| format!("failed to load {}", team_config_path.display()))?;
+    Ok(resolve_hierarchy(&team_config)?
+        .into_iter()
+        .find(|member| member.name == engineer)
+        .and_then(|member| member.reports_to))
 }
 
 pub(crate) fn inspect_scope_fence(worktree_dir: &Path) -> Result<Option<ScopeFenceCheck>> {
@@ -376,7 +382,7 @@ fn scope_validation_failure(worktree_dir: &Path) -> Result<Option<VerificationRu
     if !scope.ack_present {
         let token = scope_ack_token(scope.task_id);
         let message = format!(
-            "scope ack missing for task #{}: send `{token}` to the assigning manager before writing files inside the task fence",
+            "scope ack missing for task #{}: send `{token}` to the assigning manager or architect before writing files inside the task fence",
             scope.task_id
         );
         return Ok(Some(VerificationRunResult {
@@ -591,6 +597,16 @@ mod tests {
         validate_declared_scope,
     };
 
+    fn write_scope_ack_team_config(project_root: &Path) {
+        let team_config_dir = project_root.join(".batty").join("team_config");
+        std::fs::create_dir_all(&team_config_dir).unwrap();
+        std::fs::write(
+            team_config_dir.join("team.yaml"),
+            "name: scope-test\nroles:\n  - name: architect\n    role_type: architect\n    agent: claude\n    instances: 1\n  - name: manager\n    role_type: manager\n    agent: claude\n    instances: 1\n  - name: engineer\n    role_type: engineer\n    agent: codex\n    instances: 3\n",
+        )
+        .unwrap();
+    }
+
     #[test]
     fn parse_test_output_extracts_failures_and_paths() {
         let output = "\
@@ -779,6 +795,7 @@ src/parser.rs:12: failure here\n";
     #[test]
     fn scope_fence_validation_failure_reports_out_of_scope_files() {
         let tmp = tempfile::tempdir().unwrap();
+        write_scope_ack_team_config(tmp.path());
         let tasks_dir = tmp
             .path()
             .join(".batty")
@@ -789,9 +806,7 @@ src/parser.rs:12: failure here\n";
         let worktree_dir = tmp.path().join(".batty").join("worktrees").join("eng-1-3");
         std::fs::create_dir_all(&tasks_dir).unwrap();
         std::fs::create_dir_all(worktree_dir.join("src/team")).unwrap();
-        std::fs::create_dir_all(inbox_root.join("manager").join("new")).unwrap();
-        std::fs::create_dir_all(inbox_root.join("manager").join("cur")).unwrap();
-        std::fs::create_dir_all(inbox_root.join("manager").join("tmp")).unwrap();
+        inbox::init_inbox(&inbox_root, "manager").unwrap();
         std::fs::write(
             tasks_dir.join("011-task.md"),
             "---\nid: 11\ntitle: target\nstatus: review\npriority: medium\nclaimed_by: eng-1-3\nclaimed_at: 2026-04-10T12:00:00Z\n---\n\nTask body.\nSCOPE FENCE: src/team/completion.rs, src/team/review.rs\n",
@@ -846,6 +861,7 @@ src/parser.rs:12: failure here\n";
     #[test]
     fn inspect_scope_fence_reports_missing_ack() {
         let tmp = tempfile::tempdir().unwrap();
+        write_scope_ack_team_config(tmp.path());
         let tasks_dir = tmp
             .path()
             .join(".batty")
@@ -900,6 +916,7 @@ src/parser.rs:12: failure here\n";
     #[test]
     fn inspect_scope_fence_accepts_matching_ack() {
         let tmp = tempfile::tempdir().unwrap();
+        write_scope_ack_team_config(tmp.path());
         let tasks_dir = tmp
             .path()
             .join(".batty")
@@ -910,9 +927,7 @@ src/parser.rs:12: failure here\n";
         let worktree_dir = tmp.path().join(".batty").join("worktrees").join("eng-1-3");
         std::fs::create_dir_all(&tasks_dir).unwrap();
         std::fs::create_dir_all(worktree_dir.join("src/team")).unwrap();
-        std::fs::create_dir_all(inbox_root.join("manager").join("new")).unwrap();
-        std::fs::create_dir_all(inbox_root.join("manager").join("cur")).unwrap();
-        std::fs::create_dir_all(inbox_root.join("manager").join("tmp")).unwrap();
+        inbox::init_inbox(&inbox_root, "manager").unwrap();
         std::fs::write(
             tasks_dir.join("011-task.md"),
             "---\nid: 11\ntitle: target\nstatus: review\npriority: medium\nclaimed_by: eng-1-3\nclaimed_at: 2026-04-10T12:00:00Z\n---\n\nTask body.\nSCOPE FENCE: src/team/completion.rs\n",
@@ -949,6 +964,59 @@ src/parser.rs:12: failure here\n";
             .expect("scope fence should be present");
         assert!(result.ack_present);
         assert!(result.out_of_scope_files.is_empty());
+    }
+
+    #[test]
+    fn inspect_scope_fence_rejects_ack_sent_to_wrong_inbox() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_scope_ack_team_config(tmp.path());
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        let inbox_root = tmp.path().join(".batty").join("inboxes");
+        let worktree_dir = tmp.path().join(".batty").join("worktrees").join("eng-1-3");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::create_dir_all(worktree_dir.join("src/team")).unwrap();
+        inbox::init_inbox(&inbox_root, "manager").unwrap();
+        inbox::init_inbox(&inbox_root, "architect").unwrap();
+        std::fs::write(
+            tasks_dir.join("011-task.md"),
+            "---\nid: 11\ntitle: target\nstatus: review\npriority: medium\nclaimed_by: eng-1-3\nclaimed_at: 2026-04-10T12:00:00Z\n---\n\nTask body.\nSCOPE FENCE: src/team/completion.rs\n",
+        )
+        .unwrap();
+        let ack = inbox::InboxMessage::new_send("eng-1-3", "architect", "Scope ACK #11");
+        inbox::deliver_to_inbox(&inbox_root, &ack).unwrap();
+
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&worktree_dir)
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init"]).status.success());
+        assert!(
+            git(&["config", "user.email", "test@example.com"])
+                .status
+                .success()
+        );
+        assert!(git(&["config", "user.name", "Test"]).status.success());
+        std::fs::write(worktree_dir.join("src/team/completion.rs"), "base\n").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(git(&["commit", "-m", "base"]).status.success());
+        assert!(git(&["branch", "-M", "main"]).status.success());
+        assert!(git(&["checkout", "-b", "eng-1-3"]).status.success());
+        std::fs::write(worktree_dir.join("src/team/completion.rs"), "changed\n").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(git(&["commit", "-m", "change"]).status.success());
+
+        let result = inspect_scope_fence(&worktree_dir)
+            .unwrap()
+            .expect("scope fence should be present");
+        assert!(!result.ack_present);
     }
 
     #[test]
