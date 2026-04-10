@@ -592,7 +592,7 @@ pub(crate) fn backdate_idle_grace(daemon: &mut TeamDaemon, member_name: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{test_channel_config, TestDaemonBuilder};
+    use super::{TestDaemonBuilder, test_channel_config};
 
     #[test]
     fn test_daemon_builder_initializes_delivery_runtime_fields() {

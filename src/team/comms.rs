@@ -400,10 +400,12 @@ mod tests {
         let ch = TelegramChannel::new("12345".into(), "/nonexistent/binary".into());
         let result = ch.send("hello");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("failed to execute"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("failed to execute")
+        );
     }
 
     #[test]

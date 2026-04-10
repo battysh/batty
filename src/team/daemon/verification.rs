@@ -468,8 +468,8 @@ mod tests {
     use super::{
         ScopeValidationResult, active_claim_conflict_failure, commit_subjects_since_main,
         current_branch_name, engineer_worktree_context, find_claimed_task_for_worktree,
-        parse_scope_fence, parse_test_output, run_automatic_verification,
-        scope_validation_failure, task_mismatch_validation_failure, validate_declared_scope,
+        parse_scope_fence, parse_test_output, run_automatic_verification, scope_validation_failure,
+        task_mismatch_validation_failure, validate_declared_scope,
     };
 
     #[test]
@@ -820,7 +820,11 @@ src/parser.rs:12: failure here\n";
                 .success()
         );
         assert!(git(&["config", "user.name", "Test"]).status.success());
-        std::fs::write(worktree_dir.join("src").join("owned.rs"), "pub fn owned() {}\n").unwrap();
+        std::fs::write(
+            worktree_dir.join("src").join("owned.rs"),
+            "pub fn owned() {}\n",
+        )
+        .unwrap();
         assert!(git(&["add", "."]).status.success());
         assert!(git(&["commit", "-m", "base"]).status.success());
         assert!(git(&["branch", "-M", "main"]).status.success());

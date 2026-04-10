@@ -3,7 +3,7 @@
 //! Provides a blocking HTTP client that sends messages and polls for updates
 //! via the Telegram Bot API. Access control is enforced by numeric user IDs.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write as IoWrite};
 use std::path::Path;
@@ -778,10 +778,12 @@ mod tests {
             "result": {}
         });
 
-        assert!(parse_send_message_response(&json)
-            .unwrap_err()
-            .to_string()
-            .contains("message_id"));
+        assert!(
+            parse_send_message_response(&json)
+                .unwrap_err()
+                .to_string()
+                .contains("message_id")
+        );
     }
 
     #[test]

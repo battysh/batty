@@ -1285,6 +1285,7 @@ mod tests {
 
     use super::super::{MessageDelivery, PendingMessage};
     use super::OrchestratorOnlyReason;
+    use crate::team::AssignmentResultStatus;
     use crate::team::comms::Channel;
     use crate::team::config::OrchestratorPosition;
     use crate::team::config::RoleDef;
@@ -1300,10 +1301,9 @@ mod tests {
     use crate::team::message;
     use crate::team::standup::MemberState;
     use crate::team::test_support::{
-        architect_member, engineer_member, inferred_role_defs, manager_member, test_channel_config,
-        TestDaemonBuilder,
+        TestDaemonBuilder, architect_member, engineer_member, inferred_role_defs, manager_member,
+        test_channel_config,
     };
-    use crate::team::AssignmentResultStatus;
 
     struct RecordingChannel {
         messages: Arc<Mutex<Vec<String>>>,
@@ -1593,9 +1593,11 @@ mod tests {
         assert!(engineer_pending.is_empty());
 
         let engineer_all = inbox::all_messages(&root, "eng-1").unwrap();
-        assert!(engineer_all
-            .iter()
-            .any(|(msg, delivered)| msg.id == id && *delivered));
+        assert!(
+            engineer_all
+                .iter()
+                .any(|(msg, delivered)| msg.id == id && *delivered)
+        );
 
         let manager_pending = inbox::pending_messages(&root, "manager").unwrap();
         assert_eq!(manager_pending.len(), 1);
@@ -1675,10 +1677,12 @@ mod tests {
         assert_eq!(messages[0].from, "email-router");
         assert!(messages[0].body.contains("New email from user@example.com"));
 
-        assert!(daemon
-            .config
-            .team_config
-            .can_talk("email-router", "manager"));
+        assert!(
+            daemon
+                .config
+                .team_config
+                .can_talk("email-router", "manager")
+        );
     }
 
     #[test]
@@ -1826,9 +1830,11 @@ mod tests {
         assert!(engineer_pending.is_empty());
 
         let engineer_all = inbox::all_messages(&root, "eng-1").unwrap();
-        assert!(engineer_all
-            .iter()
-            .any(|(msg, delivered)| msg.id == id && *delivered));
+        assert!(
+            engineer_all
+                .iter()
+                .any(|(msg, delivered)| msg.id == id && *delivered)
+        );
         // Shim-managed agents: state driven by shim events, not speculative mark_member_working
         assert_ne!(daemon.states.get("eng-1"), Some(&MemberState::Working));
     }
@@ -1954,9 +1960,11 @@ mod tests {
             other => panic!("expected SendMessage, got {other:?}"),
         }
 
-        assert!(inbox::pending_messages(&root, "manager")
-            .unwrap()
-            .is_empty());
+        assert!(
+            inbox::pending_messages(&root, "manager")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2409,9 +2417,10 @@ mod tests {
         assert!(pending.is_empty(), "message should be marked delivered");
 
         let all = inbox::all_messages(&root, "eng-1").unwrap();
-        assert!(all
-            .iter()
-            .any(|(msg, delivered)| msg.id == id && *delivered));
+        assert!(
+            all.iter()
+                .any(|(msg, delivered)| msg.id == id && *delivered)
+        );
     }
 
     #[test]
@@ -2635,11 +2644,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
         daemon.drain_pending_queue("eng-1").unwrap();
-        assert!(daemon
-            .pending_delivery_queue
-            .get("eng-1")
-            .map(|q| q.is_empty())
-            .unwrap_or(true));
+        assert!(
+            daemon
+                .pending_delivery_queue
+                .get("eng-1")
+                .map(|q| q.is_empty())
+                .unwrap_or(true)
+        );
     }
 
     #[test]
@@ -2681,11 +2692,13 @@ mod tests {
         daemon.shim_handles.remove("eng-1");
         daemon.drain_pending_queue("eng-1").unwrap();
 
-        assert!(daemon
-            .pending_delivery_queue
-            .get("eng-1")
-            .map(|q| q.is_empty())
-            .unwrap_or(true));
+        assert!(
+            daemon
+                .pending_delivery_queue
+                .get("eng-1")
+                .map(|q| q.is_empty())
+                .unwrap_or(true)
+        );
 
         let root = inbox::inboxes_root(tmp.path());
         let inbox_msgs = inbox::pending_messages(&root, "eng-1").unwrap();
@@ -2737,11 +2750,13 @@ mod tests {
         assert_eq!(queue[0].body, "Task #42: implement feature");
 
         daemon.watchers.get_mut("eng-1").unwrap().confirm_ready();
-        assert!(daemon
-            .watchers
-            .get("eng-1")
-            .unwrap()
-            .is_ready_for_delivery());
+        assert!(
+            daemon
+                .watchers
+                .get("eng-1")
+                .unwrap()
+                .is_ready_for_delivery()
+        );
 
         // Remove shim handle so drain falls through to inbox delivery
         daemon.shim_handles.remove("eng-1");
@@ -3064,9 +3079,10 @@ mod tests {
         let pending = inbox::pending_messages(&root, "eng-1").unwrap();
         assert!(pending.is_empty());
         let all = inbox::all_messages(&root, "eng-1").unwrap();
-        assert!(all
-            .iter()
-            .any(|(message, delivered)| message.id == id && *delivered));
+        assert!(
+            all.iter()
+                .any(|(message, delivered)| message.id == id && *delivered)
+        );
 
         let mut receiver = crate::shim::protocol::Channel::new(child);
         receiver

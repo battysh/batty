@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use tracing::{debug, info};
 
 use super::config::{LayoutConfig, OrchestratorPosition, RoleType, WorkflowMode};
@@ -772,9 +772,11 @@ roles:
         // Each subgroup should share the same reports_to
         for group in &subgroups {
             let parent = group[0].reports_to.as_ref().unwrap();
-            assert!(group
-                .iter()
-                .all(|m| m.reports_to.as_ref().unwrap() == parent));
+            assert!(
+                group
+                    .iter()
+                    .all(|m| m.reports_to.as_ref().unwrap() == parent)
+            );
         }
     }
 
@@ -973,9 +975,11 @@ roles:
             .unwrap();
         assert!(panes_output.status.success());
         let pane_roles = String::from_utf8_lossy(&panes_output.stdout);
-        assert!(pane_roles
-            .lines()
-            .any(|line| line.ends_with(" orchestrator")));
+        assert!(
+            pane_roles
+                .lines()
+                .any(|line| line.ends_with(" orchestrator"))
+        );
         assert_eq!(pane_roles.lines().count(), 3);
         assert!(tmp.path().join(".batty").join("orchestrator.log").exists());
 
@@ -1182,10 +1186,12 @@ roles:
         let zones = build_zones_auto(&pane_members);
         assert_eq!(zones.len(), 1);
         assert_eq!(zones[0].members.len(), 3);
-        assert!(zones[0]
-            .members
-            .iter()
-            .all(|m| m.role_type == RoleType::Architect));
+        assert!(
+            zones[0]
+                .members
+                .iter()
+                .all(|m| m.role_type == RoleType::Architect)
+        );
     }
 
     #[test]
@@ -1232,10 +1238,12 @@ roles:
         assert_eq!(zones.len(), 2);
         assert_eq!(zones[0].members[0].role_type, RoleType::Architect);
         assert_eq!(zones[1].members.len(), 4);
-        assert!(zones[1]
-            .members
-            .iter()
-            .all(|m| m.role_type == RoleType::Engineer));
+        assert!(
+            zones[1]
+                .members
+                .iter()
+                .all(|m| m.role_type == RoleType::Engineer)
+        );
     }
 
     #[test]
@@ -1443,10 +1451,12 @@ roles:
         assert_eq!(zones[0].members[0].role_type, RoleType::Architect);
         assert_eq!(zones[1].members[0].role_type, RoleType::Manager);
         assert_eq!(zones[2].members.len(), 2);
-        assert!(zones[2]
-            .members
-            .iter()
-            .all(|m| m.role_type == RoleType::Engineer));
+        assert!(
+            zones[2]
+                .members
+                .iter()
+                .all(|m| m.role_type == RoleType::Engineer)
+        );
     }
 
     #[test]
@@ -1569,9 +1579,11 @@ roles:
         let zones = build_zones_auto(&pane_members);
         // Only architect and engineer zones — no user zone
         assert_eq!(zones.len(), 2);
-        assert!(zones
-            .iter()
-            .all(|z| z.members.iter().all(|m| m.role_type != RoleType::User)));
+        assert!(
+            zones
+                .iter()
+                .all(|z| z.members.iter().all(|m| m.role_type != RoleType::User))
+        );
     }
 
     #[test]

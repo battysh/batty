@@ -245,7 +245,10 @@ fn prepare_assignment_launch_falls_back_to_local_main_when_origin_main_is_frozen
         &team_config_dir,
     )
     .unwrap();
-    git_ok(&repo, &["update-ref", "refs/remotes/origin/main", frozen.trim()]);
+    git_ok(
+        &repo,
+        &["update-ref", "refs/remotes/origin/main", frozen.trim()],
+    );
 
     for i in 1..=3 {
         std::fs::write(repo.join(format!("local-{i}.txt")), format!("local {i}\n")).unwrap();

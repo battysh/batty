@@ -4,6 +4,7 @@ pub mod agent;
 pub mod cli;
 pub mod config;
 pub mod console_pane;
+pub mod env_file;
 pub mod events;
 pub mod log;
 pub mod paths;

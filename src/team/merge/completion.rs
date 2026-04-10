@@ -1150,33 +1150,46 @@ fn check_protected_file_violations(
         ".batty/team_config/team.yaml",
     ];
 
-    let output = if is_multi_repo {
-        // For multi-repo, check each sub-repo
-        let mut all_files = Vec::new();
-        for repo in sub_repo_names {
-            let repo_dir = worktree_dir.join(repo);
-            if let Ok(out) = std::process::Command::new("git")
-                .args(["diff", "--name-only", "main..HEAD"])
-                .current_dir(&repo_dir)
-                .output()
-            {
-                let files = String::from_utf8_lossy(&out.stdout);
-                all_files.extend(files.lines().map(|l| l.to_string()));
+    // Compare against the merge-base with main, not main itself. If the branch
+    // has a stale base, `main..HEAD` includes everything main added since that
+    // base, so files the engineer never touched get flagged. Merge-base diff
+    // captures only what the engineer actually changed on their branch.
+    let diff_files = |repo_dir: &Path| -> Vec<String> {
+        let merge_base = match std::process::Command::new("git")
+            .args(["merge-base", "HEAD", "main"])
+            .current_dir(repo_dir)
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
             }
+            _ => return Vec::new(),
+        };
+        if merge_base.is_empty() {
+            return Vec::new();
         }
-        all_files
-    } else {
+        let range = format!("{merge_base}..HEAD");
         match std::process::Command::new("git")
-            .args(["diff", "--name-only", "main..HEAD"])
-            .current_dir(worktree_dir)
+            .args(["diff", "--name-only", &range])
+            .current_dir(repo_dir)
             .output()
         {
             Ok(out) => String::from_utf8_lossy(&out.stdout)
                 .lines()
                 .map(|l| l.to_string())
                 .collect(),
-            Err(_) => return Vec::new(),
+            Err(_) => Vec::new(),
         }
+    };
+
+    let output = if is_multi_repo {
+        let mut all_files = Vec::new();
+        for repo in sub_repo_names {
+            all_files.extend(diff_files(&worktree_dir.join(repo)));
+        }
+        all_files
+    } else {
+        diff_files(worktree_dir)
     };
 
     output

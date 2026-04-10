@@ -788,7 +788,12 @@ pub fn ensure_worktree_branch_for_dispatch(
 
     let checkout = run_git(
         worktree_path,
-        ["checkout", "-B", expected_branch, selection.ref_name.as_str()],
+        [
+            "checkout",
+            "-B",
+            expected_branch,
+            selection.ref_name.as_str(),
+        ],
     )?;
     if !checkout.status.success() {
         bail!(

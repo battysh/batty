@@ -8,7 +8,7 @@ use anyhow::Result;
 use tracing::{info, warn};
 
 use super::super::*;
-use super::{task_needs_owned_intervention, OwnedTaskInterventionState};
+use super::{OwnedTaskInterventionState, task_needs_owned_intervention};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReportDispatchSnapshot {
