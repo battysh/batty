@@ -2,6 +2,27 @@
 
 All notable changes to Batty are documented here.
 
+## 0.10.6 — 2026-04-10
+
+Proactive deps/build cleanup based on shared-target size, not just disk
+pressure. The previous disk hygiene only cleaned `debug/deps/` and
+`debug/build/` (the bulk of the footprint) when the free disk space dropped
+below half of `min_free_gb`. Under active engineer workload, shared-target
+could grow to 6x the configured budget (24GB against a 4GB budget, observed
+during a multi-hour run) before the disk-pressure emergency ever fired,
+forcing operators to manually delete directories to keep the daemon alive.
+
+- **Size-based deps cleanup tier** — when shared-target exceeds 3x the
+  configured `max_shared_target_gb` budget, `run_disk_hygiene` now runs the
+  same deps/build emergency cleanup that the disk-pressure path uses, even
+  if free disk space is still healthy. This prevents the shared-target from
+  growing unbounded and playing catch-up against the disk. The trigger uses
+  shared-target growth as the leading indicator instead of waiting for disk
+  pressure. (`src/team/daemon/health/disk_hygiene.rs`)
+- **Regression test** — `run_disk_hygiene_triggers_deps_cleanup_when_shared_target_exceeds_3x_budget`
+  locks in the size-based escalation using 5GB sparse files so the test
+  can exceed the 12GB threshold without writing actual data to disk.
+
 ## 0.10.5 — 2026-04-10
 
 Fix stale cross-session stall signals appearing on freshly-restarted members.
