@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer};
+use serde_yaml::{Mapping, Value};
 use std::path::{Path, PathBuf};
 
 use crate::config::Policy;
@@ -146,6 +147,15 @@ impl Task {
     pub fn from_file(path: &Path) -> Result<Self> {
         let contents = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read task file: {}", path.display()))?;
+        let normalized = normalize_blocked_frontmatter_content(&contents)?;
+        let contents = match normalized {
+            Some(updated) => {
+                std::fs::write(path, &updated)
+                    .with_context(|| format!("failed to repair task file: {}", path.display()))?;
+                updated
+            }
+            None => contents,
+        };
         let mut task = Self::parse(&contents)
             .with_context(|| format!("failed to parse task file: {}", path.display()))?;
         task.source_path = path.to_path_buf();
@@ -220,6 +230,113 @@ fn split_frontmatter(content: &str) -> Result<(&str, &str)> {
     let body = body.strip_prefix('\n').unwrap_or(body);
 
     Ok((frontmatter, body))
+}
+
+fn yaml_key(key: &str) -> Value {
+    Value::String(key.to_string())
+}
+
+fn clear_blocked(mapping: &mut Mapping) {
+    mapping.remove(yaml_key("blocked"));
+    mapping.remove(yaml_key("block_reason"));
+    mapping.remove(yaml_key("blocked_on"));
+}
+
+fn set_optional_string(mapping: &mut Mapping, key: &str, value: Option<&str>) {
+    let key = yaml_key(key);
+    match value {
+        Some(value) => {
+            mapping.insert(key, Value::String(value.to_string()));
+        }
+        None => {
+            mapping.remove(key);
+        }
+    }
+}
+
+fn set_blocked_reason(mapping: &mut Mapping, reason: Option<&str>, blocked_on: Option<&str>) {
+    if reason.is_none() && blocked_on.is_none() {
+        clear_blocked(mapping);
+        return;
+    }
+
+    mapping.insert(yaml_key("blocked"), Value::Bool(true));
+    set_optional_string(mapping, "block_reason", reason);
+    set_optional_string(mapping, "blocked_on", blocked_on.or(reason));
+}
+
+fn normalize_blocked_frontmatter_content(content: &str) -> Result<Option<String>> {
+    let (frontmatter, body) = split_frontmatter(content)?;
+    let mut mapping: Mapping =
+        serde_yaml::from_str(frontmatter).context("failed to parse YAML frontmatter")?;
+
+    let blocked_value = mapping.get(yaml_key("blocked")).cloned();
+    let block_reason = mapping
+        .get(yaml_key("block_reason"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let blocked_on = mapping
+        .get(yaml_key("blocked_on"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let status_is_blocked = mapping
+        .get(yaml_key("status"))
+        .and_then(Value::as_str)
+        .is_some_and(|status| status == "blocked");
+
+    let rewrites_hidden_string_block = matches!(
+        blocked_value.as_ref(),
+        Some(Value::String(reason)) if !reason.trim().is_empty()
+    );
+    let legacy_reason = match blocked_value.as_ref() {
+        Some(Value::String(reason)) if !reason.trim().is_empty() => Some(reason.as_str()),
+        Some(Value::Bool(true)) => block_reason.as_deref().or(blocked_on.as_deref()),
+        Some(Value::Bool(false)) => None,
+        _ => block_reason.as_deref().or(blocked_on.as_deref()),
+    };
+
+    let desired_reason = legacy_reason.as_deref();
+    let desired_blocked_on = blocked_on.as_deref().or(desired_reason).map(str::to_string);
+    let rewrites_incomplete_blocked_task = status_is_blocked && legacy_reason.is_some();
+    let rewrites_incomplete_bool_shape = matches!(blocked_value, Some(Value::Bool(true)))
+        && (block_reason.as_deref() != desired_reason
+            || mapping.get(yaml_key("blocked_on")).and_then(Value::as_str)
+                != desired_blocked_on.as_deref());
+
+    if !rewrites_hidden_string_block
+        && !rewrites_incomplete_blocked_task
+        && !rewrites_incomplete_bool_shape
+    {
+        return Ok(None);
+    }
+
+    set_blocked_reason(&mut mapping, desired_reason, desired_blocked_on.as_deref());
+
+    let mut rendered =
+        serde_yaml::to_string(&mapping).context("failed to serialize task frontmatter")?;
+    if let Some(stripped) = rendered.strip_prefix("---\n") {
+        rendered = stripped.to_string();
+    }
+
+    let mut updated = String::from("---\n");
+    updated.push_str(&rendered);
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str("---\n");
+    updated.push_str(body);
+    Ok(Some(updated))
+}
+
+pub(crate) fn normalize_blocked_frontmatter(task_path: &Path) -> Result<bool> {
+    let contents = std::fs::read_to_string(task_path)
+        .with_context(|| format!("failed to read task file: {}", task_path.display()))?;
+    let Some(updated) = normalize_blocked_frontmatter_content(&contents)? else {
+        return Ok(false);
+    };
+    std::fs::write(task_path, updated)
+        .with_context(|| format!("failed to repair task file: {}", task_path.display()))?;
+    Ok(true)
 }
 
 /// Parse the Markdown body, extracting an optional `## Batty Config` section.
@@ -415,6 +532,28 @@ Body.
         let task = Task::parse(content).unwrap();
         assert_eq!(task.blocked.as_deref(), Some("waiting-for-review"));
         assert_eq!(task.blocked_on.as_deref(), Some("waiting-for-review"));
+    }
+
+    #[test]
+    fn load_tasks_from_dir_repairs_blocked_on_only_shape_to_canonical_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        let task_path = tasks_dir.join("430-blocked.md");
+        fs::write(
+            &task_path,
+            "---\nid: 430\ntitle: blocked via blocked_on only\nstatus: blocked\npriority: high\nblocked_on: waiting-for-review\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        let tasks = load_tasks_from_dir(&tasks_dir).unwrap();
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].blocked.as_deref(), Some("waiting-for-review"));
+        let content = fs::read_to_string(&task_path).unwrap();
+        assert!(content.contains("blocked: true"));
+        assert!(content.contains("block_reason: waiting-for-review"));
+        assert!(content.contains("blocked_on: waiting-for-review"));
     }
 
     #[test]

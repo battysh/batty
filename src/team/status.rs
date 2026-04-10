@@ -571,6 +571,29 @@ pub(crate) fn claimed_task_branch_signal(
     task_branch_signal_for_task(project_root, task, &current_branch)
 }
 
+fn load_board_tasks_for_status(board_dir: &Path, context: &str) -> Result<Vec<task::Task>> {
+    let tasks_dir = board_dir.join("tasks");
+    if !tasks_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let repairs = crate::team::task_cmd::repair_board_frontmatter_compat(board_dir)?;
+    if !repairs.is_empty() {
+        let repaired_task_ids = repairs
+            .iter()
+            .filter_map(|repair| repair.task_id)
+            .collect::<Vec<_>>();
+        warn!(
+            context = context,
+            repaired_count = repairs.len(),
+            repaired_task_ids = ?repaired_task_ids,
+            "repaired malformed board task frontmatter during status scan"
+        );
+    }
+
+    task::load_tasks_from_dir(&tasks_dir)
+}
+
 pub(crate) fn branch_mismatch_by_member(
     project_root: &Path,
     members: &[MemberInstance],
@@ -584,7 +607,10 @@ pub(crate) fn branch_mismatch_by_member(
         return HashMap::new();
     }
 
-    let tasks = match task::load_tasks_from_dir(&tasks_dir) {
+    let tasks = match load_board_tasks_for_status(
+        tasks_dir.parent().unwrap_or(&tasks_dir),
+        "branch_mismatch_by_member",
+    ) {
         Ok(tasks) => tasks,
         Err(error) => {
             warn!(path = %tasks_dir.display(), error = %error, "failed to load board tasks for branch mismatch status");
@@ -1330,7 +1356,10 @@ pub(crate) fn owned_task_buckets(
 
     let member_names: HashSet<&str> = members.iter().map(|member| member.name.as_str()).collect();
     let mut owned = HashMap::<String, OwnedTaskBuckets>::new();
-    let tasks = match crate::task::load_tasks_from_dir(&tasks_dir) {
+    let tasks = match load_board_tasks_for_status(
+        tasks_dir.parent().unwrap_or(&tasks_dir),
+        "owned_task_buckets",
+    ) {
         Ok(tasks) => tasks,
         Err(error) => {
             warn!(path = %tasks_dir.display(), error = %error, "failed to load board tasks for status");
@@ -1401,7 +1430,10 @@ pub(crate) fn board_status_task_queues(
 
     let mut active_tasks = Vec::new();
     let mut review_queue = Vec::new();
-    let tasks = task::load_tasks_from_dir(&tasks_dir)?;
+    let tasks = load_board_tasks_for_status(
+        tasks_dir.parent().unwrap_or(&tasks_dir),
+        "board_status_task_queues",
+    )?;
     for task in &tasks {
         let inferred = infer_runtime_task_metadata(project_root, task);
         let branch_mismatch = task_branch_mismatch(project_root, task, &inferred);
@@ -1771,7 +1803,7 @@ fn compute_board_metrics(
         });
     }
 
-    let tasks = task::load_tasks_from_dir(&tasks_dir)?;
+    let tasks = load_board_tasks_for_status(board_dir, "compute_board_metrics")?;
     if tasks.is_empty() {
         return Ok(BoardMetrics {
             runnable_count: 0,
@@ -3425,6 +3457,40 @@ mod tests {
             Some("branch mismatch (#41 on eng-1; expected eng-1/41)")
         );
         assert!(active_tasks[0].test_summary.is_none());
+    }
+
+    #[test]
+    fn board_status_task_queues_repairs_hidden_in_progress_task_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = crate::team::test_support::init_git_repo(&tmp, "status-repair-hidden");
+        let tasks_dir = repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        let task_path = tasks_dir.join("041-hidden-active.md");
+        fs::write(
+            &task_path,
+            "---\nid: 41\ntitle: Hidden active task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nblocked: waiting on reviewer\nclass: standard\n---\n",
+        )
+        .unwrap();
+
+        let (active_tasks, review_queue) = board_status_task_queues(&repo).unwrap();
+
+        assert!(review_queue.is_empty());
+        assert_eq!(active_tasks.len(), 1);
+        assert_eq!(active_tasks[0].id, 41);
+        assert_eq!(active_tasks[0].status, "in-progress");
+        assert_eq!(
+            active_tasks[0].blocked_on.as_deref(),
+            Some("waiting on reviewer")
+        );
+
+        let content = fs::read_to_string(&task_path).unwrap();
+        assert!(content.contains("blocked: true"));
+        assert!(content.contains("block_reason: waiting on reviewer"));
+        assert!(content.contains("blocked_on: waiting on reviewer"));
     }
 
     #[test]

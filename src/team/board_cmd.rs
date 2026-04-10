@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
+use tracing::{info, warn};
 
 pub use super::errors::BoardError;
 
@@ -298,7 +299,23 @@ pub(crate) fn run_board_with_program(
     board_dir: &Path,
     args: &[&str],
 ) -> Result<BoardOutput, BoardError> {
-    repair_blocked_frontmatter_compat(board_dir);
+    match super::task_cmd::repair_board_frontmatter_compat(board_dir) {
+        Ok(repairs) => {
+            for repair in repairs {
+                info!(
+                    task_id = ?repair.task_id,
+                    status = repair.status.as_deref().unwrap_or("unknown"),
+                    path = %repair.path.display(),
+                    "repaired malformed task frontmatter before board command"
+                );
+            }
+        }
+        Err(error) => warn!(
+            board = %board_dir.display(),
+            error = %error,
+            "failed to repair malformed task frontmatter before board command"
+        ),
+    }
     let current_dir = board_dir
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -325,20 +342,6 @@ pub(crate) fn run_board_with_program(
     );
     let message = format!("`{command}` failed with {status}");
     Err(classify_failure(message, stderr))
-}
-
-fn repair_blocked_frontmatter_compat(board_dir: &Path) {
-    let tasks_dir = board_dir.join("tasks");
-    let Ok(entries) = std::fs::read_dir(&tasks_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
-            continue;
-        }
-        let _ = super::task_cmd::normalize_blocked_frontmatter(&path);
-    }
 }
 
 fn format_board_command(program: &str, board_dir: &Path, args: &[&str]) -> String {
