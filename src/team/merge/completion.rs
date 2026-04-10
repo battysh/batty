@@ -15,6 +15,7 @@ use crate::task::load_tasks_from_dir;
 use crate::team::artifact::read_test_timing_log;
 use crate::team::artifact::{append_test_timing_record, track_artifact};
 use crate::team::auto_merge::{self, AutoMergeDecisionKind};
+use crate::team::board::{WorkflowMetadata, write_workflow_metadata};
 use crate::team::daemon::verification::{inspect_scope_fence, run_automatic_verification};
 use crate::team::daemon::{MergeRequest, TeamDaemon};
 use crate::team::task_loop::{
@@ -873,6 +874,15 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
 
                     match decision.decision {
                         AutoMergeDecisionKind::Accepted => {
+                            if !move_task_to_review(
+                                daemon,
+                                &board_dir,
+                                task_id,
+                                manager_name.as_deref(),
+                                engineer,
+                            )? {
+                                return Ok(());
+                            }
                             info!(
                                 engineer,
                                 task_id,
@@ -1541,6 +1551,52 @@ mod tests {
         make_test_daemon(repo, members)
     }
 
+    fn current_head(repo: &Path) -> String {
+        String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string()
+    }
+
+    fn seed_completion_packet_metadata(
+        repo: &Path,
+        task_id: u32,
+        title: &str,
+        worktree_dir: &Path,
+    ) {
+        let branch = current_worktree_branch(worktree_dir).unwrap();
+        let commit = current_head(worktree_dir);
+        let task_path = repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks")
+            .join(format!("{task_id:03}-{title}.md"));
+        write_workflow_metadata(
+            &task_path,
+            &WorkflowMetadata {
+                branch: Some(branch),
+                worktree_path: Some(worktree_dir.to_string_lossy().into_owned()),
+                commit: Some(commit),
+                changed_paths: vec!["note.txt".to_string()],
+                tests_run: Some(true),
+                tests_passed: Some(true),
+                test_results: None,
+                artifacts: Vec::new(),
+                outcome: Some("ready_for_review".to_string()),
+                review_blockers: Vec::new(),
+            },
+        )
+        .unwrap();
+    }
+
     fn setup_rebase_conflict_repo(
         engineer: &str,
     ) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
@@ -1578,6 +1634,7 @@ mod tests {
         std::fs::write(worktree_dir.join("note.txt"), "done\n").unwrap();
         git_ok(&worktree_dir, &["add", "note.txt"]);
         git_ok(&worktree_dir, &["commit", "-m", "add note"]);
+        seed_completion_packet_metadata(&repo, 42, "auto-merge-task", &worktree_dir);
 
         (tmp, repo, worktree_dir)
     }
@@ -1687,6 +1744,7 @@ mod tests {
         std::fs::write(worktree_dir.join("note.txt"), "done\n").unwrap();
         git_ok(&worktree_dir, &["add", "note.txt"]);
         git_ok(&worktree_dir, &["commit", "-m", "add note"]);
+        seed_completion_packet_metadata(&repo, 42, "commit-gate-success", &worktree_dir);
 
         let engineer = MemberInstance {
             name: "eng-1".to_string(),
@@ -1732,7 +1790,7 @@ mod tests {
         let metadata = crate::team::board::read_workflow_metadata(&task_path).unwrap();
         assert_eq!(metadata.tests_run, Some(true));
         assert_eq!(metadata.tests_passed, Some(true));
-        assert_eq!(metadata.outcome.as_deref(), Some("approved"));
+        assert_eq!(metadata.outcome.as_deref(), Some("verification_passed"));
         let snapshot_path = verification_snapshot_path(&repo, 42, "eng-1", 1);
         assert!(
             metadata
@@ -1773,6 +1831,7 @@ mod tests {
         std::fs::write(worktree_dir.join("note.txt"), "done\n").unwrap();
         git_ok(&worktree_dir, &["add", "check.sh", "note.txt"]);
         git_ok(&worktree_dir, &["commit", "-m", "add override command"]);
+        seed_completion_packet_metadata(&repo, 42, "verification-test-command", &worktree_dir);
 
         let mut daemon = setup_completion_daemon(&repo, "eng-1");
         daemon.config.team_config.workflow_policy.test_command = Some("false".to_string());
@@ -1792,8 +1851,8 @@ mod tests {
             std::fs::read_to_string(repo.join("note.txt")).unwrap(),
             "done\n"
         );
-        let snapshot = std::fs::read_to_string(verification_snapshot_path(&repo, 42, "eng-1", 1))
-            .unwrap();
+        let snapshot =
+            std::fs::read_to_string(verification_snapshot_path(&repo, 42, "eng-1", 1)).unwrap();
         assert!(snapshot.contains("\"phase\": \"complete\""));
         assert!(snapshot.contains("\"passed\": true"));
         assert!(!snapshot.contains("test command failed without a parsed failure line"));
@@ -1816,6 +1875,7 @@ mod tests {
         .unwrap();
         git_ok(&worktree_dir, &["add", "src/lib.rs"]);
         git_ok(&worktree_dir, &["commit", "-m", "introduce failing tests"]);
+        seed_completion_packet_metadata(&repo, 42, "verification-skipped", &worktree_dir);
 
         let mut daemon = setup_completion_daemon(&repo, "eng-1");
         daemon
@@ -2480,6 +2540,7 @@ mod tests {
         std::fs::write(worktree_dir.join("journal.rs"), "fn engineer() {}\n").unwrap();
         git_ok(&worktree_dir, &["add", "journal.rs"]);
         git_ok(&worktree_dir, &["commit", "-m", "engineer update"]);
+        seed_completion_packet_metadata(&repo, 42, "merge-blocked-task", &worktree_dir);
 
         std::fs::write(repo.join("journal.rs"), "fn dirty_main() {}\n").unwrap();
 
@@ -2578,6 +2639,7 @@ mod tests {
         std::fs::write(worktree_dir.join("note.txt"), "done\n").unwrap();
         git_ok(&worktree_dir, &["add", "note.txt"]);
         git_ok(&worktree_dir, &["commit", "-m", "add note"]);
+        seed_completion_packet_metadata(&repo, 42, "runtime-regression-task", &worktree_dir);
 
         let engineer = MemberInstance {
             name: "eng-1".to_string(),
@@ -2736,7 +2798,7 @@ mod tests {
                 .join("042-auto-merge-task.md"),
         )
         .unwrap();
-        assert_eq!(task.status, "in-progress");
+        assert_eq!(task.status, "review");
 
         daemon.process_merge_queue_for_test().unwrap();
 

@@ -7,9 +7,11 @@ use anyhow::{Context, Result, bail};
 use tracing::{debug, info, warn};
 
 use super::TeamDaemon;
+use crate::task::load_tasks_from_dir;
+use crate::team::board::{WorkflowMetadata, read_workflow_metadata};
 use crate::team::daemon::verification::run_automatic_verification;
 use crate::team::merge::{MergeLock, MergeOutcome, merge_engineer_branch};
-use crate::team::task_loop::read_task_title;
+use crate::team::task_loop::{current_worktree_branch, read_task_title};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MergeRequest {
@@ -32,6 +34,7 @@ pub(crate) enum MergeQueueOutcome {
     Success,
     Conflict,
     Reverted,
+    Skipped,
     Failed,
 }
 
@@ -47,6 +50,23 @@ struct MergeQueueLastResult {
     task_id: u32,
     outcome: MergeQueueOutcome,
     finished_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoMergeSkipReason {
+    WrongStatus,
+    MissingPacket,
+    NoBranch,
+}
+
+impl AutoMergeSkipReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::WrongStatus => "wrong_status",
+            Self::MissingPacket => "missing_packet",
+            Self::NoBranch => "no_branch",
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -128,6 +148,7 @@ impl MergeQueue {
                         MergeQueueOutcome::Success => "merged",
                         MergeQueueOutcome::Conflict => "conflicted",
                         MergeQueueOutcome::Reverted => "reverted",
+                        MergeQueueOutcome::Skipped => "skipped",
                         MergeQueueOutcome::Failed => "failed",
                     },
                     result.finished_at.elapsed().as_secs()
@@ -190,6 +211,22 @@ impl TeamDaemon {
     fn execute_queued_merge(&mut self, request: &MergeRequest) -> Result<MergeQueueOutcome> {
         if self.is_multi_repo {
             bail!("merge queue execution is not yet implemented for multi-repo projects");
+        }
+
+        if let Some((reason, detail)) = merge_request_skip_reason(self.project_root(), request)? {
+            warn!(
+                task_id = request.task_id,
+                engineer = request.engineer,
+                reason = reason.as_str(),
+                detail = %detail,
+                "skipping daemon auto-merge request"
+            );
+            self.record_orchestrator_action(format!(
+                "merge queue: skipped auto-merge for task #{} ({reason}: {detail})",
+                request.task_id,
+                reason = reason.as_str()
+            ));
+            return Ok(MergeQueueOutcome::Skipped);
         }
 
         let _lock =
@@ -447,6 +484,205 @@ impl TeamDaemon {
     }
 }
 
+fn merge_request_skip_reason(
+    project_root: &std::path::Path,
+    request: &MergeRequest,
+) -> Result<Option<(AutoMergeSkipReason, String)>> {
+    let task = load_tasks_from_dir(
+        &project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks"),
+    )?
+    .into_iter()
+    .find(|task| task.id == request.task_id);
+
+    let Some(task) = task else {
+        return Ok(Some((
+            AutoMergeSkipReason::WrongStatus,
+            "task is missing from the board".to_string(),
+        )));
+    };
+
+    if task.status != "review" {
+        return Ok(Some((
+            AutoMergeSkipReason::WrongStatus,
+            format!("task status is '{}' instead of 'review'", task.status),
+        )));
+    }
+
+    let metadata = read_workflow_metadata(&task.source_path)?;
+    if let Some(detail) = missing_completion_packet_detail(project_root, request, &metadata) {
+        return Ok(Some((AutoMergeSkipReason::MissingPacket, detail)));
+    }
+
+    if let Some(detail) = unavailable_branch_detail(request)? {
+        return Ok(Some((AutoMergeSkipReason::NoBranch, detail)));
+    }
+
+    Ok(None)
+}
+
+fn missing_completion_packet_detail(
+    project_root: &std::path::Path,
+    request: &MergeRequest,
+    metadata: &WorkflowMetadata,
+) -> Option<String> {
+    let mut missing = Vec::new();
+
+    match metadata
+        .branch
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(branch) if branch == request.branch => {}
+        Some(branch) => missing.push(format!(
+            "branch marker '{}' does not match queued branch '{}'",
+            branch, request.branch
+        )),
+        None => missing.push("branch marker missing".to_string()),
+    }
+
+    if metadata
+        .commit
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        missing.push("commit marker missing".to_string());
+    }
+
+    match metadata
+        .worktree_path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(path) => {
+            let resolved = resolve_project_path(project_root, path);
+            if resolved != request.worktree_dir {
+                missing.push(format!(
+                    "worktree marker '{}' resolves to '{}' instead of '{}'",
+                    path,
+                    resolved.display(),
+                    request.worktree_dir.display()
+                ));
+            }
+        }
+        None => missing.push("worktree marker missing".to_string()),
+    }
+
+    if metadata.tests_run != Some(true) {
+        missing.push("tests_run marker is not true".to_string());
+    }
+    if metadata.tests_passed != Some(true) {
+        missing.push("tests_passed marker is not true".to_string());
+    }
+    if !metadata.review_blockers.is_empty() {
+        missing.push(format!(
+            "review blockers present: {}",
+            metadata.review_blockers.join(", ")
+        ));
+    }
+    match metadata
+        .outcome
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some("verification_retry_required" | "verification_escalated") => {
+            missing.push(format!(
+                "outcome marker '{}' is not merge-ready",
+                metadata.outcome.as_deref().unwrap_or_default()
+            ));
+        }
+        Some(_) => {}
+        None => missing.push("outcome marker missing".to_string()),
+    }
+
+    (!missing.is_empty()).then(|| missing.join("; "))
+}
+
+fn resolve_project_path(project_root: &std::path::Path, path: &str) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        project_root.join(path)
+    }
+}
+
+fn unavailable_branch_detail(request: &MergeRequest) -> Result<Option<String>> {
+    if !request.worktree_dir.exists() {
+        return Ok(Some(format!(
+            "worktree '{}' does not exist",
+            request.worktree_dir.display()
+        )));
+    }
+
+    let current_branch = match current_worktree_branch(&request.worktree_dir) {
+        Ok(branch) => branch,
+        Err(error) => {
+            return Ok(Some(format!(
+                "failed to read worktree branch at '{}': {error}",
+                request.worktree_dir.display()
+            )));
+        }
+    };
+    if current_branch != request.branch {
+        return Ok(Some(format!(
+            "worktree branch is '{}' instead of '{}'",
+            current_branch, request.branch
+        )));
+    }
+
+    let commits_ahead = match commits_ahead_of_main(&request.worktree_dir) {
+        Ok(commits) => commits,
+        Err(error) => {
+            return Ok(Some(format!(
+                "failed to count commits ahead of main for '{}': {error}",
+                request.branch
+            )));
+        }
+    };
+    if commits_ahead == 0 {
+        return Ok(Some(format!(
+            "branch '{}' has no commits ahead of main",
+            request.branch
+        )));
+    }
+
+    Ok(None)
+}
+
+fn commits_ahead_of_main(worktree_dir: &std::path::Path) -> Result<u32> {
+    let output = Command::new("git")
+        .args(["rev-list", "--count", "main..HEAD"])
+        .current_dir(worktree_dir)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to count commits ahead of main in {}",
+                worktree_dir.display()
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "git rev-list --count main..HEAD failed in {}: {}",
+            worktree_dir.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .with_context(|| {
+            format!(
+                "failed to parse git rev-list --count main..HEAD output in {}",
+                worktree_dir.display()
+            )
+        })
+}
+
 fn git_head(repo_dir: &std::path::Path) -> Result<String> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -543,6 +779,7 @@ fn persist_completed_profile(daemon: &TeamDaemon, board_dir: &std::path::Path, t
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::team::board::write_workflow_metadata;
     use crate::team::standup::MemberState;
     use crate::team::task_loop::setup_engineer_worktree;
     use crate::team::test_helpers::make_test_daemon;
@@ -622,7 +859,7 @@ mod tests {
         assert_eq!(queue.queued_len(), 0);
     }
 
-    fn write_task_file(project_root: &Path, id: u32, title: &str) {
+    fn write_task_file(project_root: &Path, id: u32, title: &str, status: &str) {
         let tasks_dir = project_root
             .join(".batty")
             .join("team_config")
@@ -632,17 +869,63 @@ mod tests {
         std::fs::write(
             tasks_dir.join(format!("{id:03}-{title}.md")),
             format!(
-                "---\nid: {id}\ntitle: {title}\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\n---\n\nTask description.\n"
+                "---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: high\nclaimed_by: eng-1\nclass: standard\n---\n\nTask description.\n"
             ),
         )
         .unwrap();
+    }
+
+    fn write_completion_metadata(
+        project_root: &Path,
+        id: u32,
+        title: &str,
+        branch: &str,
+        worktree_dir: &Path,
+        commit: &str,
+    ) {
+        let task_path = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks")
+            .join(format!("{id:03}-{title}.md"));
+        write_workflow_metadata(
+            &task_path,
+            &WorkflowMetadata {
+                branch: Some(branch.to_string()),
+                worktree_path: Some(worktree_dir.to_string_lossy().into_owned()),
+                commit: Some(commit.to_string()),
+                changed_paths: vec!["note.txt".to_string()],
+                tests_run: Some(true),
+                tests_passed: Some(true),
+                test_results: None,
+                artifacts: Vec::new(),
+                outcome: Some("verification_passed".to_string()),
+                review_blockers: Vec::new(),
+            },
+        )
+        .unwrap();
+    }
+
+    fn current_head(repo_dir: &Path) -> String {
+        String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo_dir)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string()
     }
 
     #[test]
     fn daemon_process_merge_queue_merges_and_completes_task() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "batty-merge-queue-test");
-        write_task_file(&repo, 42, "merge-queue-task");
+        write_task_file(&repo, 42, "merge-queue-task", "review");
 
         let team_config_dir = repo.join(".batty").join("team_config");
         let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
@@ -650,6 +933,16 @@ mod tests {
         std::fs::write(worktree_dir.join("note.txt"), "queued merge\n").unwrap();
         git_ok(&worktree_dir, &["add", "note.txt"]);
         git_ok(&worktree_dir, &["commit", "-m", "queue merge"]);
+        let branch = current_worktree_branch(&worktree_dir).unwrap();
+        let commit = current_head(&worktree_dir);
+        write_completion_metadata(
+            &repo,
+            42,
+            "merge-queue-task",
+            &branch,
+            &worktree_dir,
+            &commit,
+        );
 
         let members = vec![
             manager_member("manager", None),
@@ -661,7 +954,7 @@ mod tests {
         daemon.enqueue_merge_request(MergeRequest {
             task_id: 42,
             engineer: "eng-1".to_string(),
-            branch: "eng-1/task-42".to_string(),
+            branch,
             worktree_dir: worktree_dir.clone(),
             queued_at: Instant::now(),
             test_passed: true,
@@ -699,7 +992,7 @@ mod tests {
     fn daemon_process_merge_queue_reverts_when_post_merge_verify_fails() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "batty-post-merge-verify-test");
-        write_task_file(&repo, 42, "post-merge-verify-task");
+        write_task_file(&repo, 42, "post-merge-verify-task", "review");
 
         let team_config_dir = repo.join(".batty").join("team_config");
         let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
@@ -709,6 +1002,16 @@ mod tests {
         git_ok(
             &worktree_dir,
             &["commit", "-m", "trigger post-merge verify failure"],
+        );
+        let branch = current_worktree_branch(&worktree_dir).unwrap();
+        let commit = current_head(&worktree_dir);
+        write_completion_metadata(
+            &repo,
+            42,
+            "post-merge-verify-task",
+            &branch,
+            &worktree_dir,
+            &commit,
         );
 
         let members = vec![
@@ -723,7 +1026,7 @@ mod tests {
         daemon.enqueue_merge_request(MergeRequest {
             task_id: 42,
             engineer: "eng-1".to_string(),
-            branch: "eng-1/task-42".to_string(),
+            branch,
             worktree_dir,
             queued_at: Instant::now(),
             test_passed: true,
@@ -746,12 +1049,160 @@ mod tests {
                 .join("042-post-merge-verify-task.md"),
         )
         .unwrap();
-        assert_eq!(task.status, "in-progress");
+        assert_eq!(task.status, "review");
         assert_eq!(daemon.active_task_id("eng-1"), Some(42));
         assert_eq!(
             daemon.member_state_for_test("eng-1"),
             Some(MemberState::Working)
         );
+    }
+
+    #[test]
+    fn merge_request_skip_reason_requires_review_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-queue-status-test");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+        std::fs::write(worktree_dir.join("note.txt"), "queued merge\n").unwrap();
+        git_ok(&worktree_dir, &["add", "note.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "queue merge"]);
+        let commit = current_head(&worktree_dir);
+
+        for status in ["todo", "blocked", "done"] {
+            write_task_file(&repo, 42, "merge-queue-status-task", status);
+            write_completion_metadata(
+                &repo,
+                42,
+                "merge-queue-status-task",
+                "eng-1/task-42",
+                &worktree_dir,
+                &commit,
+            );
+            let reason = merge_request_skip_reason(
+                &repo,
+                &MergeRequest {
+                    task_id: 42,
+                    engineer: "eng-1".to_string(),
+                    branch: "eng-1/task-42".to_string(),
+                    worktree_dir: worktree_dir.clone(),
+                    queued_at: Instant::now(),
+                    test_passed: true,
+                    should_post_merge_verify: true,
+                    test_duration_ms: 1,
+                    confidence: 0.95,
+                    files_changed: 1,
+                    lines_changed: 1,
+                },
+            )
+            .unwrap();
+
+            assert_eq!(
+                reason,
+                Some((
+                    AutoMergeSkipReason::WrongStatus,
+                    format!("task status is '{}' instead of 'review'", status)
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn merge_request_skip_reason_requires_completion_packet_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-queue-packet-test");
+        write_task_file(&repo, 42, "merge-queue-packet-task", "review");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+        std::fs::write(worktree_dir.join("note.txt"), "queued merge\n").unwrap();
+        git_ok(&worktree_dir, &["add", "note.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "queue merge"]);
+
+        let reason = merge_request_skip_reason(
+            &repo,
+            &MergeRequest {
+                task_id: 42,
+                engineer: "eng-1".to_string(),
+                branch: "eng-1/task-42".to_string(),
+                worktree_dir,
+                queued_at: Instant::now(),
+                test_passed: true,
+                should_post_merge_verify: true,
+                test_duration_ms: 1,
+                confidence: 0.95,
+                files_changed: 1,
+                lines_changed: 1,
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            reason,
+            Some((AutoMergeSkipReason::MissingPacket, detail))
+                if detail.contains("branch marker missing")
+                    && detail.contains("commit marker missing")
+                    && detail.contains("worktree marker missing")
+        ));
+    }
+
+    #[test]
+    fn daemon_process_merge_queue_skips_todo_task_even_with_branch_and_packet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-queue-todo-skip-test");
+        write_task_file(&repo, 42, "merge-queue-todo-task", "todo");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+        std::fs::write(worktree_dir.join("note.txt"), "queued merge\n").unwrap();
+        git_ok(&worktree_dir, &["add", "note.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "queue merge"]);
+        let commit = current_head(&worktree_dir);
+        write_completion_metadata(
+            &repo,
+            42,
+            "merge-queue-todo-task",
+            "eng-1/task-42",
+            &worktree_dir,
+            &commit,
+        );
+
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ];
+        let mut daemon = make_test_daemon(&repo, members);
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+        daemon.enqueue_merge_request(MergeRequest {
+            task_id: 42,
+            engineer: "eng-1".to_string(),
+            branch: "eng-1/task-42".to_string(),
+            worktree_dir: worktree_dir.clone(),
+            queued_at: Instant::now(),
+            test_passed: true,
+            should_post_merge_verify: true,
+            test_duration_ms: 1,
+            confidence: 0.95,
+            files_changed: 1,
+            lines_changed: 1,
+        });
+
+        daemon.process_merge_queue().unwrap();
+
+        assert!(!repo.join("note.txt").exists());
+        let task = crate::task::Task::from_file(
+            &repo
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("042-merge-queue-todo-task.md"),
+        )
+        .unwrap();
+        assert_eq!(task.status, "todo");
     }
 
     #[test]
