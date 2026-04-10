@@ -137,10 +137,14 @@ impl TeamDaemon {
                 .filter(|snapshot| snapshot.active_task_ids.is_empty())
                 .collect();
 
+            let dispatchable_task_ids: std::collections::HashSet<u32> =
+                crate::team::resolver::dispatchable_tasks(&board_dir)?
+                    .into_iter()
+                    .map(|task| task.id)
+                    .collect();
             let unassigned_open_tasks: Vec<&crate::task::Task> = tasks
                 .iter()
-                .filter(|task| task.claimed_by.is_none())
-                .filter(|task| matches!(task.status.as_str(), "backlog" | "todo"))
+                .filter(|task| dispatchable_task_ids.contains(&task.id))
                 .collect();
 
             if idle_active_reports.is_empty() && unassigned_open_tasks.is_empty() {

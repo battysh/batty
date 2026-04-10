@@ -32,10 +32,9 @@ pub use prompt::{PLANNING_RESPONSE_FORMAT, compose_planning_prompt};
 
 pub fn dispatchable_task_count(
     board_dir: &Path,
-    members: &[crate::team::hierarchy::MemberInstance],
+    _members: &[crate::team::hierarchy::MemberInstance],
 ) -> Result<usize> {
-    let resolutions = crate::team::resolver::resolve_board(board_dir, members)?;
-    Ok(crate::team::resolver::runnable_tasks(&resolutions).len())
+    Ok(crate::team::resolver::dispatchable_tasks(board_dir)?.len())
 }
 
 pub fn should_trigger_planning_cycle(idle_engineers: usize, dispatchable_tasks: usize) -> bool {
@@ -140,6 +139,31 @@ roles:
 
         let count = dispatchable_task_count(board_dir, &solo_members()).unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn dispatchable_task_count_excludes_manual_blocked_todo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        std::fs::create_dir_all(board_dir.join("tasks")).unwrap();
+        std::fs::write(
+            board_dir.join("tasks/001-runnable-a.md"),
+            "---\nid: 1\ntitle: runnable-a\nstatus: todo\npriority: medium\nclass: standard\n---\n\nBody.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            board_dir.join("tasks/002-runnable-b.md"),
+            "---\nid: 2\ntitle: runnable-b\nstatus: todo\npriority: medium\nclass: standard\n---\n\nBody.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            board_dir.join("tasks/003-manual.md"),
+            "---\nid: 3\ntitle: manual\nstatus: todo\npriority: medium\nblocked: manual provider-console token rotation\nclass: standard\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        let count = dispatchable_task_count(board_dir, &solo_members()).unwrap();
+        assert_eq!(count, 2);
     }
 
     #[test]

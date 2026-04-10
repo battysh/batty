@@ -45,10 +45,11 @@ impl TeamDaemon {
             .join("board");
         let inbox_root = inbox::inboxes_root(&self.config.project_root);
         let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
-        let task_status_by_id: std::collections::HashMap<u32, String> = tasks
-            .iter()
-            .map(|task| (task.id, task.status.clone()))
-            .collect();
+        let dispatchable_task_ids: std::collections::HashSet<u32> =
+            crate::team::resolver::dispatchable_tasks(&board_dir)?
+                .into_iter()
+                .map(|task| task.id)
+                .collect();
         let replenishment_targets: Vec<MemberInstance> = self
             .config
             .members
@@ -100,17 +101,7 @@ impl TeamDaemon {
 
         let unblocked_todo_tasks: Vec<&crate::task::Task> = tasks
             .iter()
-            .filter(|task| task.status == "todo")
-            .filter(|task| task.claimed_by.is_none())
-            .filter(|task| task.blocked.is_none())
-            .filter(|task| task.blocked_on.is_none())
-            .filter(|task| {
-                task.depends_on.iter().all(|dep_id| {
-                    task_status_by_id
-                        .get(dep_id)
-                        .is_none_or(|status| status == "done")
-                })
-            })
+            .filter(|task| dispatchable_task_ids.contains(&task.id))
             .collect();
 
         if idle_unassigned_engineers.len() <= unblocked_todo_tasks.len() {

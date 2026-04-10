@@ -1661,24 +1661,15 @@ fn compute_board_metrics(
         });
     }
 
-    let task_status_by_id: HashMap<u32, String> = tasks
-        .iter()
-        .map(|task| (task.id, task.status.clone()))
+    let dispatchable_task_ids: HashSet<u32> = crate::team::resolver::dispatchable_tasks(board_dir)?
+        .into_iter()
+        .map(|task| task.id)
         .collect();
 
     let now = SystemTime::now();
     let runnable_count = tasks
         .iter()
-        .filter(|task| matches!(task.status.as_str(), "backlog" | "todo"))
-        .filter(|task| task.claimed_by.is_none())
-        .filter(|task| task.blocked.is_none())
-        .filter(|task| {
-            task.depends_on.iter().all(|dep_id| {
-                task_status_by_id
-                    .get(dep_id)
-                    .is_none_or(|status| status == "done")
-            })
-        })
+        .filter(|task| dispatchable_task_ids.contains(&task.id))
         .count() as u32;
 
     let blocked_count = tasks
@@ -3820,6 +3811,31 @@ mod tests {
         assert_eq!(metrics.auto_merge_rate, None);
         // Board metric still works.
         assert_eq!(metrics.runnable_count, 1);
+    }
+
+    #[test]
+    fn compute_metrics_excludes_manual_blocked_todo_from_runnable_count() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        write_board_task(
+            tmp.path(),
+            "001-dispatchable-a.md",
+            "id: 1\ntitle: Dispatchable A\nstatus: todo\npriority: high\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "002-dispatchable-b.md",
+            "id: 2\ntitle: Dispatchable B\nstatus: todo\npriority: high\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "003-manual-blocked.md",
+            "id: 3\ntitle: Manual Blocked\nstatus: todo\npriority: high\nblocked: manual provider-console token rotation\n",
+        );
+
+        let metrics = compute_metrics(&board_dir(tmp.path()), &[engineer("eng-1")]).unwrap();
+        assert_eq!(metrics.runnable_count, 2);
+        assert_eq!(metrics.blocked_count, 1);
     }
 
     #[test]
