@@ -898,6 +898,61 @@ fn preserve_worktree_before_restart_reports_block_when_preserve_fails() {
 }
 
 #[test]
+fn report_preserve_failure_deduplicates_identical_alerts() {
+    // Regression for 2026-04-10 acknowledgement-loop bug: when the stale
+    // branch condition persists across reconciliation cycles, the daemon
+    // used to re-fire identical preserve-failure alerts to engineer + manager
+    // every cycle. Engineers acked without action, manager re-fired, and
+    // nothing made forward progress. This test locks in that repeated
+    // identical calls within the dedup window produce exactly one message.
+    let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "batty-daemon-preserve-dedup");
+    let team_config_dir = repo.join(".batty").join("team_config");
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    crate::team::task_loop::prepare_engineer_assignment_worktree(
+        &repo,
+        &worktree_dir,
+        "eng-1",
+        "eng-1/55",
+        &team_config_dir,
+    )
+    .unwrap();
+
+    let mut daemon = TestDaemonBuilder::new(&repo)
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ])
+        .build();
+    write_owned_task_file(&repo, 55, "dedup-task", "in-progress", "eng-1");
+
+    // First call: should queue the alert.
+    daemon.report_preserve_failure("eng-1", Some(55), "safe-branch recovery", "detail-a");
+    // Second call with identical parameters: should be suppressed.
+    daemon.report_preserve_failure("eng-1", Some(55), "safe-branch recovery", "detail-a");
+    // Third call: same member/task/context but a different detail should still
+    // go through (different condition, operator needs to see it).
+    daemon.report_preserve_failure("eng-1", Some(55), "safe-branch recovery", "detail-b");
+
+    let manager_messages =
+        crate::team::inbox::pending_messages(&crate::team::inbox::inboxes_root(&repo), "manager")
+            .unwrap();
+    let preserve_alerts = manager_messages
+        .iter()
+        .filter(|message| {
+            message
+                .body
+                .contains("could not safely auto-save eng-1's dirty worktree")
+        })
+        .count();
+    assert_eq!(
+        preserve_alerts, 2,
+        "expected exactly 2 preserve-failure alerts (detail-a + detail-b); duplicate detail-a should have been suppressed, got {preserve_alerts}",
+    );
+}
+
+#[test]
 #[serial]
 #[cfg_attr(not(feature = "integration"), ignore)]
 fn maybe_fire_nudges_marks_member_working_after_live_delivery() {

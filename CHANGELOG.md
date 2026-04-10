@@ -2,6 +2,23 @@
 
 All notable changes to Batty are documented here.
 
+## 0.10.2 — 2026-04-10
+
+Fix for a preserve-failure acknowledgement loop introduced when the stale-branch
+reconciliation path started firing alerts to engineer + manager on every
+reconciliation cycle. When the stale condition persisted (engineer acked
+without fixing, manager re-detected), both inboxes flooded with identical
+alerts and no forward progress was made.
+
+- **Deduplicate `report_preserve_failure` alerts** — suppress repeated
+  preserve-failure notifications for the same `(member, task, context, detail)`
+  within a 10-minute window. Different detail strings still surface normally so
+  operators see real state changes. Reuses the existing
+  `suppress_recent_escalation` helper that previously had no callers.
+  (`src/team/daemon.rs`)
+- **Regression test** — `report_preserve_failure_deduplicates_identical_alerts`
+  locks in the one-per-condition behavior. (`src/team/daemon/tests.rs`)
+
 ## 0.10.1 — 2026-04-10
 
 Stability hardening for the daemon-owned loop. 43 commits since 0.10.0,

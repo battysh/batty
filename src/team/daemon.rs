@@ -257,6 +257,27 @@ impl TeamDaemon {
                 "Batty could not safely auto-save {member_name}'s dirty worktree before {context}. {detail}"
             ),
         };
+
+        // Deduplicate repeated preserve-failure alerts for the same
+        // (member, task, context, detail). Without this, the daemon fires the
+        // same alert to engineer + manager on every reconciliation cycle as
+        // long as the stale branch condition persists, creating tight
+        // acknowledgement loops that flood the inbox without forward progress.
+        let detail_digest: u64 = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            detail.hash(&mut hasher);
+            hasher.finish()
+        };
+        let task_key = task_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let dedup_key = format!("preserve:{member_name}:{task_key}:{context}:{detail_digest}");
+        if self.suppress_recent_escalation(dedup_key, Duration::from_secs(600)) {
+            return;
+        }
+
         if let Some(task_id) = task_id {
             if let Err(error) =
                 task_cmd::block_task_with_reason(&self.board_dir(), task_id, &reason)
